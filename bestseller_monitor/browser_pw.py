@@ -113,7 +113,9 @@ def _is_punish_url(url: str) -> bool:
     # 站点会在正常详情 URL 后追加 /_____tmd_____/punish?x5secdata=... 的上报装饰，不算真验证
     if "_____tmd_____" in u:
         return False
-    return "punishtextfetch" in u or "/punish?" in u or "/punish/" in u
+    # 淘宝 deny/验证拦截页（App 扫码等形式），以及 punish/验证请求
+    return ("punishtextfetch" in u or "/punish?" in u or "/punish/" in u
+            or "bsop-punish" in u or "deny_pc" in u)
 
 
 def intervention_kind(page, punished: bool) -> str | None:
@@ -121,6 +123,8 @@ def intervention_kind(page, punished: bool) -> str | None:
     url = (page.url or "").lower()
     if "login.taobao" in url or "login.1688" in url:
         return "登录墙"
+    if _is_punish_url(url):
+        return "滑块"
     body = _body_text(page)
     for m in SLIDER_MARKERS:
         if m in body:
