@@ -1,6 +1,4 @@
 [run]
-# 输入方式：auto（有 product_urls.csv 就用它，否则用 shops）/ shops / product
-input_source = "auto"
 # 每个店铺最多翻几页商品列表
 max_pages_per_shop = 10
 # 单轮详情页总数上限（跨店重复采集也计入）
@@ -58,7 +56,6 @@ base_url = "https://www.1688.com/"
 
 [paths]
 shop_csv = "config/shops.csv"
-product_urls_csv = "config/product_urls.csv"
 db_file = "data/bestseller.db"
 data_dir = "data"
 output_dir = "output"

@@ -31,8 +31,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-detail", type=int, default=None, help="覆盖单轮详情页上限")
     p.add_argument("--limit-shops", type=str, default=None, help="逗号分隔的 shop_key 白名单")
     p.add_argument("--no-shuffle", action="store_true", help="不随机打乱店内商品顺序")
-    p.add_argument("--mode", choices=["auto", "shops", "product"], default=None,
-                   help="输入方式：auto/shops/product")
+    p.add_argument("--mode", choices=["shops"], default="shops",
+                   help="仅支持 shops（商品URL模式已移除）")
     return p.parse_args()
 
 
@@ -47,9 +47,6 @@ def main() -> int:
         cfg = cfg.replace(max_detail_pages_per_round=args.max_detail)
     if args.no_shuffle:
         cfg = cfg.replace(shuffle_within_shop=False)
-    if args.mode:
-        cfg = cfg.replace(input_source=args.mode)
-
     limit_keys = None
     if args.limit_shops:
         limit_keys = {s.strip() for s in args.limit_shops.split(",") if s.strip()}

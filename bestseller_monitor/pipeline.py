@@ -9,7 +9,7 @@ from collections import defaultdict
 from playwright.sync_api import sync_playwright
 
 from . import browser_dp, browser_pw
-from .config import Config, Shop, load_product_urls
+from .config import Config, Shop
 from .db import Database, connect, utcnow, cst_date
 from .delay import Humanizer
 from .detail import DetailParseFailed, capture_detail_payload, save_raw_page
@@ -23,29 +23,6 @@ log = logging.getLogger(__name__)
 def _ensure_db_shops(db: Database, round_id: int, shops: list[Shop]) -> None:
     for shop in shops:
         db.add_shop(round_id, shop.key, shop.url, shop.name)
-
-
-def _round_input_mode(db: Database, cfg: Config, round_id: int) -> str:
-    if cfg.input_source == "shops":
-        return "shops"
-    if cfg.input_source == "product":
-        return "product"
-    # auto：有商品URL清单则用 product，否则 shops
-    if load_product_urls(cfg.product_urls_csv):
-        return "product"
-    return "shops"
-
-
-def _seed_product_round(db: Database, cfg: Config, round_id: int) -> None:
-    """把商品URL清单作为伪店铺(L1)写入 shop_offers，跳过店铺列表抓取。"""
-    rows = load_product_urls(cfg.product_urls_csv)
-    db.add_shop(round_id, "L1", "https://www.1688.com/", "商品URL清单")
-    db.save_shop_offers(
-        round_id, "L1", "https://www.1688.com/", "商品URL清单",
-        [(i + 1, oid, url, "", "") for i, (oid, url) in enumerate(rows)],
-        0,
-    )
-    log.info("已导入 %s 个商品URL到本轮（伪店铺 L1）。", len(rows))
 
 
 def _pending_detail_offers(db: Database, round_id: int, cfg: Config):
@@ -68,18 +45,14 @@ def run_round(cfg: Config, shops: list[Shop]) -> None:
     db = Database(conn)
     round_id = db.start_or_resume()
     _ensure_db_shops(db, round_id, shops)
-    mode = _round_input_mode(db, cfg, round_id)
-    skip_listing = mode == "product"
-    if skip_listing:
-        _seed_product_round(db, cfg, round_id)
 
     try:
         if cfg.driver == "pw_cdp":
-            _run_pwcdp_round(db, cfg, round_id, shops, skip_listing)
+            _run_pwcdp_round(db, cfg, round_id, shops)
         elif cfg.driver == "drission":
-            _run_dp_round(db, cfg, round_id, shops, skip_listing)
+            _run_dp_round(db, cfg, round_id, shops)
         else:
-            _run_pw_round(db, cfg, round_id, shops, skip_listing)
+            _run_pw_round(db, cfg, round_id, shops)
         _finalize_round(db, cfg, round_id)
     except RuntimeError as exc:
         # 人工处理超时等情况：保留轮次状态，提示稍后续跑
@@ -89,7 +62,7 @@ def run_round(cfg: Config, shops: list[Shop]) -> None:
         conn.close()
 
 
-def _run_pw_round(db: Database, cfg: Config, round_id: int, shops: list[Shop], skip_listing: bool) -> None:
+def _run_pw_round(db: Database, cfg: Config, round_id: int, shops: list[Shop]) -> None:
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
             user_data_dir=str(cfg.profile_dir),
@@ -119,17 +92,15 @@ def _run_pw_round(db: Database, cfg: Config, round_id: int, shops: list[Shop], s
             window.chrome = window.chrome || { runtime: {} };
             """
         )
-        if not skip_listing:
-            _run_listing_phase(db, cfg, round_id, shops, page)
+        _run_listing_phase(db, cfg, round_id, shops, page)
         _run_detail_phase(db, cfg, round_id, page)
         context.close()
 
 
-def _run_dp_round(db: Database, cfg: Config, round_id: int, shops: list[Shop], skip_listing: bool) -> None:
+def _run_dp_round(db: Database, cfg: Config, round_id: int, shops: list[Shop]) -> None:
     page = browser_dp.create_page(cfg)
     try:
-        if not skip_listing:
-            _run_listing_dp(db, cfg, round_id, shops, page)
+        _run_listing_dp(db, cfg, round_id, shops, page)
         _run_detail_dp(db, cfg, round_id, page)
     finally:
         try:
@@ -402,13 +373,12 @@ def _finalize_round(db: Database, cfg: Config, round_id: int) -> None:
 
 # ---------- Playwright 连接接管（pw_cdp）路径 ----------
 
-def _run_pwcdp_round(db: Database, cfg: Config, round_id: int, shops: list[Shop], skip_listing: bool) -> None:
+def _run_pwcdp_round(db: Database, cfg: Config, round_id: int, shops: list[Shop]) -> None:
     config_hash = db.record_params(cfg)
     emit = db.event_logger(round_id, config_hash)
     pw, br, page, ctx = browser_pw.open_session(cfg)
     try:
-        if not skip_listing:
-            _run_listing_pw(db, cfg, round_id, shops, page, emit=emit)
+        _run_listing_pw(db, cfg, round_id, shops, page, emit=emit)
         _run_detail_pw(db, cfg, round_id, page, emit=emit)
     finally:
         browser_pw.close_session(pw, br)

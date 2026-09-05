@@ -34,7 +34,7 @@
 - 有效轮次：round #2（A02，90 offer/514 快照）、round #4（12 店，335 offer/1947 快照）、round #6（A01 补采，32 offer/162 快照）。
 - 主数据：shops / products / skus / inventory 只增改不删；本次运行会用 `shops.csv` upsert 回 `shops`。
 - 抓取驱动：`driver=pw_cdp`（Playwright 接管已登录 Edge，`profiles/account1_edge`）。
-- 运行：`python run.py --mode shops`（店铺模式；默认 auto 会因 `product_urls.csv` 存在而走商品URL模式，需 `--mode shops`）。`--limit-shops Axx` / `--pages-per-shop N` 可单店限页。
+- 运行：`python run.py`（**仅店铺模式**，商品URL清单抓取已移除）；`--mode` 仅保留 `shops`（兼容旧命令）。`--limit-shops Axx` / `--pages-per-shop N` 可单店限页。
 - `shops.csv` 列：`shop_key, shop_name, shop_url, pages, active, offer_list_url`。`offer_list_url` 为“全部商品页”URL，填了用 `page.goto` 进入它，空则自动拼 `/page/offerlist.htm`；`shop_url` 是店铺首页（存在 `Shop.home_url`）。
 - 工具：`tools/analyze_delay.py`（延迟×验证关联分析）、`tools/sync_list_titles.py`（把某店 `inventory.product_name` 刷成卡片标题）、`tools/diag_verify_state.py`（诊断弹窗验证状态）、`tools/diag_offer_id_presolve.py`（列表页 offer_id 预解析探测）。
 

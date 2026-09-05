@@ -28,10 +28,10 @@ python run.py
 python run.py --pages-per-shop 2 --max-detail 20 --limit-shops A01
 ```
 
-两种输入方式：
+输入方式（仅店铺模式，商品URL清单抓取已移除）：
 
-- 商品 URL 清单：`config/product_urls.csv` 存在时优先用（跳过店铺列表，直接抓详情页）。
-- 店铺模式：`config/shops.csv` 存在且无 product_urls 时，按店铺翻页抓榜单。
+- 店铺模式：按 `config/shops.csv` 里的店铺翻页抓榜单（`shop_url` 为店铺首页，
+  `offer_list_url` 可显式指定商品列表页 URL，留空则自动拼 `/page/offerlist.htm`）。
 
 浏览器采用“普通进程启动 + DrissionPage 接管”方式（见 `config/config.toml` 的
 `start_browser` / `attach_port`），避免被判定为受控会话。价格/库存从页面内嵌 JSON

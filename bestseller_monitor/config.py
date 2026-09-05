@@ -48,8 +48,6 @@ class Config:
     fail_rate_limit: float
     shuffle_within_shop: bool
     alarm_on_intervention: bool
-    input_source: str
-    product_urls_csv: pathlib.Path
     detail_delay_sec: tuple[float, float]
     long_pause_interval: tuple[int, int]
     long_pause_sec: tuple[float, float]
@@ -107,8 +105,6 @@ class Config:
             fail_rate_limit=float(run["fail_rate_limit"]),
             shuffle_within_shop=bool(run["shuffle_within_shop"]),
             alarm_on_intervention=bool(run.get("alarm_on_intervention", True)),
-            input_source=str(run.get("input_source", "auto")),
-            product_urls_csv=p("paths", "product_urls_csv"),
             detail_delay_sec=_tuple2("human.detail_delay_sec", human["detail_delay_sec"]),
             long_pause_interval=(
                 int(human["long_pause_interval"][0]),
@@ -190,29 +186,3 @@ def load_shops(path: pathlib.Path) -> list[Shop]:
     if not shops:
         raise ValueError("shops.csv 中没有店铺。")
     return shops
-
-
-def load_product_urls(path: pathlib.Path) -> list[tuple[str, str]]:
-    """读取商品URL清单，返回 [(offer_id, url)]；自动补全为标准详情页链接。"""
-    import re
-
-    if not path.exists():
-        return []
-    out: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    with open(path, newline="", encoding="utf-8-sig") as fh:
-        for row in csv.DictReader(fh):
-            url = (row.get("url") or row.get("商品链接") or row.get("链接") or "").strip()
-            oid = (row.get("offer_id") or "").strip()
-            if not oid:
-                m = re.search(r"/(?:offer|item)/(\d+)", url)
-                oid = m.group(1) if m else ""
-            if not oid:
-                continue
-            if not url:
-                url = f"https://detail.1688.com/offer/{oid}.html"
-            if oid in seen:
-                continue
-            seen.add(oid)
-            out.append((oid, url))
-    return out
