@@ -42,6 +42,7 @@ class Config:
     base_url: str
     human_pause_minutes: int
     intervention_confirmation_sec: float
+    deny_backoff_sec: float
     max_pages_per_shop: int
     max_detail_pages_per_round: int
     max_attempts_per_page: int
@@ -99,6 +100,7 @@ class Config:
             base_url=str(browser.get("base_url", "https://www.1688.com/")),
             human_pause_minutes=int(run["human_pause_minutes"]),
             intervention_confirmation_sec=float(run.get("intervention_confirmation_sec", 2.0)),
+            deny_backoff_sec=float(run.get("deny_backoff_sec", 30.0)),
             max_pages_per_shop=int(run["max_pages_per_shop"]),
             max_detail_pages_per_round=int(run["max_detail_pages_per_round"]),
             max_attempts_per_page=int(run["max_attempts_per_page"]),

@@ -13,9 +13,9 @@ from datetime import datetime
 from pathlib import Path
 
 CLICK_EVENTS = ("click_ok", "click_no_popup", "click_url_notoffer",
-                "click_parse_empty", "click_skipped")
+                "click_parse_empty", "click_skipped", "click_deny")
 SUCCESS = "click_ok"
-FAILURE_EVENTS = ("click_no_popup", "click_url_notoffer", "click_parse_empty")
+FAILURE_EVENTS = ("click_no_popup", "click_url_notoffer", "click_parse_empty", "click_deny")
 
 
 def load_click_rows(conn: sqlite3.Connection, round_id: int | None = None):
@@ -55,12 +55,12 @@ def _pct(v: float | None) -> str:
 def render(out: list[dict]) -> str:
     lines = ["1688 点击→弹窗可靠性（按店）",
              f"{'店铺':<6}{'点击':>6}{'成功':>6}{'无弹窗':>8}{'非offer':>8}"
-             f"{'解析空':>8}{'跳过':>6}{'成功率':>9}{'无弹窗占比':>10}"]
+             f"{'解析空':>8}{'跳过':>6}{'deny':>6}{'成功率':>9}{'无弹窗占比':>10}"]
     for d in out:
         lines.append(
             f"{d['shop']:<6}{d['total']:>6}{d[SUCCESS]:>6}{d['click_no_popup']:>8}"
             f"{d['click_url_notoffer']:>8}{d['click_parse_empty']:>8}"
-            f"{d['click_skipped']:>6}{_pct(d['success_rate']):>9}"
+            f"{d['click_skipped']:>6}{d['click_deny']:>6}{_pct(d['success_rate']):>9}"
             f"{_pct(d['no_popup_ratio']):>10}"
         )
     if not out:
@@ -73,11 +73,13 @@ def write_csv(path: Path, out: list[dict]) -> None:
     with open(path, "w", newline="", encoding="utf-8-sig") as fh:
         w = csv.writer(fh)
         w.writerow(["shop", "total", "ok", "no_popup", "url_notoffer",
-                    "parse_empty", "skipped", "attempted", "success_rate", "no_popup_ratio"])
+                    "parse_empty", "skipped", "deny", "attempted",
+                    "success_rate", "no_popup_ratio"])
         for d in out:
             w.writerow([d["shop"], d["total"], d[SUCCESS], d["click_no_popup"],
                         d["click_url_notoffer"], d["click_parse_empty"], d["click_skipped"],
-                        d["attempted"], _pct(d["success_rate"]), _pct(d["no_popup_ratio"])])
+                        d["click_deny"], d["attempted"], _pct(d["success_rate"]),
+                        _pct(d["no_popup_ratio"])])
 
 
 def main(argv: list[str] | None = None) -> int:

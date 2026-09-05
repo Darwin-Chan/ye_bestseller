@@ -75,6 +75,8 @@ def detect(page) -> str | None:
     url = (page.url or "").lower()
     if "login.taobao" in url or "login.1688" in url:
         return "登录墙"
+    if _is_deny_url(url):
+        return None          # 淘宝 deny/限流页：交给 _capture_card 退避，不响铃等扫码
     if _is_punish_url(url):
         return "滑块"
     body = _body_text(page)
@@ -113,9 +115,14 @@ def _is_punish_url(url: str) -> bool:
     # 站点会在正常详情 URL 后追加 /_____tmd_____/punish?x5secdata=... 的上报装饰，不算真验证
     if "_____tmd_____" in u:
         return False
-    # 淘宝 deny/验证拦截页（App 扫码等形式），以及 punish/验证请求
-    return ("punishtextfetch" in u or "/punish?" in u or "/punish/" in u
-            or "bsop-punish" in u or "deny_pc" in u)
+    return "punishtextfetch" in u or "/punish?" in u or "/punish/" in u
+
+
+def _is_deny_url(url: str) -> bool:
+    """淘宝 deny/验证拦截页（bsop-punish/deny_pc，通常由连续高频访问触发的反爬限流）。
+    这类不该响铃等人扫码，而应自动降速退避。"""
+    u = (url or "").lower()
+    return "bsop-punish" in u or "deny_pc" in u
 
 
 def intervention_kind(page, punished: bool) -> str | None:
@@ -447,7 +454,8 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                     continue
             img = page.locator(_PRODUCT_IMG_SEL).nth(i)
             _capture_card(page, img, list_title, cfg, punished, on_response, se, db,
-                          round_id, shop, offers, seen, idx=i, page_no=pages_read)
+                          round_id, shop, offers, seen, idx=i, page_no=pages_read,
+                          human=human)
 
         if pages_read >= max_pages:
             break
@@ -496,7 +504,8 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                     se("product_open")
                     img = page.locator(_PRODUCT_IMG_SEL).nth(i)
                     _capture_card(page, img, name, cfg, punished, on_response, se, db,
-                                  round_id, shop, offers, seen, idx=i, page_no=rpg)
+                                  round_id, shop, offers, seen, idx=i, page_no=rpg,
+                                  human=human)
             if rpg >= max_pages:
                 break
             advanced = _click_text_in_frames(page, "下一页")
@@ -582,7 +591,7 @@ def _read_card_title(page, idx: int) -> str:
 
 
 def _capture_card(page, img, list_title, cfg, punished, on_response, se, db, round_id, shop,
-                  offers, seen, idx: int = 0, page_no: int = 0) -> str | None:
+                  offers, seen, idx: int = 0, page_no: int = 0, human=None) -> str | None:
     """点开卡片弹出、offer_id 去重、读 SKU、入库；成功返回 offer_id，否则返回 None。
     list_title 为点前读到的卡片商品名（可能为空）。"""
     cnote = f"page={page_no}&idx={idx}"
@@ -591,6 +600,15 @@ def _capture_card(page, img, list_title, cfg, punished, on_response, se, db, rou
         se("click_no_popup", note=cnote)
         return None
     url = detail_page.url
+    # 命中淘宝 deny/验证拦截页（反爬限流）：自动降速退避，不硬刚、不响铃等人扫码
+    if _is_deny_url(url):
+        se("click_deny", note=cnote + "&url=" + url[:80])
+        log.warning("店铺 %s 点击命中 deny（反爬限流），退避 %.0f 秒后继续",
+                    shop.key, cfg.deny_backoff_sec)
+        _close_popup_or_back(detail_page, popup, page)
+        if human is not None:
+            human.sleep(cfg.deny_backoff_sec)
+        return None
     m = re.search(r"/(?:offer|item)/(\d+)\.html", url)
     if not m:
         se("click_url_notoffer", note=cnote)

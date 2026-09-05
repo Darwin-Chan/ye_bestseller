@@ -11,6 +11,8 @@ fail_rate_limit = 0.10
 human_pause_minutes = 10
 # 判定“需要人工介入”前的确认窗口（秒）：瞬时报错信号在此窗口内自行消失则视为误报
 intervention_confirmation_sec = 2.0
+# 命中淘宝 deny/验证拦截页（反爬限流）时的退避时长（秒）：自动放慢，降低再次触发限流概率
+deny_backoff_sec = 30.0
 # 是否打乱店铺内商品访问顺序（拟人化）
 shuffle_within_shop = true
 # 出现滑块/登录墙等需要人工干预时是否播放警报音
