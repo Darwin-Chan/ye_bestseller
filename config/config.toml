@@ -1,0 +1,67 @@
+[run]
+# 输入方式：auto（有 product_urls.csv 就用它，否则用 shops）/ shops / product
+input_source = "auto"
+# 每个店铺最多翻几页商品列表
+max_pages_per_shop = 10
+# 单轮详情页总数上限（跨店重复采集也计入）
+max_detail_pages_per_round = 3000
+# 单个商品详情最多尝试次数
+max_attempts_per_page = 2
+# 失败率超过该比例时整轮暂停等人工决策
+fail_rate_limit = 0.10
+# 触发滑块/登录墙后等待人工处理的最长分钟数
+human_pause_minutes = 10
+# 判定“需要人工介入”前的确认窗口（秒）：瞬时报错信号在此窗口内自行消失则视为误报
+intervention_confirmation_sec = 2.0
+# 是否打乱店铺内商品访问顺序（拟人化）
+shuffle_within_shop = true
+# 出现滑块/登录墙等需要人工干预时是否播放警报音
+alarm_on_intervention = true
+
+[human]
+# 详情页之间基础延迟（秒，随机取区间内值）
+detail_delay_sec = [0.8, 2]
+# 每 N 个详情页后插入一次较长的停顿（N 在该区间随机）
+long_pause_interval = [12, 20]
+long_pause_sec = [10, 20]
+# 每完成一批商品后休息
+batch_size = 300
+batch_rest_sec = [20, 40]
+# 列表页之间延迟
+list_delay_sec = [1.5, 3]
+# 点击/操作前等待
+action_delay_sec = [0.6, 1.5]
+# 页面加载完成后、读取数据前的等待
+read_delay_sec = [0.8, 1.5]
+# 失败重试：指数退避基础秒数 + 随机抖动秒数
+retry_base_sec = 5.0
+retry_jitter_sec = 2.0
+
+[browser]
+# MVP 必须使用有头浏览器以便人工处理滑块/扫码
+headless = false
+# 驱动方式：drission（推荐，可过 1688 登录）/ playwright
+driver = "pw_cdp"
+# 使用本机已装浏览器：msedge / chrome / chromium（chromium 需 playwright install chromium）
+channel = "msedge"
+profile_dir = "profiles/account1_chrome"
+# DrissionPage 使用的浏览器用户数据目录与浏览器路径（本次用 Edge）
+user_data_path = "profiles/account1_edge"
+chrome_path = "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
+# 是否复用系统默认浏览器用户配置；现为 false，使用上方独立配置目录。
+use_system_profile = false
+start_browser = true
+attach_port = 9222
+slow_mo_ms = 100
+timeout_ms = 45000
+base_url = "https://www.1688.com/"
+
+[paths]
+shop_csv = "config/shops.csv"
+product_urls_csv = "config/product_urls.csv"
+db_file = "data/bestseller.db"
+data_dir = "data"
+output_dir = "output"
+logs_dir = "logs"
+screenshot_dir = "data/screenshots"
+raw_page_dir = "data/raw_pages"
