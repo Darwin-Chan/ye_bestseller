@@ -443,7 +443,7 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                     continue
             img = page.locator(_PRODUCT_IMG_SEL).nth(i)
             _capture_card(page, img, list_title, cfg, punished, on_response, se, db,
-                          round_id, shop, offers, seen)
+                          round_id, shop, offers, seen, idx=i, page_no=pages_read)
 
         if pages_read >= max_pages:
             break
@@ -492,7 +492,7 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                     se("product_open")
                     img = page.locator(_PRODUCT_IMG_SEL).nth(i)
                     _capture_card(page, img, name, cfg, punished, on_response, se, db,
-                                  round_id, shop, offers, seen)
+                                  round_id, shop, offers, seen, idx=i, page_no=rpg)
             if rpg >= max_pages:
                 break
             advanced = _click_text_in_frames(page, "下一页")
@@ -578,20 +578,24 @@ def _read_card_title(page, idx: int) -> str:
 
 
 def _capture_card(page, img, list_title, cfg, punished, on_response, se, db, round_id, shop,
-                  offers, seen) -> str | None:
+                  offers, seen, idx: int = 0, page_no: int = 0) -> str | None:
     """点开卡片弹出、offer_id 去重、读 SKU、入库；成功返回 offer_id，否则返回 None。
     list_title 为点前读到的卡片商品名（可能为空）。"""
+    cnote = f"page={page_no}&idx={idx}"
     detail_page, popup = _click_one_product(page, img, cfg, punished, on_response, emit=se)
     if detail_page is None:
+        se("click_no_popup", note=cnote)
         return None
     url = detail_page.url
     m = re.search(r"/(?:offer|item)/(\d+)\.html", url)
     if not m:
+        se("click_url_notoffer", note=cnote)
         _close_popup_or_back(detail_page, popup, page)
         return None
     oid = m.group(1)
     se("popup_open", offer_id=oid)
     if db and round_id and db.inventory_exists(shop.key, oid, cst_date()):
+        se("click_skipped", offer_id=oid, note=cnote + "&offer_id=" + oid)
         se("skip_existing", offer_id=oid, note="inventory_exists_today")
         _close_popup_or_back(detail_page, popup, page)
         return None
@@ -604,6 +608,7 @@ def _capture_card(page, img, list_title, cfg, punished, on_response, se, db, rou
         try:
             html = detail_page.content()
         except Exception:
+            se("click_no_popup", offer_id=oid, note=cnote + "&offer_id=" + oid)
             se("popup_close", offer_id=oid)
             _close_popup_or_back(detail_page, popup, page)
             return None
@@ -630,9 +635,14 @@ def _capture_card(page, img, list_title, cfg, punished, on_response, se, db, rou
             ]
             db.clear_failures(round_id, shop.key, oid)
             db.save_snapshot_rows(round_id, shop.key, snap_rows)
+            se("click_ok", offer_id=oid, note=cnote + "&offer_id=" + oid + f"&sku={len(rows)}")
         else:
             db.mark_failure(round_id, shop.key, oid, 1, "popup未解析到SKU")
+            se("click_parse_empty", offer_id=oid, note=cnote + "&offer_id=" + oid)
             se("detail_parse", offer_id=oid, note="sku_count=0")
+    elif db and round_id:
+        # 本轮已处理过的同一 offer：视为已采集，不计为失败
+        se("click_skipped", offer_id=oid, note=cnote + "&offer_id=" + oid + "&dup=1")
     se("popup_close", offer_id=oid)
     _close_popup_or_back(detail_page, popup, page)
     return oid
