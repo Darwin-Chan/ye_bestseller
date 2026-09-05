@@ -371,7 +371,7 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
     max_pages = int(shop.pages) if shop.pages else int(cfg.max_pages_per_shop)
     offers: list[tuple[int, str, str, str, str]] = []
     seen: set[str] = set()
-    seen_names: set[str] = set()
+    name_counter: dict[str, int] = {}
     punished = [False]
     pages_read = 0
 
@@ -425,71 +425,25 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
             human.before_detail()   # 加大并随机化商品详情访问间隔
             se("product_open")
             list_title = _read_card_title(page, i)   # 点前读列表页商品名
-            # 同店（同页/跨页）重复商品名异常检测
             if list_title:
-                if list_title in seen_names:
+                name_counter[list_title] = name_counter.get(list_title, 0) + 1
+                c = name_counter[list_title]
+                if c >= 2:
+                    # 同店（同页/跨页）重复商品名异常检测（第 2 次及以上出现）
                     log.warning("异常：店铺 %s 出现重复商品名「%s」（第 %s 个商品）",
                                 shop.key, list_title[:60], i)
                     se("duplicate_name", note=f"name={list_title[:60]} @idx={i}")
-                seen_names.add(list_title)
-            if db and round_id and db.inventory_exists_by_name(shop.key, list_title, cst_date()):
-                log.info("店铺 %s 商品「%s」今日已有库存，跳过（不进详情）",
-                         shop.key, list_title[:40])
-                se("skip_existing", note=f"name_exists_today:{list_title[:40]}")
-                continue
+                # 计数=1 且今天已有库存 → 暂缓（只记位置事件），若该名字最终计数>1 则第二遍补抓
+                if db and round_id and c == 1 and db.inventory_exists_by_name(
+                        shop.key, list_title, cst_date()):
+                    log.info("店铺 %s 商品「%s」今日已有库存，暂缓（计数 %s）",
+                             shop.key, list_title[:40], c)
+                    se("defer_samename",
+                       note=f"name={list_title[:40]} @page={pages_read} @idx={i}")
+                    continue
             img = page.locator(_PRODUCT_IMG_SEL).nth(i)
-            detail_page, popup = _click_one_product(page, img, cfg, punished, on_response,
-                                                    emit=se)
-            if detail_page is None:
-                continue
-            url = detail_page.url
-            m = re.search(r"/(?:offer|item)/(\d+)\.html", url)
-            if not m:
-                _close_popup_or_back(detail_page, popup, page)
-                continue
-            oid = m.group(1)
-            se("popup_open", offer_id=oid)
-            if db and round_id and db.inventory_exists(shop.key, oid, cst_date()):
-                log.info("店铺 %s 商品 %s 今日已有库存，跳过", shop.key, oid)
-                se("skip_existing", offer_id=oid, note="inventory_exists_today")
-                _close_popup_or_back(detail_page, popup, page)
-                continue
-            first_time = oid not in seen
-            if first_time:
-                seen.add(oid)
-                offers.append((len(offers) + 1, oid, url, list_title, ""))
-                log.info("命中商品 %s（累计 %s）", oid, len(offers))
-            # 直接在 popup 详情页读取 skuInfoMap 并入库，避免二次访问
-            if db and round_id and first_time:
-                html = detail_page.content()
-                title = extract_title(html) or ""
-                rows = extract_skus_from_html(html)
-                if rows:
-                    img = extract_main_image(html)
-                    db.upsert_product(oid, url, title, img)
-                    se("detail_parse", offer_id=oid, note=f"sku_count={len(rows)}")
-                    snap_rows = [
-                        {
-                            "round_id": round_id, "shop_key": shop.key,
-                            "shop_url": shop.url, "shop_name": shop.name,
-                            "offer_id": oid, "product_url": url,
-                            "product_name": list_title or title,
-                            "sku_id": sku.get("sku_id") or hashlib.sha1(
-                                f"{oid}|{sku['sku_name']}".encode("utf-8")
-                            ).hexdigest()[:16],
-                            "sku_name": sku["sku_name"], "sku_price": sku["sku_price"],
-                            "sku_stock": sku["sku_stock"], "collected_at": utcnow(),
-                            "main_image_url": img, "page_status": "成功", "attempt": 1,
-                        }
-                        for sku in rows
-                    ]
-                    db.clear_failures(round_id, shop.key, oid)
-                    db.save_snapshot_rows(round_id, shop.key, snap_rows)
-                else:
-                    db.mark_failure(round_id, shop.key, oid, 1, "popup未解析到SKU")
-                    se("detail_parse", offer_id=oid, note="sku_count=0")
-            se("popup_close", offer_id=oid)
-            _close_popup_or_back(detail_page, popup, page)
+            _capture_card(page, img, list_title, cfg, punished, on_response, se, db,
+                          round_id, shop, offers, seen)
 
         if pages_read >= max_pages:
             break
@@ -501,6 +455,54 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
             break
         page.wait_for_load_state("domcontentloaded", timeout=cfg.timeout_ms)
         time.sleep(2)
+
+    # 第二遍：计数>1 的同名商品，按名找回并补抓（offer_id 去重，避免重复/遗漏）
+    ambiguous = {n for n, c in name_counter.items() if c > 1}
+    if ambiguous:
+        log.info("店铺 %s 发现 %s 个同名商品名，回头补抓", shop.key, len(ambiguous))
+        page.goto(shop.url, wait_until="domcontentloaded")
+        time.sleep(4)
+        if _click_text_in_frames(page, "销量"):
+            time.sleep(3)
+        rkind = intervention_kind(page, punished[0])
+        if rkind:
+            wait_for_resolution(page, cfg.human_pause_minutes, emit=se,
+                                verification_type=_vtype(rkind),
+                                confirm_sec=cfg.intervention_confirmation_sec)
+        for rpg in range(1, max_pages + 1):
+            human.before_list_page()
+            se("list_page", note=f"rescue_page={rpg}")
+            prev = -1
+            for _ in range(12):
+                try:
+                    page.mouse.wheel(0, 6000)
+                    page.wait_for_load_state("domcontentloaded")
+                    time.sleep(1.2)
+                except Exception:
+                    break
+                cur = page.locator(_PRODUCT_IMG_SEL).count()
+                if cur == prev:
+                    break
+                prev = cur
+            n = page.locator(_PRODUCT_IMG_SEL).count()
+            for i in range(n):
+                name = _read_card_title(page, i)
+                if name and name in ambiguous:
+                    human.before_detail()
+                    se("product_open")
+                    img = page.locator(_PRODUCT_IMG_SEL).nth(i)
+                    _capture_card(page, img, name, cfg, punished, on_response, se, db,
+                                  round_id, shop, offers, seen)
+            if rpg >= max_pages:
+                break
+            advanced = _click_text_in_frames(page, "下一页")
+            if not advanced:
+                advanced = _click_text_in_frames(page, "加载更多")
+            if not advanced:
+                log.info("店铺 %s 补抓在第 %s 页后无下一页，提前结束", shop.key, rpg)
+                break
+            page.wait_for_load_state("domcontentloaded", timeout=cfg.timeout_ms)
+            time.sleep(2)
     return offers, pages_read
 
 
@@ -573,6 +575,67 @@ def _read_card_title(page, idx: int) -> str:
         ) or "").strip()
     except Exception:
         return ""
+
+
+def _capture_card(page, img, list_title, cfg, punished, on_response, se, db, round_id, shop,
+                  offers, seen) -> str | None:
+    """点开卡片弹出、offer_id 去重、读 SKU、入库；成功返回 offer_id，否则返回 None。
+    list_title 为点前读到的卡片商品名（可能为空）。"""
+    detail_page, popup = _click_one_product(page, img, cfg, punished, on_response, emit=se)
+    if detail_page is None:
+        return None
+    url = detail_page.url
+    m = re.search(r"/(?:offer|item)/(\d+)\.html", url)
+    if not m:
+        _close_popup_or_back(detail_page, popup, page)
+        return None
+    oid = m.group(1)
+    se("popup_open", offer_id=oid)
+    if db and round_id and db.inventory_exists(shop.key, oid, cst_date()):
+        se("skip_existing", offer_id=oid, note="inventory_exists_today")
+        _close_popup_or_back(detail_page, popup, page)
+        return None
+    first_time = oid not in seen
+    if first_time:
+        seen.add(oid)
+        offers.append((len(offers) + 1, oid, url, list_title or "", ""))
+        log.info("命中商品 %s（累计 %s）", oid, len(offers))
+    if db and round_id and first_time:
+        try:
+            html = detail_page.content()
+        except Exception:
+            se("popup_close", offer_id=oid)
+            _close_popup_or_back(detail_page, popup, page)
+            return None
+        title = extract_title(html) or ""
+        rows = extract_skus_from_html(html)
+        if rows:
+            img_url = extract_main_image(html)
+            db.upsert_product(oid, url, title, img_url)
+            se("detail_parse", offer_id=oid, note=f"sku_count={len(rows)}")
+            snap_rows = [
+                {
+                    "round_id": round_id, "shop_key": shop.key,
+                    "shop_url": shop.url, "shop_name": shop.name,
+                    "offer_id": oid, "product_url": url,
+                    "product_name": list_title or title,
+                    "sku_id": sku.get("sku_id") or hashlib.sha1(
+                        f"{oid}|{sku['sku_name']}".encode("utf-8")
+                    ).hexdigest()[:16],
+                    "sku_name": sku["sku_name"], "sku_price": sku["sku_price"],
+                    "sku_stock": sku["sku_stock"], "collected_at": utcnow(),
+                    "main_image_url": img_url, "page_status": "成功", "attempt": 1,
+                }
+                for sku in rows
+            ]
+            db.clear_failures(round_id, shop.key, oid)
+            db.save_snapshot_rows(round_id, shop.key, snap_rows)
+        else:
+            db.mark_failure(round_id, shop.key, oid, 1, "popup未解析到SKU")
+            se("detail_parse", offer_id=oid, note="sku_count=0")
+    se("popup_close", offer_id=oid)
+    _close_popup_or_back(detail_page, popup, page)
+    return oid
 
 
 def _close_popup_or_back(detail_page, popup, page):
