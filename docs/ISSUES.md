@@ -15,6 +15,7 @@
 | IS-24 | 中 | 待定 | **GUI：执行过程中可主动放弃某轮** | 计划做一个 GUI 页面，能在采集过程中主动“放弃当前轮”。放弃即调用 `abandon_round()`：标记 `已放弃`、保留已采集数据、不再续跑、不作差分基准。当前无入口，只能用 `db.abandon_round()` 或手工改库。 | 待 GUI 立项后接入；数据层能力（`db.abandon_round()`）已就绪。 |
 | IS-25 | 中 | 待定 | **异步数据呈现 / 导出改造** | 计划把“最后的数据导出”改造成异步的数据呈现（如 Web 看板/接口）。当前已把整轮结束的同步导出（CSV+Excel）从 `_finalize_round` 移除，仅写入数据库；导出/呈现交给异步接管。**旧 `report.py` 导出/差分层（含 `stock_delta`/`update_stock_deltas`/`export_*`/`_sheet_*`）已删除，`snapshots.stock_delta` 列已物理删除。** | 设计异步呈现（读 `inventory.diff` / `snapshots` 现算）；如需 CSV/Excel，在异步阶段重建导入导出层。 |
 | IS-23 | 低 | 待定 | **三条抓取驱动路径并存，直连路径大概率失效且无自动化覆盖** | `pipeline.py` 同时保留 `_run_pw_round`（Playwright 直连）、`_run_dp_round`（DrissionPage）、`_run_pwcdp_round`（CDP 点击，为主路径）。直连路径的 `crawl_shop_listing` 依赖 `<a href>` 抓商品，但 1688 卡片多为无 href 的图片卡；`_run_listing_phase`/`_run_detail_phase` 等函数无单测覆盖。 | 评估后移除未使用的直连路径，或在 PRD 注明其仅为降级备用；为保留逻辑补 fixture 单测，并明确唯一推荐驱动。 |
+| IS-26 | 低 | 待定 | **清理不再使用的导出配置与依赖** | `config.toml` 的 `[paths].output_dir` 与 `requirements.txt` 的 `openpyxl` 已不再被运行路径使用（`report.py` 已删）。若异步呈现（IS-25）会复用输出目录 / openpyxl 则保留；否则后续清理。 | 等 IS-25 定方向后决定：保留（供异步呈现复用）或删除 `output_dir` 配置项与 `openpyxl` 依赖，并移除 `ensure_dirs()` 中对 output 目录的创建。 |
 | IS-12 | 低 | 待定 | **低销商品降频采集** | 对 `diff` 较小（按 SKU 汇总库存变化）的商品，把采集频率从「每日」降到「每 2-3 天一次」以节省时间。待定：①「diff 小」阈值怎么定；② 按商品还是按店铺降频；③ 与现有「同日跳过/按名跳过」的关系（低销需按「距上次采集≥2-3 天」才采，而非「当日已采」）；④ 新品无历史 diff 时默认（建议先每日，有数据再降频）。 | 先明确阈值与「是否到采集日」判定，再定实现位置（pipeline 还是抓取循环）。低优先级，可后做。 |
 
 ---
