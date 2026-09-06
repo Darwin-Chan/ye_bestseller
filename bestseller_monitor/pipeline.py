@@ -9,6 +9,7 @@ from collections import defaultdict
 from playwright.sync_api import sync_playwright
 
 from . import browser_dp, browser_pw
+from .browser_pw import DenyTracker, ShopDenyExceeded, RoundDenyExceeded
 from .config import Config, Shop
 from .db import Database, connect, utcnow, cst_date
 from .delay import Humanizer
@@ -377,15 +378,16 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int, shops: list[Shop]
     config_hash = db.record_params(cfg)
     emit = db.event_logger(round_id, config_hash)
     pw, br, page, ctx = browser_pw.open_session(cfg)
+    deny_tracker = DenyTracker(cfg.deny_window_minutes * 60)
     try:
-        _run_listing_pw(db, cfg, round_id, shops, page, emit=emit)
+        _run_listing_pw(db, cfg, round_id, shops, page, emit=emit, deny_tracker=deny_tracker)
         _run_detail_pw(db, cfg, round_id, page, emit=emit)
     finally:
         browser_pw.close_session(pw, br)
 
 
 def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop], page,
-                    emit=None) -> None:
+                    emit=None, deny_tracker=None) -> None:
     db.set_phase(round_id, "listing")
     done = {row["shop_key"] for row in db.shops_to_list(round_id) if row["list_status"] == "完成"}
     human = Humanizer(cfg)
@@ -393,11 +395,19 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
         if shop.key in done:
             log.info("店铺 %s 本轮已完成榜单，跳过", shop.key)
             continue
-        offers, pages_read = browser_pw.crawl_store_by_click(
-            page, shop, cfg, human, db=db, round_id=round_id, emit=emit,
-        )
-        log.info("店铺 %s 榜单：%s 个商品（%s 页）", shop.key, len(offers), pages_read)
-        db.save_shop_offers(round_id, shop.key, shop.url, shop.name, offers, pages_read)
+        try:
+            offers, pages_read = browser_pw.crawl_store_by_click(
+                page, shop, cfg, human, db=db, round_id=round_id, emit=emit,
+                deny_tracker=deny_tracker,
+            )
+            log.info("店铺 %s 榜单：%s 个商品（%s 页）", shop.key, len(offers), pages_read)
+            db.save_shop_offers(round_id, shop.key, shop.url, shop.name, offers, pages_read)
+        except ShopDenyExceeded as exc:
+            log.warning("店铺 %s 因 deny 超过阈值，跳过（本轮不保存残缺榜单）：%s", shop.key, exc)
+            continue
+        except RoundDenyExceeded as exc:
+            log.error("整轮 deny 超过阈值，中止本轮：%s", exc)
+            raise RuntimeError(str(exc)) from exc
     log.info("榜单阶段完成")
 
 

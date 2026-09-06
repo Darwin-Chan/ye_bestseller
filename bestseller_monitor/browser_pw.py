@@ -125,6 +125,42 @@ def _is_deny_url(url: str) -> bool:
     return "bsop-punish" in u or "deny_pc" in u
 
 
+class ShopDenyExceeded(Exception):
+    """某店滚动窗口内 deny 数达到阈值，跳过该店。"""
+
+
+class RoundDenyExceeded(Exception):
+    """整轮滚动窗口内 deny 数达到阈值，中止本轮。"""
+
+
+class DenyTracker:
+    """滚动窗口内的 deny 计数（按店 + 整轮）。"""
+    def __init__(self, window_sec: float):
+        self.window_sec = window_sec
+        self.events: list[tuple[float, str]] = []
+
+    def _prune(self, now: float) -> None:
+        self.events = [(t, s) for t, s in self.events if now - t <= self.window_sec]
+
+    def record(self, shop_key: str) -> None:
+        now = time.time()
+        self.events.append((now, shop_key))
+        self._prune(now)
+
+    def shop_count(self, shop_key: str) -> int:
+        self._prune(time.time())
+        return sum(1 for t, s in self.events if s == shop_key)
+
+    def round_count(self) -> int:
+        self._prune(time.time())
+        return len(self.events)
+
+
+def _deny_resolved(page) -> bool:
+    """deny 界面是否已解除：URL 不再是 deny 页即可认为解除（用户扫码后页面会离开 deny）。"""
+    return not _is_deny_url(page.url or "")
+
+
 def intervention_kind(page, punished: bool) -> str | None:
     """判定是否需要人工介入。仅看验证据信号，绝不因“没有商品”误判。"""
     url = (page.url or "").lower()
@@ -376,7 +412,7 @@ def capture_detail(page, product_url: str, cfg: Config, human: Humanizer, emit=N
 
 
 def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
-                         db=None, round_id=None, emit=None):
+                         db=None, round_id=None, emit=None, deny_tracker=None):
     """商品列表用「点击商品图进详情」的方式收集商品，绕开拿不到URL的问题。"""
     log.info("开始点击式抓取店铺 %s（%s）", shop.key, shop.url)
     max_pages = int(shop.pages) if shop.pages else int(cfg.max_pages_per_shop)
@@ -455,7 +491,7 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
             img = page.locator(_PRODUCT_IMG_SEL).nth(i)
             _capture_card(page, img, list_title, cfg, punished, on_response, se, db,
                           round_id, shop, offers, seen, idx=i, page_no=pages_read,
-                          human=human)
+                          human=human, deny_tracker=deny_tracker)
 
         if pages_read >= max_pages:
             break
@@ -505,7 +541,7 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                     img = page.locator(_PRODUCT_IMG_SEL).nth(i)
                     _capture_card(page, img, name, cfg, punished, on_response, se, db,
                                   round_id, shop, offers, seen, idx=i, page_no=rpg,
-                                  human=human)
+                                  human=human, deny_tracker=deny_tracker)
             if rpg >= max_pages:
                 break
             advanced = _click_text_in_frames(page, "下一页")
@@ -591,24 +627,95 @@ def _read_card_title(page, idx: int) -> str:
 
 
 def _capture_card(page, img, list_title, cfg, punished, on_response, se, db, round_id, shop,
-                  offers, seen, idx: int = 0, page_no: int = 0, human=None) -> str | None:
+                  offers, seen, idx: int = 0, page_no: int = 0, human=None,
+                  deny_tracker=None) -> str | None:
     """点开卡片弹出、offer_id 去重、读 SKU、入库；成功返回 offer_id，否则返回 None。
-    list_title 为点前读到的卡片商品名（可能为空）。"""
+    deny 处理：第1/2次退避重试；第3次响铃提醒扫码、解除后重抓，30s 未成功视为失败。
+    可能抛 ShopDenyExceeded / RoundDenyExceeded。"""
     cnote = f"page={page_no}&idx={idx}"
-    detail_page, popup = _click_one_product(page, img, cfg, punished, on_response, emit=se)
-    if detail_page is None:
-        se("click_no_popup", note=cnote)
-        return None
+    per_product_denies = 0
+    for _ in range(3):
+        detail_page, popup = _click_one_product(page, img, cfg, punished, on_response, emit=se)
+        if detail_page is None:
+            se("click_no_popup", note=cnote)
+            return None
+        url = detail_page.url
+        if _is_deny_url(url):
+            per_product_denies += 1
+            if deny_tracker:
+                deny_tracker.record(shop.key)
+                if deny_tracker.round_count() >= cfg.deny_round_limit:
+                    se("click_deny", note=cnote + f"&n={per_product_denies}&round_abort")
+                    raise RoundDenyExceeded(
+                        f"整轮 {cfg.deny_window_minutes} 分钟内 deny≥{cfg.deny_round_limit}")
+                if deny_tracker.shop_count(shop.key) >= cfg.deny_shop_limit:
+                    se("click_deny", note=cnote + f"&n={per_product_denies}&shop_skip")
+                    raise ShopDenyExceeded(
+                        f"店铺 {shop.key} {cfg.deny_window_minutes} 分钟内 deny≥{cfg.deny_shop_limit}")
+            log.warning("店铺 %s 商品命中 deny（该商品第 %s 次）", shop.key, per_product_denies)
+            if per_product_denies == 1:
+                se("click_deny", note=cnote + "&n=1")
+                _close_popup_or_back(detail_page, popup, page)
+                if human is not None:
+                    human.sleep(cfg.deny_backoff_sec)
+                continue
+            if per_product_denies == 2:
+                se("click_deny", note=cnote + "&n=2")
+                _close_popup_or_back(detail_page, popup, page)
+                if human is not None:
+                    human.sleep(cfg.deny_retry2_backoff_sec)
+                continue
+            return _handle_deny_scan(page, detail_page, popup, img, cfg, punished, on_response,
+                                     se, db, round_id, shop, offers, seen, list_title, cnote, human)
+        return _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_response,
+                              se, db, round_id, shop, offers, seen, cnote)
+    return None
+
+
+def _handle_deny_scan(page, detail_page, popup, img, cfg, punished, on_response, se, db,
+                      round_id, shop, offers, seen, list_title, cnote, human) -> str | None:
+    """第 3 次 deny：保留 deny 弹窗供扫码，响铃直到其 URL 离开 deny，再重新抓取。"""
+    se("click_deny", note=cnote + "&n=3&scan")
+    log.warning("店铺 %s 商品被 deny 第 3 次，请在 Edge 窗口扫码解除（响铃直到解除）", shop.key)
+    appear_ts = time.time()
+    while not _deny_resolved(detail_page):
+        if time.time() - appear_ts > cfg.human_pause_minutes * 60:
+            raise RuntimeError("人工介入(deny 扫码)超时")
+        sound.play_alarm(count=1)
+        time.sleep(3)
+    log.info("店铺 %s 的 deny 界面已解除，停止响铃", shop.key)
+    if re.search(r"/(?:offer|item)/(\d+)\.html", detail_page.url or ""):
+        oid = _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_response,
+                             se, db, round_id, shop, offers, seen, cnote)
+        return oid
+    _close_popup_or_back(detail_page, popup, page)
+    return _retry_recapture(page, img, cfg, punished, on_response, se, db, round_id, shop,
+                            offers, seen, list_title, cnote, human)
+
+
+def _retry_recapture(page, img, cfg, punished, on_response, se, db, round_id, shop,
+                     offers, seen, list_title, cnote, human) -> str | None:
+    """扫码解除后限时重抓：deny_scan_wait_sec 秒内抓到即返回，否则视为失败。"""
+    deadline = time.time() + cfg.deny_scan_wait_sec
+    while time.time() < deadline:
+        detail_page, popup = _click_one_product(page, img, cfg, punished, on_response, emit=se)
+        if detail_page is not None and not _is_deny_url(detail_page.url or ""):
+            oid = _ingest_detail(page, detail_page, popup, list_title, cfg, punished,
+                                 on_response, se, db, round_id, shop, offers, seen, cnote)
+            if oid:
+                return oid
+        if detail_page is not None:
+            _close_popup_or_back(detail_page, popup, page)
+        time.sleep(1)
+    log.warning("店铺 %s 商品扫码后 %.0f 秒内仍未抓取成功，标记失败",
+                shop.key, cfg.deny_scan_wait_sec)
+    return None
+
+
+def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_response, se, db,
+                   round_id, shop, offers, seen, cnote) -> str | None:
+    """对非 deny 的详情弹窗做 offer_id 去重、读 SKU、入库；成功返回 offer_id。"""
     url = detail_page.url
-    # 命中淘宝 deny/验证拦截页（反爬限流）：自动降速退避，不硬刚、不响铃等人扫码
-    if _is_deny_url(url):
-        se("click_deny", note=cnote + "&url=" + url[:80])
-        log.warning("店铺 %s 点击命中 deny（反爬限流），退避 %.0f 秒后继续",
-                    shop.key, cfg.deny_backoff_sec)
-        _close_popup_or_back(detail_page, popup, page)
-        if human is not None:
-            human.sleep(cfg.deny_backoff_sec)
-        return None
     m = re.search(r"/(?:offer|item)/(\d+)\.html", url)
     if not m:
         se("click_url_notoffer", note=cnote)
@@ -663,7 +770,6 @@ def _capture_card(page, img, list_title, cfg, punished, on_response, se, db, rou
             se("click_parse_empty", offer_id=oid, note=cnote + "&offer_id=" + oid)
             se("detail_parse", offer_id=oid, note="sku_count=0")
     elif db and round_id:
-        # 本轮已处理过的同一 offer：视为已采集，不计为失败
         se("click_skipped", offer_id=oid, note=cnote + "&offer_id=" + oid + "&dup=1")
     se("popup_close", offer_id=oid)
     _close_popup_or_back(detail_page, popup, page)

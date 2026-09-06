@@ -12,7 +12,12 @@ human_pause_minutes = 10
 # 判定“需要人工介入”前的确认窗口（秒）：瞬时报错信号在此窗口内自行消失则视为误报
 intervention_confirmation_sec = 2.0
 # 命中淘宝 deny/验证拦截页（反爬限流）时的退避时长（秒）：自动放慢，降低再次触发限流概率
-deny_backoff_sec = 30.0
+deny_backoff_sec = 30.0         # 商品第 1 次 deny 的退避
+deny_retry2_backoff_sec = 60.0  # 商品第 2 次 deny 的退避
+deny_scan_wait_sec = 30.0       # 扫码解除后重新抓取的成功判定超时（秒），超时视为该商品失败
+deny_window_minutes = 10        # deny 计数滚动窗口（分钟）
+deny_shop_limit = 7             # 窗口内该店 deny≥N -> 跳过该店
+deny_round_limit = 10           # 窗口内整轮 deny≥N -> 中止本轮
 # 是否打乱店铺内商品访问顺序（拟人化）
 shuffle_within_shop = true
 # 出现滑块/登录墙等需要人工干预时是否播放警报音

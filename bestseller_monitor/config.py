@@ -43,6 +43,11 @@ class Config:
     human_pause_minutes: int
     intervention_confirmation_sec: float
     deny_backoff_sec: float
+    deny_retry2_backoff_sec: float
+    deny_scan_wait_sec: float
+    deny_window_minutes: int
+    deny_shop_limit: int
+    deny_round_limit: int
     max_pages_per_shop: int
     max_detail_pages_per_round: int
     max_attempts_per_page: int
@@ -101,6 +106,11 @@ class Config:
             human_pause_minutes=int(run["human_pause_minutes"]),
             intervention_confirmation_sec=float(run.get("intervention_confirmation_sec", 2.0)),
             deny_backoff_sec=float(run.get("deny_backoff_sec", 30.0)),
+            deny_retry2_backoff_sec=float(run.get("deny_retry2_backoff_sec", 60.0)),
+            deny_scan_wait_sec=float(run.get("deny_scan_wait_sec", 30.0)),
+            deny_window_minutes=int(run.get("deny_window_minutes", 10)),
+            deny_shop_limit=int(run.get("deny_shop_limit", 7)),
+            deny_round_limit=int(run.get("deny_round_limit", 10)),
             max_pages_per_shop=int(run["max_pages_per_shop"]),
             max_detail_pages_per_round=int(run["max_detail_pages_per_round"]),
             max_attempts_per_page=int(run["max_attempts_per_page"]),
