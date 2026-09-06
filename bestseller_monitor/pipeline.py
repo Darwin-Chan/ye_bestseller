@@ -350,16 +350,20 @@ def _capture_one(
 def _finalize_round(db: Database, cfg: Config, round_id: int) -> None:
     update_stock_deltas(db, round_id)
     total, succeeded = db.offer_counts(round_id)
-    failed = total - succeeded
-    fail_rate = failed / total if total else 0.0
-    if total and fail_rate > cfg.fail_rate_limit:
-        note = f"失败率 {fail_rate:.1%} 超过阈值 {cfg.fail_rate_limit:.0%}，需人工决策"
+    click_fail = db.click_card_failures(round_id)   # 点击后未得到商品编号的卡片
+    attempted = total + click_fail
+    failed = (total - succeeded) + click_fail
+    fail_rate = failed / attempted if attempted else 0.0
+    if attempted and fail_rate > cfg.fail_rate_limit:
+        note = (f"失败率 {fail_rate:.1%} 超过阈值 {cfg.fail_rate_limit:.0%}"
+                f"（快照失败 {total - succeeded}，点击未得商品 {click_fail}），需人工决策")
         db.finish_round(round_id, status="需人工-失败率超限", note=note)
         log.warning("轮次 #%s：%s", round_id, note)
         print(f"\n>>> {note}。请检查 data/ 与 output/ 中的结果后再决定。\n")
     else:
         db.finish_round(round_id, status="完成")
-        log.info("轮次 #%s 完成（尝试 %s，成功 %s）", round_id, total, succeeded)
+        log.info("轮次 #%s 完成（尝试 %s，成功 %s，点击未得商品 %s）",
+                 round_id, attempted, succeeded, click_fail)
 
     try:
         export_round_csv(db, cfg, round_id)

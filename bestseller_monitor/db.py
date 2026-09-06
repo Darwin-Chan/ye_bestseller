@@ -5,6 +5,7 @@ import logging
 import sqlite3
 import hashlib
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
@@ -183,6 +184,17 @@ def cst_date(iso_utc: str | None = None) -> str:
         return dt.astimezone(CST).strftime("%Y-%m-%d")
     except ValueError:
         return datetime.now(CST).strftime("%Y-%m-%d")
+
+
+_CARD_POS_RE = re.compile(r"page=(\d+)&idx=(\d+)")
+
+
+def _card_pos(note: str | None) -> tuple[int, int] | None:
+    """从事件 note 中解析卡片位置 (page, idx)，用于按卡片去重。"""
+    if not note:
+        return None
+    m = _CARD_POS_RE.search(note)
+    return (int(m.group(1)), int(m.group(2))) if m else None
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -476,6 +488,22 @@ class Database:
         ).fetchone()
         return row is not None
 
+    def find_offer_id_by_name(self, shop_key: str, product_name: str, date: str) -> str | None:
+        """按 (shop_key, product_name, date) 找唯一 offer_id。
+
+        用于「按名暂缓」时补记录该商品：只在能确定唯一 offer_id 时返回，避免同名多品时猜错。
+        同名多品（多个不同 offer_id）返回 None。
+        """
+        if not product_name:
+            return None
+        rows = self.conn.execute(
+            "SELECT DISTINCT offer_id FROM inventory "
+            "WHERE shop_key=? AND product_name=? AND date=?",
+            (shop_key, product_name, date),
+        ).fetchall()
+        ids = [r["offer_id"] for r in rows]
+        return ids[0] if len(ids) == 1 else None
+
     def mark_skipped(self, round_id: int, shop_key: str, shop_url: str, shop_name: str,
                      offer_id: str, product_url: str, product_name: str | None = None,
                      note: str = "今日已有库存，跳过") -> None:
@@ -535,6 +563,32 @@ class Database:
             (round_id,),
         ).fetchone()["c"]
         return int(total), int(ok)
+
+    def click_card_failures(self, round_id: int) -> int:
+        """统计「点击后从未抓到任何 SKU」的失败卡片数（按 shop+page+idx 去重）。
+
+        判定：
+          - 成功：该卡片出现过 click_ok（抓到 SKU）或 click_skipped（成功跳过）。
+          - 失败：该卡片仅出现过 click_no_popup / click_url_notoffer / click_deny。
+        用于把「点击失败但没拿到 offer_id」的卡片也计入整轮失败率，避免被静默丢弃、
+        导致成功率被高估、『失败率>阈值即暂停』失效。
+        """
+        rows = self.conn.execute(
+            "SELECT shop_key, event, note FROM event_log "
+            "WHERE round_id=? AND event IN "
+            "('click_ok','click_skipped','click_no_popup','click_url_notoffer','click_deny')",
+            (round_id,),
+        ).fetchall()
+        ok_keys: set[tuple] = set()
+        fail_keys: set[tuple] = set()
+        for r in rows:
+            pos = _card_pos(r["note"])
+            key = (r["shop_key"], pos) if pos else (r["shop_key"], r["note"])
+            if r["event"] in ("click_ok", "click_skipped"):
+                ok_keys.add(key)
+            else:
+                fail_keys.add(key)
+        return len(fail_keys - ok_keys)
 
     def update_delta(self, snap_id: int, delta: int) -> None:
         self.conn.execute("UPDATE snapshots SET stock_delta=? WHERE id=?", (delta, snap_id))

@@ -15,12 +15,16 @@ from . import sound
 
 log = logging.getLogger(__name__)
 
+# 记录本次由 create_page 启动的浏览器进程，收尾只结束它。
+_proc = None
+
 SLIDER_MARKERS = ("向右滑动验证", "请完成验证", "滑块验证", "拖动滑块", "安全验证")
 LOGIN_MARKERS = ("登录后查看", "请登录", "扫码登录", "确认登录", "快速进入")
 PUNISH_MARKERS = ("拖动滑块", "请完成验证", "向右滑动", "安全验证", "验证通过", "punish", "x5sec")
 
 
 def create_page(cfg: Config):
+    global _proc
     from DrissionPage import ChromiumOptions, ChromiumPage
 
     if getattr(cfg, "start_browser", True):
@@ -28,7 +32,7 @@ def create_page(cfg: Config):
         # 让服务器认为这是“人启动”的浏览器，避免会话被降级。
         edge = cfg.chrome_path or r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
         if os.path.exists(edge):
-            subprocess.Popen([
+            _proc = subprocess.Popen([
                 edge,
                 f"--remote-debugging-port={cfg.attach_port}",
                 f"--user-data-dir={cfg.user_data_path}",
@@ -36,7 +40,7 @@ def create_page(cfg: Config):
                 "--no-default-browser-check",
                 cfg.base_url,
             ])
-            log.info("已用普通进程启动浏览器（调试端口 %s）。", cfg.attach_port)
+            log.info("已用普通进程启动浏览器（调试端口 %s，PID %s）。", cfg.attach_port, _proc.pid)
         else:
             log.warning("未找到浏览器路径，尝试由 DrissionPage 拉取：%s", edge)
 
@@ -73,11 +77,17 @@ def create_page(cfg: Config):
 
 
 def stop_browser() -> None:
-    try:
-        subprocess.run(["taskkill", "/IM", "msedge.exe", "/F"], capture_output=True)
-        log.info("已关闭本次启动的浏览器进程。")
-    except Exception:
-        pass
+    global _proc
+    proc = _proc
+    _proc = None
+    if proc is not None and proc.poll() is None:
+        try:
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+            log.info("已关闭本次启动的浏览器进程（PID %s）。", proc.pid)
+        except Exception as exc:
+            log.debug("关闭浏览器进程失败：%s", exc)
+    else:
+        log.info("未由本程序启动的浏览器进程，跳过关闭。")
 
 
 def _body_text(page) -> str:

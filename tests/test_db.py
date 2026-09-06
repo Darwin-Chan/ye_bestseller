@@ -239,6 +239,49 @@ class DbTests(unittest.TestCase):
             "SELECT COUNT(*) FROM snapshots WHERE round_id=?", (rid,)
         ).fetchone()[0], 1)
 
+    def test_find_offer_id_by_name_unique_vs_ambiguous(self):
+        base = {
+            "shop_key": "A", "offer_id": "11", "sku_id": "s1", "sku_name": "S",
+            "shop_name": "店铺A", "product_name": "厨房清洁膏", "sku_price": 1.0,
+        }
+        self.db.upsert_inventory([{**base, "sku_stock": 200,
+                                   "collected_at": "2026-09-05T02:00:00+00:00"}])
+        # 唯一 offer_id：返回它
+        self.assertEqual(self.db.find_offer_id_by_name("A", "厨房清洁膏", "2026-09-05"), "11")
+        # 其它日期 / 店铺 / 名称拿不到
+        self.assertIsNone(self.db.find_offer_id_by_name("A", "厨房清洁膏", "2026-09-06"))
+        self.assertIsNone(self.db.find_offer_id_by_name("B", "厨房清洁膏", "2026-09-05"))
+        self.assertIsNone(self.db.find_offer_id_by_name("A", "别的商品", "2026-09-05"))
+        # 同名多品（两个不同 offer_id）→ 不猜，返回 None
+        base2 = {**base, "offer_id": "22", "sku_id": "s2"}
+        self.db.upsert_inventory([{**base2, "sku_stock": 100,
+                                   "collected_at": "2026-09-05T02:00:00+00:00"}])
+        self.assertIsNone(self.db.find_offer_id_by_name("A", "厨房清洁膏", "2026-09-05"))
+
+    def test_click_card_failures_dedup_by_card(self):
+        rid = self.db.start_or_resume()
+        evs = [
+            ("A", "click_ok", "page=1&idx=0&offer_id=1&sku=3"),
+            ("A", "click_no_popup", "page=1&idx=1"),
+            ("A", "click_url_notoffer", "page=1&idx=2"),
+            ("A", "click_ok", "page=2&idx=1&offer_id=2&sku=2"),
+            ("B", "click_url_notoffer", "page=1&idx=0"),
+            ("B", "click_ok", "page=1&idx=0&offer_id=3&sku=1"),
+            ("B", "click_no_popup", "page=2&idx=0"),
+            ("C", "click_deny", "page=1&idx=0&n=1"),
+            ("C", "click_ok", "page=1&idx=0&offer_id=9&sku=2"),
+            ("C", "click_deny", "page=2&idx=0&n=3&scan"),
+        ]
+        for shop, ev, note in evs:
+            self.db.conn.execute(
+                "INSERT INTO event_log(round_id, shop_key, event, ts, note, kind) "
+                "VALUES (?, ?, ?, ?, ?, 'work')",
+                (rid, shop, ev, "2026-09-05T00:00:00+00:00", note),
+            )
+        self.db.conn.commit()
+        # 失败卡片：A(1,1)、A(1,2)、B(2,0)、C(2,0)；B(1,0)/C(1,0) 曾失败但最终 click_ok → 不算
+        self.assertEqual(self.db.click_card_failures(rid), 4)
+
 
 if __name__ == "__main__":
     unittest.main()

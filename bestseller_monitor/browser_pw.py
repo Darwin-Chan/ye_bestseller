@@ -21,16 +21,21 @@ from . import sound
 
 log = logging.getLogger(__name__)
 
+# 记录本次由 open_session 启动的浏览器进程，收尾只结束它，绝不波及用户其它 Edge 窗口。
+_launched_proc = None
+
 SLIDER_MARKERS = ("向右滑动验证", "请完成验证", "滑块验证", "拖动滑块", "安全验证", "punish")
 LOGIN_MARKERS = ("登录后查看", "请登录", "扫码登录", "确认登录", "快速进入")
 
 
 def open_session(cfg: Config):
+    global _launched_proc
     from playwright.sync_api import sync_playwright
 
     edge = cfg.chrome_path or r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+    proc = None
     if getattr(cfg, "start_browser", True) and os.path.exists(edge):
-        subprocess.Popen([
+        proc = subprocess.Popen([
             edge,
             f"--remote-debugging-port={cfg.attach_port}",
             f"--user-data-dir={cfg.user_data_path}",
@@ -38,8 +43,9 @@ def open_session(cfg: Config):
             "--no-default-browser-check",
             "about:blank",
         ])
-        log.info("已用普通进程启动浏览器（调试端口 %s）。", cfg.attach_port)
+        log.info("已用普通进程启动浏览器（调试端口 %s，PID %s）。", cfg.attach_port, proc.pid)
         time.sleep(8)
+    _launched_proc = proc
 
     pw = sync_playwright().start()
     br = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{cfg.attach_port}")
@@ -50,6 +56,7 @@ def open_session(cfg: Config):
 
 
 def close_session(pw, br) -> None:
+    global _launched_proc
     try:
         br.close()
     except Exception:
@@ -58,10 +65,15 @@ def close_session(pw, br) -> None:
         pw.stop()
     except Exception:
         pass
-    try:
-        subprocess.run(["taskkill", "/IM", "msedge.exe", "/F"], capture_output=True)
-    except Exception:
-        pass
+    # 只关闭本次启动的那个浏览器进程树，避免 taskkill /IM msedge.exe 强杀用户的其它 Edge。
+    proc = _launched_proc
+    _launched_proc = None
+    if proc is not None and proc.poll() is None:
+        try:
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+            log.info("已关闭本次启动的浏览器进程（PID %s）。", proc.pid)
+        except Exception as exc:
+            log.debug("关闭浏览器进程失败：%s", exc)
 
 
 def _body_text(page) -> str:
@@ -487,6 +499,17 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                              shop.key, list_title[:40], c)
                     se("defer_samename",
                        note=f"name={list_title[:40]} @page={pages_read} @idx={i}")
+                    # 按名暂缓：若（店铺, 商品名, 当日）能确定唯一 offer_id，则把该商品计入
+                    # 本轮榜单并补写一条“成功/跳过”快照，避免整轮商品数被低估；
+                    # 同名多品拿不准就不写（只记事件），防止误配。
+                    def_oid = db.find_offer_id_by_name(shop.key, list_title, cst_date())
+                    if def_oid:
+                        def_url = f"https://detail.1688.com/offer/{def_oid}.html"
+                        if def_oid not in seen:
+                            seen.add(def_oid)
+                            offers.append((len(offers) + 1, def_oid, def_url, list_title, ""))
+                        db.mark_skipped(round_id, shop.key, shop.url, shop.name, def_oid,
+                                        def_url, list_title, note="今日已有同名库存，跳过")
                     continue
             img = page.locator(_PRODUCT_IMG_SEL).nth(i)
             _capture_card(page, img, list_title, cfg, punished, on_response, se, db,
@@ -723,16 +746,21 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
         return None
     oid = m.group(1)
     se("popup_open", offer_id=oid)
-    if db and round_id and db.inventory_exists(shop.key, oid, cst_date()):
-        se("click_skipped", offer_id=oid, note=cnote + "&offer_id=" + oid)
-        se("skip_existing", offer_id=oid, note="inventory_exists_today")
-        _close_popup_or_back(detail_page, popup, page)
-        return None
     first_time = oid not in seen
     if first_time:
         seen.add(oid)
         offers.append((len(offers) + 1, oid, url, list_title or "", ""))
         log.info("命中商品 %s（累计 %s）", oid, len(offers))
+    if db and round_id and db.inventory_exists(shop.key, oid, cst_date()):
+        # 今天已采过：仍把该商品计入本轮榜单，并补写一条“成功/跳过”快照，
+        # 避免轮次商品数被低估、或误计为失败/待处理（PRD 口径）。
+        if first_time:
+            db.mark_skipped(round_id, shop.key, shop.url, shop.name, oid, url,
+                            list_title or "", note="今日已有库存，跳过")
+        se("click_skipped", offer_id=oid, note=cnote + "&offer_id=" + oid)
+        se("skip_existing", offer_id=oid, note="inventory_exists_today")
+        _close_popup_or_back(detail_page, popup, page)
+        return oid
     if db and round_id and first_time:
         try:
             html = detail_page.content()

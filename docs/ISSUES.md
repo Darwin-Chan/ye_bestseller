@@ -1,9 +1,9 @@
 # 项目 Issue 列表
 
 > 用途：汇总 1688 畅销榜 × SKU 库存快照 MVP 当前**尚未解决**的问题，作为项目 issue list。
-> 维护约定：**每天结束前更新**；每条含 状态 / 描述 / 证据 / 下一步。已解决的移到“最近已解决”并在日期旁打勾。
+> 维护约定：**每天结束前更新**；每条含 状态 / 描述 / 证据 / 下一步。已解决的移到「最近已解决」并在日期旁打勾。
 
-最近更新：2026-09-05
+最近更新：2026-09-06（本次基于代码审查 + 测试 + 数据库现场核查）
 
 ---
 
@@ -11,35 +11,58 @@
 
 | ID | 优先级 | 状态 | 标题 | 说明 / 证据 | 下一步 |
 |---|---|---|---|---|---|
-| IS-04 | 中 | 待测 | **已采集完的店铺处理偏慢** | 已采集店（当天全采过）再次运行时仍偏慢。现有数据：round #4 A01 首跑 6分10秒/58 offer；round #6 A01 重跑 5分34秒（32 新 + 58 按名跳过）；IS-03 冒烟 A10 单页 110 秒（30 个全“暂缓/跳过”，几乎没点弹窗）。**结论：已采集店的耗时主要在“遍历列表 + 每页滚动加载 + 读商品名”，不在点详情。** | 优化方向：已采集店只翻列表页读名、不点弹窗（预扫描/名称开关）；或整店已采集时只做“列表+按名判断”快速通过。可先拿一家全采店计时对比。 |
-| IS-12 | 低 | 待定 | **低销商品降频采集** | 新增机制：对 `diff` 较小（按 SKU 汇总库存变化）的商品，把采集频率从“每日”降到“**每 2-3 天一次**”，以节省整体抓取时间。待定项：① “diff 小”阈值怎么定（如近 N 日 `Σ|ΣSKU diff|` 低于多少）；② 按商品还是按店铺降频；③ 与现有“同日跳过/按名跳过”的关系（低销需按“距上次采集 ≥2-3 天”才采，而非“当日已采”）；④ 新品无历史 diff 时默认（建议先按每日，有数据后再降频）。 | 先明确阈值与“是否到采集日”判定；再定实现位置（pipeline 还是抓取循环）。低优先级，可后做。 |
+| IS-04 | 中 | 待测 | **已采集完的店铺处理偏慢** | 已采集店（当天全采过）再次运行时仍偏慢。现有数据：round #4 A01 首跑 6分10秒/58 offer；round #6 A01 重跑 5分34秒（32 新 + 58 按名跳过）；IS-03 冒烟 A10 单页 110 秒（30 个全「暂缓/跳过」）。结论：已采集店的耗时主要在「遍历列表 + 每页滚动加载 + 读商品名」，不在点详情。 | 优化方向：已采集店只翻列表页读名、不点弹窗（预扫描/名称开关）；或整店已采集时只做「列表+按名判断」快速通过。可先拿一家全采店计时对比。 |
+| IS-17 | 中 | 待处理 | **三套「滑块/登录墙/deny」识别逻辑重复实现，口径不一致易漂移** | `guard.py`（`detect/wait_for_human`，供 `listing.py`/`detail.py` 用）、`browser_pw.py`（`detect/intervention_kind/_is_punish_url/_is_deny_url/_captcha_visible/_resolved`）、`browser_dp.py`（又一套 `detect/wait_for_human`）。「滑/登/deny/punish」在同一项目里被定义三遍，标记文案、阈值、判定互不相同；`guard` 无 deny 概念，而 `browser_pw` 有。 | 收敛到一个模块（建议 `guard.py`）导出统一判定函数，`browser_pw`/`browser_dp` 只复用；删除重复实现并补行为一致的测试。 |
+| IS-18 | 中 | 待处理 | **事件日志 phase 标注不一致，分析脚本按阶段过滤会错置** | 点击式路径 `crawl_store_by_click` 的 `se()` 统一注入 `phase="listing"`，因此 `_ingest_detail` 内的 `detail_parse`、`click_ok`、`click_parse_empty`、`click_deny` 等都标成列表阶段；而 `_run_detail_pw` 的 `emit_detail` 用 `phase="detail"`。 | 让点击路径按事件实际阶段标注（列表=listing、弹窗/详情=detail）；或详情事件走独立的 phase 参数。 |
+| IS-19 | 中 | 待处理 | **部分拟人化延迟参数在主路径未生效，仍有短等待硬编码在代码里** | `Humanizer` 提供 `before_action()`（用 `action_delay_sec`）和 `after_load()`（用 `read_delay_sec`），但主路径 `crawl_store_by_click` 只调用 `before_detail`/`before_list_page`；`read_delay_sec`/`action_delay_sec` 在 `pw_cdp` 下不生效。同时 `page.goto` 后 `time.sleep(2/4)`、滚动后 `time.sleep(1.2)`、翻页后 `time.sleep(2)` 等仍在代码里。 | 把这些固定等待抽到 `Humanizer`（或读取配置），并在 PRD/文档中明确哪些仍是内置固定值；接入 `before_action/after_load`。 |
+| IS-20 | 中 | 待处理 | **日报/CSV 时间戳用 UTC，而「当日去重」用北京日期，跨日边界文件名与数据日期对不上** | `report._stamp()` 用 `started_at`（`utcnow()` 为 UTC 时间）直接 `strftime`；而 `db.cst_date()` 把 UTC 转北京日期，`inventory.date` 存北京日期。例如北京 09-05 晚 23:53 开始的一轮，导出文件名为 `20260905_153329`（UTC 日期），但该轮数据实际归属北京 09-06。 | 让 `_stamp` 用 `cst_date()` 生成「北京日期_时分秒」，或统一所有时间线为北京时间并在命名/展示中注明。 |
+| IS-21 | 中 | 待处理 | **profile 配置与文档不一致；依赖清单缺 DrissionPage** | `config.toml`：`profile_dir = "profiles/account1_chrome"`、`user_data_path = "profiles/account1_edge"`、`channel = "msedge"`。主路径 `pw_cdp` 用 `user_data_path`（Edge），而 `_run_pw_round`（Playwright 直连）用 `profile_dir`（Chrome 配置）；READMDE 却只提 `profiles/account1_edge`。另 `requirements.txt` 只含 `playwright/openpyxl`，未列 `DrissionPage`，一旦切到 `driver=drission` 会因缺少依赖而失败。 | 统一 profile：把 `profile_dir` 对齐到实际登录的 `account1_edge`（或删除该字段只留 `user_data_path`）；`requirements.txt` 补充 `DrissionPage`（若保留该驱动），并说明两个 profile 的用途。 |
+| IS-22 | 中 | 待处理 | **数据/轮次现状文档过期，未记录第 7/8/11/12 轮，且第 12 轮为「已放弃」** | 数据库（`data/bestseller.db`）现有轮次 #2,4,6,7,8,10,11 状态「完成」和 #12 状态「已放弃」（phase=abandoned，3/12 店、109 offer、691 快照、deny=203 次）；`inventory` 有 09-05（6012 行）与 09-06（691 行）。而 ISSUES「数据/环境现状」仍写「有效轮次 #2/#4/#6、round #10 今天完整跑」，日期停在 09-05。 | 更新轮次清单与「有效轮」口径（区分 完成/已放弃/进行中）；明确「已放弃轮次写入的 inventory 是否应参与同日去重判断」（当前会因当天已有库存而跳过，需确认是否回滚）。 |
+| IS-23 | 低 | 待定 | **三条抓取驱动路径并存，直连路径大概率失效且无自动化覆盖** | `pipeline.py` 同时保留 `_run_pw_round`（Playwright 直连）、`_run_dp_round`（DrissionPage）、`_run_pwcdp_round`（CDP 点击，为主路径）。直连路径的 `crawl_shop_listing` 依赖 `<a href>` 抓商品，但 1688 卡片多为无 href 的图片卡；`_run_listing_phase`/`_run_detail_phase` 等函数无单测覆盖。 | 评估后移除未使用的直连路径，或在 PRD 注明其仅为降级备用；为保留逻辑补 fixture 单测，并明确唯一推荐驱动。 |
+| IS-12 | 低 | 待定 | **低销商品降频采集** | 对 `diff` 较小（按 SKU 汇总库存变化）的商品，把采集频率从「每日」降到「每 2-3 天一次」以节省时间。待定：①「diff 小」阈值怎么定；② 按商品还是按店铺降频；③ 与现有「同日跳过/按名跳过」的关系（低销需按「距上次采集≥2-3 天」才采，而非「当日已采」）；④ 新品无历史 diff 时默认（建议先每日，有数据再降频）。 | 先明确阈值与「是否到采集日」判定，再定实现位置（pipeline 还是抓取循环）。低优先级，可后做。 |
+
+---
 
 ## B. 最近已解决（供追溯）
 
 | ID | 解决日期 | 说明 |
 |---|---|---|
-| IS-05 | 2026-09-05 | 商品名 `list_title` 提取改为“仅含一张商品图的最小容器取首行”，不再依赖 `已售/¥` 文案；round #4 335/335 非空。 |
+| IS-14 | 2026-09-06 | **已改代码**：收尾不再全局 `taskkill /IM msedge.exe /F`，改为记录本次 `subprocess.Popen(...)` 的 PID，仅 `taskkill /PID <pid> /T /F` 结束本次启动的浏览器进程树（`browser_pw.close_session`、`browser_dp.stop_browser`）。**待下一轮实测确认**不误关其它 Edge 窗口。 |
+| IS-15 | 2026-09-06 | **已改代码**：① `_ingest_detail` 遇到当日已采商品，先把它计入 `shop_offers` 榜单，再 `mark_skipped` 补写一条“成功/跳过”快照；② 按名暂缓也通过 `find_offer_id_by_name`（仅当同名唯一）补记录。**待下一轮实测确认**轮次商品数不再被低估。 |
+| IS-16 | 2026-09-06 | **已改代码**：新增 `db.click_card_failures()`（按 shop+page+idx 去重，`click_ok/click_skipped` 视为成功，`click_no_popup/click_url_notoffer/click_deny` 且再无成功即为失败），`_finalize_round` 据此把「点击后未得到商品」的卡片计入失败率，使失败率>10% 的兜底对点击失败也生效。**待下一轮实测确认**。 |
+| IS-05 | 2026-09-05 | 商品名 `list_title` 提取改为「仅含一张商品图的最小容器取首行」，不再依赖 `已售/¥` 文案；round #4 335/335 非空。 |
 | IS-01 | 2026-09-05 | 5 家 0 商品店：采用方案 3（`shops.csv` 显式 `offer_list_url`），已填 12 家；验证 A05/A06/A10/A11/A12 各 1 页全部采到（30/30/29/30/30 offer）。 |
-| IS-03 | 2026-09-05 | 同名商品“按名跳过”误判：改为**计数+暂缓+计数>1补抓**。每店每个商品名计数；计数=1且已有库存→暂缓；计数≥2→当场抓；最终计数>1→第二遍按名补抓（offer_id 去重，避免重复/遗漏）。选项A：计数==1（唯一名已有库存）默认跳过，接受极小概率“榜外同名”漏采。逻辑经模拟验证（同名/全新增/混合顺序/三同名均不漏），A10 冒烟确认计数+暂缓正常。 |
-| IS-02 | 2026-09-05 | 点击→弹窗可靠性：埋点 + 分析脚本 + **定位根因=连续高频采集触发的淘宝反爬限流（点击落到 `bsop-punish-test-webapp/deny_pc.html`）**，非卡片模板。已加 `_is_deny_url`（deny=退避不响铃）、`deny_backoff_sec`（默认 30s，遇 deny 自动降速）+ 埋点 `click_deny`；`deny_pc` 不再静默当“非offer”，真 punish 页仍响铃。round #10 整体成功率约 65%，A05/A10/A11≈95%。 |
-| IS-13 | 2026-09-06 | 抗 deny 限流：`_capture_card` 遇 deny 按“该商品”计数——第 1 次退避 30s、第 2 次退避 60s（重试同商品）、第 3 次响铃提醒扫码、解除后限时 30s 重抓（超时标记失败）。**滚动 10 分钟窗口**：该店 deny≥7 跳过该店；整轮 deny≥10 中止本轮。新增 `DenyTracker`、`ShopDenyExceeded/RoundDenyExceeded`；配置项 `deny_retry2_backoff_sec/deny_scan_wait_sec/deny_window_minutes/deny_shop_limit/deny_round_limit`。扫码/解除判定（URL 离开 deny）为初版，待真实命中后优化。 |
+| IS-03 | 2026-09-05 | 同名商品「按名跳过」误判：改为**计数+暂缓+计数>1补抓**。每店每个商品名计数；计数=1且已有库存→暂缓；计数≥2→当场抓；最终计数>1→第二遍按名补抓（offer_id 去重）。 |
+| IS-02 | 2026-09-05 | 点击→弹窗可靠性：埋点 + 分析脚本 + 定位根因=连续高频采集触发的淘宝反爬限流。已加 `_is_deny_url`、`deny_backoff_sec` + 埋点 `click_deny`。 |
+| IS-13 | 2026-09-06 | 抗 deny 限流：`_capture_card` 遇 deny 按「该商品」计数——第 1 次退避 30s、第 2 次退避 60s、第 3 次响铃扫码、解除后限时 30s 重抓；滚动 10 分钟窗口：该店 deny≥7 跳过该店、整轮 deny≥10 中止本轮。扫码/解除判定（URL 离开 deny）为初版，待真实命中后优化。 |
 | IS-06 | 2026-09-05 | 同日去重：按 `(shop_key, offer_id, 当日)` 与按 `(shop_key, product_name, 当日)` 双轨，按名可点前跳过、offer_id 兜底。 |
-| IS-07 | 2026-09-05 | 新增“同店同名商品异常检测”：重复商品名记 `warning` + `event_log.duplicate_name`（A02×2、A07、A08、A10 共 5 条）。 |
+| IS-07 | 2026-09-05 | 新增「同店同名商品异常检测」：重复商品名记 `warning` + `event_log.duplicate_name`。 |
 | IS-08 | 2026-09-05 | 修复 `cst_date()` 缺失默认参数的回归（补了无参调用测试）。 |
-| IS-09 | 2026-09-05 | 误报“人工介入”大修：① `_is_punish_url` 排除 `_____tmd_____/punish?x5secdata` 装饰 URL；② `intervention_kind` 仅当有验证文案或非“点我反馈”拦截页才算；③ `wait_for_resolution` 加“确认窗口 + 刷新兜底”。A02 卡片验证 `intervention=None`。 |
+| IS-09 | 2026-09-05 | 误报「人工介入」大修：① `_is_punish_url` 排除 `_____tmd_____/punish?x5secdata` 装饰 URL；② `intervention_kind` 仅当有验证文案或非「点我反馈」拦截页才算；③ `wait_for_resolution` 加「确认窗口 + 刷新兜底」。 |
 | IS-10 | 2026-09-05 | A02 `inventory.product_name` 回填为卡片标题（90 offer / 514 行）。 |
 | IS-11 | 2026-09-05 | 清理废弃轮次（round #1、#3、#5）及测试日志（run_test*.log、run_full.log）。 |
 
-## C. 数据/环境现状（便于每天参考）
+---
 
-- 有效轮次：round #2（A02，90 offer/514 快照）、round #4（12 店，335 offer/1947 快照）、round #6（A01 补采，32 offer/162 快照）。
-- round #10（今天完整跑）：A04/A05/A06/A09/A10/A11/A12 等补采；整体点击成功率约 65%，主失败为 `url_notoffer`（点击落到淘宝 `deny_pc.html`，即连续高频采集触发的反爬限流）。A05/A10/A11≈95%，A07/A12/A09 因 deny 较低；`deny_pc` 已被识别为“需人工”。
-- 主数据：shops / products / skus / inventory 只增改不删；本次运行会用 `shops.csv` upsert 回 `shops`。
-- 抓取驱动：`driver=pw_cdp`（Playwright 接管已登录 Edge，`profiles/account1_edge`）。
-- 运行：`python run.py`（**仅店铺模式**，商品URL清单抓取已移除）；`--mode` 仅保留 `shops`（兼容旧命令）。`--limit-shops Axx` / `--pages-per-shop N` 可单店限页。
-- `shops.csv` 列：`shop_key, shop_name, shop_url, pages, active, offer_list_url`。`offer_list_url` 为“全部商品页”URL，填了用 `page.goto` 进入它，空则自动拼 `/page/offerlist.htm`；`shop_url` 是店铺首页（存在 `Shop.home_url`）。
-- 工具：`tools/analyze_delay.py`（延迟×验证关联分析）、`tools/sync_list_titles.py`（把某店 `inventory.product_name` 刷成卡片标题）、`tools/diag_verify_state.py`（诊断弹窗验证状态）、`tools/diag_offer_id_presolve.py`（列表页 offer_id 预解析探测）。
+## C. 数据 / 环境现状（2026-09-06 核查）
+
+**轮次（`data/bestseller.db`，时间为 UTC）**
+
+- 完成：#2（1 店/90 offer/514 快照）、#4（12 店/335 offer/1947 快照）、#6（A01 补采/32 offer/162 快照）、#7（1 店/30 offer/153 快照）、#8（4 店/119 offer/717 快照）、#10（12 店/343 offer/1756 成功 + 8 失败）、#11（3 店/127 offer/764 快照，09-05 晚 23:53 结束）。
+- 已放弃：#12（09-05 16:21 UTC 起跑，约北京 09-06 00:21；3/12 店、109 offer、691 快照、deny 计数 203，用户手动放弃）。**当前无「进行中」轮次。**
+- `inventory`：09-05 共 6012 行、09-06 共 691 行（来自已放弃的 #12）。
+
+**点评**：#12 已放弃但仍写下了 09-06 的库存，按「同日去重」逻辑会让这些商品在 09-06 当天被当作「已采过」而跳过，需确认是否需要回滚或排除（见 IS-22）。
+
+**运行与配置**
+
+- 抓取驱动：`driver=pw_cdp`（Playwright 连接接管已登录 Edge，`profiles/account1_edge`）。
+- 运行：`python run.py`（仅店铺模式；`--mode` 仅保留 `shops`）。`--limit-shops Axx` / `--pages-per-shop N` 可单店限页。
+- `shops.csv`：当前 12 家（A01–A12），各家 `pages=3`、`active=1`，均显式配置 `offer_list_url`。列：`shop_key, shop_name, shop_url, pages, active, offer_list_url`。`offer_list_url` 为「全部商品页」URL，填了就 `page.goto` 进入，空则自动拼 `/page/offerlist.htm`。
+- 主数据：shops / products / skus / inventory 只增改不删；每次运行会以 `shops.csv` upsert 回 `shops`。
+- 工具：`tools/analyze_click.py`（点击成功率）、`tools/analyze_delay.py`（延迟×验证关联）、`tools/sync_list_titles.py`、`tools/diag_offer_id_presolve.py`、`tools/diag_verify_state.py`、`tools/summary.py`。
+- 测试：`python -m unittest discover -s tests -p "test_*.py"` 共 27 项全部通过；`py_compile` 全部源码通过（33 个文件）。
 
 ---
 
-**每天结束前**：把新增/解决的 issue 更新进本文件，保持状态、证据、下一步清晰；不清晰的地方标“待确认”。
+**每天结束前**：把新增/解决的 issue 更新进本文件，保持状态、证据、下一步清晰；不清晰的地方标「待确认」。
