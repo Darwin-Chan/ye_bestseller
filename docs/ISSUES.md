@@ -12,7 +12,8 @@
 | ID | 优先级 | 状态 | 标题 | 说明 / 证据 | 下一步 |
 |---|---|---|---|---|---|
 | IS-04 | 中 | 待测 | **已采集完的店铺处理偏慢** | 已采集店（当天全采过）再次运行时仍偏慢。现有数据：round #4 A01 首跑 6分10秒/58 offer；round #6 A01 重跑 5分34秒（32 新 + 58 按名跳过）；IS-03 冒烟 A10 单页 110 秒（30 个全「暂缓/跳过」）。结论：已采集店的耗时主要在「遍历列表 + 每页滚动加载 + 读商品名」，不在点详情。 | 优化方向：已采集店只翻列表页读名、不点弹窗（预扫描/名称开关）；或整店已采集时只做「列表+按名判断」快速通过。可先拿一家全采店计时对比。 |
-| IS-22 | 中 | 待处理 | **数据/轮次现状文档过期，未记录第 7/8/11/12 轮，且第 12 轮为「已放弃」** | 数据库（`data/bestseller.db`）现有轮次 #2,4,6,7,8,10,11 状态「完成」和 #12 状态「已放弃」（phase=abandoned，3/12 店、109 offer、691 快照、deny=203 次）；`inventory` 有 09-05（6012 行）与 09-06（691 行）。而 ISSUES「数据/环境现状」仍写「有效轮次 #2/#4/#6、round #10 今天完整跑」，日期停在 09-05。 | 更新轮次清单与「有效轮」口径（区分 完成/已放弃/进行中）；明确「已放弃轮次写入的 inventory 是否应参与同日去重判断」（当前会因当天已有库存而跳过，需确认是否回滚）。 |
+| IS-24 | 中 | 待定 | **GUI：执行过程中可主动放弃某轮** | 计划做一个 GUI 页面，能在采集过程中主动“放弃当前轮”。放弃即调用 `abandon_round()`：标记 `已放弃`、保留已采集数据、不再续跑、不作差分基准。当前无入口，只能用 `db.abandon_round()` 或手工改库。 | 待 GUI 立项后接入；数据层能力（`db.abandon_round()`）已就绪。 |
+| IS-25 | 中 | 待定 | **异步数据呈现 / 导出改造** | 计划把“最后的数据导出”改造成异步的数据呈现（如 Web 看板/接口）。当前已把整轮结束的同步导出（CSV+Excel）从 `_finalize_round` 移除，仅写入数据库；导出/呈现交给异步接管。 | 设计异步呈现（读 `inventory.diff` / `snapshots`）；明确是否沿用/删除 `report.py` 里的导出与 `snapshots.stock_delta`。 |
 | IS-23 | 低 | 待定 | **三条抓取驱动路径并存，直连路径大概率失效且无自动化覆盖** | `pipeline.py` 同时保留 `_run_pw_round`（Playwright 直连）、`_run_dp_round`（DrissionPage）、`_run_pwcdp_round`（CDP 点击，为主路径）。直连路径的 `crawl_shop_listing` 依赖 `<a href>` 抓商品，但 1688 卡片多为无 href 的图片卡；`_run_listing_phase`/`_run_detail_phase` 等函数无单测覆盖。 | 评估后移除未使用的直连路径，或在 PRD 注明其仅为降级备用；为保留逻辑补 fixture 单测，并明确唯一推荐驱动。 |
 | IS-12 | 低 | 待定 | **低销商品降频采集** | 对 `diff` 较小（按 SKU 汇总库存变化）的商品，把采集频率从「每日」降到「每 2-3 天一次」以节省时间。待定：①「diff 小」阈值怎么定；② 按商品还是按店铺降频；③ 与现有「同日跳过/按名跳过」的关系（低销需按「距上次采集≥2-3 天」才采，而非「当日已采」）；④ 新品无历史 diff 时默认（建议先每日，有数据再降频）。 | 先明确阈值与「是否到采集日」判定，再定实现位置（pipeline 还是抓取循环）。低优先级，可后做。 |
 
@@ -22,6 +23,7 @@
 
 | ID | 解决日期 | 说明 |
 |---|---|---|
+| IS-22 | 2026-09-07 | **已解决**：① 核对并更新「数据/环境现状」轮次口径（#2/4/6/7/8/10/11 完成、#12 已放弃但数据保留）；② 明确「已放弃 ≠ 数据有问题」——已写入的 shop_offers/snapshots/inventory 全部保留，**照常参与“当日去重”，不回滚**，仅不作为差分基准、不再续跑；③ 新增 `db.abandon_round()` 作为显式、数据保留的放弃操作（供后续 GUI 使用）。 |
 | IS-14 | 2026-09-06 | **已改代码**：收尾不再全局 `taskkill /IM msedge.exe /F`，改为记录本次 `subprocess.Popen(...)` 的 PID，仅 `taskkill /PID <pid> /T /F` 结束本次启动的浏览器进程树（`browser_pw.close_session`、`browser_dp.stop_browser`）。**待下一轮实测确认**不误关其它 Edge 窗口。 |
 | IS-15 | 2026-09-06 | **已改代码**：① `_ingest_detail` 遇到当日已采商品，先把它计入 `shop_offers` 榜单，再 `mark_skipped` 补写一条“成功/跳过”快照；② 按名暂缓也通过 `find_offer_id_by_name`（仅当同名唯一）补记录。**待下一轮实测确认**轮次商品数不再被低估。 |
 | IS-16 | 2026-09-06 | **已改代码**：新增 `db.click_card_failures()`（按 shop+page+idx 去重，`click_ok/click_skipped` 视为成功，`click_no_popup/click_url_notoffer/click_deny` 且再无成功即为失败），`_finalize_round` 据此把「点击后未得到商品」的卡片计入失败率，使失败率>10% 的兜底对点击失败也生效。**待下一轮实测确认**。 |
@@ -44,7 +46,7 @@
 
 ---
 
-## C. 数据 / 环境现状（2026-09-06 核查）
+## C. 数据 / 环境现状（2026-09-07 核查）
 
 **轮次（`data/bestseller.db`，时间为 UTC）**
 
@@ -52,7 +54,7 @@
 - 已放弃：#12（09-05 16:21 UTC 起跑，约北京 09-06 00:21；3/12 店、109 offer、691 快照、deny 计数 203，用户手动放弃）。**当前无「进行中」轮次。**
 - `inventory`：09-05 共 6012 行、09-06 共 691 行（来自已放弃的 #12）。
 
-**点评**：#12 已放弃但仍写下了 09-06 的库存，按「同日去重」逻辑会让这些商品在 09-06 当天被当作「已采过」而跳过，需确认是否需要回滚或排除（见 IS-22）。
+**点评**：#12 虽已放弃，但其写入的 09-06 库存**有效**——按「同日去重」会在 09-06 当天把相关商品当作“已采过”而跳过，这是**正确行为（不回滚）**；#12 仅不作为差分基准、不再续跑。
 
 **运行与配置**
 
@@ -60,8 +62,9 @@
 - 运行：`python run.py`（仅店铺模式；`--mode` 仅保留 `shops`）。`--limit-shops Axx` / `--pages-per-shop N` 可单店限页。
 - `shops.csv`：当前 12 家（A01–A12），各家 `pages=3`、`active=1`，均显式配置 `offer_list_url`。列：`shop_key, shop_name, shop_url, pages, active, offer_list_url`。`offer_list_url` 为「全部商品页」URL，填了就 `page.goto` 进入，空则自动拼 `/page/offerlist.htm`。
 - 主数据：shops / products / skus / inventory 只增改不删；每次运行会以 `shops.csv` upsert 回 `shops`。
+- 导出：整轮结束已**不再自动生成** CSV/Excel（同步导出从 `_finalize_round` 移除），仅写入 `data/bestseller.db`；数据呈现后置为异步（见 IS-25）。
 - 工具：`tools/analyze_click.py`（点击成功率）、`tools/analyze_delay.py`（延迟×验证关联）、`tools/sync_list_titles.py`、`tools/diag_offer_id_presolve.py`、`tools/diag_verify_state.py`、`tools/summary.py`。
-- 测试：`python -m unittest discover -s tests -p "test_*.py"` 共 27 项全部通过；`py_compile` 全部源码通过（33 个文件）。
+- 测试：`python -m unittest discover -s tests -p "test_*.py"` 共 33 项全部通过；`py_compile` 全部源码通过。
 
 ---
 

@@ -2,7 +2,7 @@
 
 按 [docs/PRD-1688库存快照MVP.md](docs/PRD-1688库存快照MVP.md) 实现的路线 A MVP：
 每天在若干 1688 店铺内按销量排序抓取前若干页商品，进入详情页采集 SKU 名称/价格/库存，
-存入 SQLite 并导出 CSV/Excel，跨轮比较库存变化用于估算销量。
+存入 SQLite，跨轮比较库存变化用于估算销量。（同步导出 CSV/Excel 已停用，数据呈现后置为异步。）
 
 ## 安装
 
@@ -43,14 +43,14 @@ python run.py --pages-per-shop 2 --max-detail 20 --limit-shops A01
   `python login_chrome.py` 扫码登录一次。
 - 出现滑块/登录墙时程序会暂停等待人工处理。
 - 中断后可再次运行续跑；每轮只有完整完成后才参与库存差分。
-- 结果位于 `data/`（CSV 与原始页面）与 `output/`（Excel 日报）；运行数据均已加入 `.gitignore`。
+- 结果写入 `data/bestseller.db`；解析失败的原始页面存 `data/raw_pages/round_<轮次>/`；不再自动生成 CSV/Excel。运行数据均已加入 `.gitignore`。
 
 ## 校准说明
 
 1688 页面结构会变化。首次实机运行时若详情页 SKU 或店铺列表解析失败，程序会：
 
 - 把原始 HTML 存到 `data/raw_pages/round_<轮次>/`；
-- 在 Excel「失败清单」与日志中标记「需人工/解析失败」；
+- 在数据库（rounds/snapshots）与日志中标记「需人工/解析失败」；
 - 根据存档页面调整 `bestseller_monitor/parse.py` 里的解析规则后重跑即可，其余模块无需改动。
 
 ## 免责声明

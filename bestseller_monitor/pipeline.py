@@ -16,7 +16,7 @@ from .delay import Humanizer
 from .detail import DetailParseFailed, capture_detail_payload, save_raw_page
 from .parse import extract_main_image
 from .listing import crawl_shop_listing
-from .report import export_round_csv, export_round_excel, update_stock_deltas
+from .report import update_stock_deltas
 
 log = logging.getLogger(__name__)
 
@@ -359,20 +359,11 @@ def _finalize_round(db: Database, cfg: Config, round_id: int) -> None:
                 f"（快照失败 {total - succeeded}，点击未得商品 {click_fail}），需人工决策")
         db.finish_round(round_id, status="需人工-失败率超限", note=note)
         log.warning("轮次 #%s：%s", round_id, note)
-        print(f"\n>>> {note}。请检查 data/ 与 output/ 中的结果后再决定。\n")
+        print(f"\n>>> {note}。请检查数据库 data/bestseller.db 中的结果后再决定。\n")
     else:
         db.finish_round(round_id, status="完成")
         log.info("轮次 #%s 完成（尝试 %s，成功 %s，点击未得商品 %s）",
                  round_id, attempted, succeeded, click_fail)
-
-    try:
-        export_round_csv(db, cfg, round_id)
-    except Exception:
-        log.exception("CSV 导出失败")
-    try:
-        export_round_excel(db, cfg, round_id)
-    except Exception:
-        log.exception("Excel 导出失败（请确认已安装 openpyxl：pip install -r requirements.txt）")
     db.commit()
 
 
