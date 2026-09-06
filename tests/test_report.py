@@ -4,7 +4,7 @@ from pathlib import Path
 
 from bestseller_monitor.config import Config
 from bestseller_monitor.db import Database, connect
-from bestseller_monitor.report import export_round_excel, update_stock_deltas
+from bestseller_monitor.report import _stamp, export_round_excel, update_stock_deltas
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -22,6 +22,20 @@ def _row(rid, shop_key, offer_id, sku_id, stock, name="商品", attempt=1, delta
 
 
 class ReportTests(unittest.TestCase):
+    def test_stamp_uses_beijing_time(self):
+        # UTC 2026-09-05 23:30 → 北京时间 2026-09-06 07:30（跨日边界）
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "t.db")
+            db = Database(conn)
+            conn.execute(
+                "INSERT INTO rounds(started_at, status, phase) VALUES (?, '进行中', 'listing')",
+                ("2026-09-05T23:30:00+00:00",),
+            )
+            conn.commit()
+            rid = conn.execute("SELECT id FROM rounds ORDER BY id DESC LIMIT 1").fetchone()[0]
+            self.assertEqual(_stamp(db, rid), "20260906_073000")
+            conn.close()
+
     def test_update_stock_deltas(self):
         with tempfile.TemporaryDirectory() as tmp:
             conn = connect(Path(tmp) / "t.db")

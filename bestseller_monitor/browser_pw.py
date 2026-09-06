@@ -18,14 +18,24 @@ from .delay import Humanizer
 from .detail import DetailParseFailed
 from .parse import extract_skus_from_html, extract_title, extract_main_image
 from . import sound
+from .guard import (
+    body_text, captcha_visible, deny_resolved, detect, intervention_kind,
+    is_deny_url, is_login_url, is_punish_url, resolved, vtype, wait_for_resolution,
+)
 
 log = logging.getLogger(__name__)
 
 # 记录本次由 open_session 启动的浏览器进程，收尾只结束它，绝不波及用户其它 Edge 窗口。
 _launched_proc = None
 
-SLIDER_MARKERS = ("向右滑动验证", "请完成验证", "滑块验证", "拖动滑块", "安全验证", "punish")
-LOGIN_MARKERS = ("登录后查看", "请登录", "扫码登录", "确认登录", "快速进入")
+# 兼容旧私有名/旧名（本文件内部与诊断工具仍引用）
+_body_text = body_text
+_captcha_visible = captcha_visible
+_deny_resolved = deny_resolved
+_is_punish_url = is_punish_url
+_is_deny_url = is_deny_url
+_resolved = resolved
+_vtype = vtype
 
 
 def open_session(cfg: Config):
@@ -76,67 +86,6 @@ def close_session(pw, br) -> None:
             log.debug("关闭浏览器进程失败：%s", exc)
 
 
-def _body_text(page) -> str:
-    try:
-        return page.locator("body").inner_text(timeout=3000) or ""
-    except Exception:
-        return ""
-
-
-def detect(page) -> str | None:
-    url = (page.url or "").lower()
-    if "login.taobao" in url or "login.1688" in url:
-        return "登录墙"
-    if _is_deny_url(url):
-        return None          # 淘宝 deny/限流页：交给 _capture_card 退避，不响铃等扫码
-    if _is_punish_url(url):
-        return "滑块"
-    body = _body_text(page)
-    for m in SLIDER_MARKERS:
-        if m in body:
-            return "滑块"
-    for m in LOGIN_MARKERS:
-        if m in body and len(body) < 3000:
-            return "登录墙"
-    return None
-
-
-def _captcha_visible(page) -> bool:
-    # 只针对特征明确的验证容器/iframe，避免普通元素误判
-    sel = ("iframe[src*='captcha' i], iframe[src*='nocaptcha' i], iframe[src*='secaptcha' i], "
-           "#nc_1_wrapper, #nc_1_container, .nc-container, .nc_scale, #nc_1_n1z, "
-           "#baxia-dialog-content, .baxia-dialog, [class*='baxia-dialog'], "
-           "#nocaptcha, [class*='verify_'], [class*='captcha']")
-    try:
-        loc = page.locator(sel)
-        n = loc.count()
-        for i in range(min(n, 40)):
-            try:
-                if loc.nth(i).is_visible():
-                    return True
-            except Exception:
-                continue
-        return False
-    except Exception:
-        return False
-
-
-def _is_punish_url(url: str) -> bool:
-    """真实验证页/验证请求：punish 页或 punishTextFetch。普通的 tmd report/x5sec 上报不算。"""
-    u = (url or "").lower()
-    # 站点会在正常详情 URL 后追加 /_____tmd_____/punish?x5secdata=... 的上报装饰，不算真验证
-    if "_____tmd_____" in u:
-        return False
-    return "punishtextfetch" in u or "/punish?" in u or "/punish/" in u
-
-
-def _is_deny_url(url: str) -> bool:
-    """淘宝 deny/验证拦截页（bsop-punish/deny_pc，通常由连续高频访问触发的反爬限流）。
-    这类不该响铃等人扫码，而应自动降速退避。"""
-    u = (url or "").lower()
-    return "bsop-punish" in u or "deny_pc" in u
-
-
 class ShopDenyExceeded(Exception):
     """某店滚动窗口内 deny 数达到阈值，跳过该店。"""
 
@@ -166,97 +115,6 @@ class DenyTracker:
     def round_count(self) -> int:
         self._prune(time.time())
         return len(self.events)
-
-
-def _deny_resolved(page) -> bool:
-    """deny 界面是否已解除：URL 不再是 deny 页即可认为解除（用户扫码后页面会离开 deny）。"""
-    return not _is_deny_url(page.url or "")
-
-
-def intervention_kind(page, punished: bool) -> str | None:
-    """判定是否需要人工介入。仅看验证据信号，绝不因“没有商品”误判。"""
-    url = (page.url or "").lower()
-    if "login.taobao" in url or "login.1688" in url:
-        return "登录墙"
-    if _is_punish_url(url):
-        return "滑块"
-    body = _body_text(page)
-    for m in SLIDER_MARKERS:
-        if m in body:
-            return "滑块"
-    if _captcha_visible(page):
-        # 可见验证容器：只有当页面确实带验证文案，或不是“点我反馈”这种纯反爬拦截页时，才算滑块
-        if any(m in body for m in SLIDER_MARKERS) or ("点我反馈" not in body):
-            return "滑块"
-    for m in LOGIN_MARKERS:
-        if m in body and len(body) < 3000:
-            return "登录墙"
-    # 仅当 URL 是真 punish 页且页面确实“像验证”时，才兜底判滑块（避免裸 URL 误报）
-    if punished and _is_punish_url(url):
-        return "滑块"
-    return None
-
-
-def _vtype(kind: str | None) -> str:
-    """把 intervention_kind 的返回文案映射为相对稳定的验证类型。"""
-    if kind == "登录墙":
-        return "login"
-    if kind in ("滑块", "物品识别", "图片验证"):
-        return "slider"
-    return "none"
-
-
-def _resolved(page) -> bool:
-    """解决判定：验证弹窗/iframe 不再可见，且不处于登录墙，即认为已解决。"""
-    try:
-        url = (page.url or "").lower()
-        if "login.taobao" in url or "login.1688" in url:
-            return False
-        if _is_punish_url(url):
-            return False
-        return not _captcha_visible(page)
-    except Exception:
-        return False
-
-
-def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | None = None,
-                        confirm_sec: float = 2.0) -> None:
-    """需要人工介入时：先过确认窗口过滤瞬时报错信号，再持续响铃直到解决。"""
-    vtype = verification_type or "slider"
-    # 确认窗口：短暂出现又自行消失的信号（如 tmd/x5sec 上报）不算真正的人工介入
-    confirm_deadline = time.time() + max(0.0, confirm_sec)
-    while time.time() < confirm_deadline:
-        if _resolved(page):
-            log.debug("人工介入信号瞬时就消失，判定为误报，忽略")
-            return
-        time.sleep(0.3)
-    # 超过确认窗口仍未解决 => 确认为真正需要人工介入
-    # 先尝试一次刷新：反爬拦截页/瞬时 block 常可通过刷新解除，刷新后恢复则不响铃
-    try:
-        page.reload(wait_until="domcontentloaded")
-        time.sleep(1.5)
-    except Exception:
-        pass
-    if _resolved(page):
-        log.info("刷新后已恢复，忽略（原为瞬时报错/反爬拦截）")
-        return
-    log.warning("检测到需要人工介入，请在 Edge 窗口处理（持续响铃直到解决）……最长 %s 分钟", minutes)
-    if emit:
-        emit("verification_appear", kind="verification", verification_type=vtype,
-             note=f"type={vtype}")
-    appear_ts = time.time()
-    deadline = time.time() + minutes * 60
-    while True:
-        if _resolved(page):
-            if emit:
-                emit("verification_solved", kind="verification", verification_type=vtype,
-                     note=f"resolution_seconds={time.time() - appear_ts:.1f}")
-            log.info("人工介入已解决，停止响铃，继续。")
-            return
-        if time.time() > deadline:
-            raise RuntimeError("人工介入超时")
-        sound.play_alarm(count=1)   # 每次约 1 秒，循环播放
-        time.sleep(3)
 
 
 _ANCHOR_SEL = "a[href*='/offer/'], a[href*='/item/']"
@@ -435,9 +293,9 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
     pages_read = 0
 
     def se(event: str, **kw: object) -> None:
-        """shop 作用域事件：统一注入 shop_key + phase；传入的 offer_id/note 等保留。"""
+        """shop 作用域事件：统一注入 shop_key；phase 默认 listing，可按调用单独覆盖。"""
         if emit is not None:
-            emit(event, shop_key=shop.key, phase="listing", **kw)
+            emit(event, shop_key=shop.key, phase=kw.pop("phase", "listing"), **kw)
 
     def on_response(resp):
         try:
@@ -448,8 +306,10 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
 
     page.on("response", on_response)
     page.goto(shop.url, wait_until="domcontentloaded")
+    human.after_load()          # read_delay_sec：页面加载后、读取数据前的拟人化延迟
     time.sleep(4)
     se("list_load", note=shop.url)
+    human.before_action()       # action_delay_sec：点击排序前的拟人化延迟
     if _click_text_in_frames(page, "销量"):
         time.sleep(3)
         log.info("已点击「销量」排序")
@@ -518,6 +378,7 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
 
         if pages_read >= max_pages:
             break
+        human.before_action()   # 翻页/加载更多前的拟人化延迟
         advanced = _click_text_in_frames(page, "下一页")
         if not advanced:
             advanced = _click_text_in_frames(page, "加载更多")
@@ -532,7 +393,9 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
     if ambiguous:
         log.info("店铺 %s 发现 %s 个同名商品名，回头补抓", shop.key, len(ambiguous))
         page.goto(shop.url, wait_until="domcontentloaded")
+        human.after_load()
         time.sleep(4)
+        human.before_action()
         if _click_text_in_frames(page, "销量"):
             time.sleep(3)
         rkind = intervention_kind(page, punished[0])
@@ -567,6 +430,7 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                                   human=human, deny_tracker=deny_tracker)
             if rpg >= max_pages:
                 break
+            human.before_action()
             advanced = _click_text_in_frames(page, "下一页")
             if not advanced:
                 advanced = _click_text_in_frames(page, "加载更多")
@@ -668,22 +532,22 @@ def _capture_card(page, img, list_title, cfg, punished, on_response, se, db, rou
             if deny_tracker:
                 deny_tracker.record(shop.key)
                 if deny_tracker.round_count() >= cfg.deny_round_limit:
-                    se("click_deny", note=cnote + f"&n={per_product_denies}&round_abort")
+                    se("click_deny", phase="detail", note=cnote + f"&n={per_product_denies}&round_abort")
                     raise RoundDenyExceeded(
                         f"整轮 {cfg.deny_window_minutes} 分钟内 deny≥{cfg.deny_round_limit}")
                 if deny_tracker.shop_count(shop.key) >= cfg.deny_shop_limit:
-                    se("click_deny", note=cnote + f"&n={per_product_denies}&shop_skip")
+                    se("click_deny", phase="detail", note=cnote + f"&n={per_product_denies}&shop_skip")
                     raise ShopDenyExceeded(
                         f"店铺 {shop.key} {cfg.deny_window_minutes} 分钟内 deny≥{cfg.deny_shop_limit}")
             log.warning("店铺 %s 商品命中 deny（该商品第 %s 次）", shop.key, per_product_denies)
             if per_product_denies == 1:
-                se("click_deny", note=cnote + "&n=1")
+                se("click_deny", phase="detail", note=cnote + "&n=1")
                 _close_popup_or_back(detail_page, popup, page)
                 if human is not None:
                     human.sleep(cfg.deny_backoff_sec)
                 continue
             if per_product_denies == 2:
-                se("click_deny", note=cnote + "&n=2")
+                se("click_deny", phase="detail", note=cnote + "&n=2")
                 _close_popup_or_back(detail_page, popup, page)
                 if human is not None:
                     human.sleep(cfg.deny_retry2_backoff_sec)
@@ -698,7 +562,7 @@ def _capture_card(page, img, list_title, cfg, punished, on_response, se, db, rou
 def _handle_deny_scan(page, detail_page, popup, img, cfg, punished, on_response, se, db,
                       round_id, shop, offers, seen, list_title, cnote, human) -> str | None:
     """第 3 次 deny：保留 deny 弹窗供扫码，响铃直到其 URL 离开 deny，再重新抓取。"""
-    se("click_deny", note=cnote + "&n=3&scan")
+    se("click_deny", phase="detail", note=cnote + "&n=3&scan")
     log.warning("店铺 %s 商品被 deny 第 3 次，请在 Edge 窗口扫码解除（响铃直到解除）", shop.key)
     appear_ts = time.time()
     while not _deny_resolved(detail_page):
@@ -738,6 +602,10 @@ def _retry_recapture(page, img, cfg, punished, on_response, se, db, round_id, sh
 def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_response, se, db,
                    round_id, shop, offers, seen, cnote) -> str | None:
     """对非 deny 的详情弹窗做 offer_id 去重、读 SKU、入库；成功返回 offer_id。"""
+    # IS-18：详情弹窗内的事件应记为 detail 阶段（传入的 se 默认标为 listing）
+    _shop_emit = se
+    def se(event: str, **kw: object) -> None:
+        _shop_emit(event, phase="detail", **kw)
     url = detail_page.url
     m = re.search(r"/(?:offer|item)/(\d+)\.html", url)
     if not m:

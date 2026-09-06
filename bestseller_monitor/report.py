@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import csv
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
 from .config import Config
-from .db import Database
+from .db import Database, CST
 
 log = logging.getLogger(__name__)
 
@@ -100,12 +100,15 @@ def export_round_excel(db: Database, cfg: Config, round_id: int) -> Path:
 def _stamp(db: Database, round_id: int) -> str:
     row = db.conn.execute("SELECT started_at FROM rounds WHERE id=?", (round_id,)).fetchone()
     if not row:
-        return datetime.now().strftime("%Y%m%d_%H%M%S")
+        return datetime.now(CST).strftime("%Y%m%d_%H%M%S")
     try:
         dt = datetime.fromisoformat(row["started_at"])
-        return dt.strftime("%Y%m%d_%H%M%S")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        # 统一用北京时间命名，与库存的“当日去重”口径一致（IS-20）
+        return dt.astimezone(CST).strftime("%Y%m%d_%H%M%S")
     except ValueError:
-        return datetime.now().strftime("%Y%m%d_%H%M%S")
+        return datetime.now(CST).strftime("%Y%m%d_%H%M%S")
 
 
 def _dump_sheet(wb, title: str, headers: list[str], rows: Iterable[tuple]) -> None:

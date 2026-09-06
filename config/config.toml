@@ -49,8 +49,9 @@ headless = false
 driver = "pw_cdp"
 # 使用本机已装浏览器：msedge / chrome / chromium（chromium 需 playwright install chromium）
 channel = "msedge"
-profile_dir = "profiles/account1_chrome"
-# DrissionPage 使用的浏览器用户数据目录与浏览器路径（本次用 Edge）
+# 统一使用实际登录过的用户数据目录（Readme/PRD 均以 Edge 为例）
+profile_dir = "profiles/account1_edge"
+# Playwright / DrissionPage 使用同一套用户数据目录与浏览器路径
 user_data_path = "profiles/account1_edge"
 chrome_path = "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
 # 是否复用系统默认浏览器用户配置；现为 false，使用上方独立配置目录。

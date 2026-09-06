@@ -12,16 +12,12 @@ from .delay import Humanizer
 from .detail import DetailParseFailed
 from .parse import extract_skus_from_html, extract_title
 from . import sound
+from .guard import SLIDER_MARKERS, LOGIN_MARKERS, is_login_url, is_punish_url, is_deny_url
 
 log = logging.getLogger(__name__)
 
 # 记录本次由 create_page 启动的浏览器进程，收尾只结束它。
 _proc = None
-
-SLIDER_MARKERS = ("向右滑动验证", "请完成验证", "滑块验证", "拖动滑块", "安全验证")
-LOGIN_MARKERS = ("登录后查看", "请登录", "扫码登录", "确认登录", "快速进入")
-PUNISH_MARKERS = ("拖动滑块", "请完成验证", "向右滑动", "安全验证", "验证通过", "punish", "x5sec")
-
 
 def create_page(cfg: Config):
     global _proc
@@ -100,15 +96,14 @@ def _body_text(page) -> str:
 
 def detect(page) -> str | None:
     url = (getattr(page, "url", "") or "").lower()
-    if "login.1688.com" in url or "login.taobao.com" in url:
+    if is_login_url(url):
         return "登录墙"
-    if "punish" in url or "x5secdata" in url:
+    if is_deny_url(url):
+        return None
+    if is_punish_url(url):
         return "滑块"
     body = _body_text(page)
     for m in SLIDER_MARKERS:
-        if m in body:
-            return "滑块"
-    for m in PUNISH_MARKERS:
         if m in body:
             return "滑块"
     for m in LOGIN_MARKERS:
