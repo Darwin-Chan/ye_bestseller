@@ -70,3 +70,37 @@ output_dir = "output"
 logs_dir = "logs"
 screenshot_dir = "data/screenshots"
 raw_page_dir = "data/raw_pages"
+
+# =====================================================================
+# [builtin_waits] 内置固定等待（仅作文档记录，暂未被代码读取）
+# ---------------------------------------------------------------------
+# 说明：以下等待目前仍写死在驱动代码里（browser_pw/browser_dp 等），
+# 尚未接入配置读取——改动本区块不会生效。这里仅为"当前实际值"留档，
+# 便于和上方 [human]（拟人化随机延迟）及 [run]（退避/超时）区分。
+# 目标：后续逐步把这些固定等待迁移到配置驱动。
+# =====================================================================
+[builtin_waits]
+# 用普通进程启动浏览器后，等待启动完成 + 远程调试端口可连接
+browser_launch_sec = 8.0
+# 进入店铺/商品列表页（page.goto）后，等页面渲染出商品卡片
+page_settle_after_goto_sec = 4.0
+# 点击「销量」排序后，等列表按销量重新返回
+sort_click_settle_sec = 3.0
+# 列表页无验证拦截时，额外等商品从懒加载出现
+listing_load_extra_sec = 5.0
+# 向下滚动一屏触发懒加载后，等新一批卡片加载
+scroll_step_sec = 1.2
+# 点击「下一页 / 加载更多」后，等列表刷新
+next_page_settle_sec = 2.0
+# 从详情返回上一页（go_back）后，等页面稳定
+back_page_settle_sec = 1.0
+# 人工介入确认窗口内，轮询"瞬时信号是否已自行消失"的间隔
+confirm_poll_sec = 0.3
+# 判定需人工介入后、先刷新一次，刷新后等页面恢复的等待
+reload_recover_sec = 1.5
+# 人工介入解决前（以及 deny 响铃扫码时），每次响铃的间隔
+alarm_interval_sec = 3.0
+# deny 解除后限时重抓（deny_scan_wait_sec 内）的每次重试间隔
+deny_retry_poll_sec = 1.0
+# 详情弹窗等待的是 domcontentloaded（非固定秒数，上限用 [browser].timeout_ms）
+popup_wait_for = "domcontentloaded"
