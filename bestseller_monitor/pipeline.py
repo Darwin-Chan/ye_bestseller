@@ -16,7 +16,6 @@ from .delay import Humanizer
 from .detail import DetailParseFailed, capture_detail_payload, save_raw_page
 from .parse import extract_main_image
 from .listing import crawl_shop_listing
-from .report import update_stock_deltas
 
 log = logging.getLogger(__name__)
 
@@ -348,7 +347,6 @@ def _capture_one(
 
 
 def _finalize_round(db: Database, cfg: Config, round_id: int) -> None:
-    update_stock_deltas(db, round_id)
     total, succeeded = db.offer_counts(round_id)
     click_fail = db.click_card_failures(round_id)   # 点击后未得到商品编号的卡片
     attempted = total + click_fail

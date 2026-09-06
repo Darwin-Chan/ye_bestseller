@@ -103,7 +103,6 @@ CREATE TABLE IF NOT EXISTS snapshots (
     sku_name TEXT,
     sku_price REAL,
     sku_stock INTEGER,
-    stock_delta INTEGER,
     collected_at TEXT NOT NULL,
     page_status TEXT NOT NULL,
     attempt INTEGER NOT NULL DEFAULT 1,
@@ -249,6 +248,15 @@ def connect(db_path: Path) -> sqlite3.Connection:
             conn.commit()
     except sqlite3.OperationalError:
         pass
+    # 迁移：物理删除 snapshots.stock_delta（旧报表口径，SKU 差分改用 inventory.diff）
+    try:
+        info = conn.execute('PRAGMA table_info("snapshots")').fetchall()
+        if any(r[1] == "stock_delta" for r in info):
+            conn.execute("ALTER TABLE snapshots DROP COLUMN stock_delta")
+            conn.commit()
+            log.info("已物理删除 snapshots.stock_delta 列")
+    except sqlite3.OperationalError as exc:
+        log.debug("删除 snapshots.stock_delta 列失败（可能已删除或版本不支持）：%s", exc)
     conn.commit()
     return conn
 
@@ -606,9 +614,6 @@ class Database:
             else:
                 fail_keys.add(key)
         return len(fail_keys - ok_keys)
-
-    def update_delta(self, snap_id: int, delta: int) -> None:
-        self.conn.execute("UPDATE snapshots SET stock_delta=? WHERE id=?", (delta, snap_id))
 
     def append_event(
         self,

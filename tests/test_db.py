@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 
 from bestseller_monitor.db import Database, connect, cst_date
@@ -281,6 +282,24 @@ class DbTests(unittest.TestCase):
         self.db.conn.commit()
         # 失败卡片：A(1,1)、A(1,2)、B(2,0)、C(2,0)；B(1,0)/C(1,0) 曾失败但最终 click_ok → 不算
         self.assertEqual(self.db.click_card_failures(rid), 4)
+
+    def test_connect_migration_drops_stock_delta(self):
+        # 模拟旧库：snapshots 含 stock_delta 列
+        old = Path(tempfile.gettempdir()) / f"bestseller_old_{id(self)}.db"
+        c = sqlite3.connect(str(old))
+        c.execute(
+            "CREATE TABLE snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "round_id INTEGER, shop_key TEXT, offer_id TEXT, sku_id TEXT, "
+            "stock_delta INTEGER, collected_at TEXT)"
+        )
+        c.commit()
+        c.close()
+        # connect() 应执行迁移删除 stock_delta
+        conn = connect(old)
+        cols = [r[1] for r in conn.execute('PRAGMA table_info("snapshots")').fetchall()]
+        self.assertNotIn("stock_delta", cols)
+        conn.close()
+        old.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
