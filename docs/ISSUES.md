@@ -27,7 +27,7 @@
 | IS-16 | 2026-09-06 | **已改代码**：新增 `db.click_card_failures()`（按 shop+page+idx 去重，`click_ok/click_skipped` 视为成功，`click_no_popup/click_url_notoffer/click_deny` 且再无成功即为失败），`_finalize_round` 据此把「点击后未得到商品」的卡片计入失败率，使失败率>10% 的兜底对点击失败也生效。**待下一轮实测确认**。 |
 | IS-17 | 2026-09-06 | **已改代码**：把「滑块/登录墙/deny/punish」判定收敛到 `guard.py`（`is_punish_url/is_deny_url/is_login_url/vtype/intervention_kind/wait_for_resolution` 等）；`browser_pw` 改为从 `guard` 导入（保留旧名别名供诊断工具），`browser_dp` 复用 `guard` 常量与 URL 判定，删除各自重复实现。**待下一轮实测确认**。 |
 | IS-18 | 2026-09-06 | **已改代码**：点击式路径的 `se()` 支持按调用覆盖 `phase`；`_ingest_detail` 内详情事件（`detail_parse/click_ok/click_parse_empty/click_skipped/popup_open/popup_close/click_deny`）统一标为 `phase="detail"`，列表事件仍为 `listing`，避免分析脚本按阶段错置。 |
-| IS-19 | 2026-09-06 | **已改代码**：主路径 `crawl_store_by_click` 接入 `human.after_load()`（`read_delay_sec`）与 `human.before_action()`（`action_delay_sec`），使这两项拟人化延迟在 `pw_cdp` 下真正生效；另在 `config.toml` 增 `[builtin_waits]` 留档内置固定等待，并在 PRD 增「延迟与等待口径」说明（区分可配置与内置固定）。 |
+| IS-19 | 2026-09-06 | **已改代码**：主路径 `crawl_store_by_click` 接入 `human.after_load()`/`before_action()`；并把列表页“就绪”相关等待改为「条件等待 + 上限兜底」（等商品卡片出现 / 新卡片加载 / 调试端口可连接，超时才按 `_WAIT_*` 常量继续），不再固定 sleep。`config.toml` 的 `[builtin_waits]` 仅保留 4 项人工介入节拍留档；PRD 已更新「延迟与等待口径」。**待下一轮实测确认**。 |
 | IS-20 | 2026-09-06 | **已改代码**：`report._stamp()` 改为把 `started_at`(UTC) 转北京时间再命名，与库存「当日去重」口径一致；新增跨日边界单测（UTC 09-05 23:30 → 北京 09-06 07:30）。 |
 | IS-21 | 2026-09-06 | **已改代码**：`config.toml` 的 `profile_dir` 统一为 `profiles/account1_edge`（与 `user_data_path` 一致，避免 Playwright 直连用错 Chrome 配置）；`requirements.txt` 补充 `DrissionPage>=4.0`。 |
 | IS-05 | 2026-09-05 | 商品名 `list_title` 提取改为「仅含一张商品图的最小容器取首行」，不再依赖 `已售/¥` 文案；round #4 335/335 非空。 |

@@ -37,6 +37,36 @@ _is_deny_url = is_deny_url
 _resolved = resolved
 _vtype = vtype
 
+# 条件等待的上限兜底（秒）——优先“等条件满足”，超时才继续，替代固定 sleep。
+_WAIT_LAUNCH_SEC = 25.0    # 等浏览器调试端口可连接
+_WAIT_UI_SEC = 18.0        # 列表页等商品卡片出现
+_WAIT_SORT_SEC = 10.0      # 点「销量」排序后等列表刷新
+_WAIT_SCROLL_SEC = 3.0     # 每次滚动后等新一批卡片
+_WAIT_NEXT_SEC = 10.0      # 翻页/加载更多后等列表刷新
+_WAIT_BACK_SEC = 8.0       # 返回上一页后等就绪
+
+
+def _wait_until(page, describe: str, predicate, timeout_sec: float, poll: float = 0.4) -> bool:
+    """条件等待 + 上限兜底：条件满足返回 True；超时记日志并返回 False（不中断流程）。"""
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            if predicate():
+                return True
+        except Exception:
+            pass
+        time.sleep(poll)
+    log.info("等待「%s」超时(%.0fs)，按当前状态继续。", describe, timeout_sec)
+    return False
+
+
+def _wait_cards(page, min_count: int = 1, timeout_sec: float = _WAIT_UI_SEC,
+                describe: str = "商品卡片出现"):
+    """等列表页出现至少 min_count 张商品卡片（条件等待，超时兜底）。"""
+    return _wait_until(page, describe,
+                       lambda: page.locator(_PRODUCT_IMG_SEL).count() >= min_count,
+                       timeout_sec)
+
 
 def open_session(cfg: Config):
     global _launched_proc
@@ -54,11 +84,26 @@ def open_session(cfg: Config):
             "about:blank",
         ])
         log.info("已用普通进程启动浏览器（调试端口 %s，PID %s）。", cfg.attach_port, proc.pid)
-        time.sleep(8)
     _launched_proc = proc
 
     pw = sync_playwright().start()
-    br = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{cfg.attach_port}")
+    # 用「能连上调试端口」作为浏览器就绪条件，替代固定 8 秒（超时兜底）
+    br = None
+    last_exc: Exception | None = None
+    deadline = time.time() + _WAIT_LAUNCH_SEC
+    while time.time() < deadline:
+        try:
+            br = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{cfg.attach_port}")
+            break
+        except Exception as exc:
+            last_exc = exc
+            time.sleep(0.8)
+    if br is None:
+        try:
+            pw.stop()
+        except Exception:
+            pass
+        raise RuntimeError(f"无法连接浏览器调试端口 {cfg.attach_port}（{last_exc}）")
     ctx = br.contexts[0]
     page = ctx.new_page()
     page.set_default_timeout(cfg.timeout_ms)
@@ -307,11 +352,12 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
     page.on("response", on_response)
     page.goto(shop.url, wait_until="domcontentloaded")
     human.after_load()          # read_delay_sec：页面加载后、读取数据前的拟人化延迟
-    time.sleep(4)
+    _wait_cards(page, min_count=1, describe="店铺首屏商品卡片")   # 条件等待，替代固定 4s
     se("list_load", note=shop.url)
     human.before_action()       # action_delay_sec：点击排序前的拟人化延迟
     if _click_text_in_frames(page, "销量"):
-        time.sleep(3)
+        _wait_cards(page, min_count=1, timeout_sec=_WAIT_SORT_SEC,
+                    describe="销量排序后商品卡片")   # 条件等待，替代固定 3s
         log.info("已点击「销量」排序")
         se("list_sort")
     kind = intervention_kind(page, punished[0])
@@ -327,12 +373,16 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
         # 滚动到底部触发懒加载，直到图片数量不再增加
         prev = -1
         for _ in range(12):
+            baseline = page.locator(_PRODUCT_IMG_SEL).count()
             try:
                 page.mouse.wheel(0, 6000)
                 page.wait_for_load_state("domcontentloaded")
-                time.sleep(1.2)
             except Exception:
                 break
+            # 等新一批卡片出现（条件等待，替代固定 1.2s；无新增则很快超时并停止滚动）
+            _wait_until(page, "滚动加载新卡片",
+                        lambda: page.locator(_PRODUCT_IMG_SEL).count() > baseline,
+                        _WAIT_SCROLL_SEC)
             cur = page.locator(_PRODUCT_IMG_SEL).count()
             if cur == prev:
                 break
@@ -386,7 +436,8 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
             log.info("店铺 %s 第 %s 页后无下一页/加载更多，提前结束", shop.key, pages_read)
             break
         page.wait_for_load_state("domcontentloaded", timeout=cfg.timeout_ms)
-        time.sleep(2)
+        _wait_cards(page, min_count=1, timeout_sec=_WAIT_NEXT_SEC,
+                    describe="翻页后商品卡片")   # 条件等待，替代固定 2s
 
     # 第二遍：计数>1 的同名商品，按名找回并补抓（offer_id 去重，避免重复/遗漏）
     ambiguous = {n for n, c in name_counter.items() if c > 1}
@@ -394,10 +445,11 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
         log.info("店铺 %s 发现 %s 个同名商品名，回头补抓", shop.key, len(ambiguous))
         page.goto(shop.url, wait_until="domcontentloaded")
         human.after_load()
-        time.sleep(4)
+        _wait_cards(page, min_count=1, describe="补抓店铺首屏商品卡片")
         human.before_action()
         if _click_text_in_frames(page, "销量"):
-            time.sleep(3)
+            _wait_cards(page, min_count=1, timeout_sec=_WAIT_SORT_SEC,
+                        describe="补抓排序后商品卡片")
         rkind = intervention_kind(page, punished[0])
         if rkind:
             wait_for_resolution(page, cfg.human_pause_minutes, emit=se,
@@ -408,12 +460,15 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
             se("list_page", note=f"rescue_page={rpg}")
             prev = -1
             for _ in range(12):
+                baseline = page.locator(_PRODUCT_IMG_SEL).count()
                 try:
                     page.mouse.wheel(0, 6000)
                     page.wait_for_load_state("domcontentloaded")
-                    time.sleep(1.2)
                 except Exception:
                     break
+                _wait_until(page, "补抓滚动加载新卡片",
+                            lambda: page.locator(_PRODUCT_IMG_SEL).count() > baseline,
+                            _WAIT_SCROLL_SEC)
                 cur = page.locator(_PRODUCT_IMG_SEL).count()
                 if cur == prev:
                     break
@@ -438,7 +493,8 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                 log.info("店铺 %s 补抓在第 %s 页后无下一页，提前结束", shop.key, rpg)
                 break
             page.wait_for_load_state("domcontentloaded", timeout=cfg.timeout_ms)
-            time.sleep(2)
+            _wait_cards(page, min_count=1, timeout_sec=_WAIT_NEXT_SEC,
+                        describe="补抓翻页后商品卡片")
     return offers, pages_read
 
 
@@ -681,6 +737,7 @@ def _close_popup_or_back(detail_page, popup, page):
     elif detail_page is page:
         try:
             page.go_back(wait_until="domcontentloaded", timeout=30000)
-            time.sleep(1)
+            _wait_cards(page, min_count=1, timeout_sec=_WAIT_BACK_SEC,
+                        describe="返回列表页商品卡片")   # 条件等待，替代固定 1s
         except Exception:
             pass
