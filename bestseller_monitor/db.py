@@ -295,6 +295,23 @@ class Database:
         )
         self.conn.commit()
 
+    def abandon_round(self, round_id: int, note: str | None = None) -> None:
+        """把某轮标记为「已放弃」：表示不再继续抓取该轮，但已采集的数据全部保留。
+
+        语义：
+          - 已放弃 ≠ 数据有问题：已写入的 shop_offers / snapshots / inventory 一律保留，
+            并照常参与“当日去重”（同日已采即跳过）。
+          - 已放弃轮不作为后续轮次的差分基准（差分只参考 status='完成' 的轮）。
+          - 已放弃轮不再被“续跑”（status 不是 '进行中'，下次运行会开新轮）。
+        """
+        self.conn.execute(
+            "UPDATE rounds SET status='已放弃', phase='abandoned', finished_at=?, note=? "
+            "WHERE id=?",
+            (utcnow(), note, round_id),
+        )
+        self.conn.commit()
+        log.info("轮次 #%s 已标记为「已放弃」（已采集数据保留，不再续跑，不作为差分基准）。", round_id)
+
     def shops_to_list(self, round_id: int) -> list[sqlite3.Row]:
         """返回本店未完成列表抓取的店铺（由调用方与 shops.csv 对照）。"""
         cur = self.conn.execute(
