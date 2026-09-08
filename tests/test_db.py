@@ -4,7 +4,13 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
-from bestseller_monitor.db import Database, connect, cst_date
+from bestseller_monitor.db import (
+    Database,
+    connect,
+    cst_date,
+    past_day_cutoff,
+    DayBoundaryReached,
+)
 
 
 class DbTests(unittest.TestCase):
@@ -12,8 +18,12 @@ class DbTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.conn = connect(Path(self.tmp.name) / "test.db")
         self.db = Database(self.conn)
+        # 测试期间禁用“23:55 跨天中止”，避免在真实窗口内运行测试时误触发。
+        self._day_patcher = patch("bestseller_monitor.db.past_day_cutoff", return_value=False)
+        self._day_patcher.start()
 
     def tearDown(self):
+        self._day_patcher.stop()
         self.conn.close()
         self.tmp.cleanup()
 
@@ -134,6 +144,33 @@ class DbTests(unittest.TestCase):
             self.conn.execute("SELECT COUNT(*) FROM snapshots WHERE round_id=?", (rid,)).fetchone()[0], 0,
         )
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM skus").fetchone()[0], 0)
+
+    def test_past_day_cutoff_uses_beijing_time(self):
+        self.assertFalse(past_day_cutoff("2026-09-09T15:54:00+00:00"))  # 北京 23:54
+        self.assertTrue(past_day_cutoff("2026-09-09T15:55:00+00:00"))   # 北京 23:55
+        self.assertTrue(past_day_cutoff("2026-09-09T15:59:59+00:00"))   # 北京 23:59:59
+        self.assertFalse(past_day_cutoff("2026-09-09T16:00:00+00:00"))  # 北京次日 00:00
+
+    def test_save_snapshot_rows_raises_day_boundary_after_commit(self):
+        rid = self.db.start_or_resume()
+        rows = [{
+            "round_id": rid, "shop_key": "A01", "shop_url": "https://a.example/",
+            "shop_name": "店铺A", "offer_id": "1",
+            "product_url": "https://detail.1688.com/offer/1.html", "product_name": "商品",
+            "sku_id": "1:1", "sku_name": "规格", "sku_price": 1.0,
+            "sku_stock": 100, "collected_at": "2026-09-09T15:54:00+00:00",
+            "page_status": "成功", "attempt": 1,
+        }]
+        with patch("bestseller_monitor.db.past_day_cutoff", return_value=True):
+            with self.assertRaises(DayBoundaryReached):
+                self.db.save_snapshot_rows(rid, "A01", rows)
+
+        # 已提交后才中止：该商品最后一个 SKU 已完整入库。
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM snapshots WHERE round_id=?", (rid,)
+        ).fetchone()[0], 1)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM skus").fetchone()[0], 1)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM inventory").fetchone()[0], 1)
 
     def test_incomplete_inventory_does_not_trigger_same_day_dedupe(self):
         self.db.conn.execute(

@@ -45,7 +45,7 @@ PROJECT_ROOT = _project_root()
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from bestseller_monitor.config import Config, load_shops  # noqa: E402
-from bestseller_monitor.db import Database, cst_date  # noqa: E402
+from bestseller_monitor.db import Database, cst_date, DAY_BOUNDARY_NOTE  # noqa: E402
 
 CST = timezone(timedelta(hours=8))
 
@@ -120,7 +120,7 @@ class Api:
     def _start_summary(self, conn) -> dict:
         today = self._today()
         rounds_today = conn.execute(
-            "SELECT id, started_at, finished_at, status FROM rounds"
+            "SELECT id, started_at, finished_at, status, note FROM rounds"
         ).fetchall()
         today_ids = []
         for r in rounds_today:
@@ -148,12 +148,15 @@ class Api:
                 except ValueError:
                     dur = None
             status = last["status"]
-            note = {
-                "完成": "",
-                "已放弃": "，人工放弃",
-                "意外中止": "，deny 超限意外中止",
-                "需人工-失败率超限": "，失败率超限暂停",
-            }.get(status, "")
+            if status == "意外中止" and last.get("note") == DAY_BOUNDARY_NOTE:
+                note = "，跨天中止"
+            else:
+                note = {
+                    "完成": "",
+                    "已放弃": "，人工放弃",
+                    "意外中止": "，deny 超限意外中止",
+                    "需人工-失败率超限": "，失败率超限暂停",
+                }.get(status, "")
             summary = {
                 "started": True,
                 "rounds": len(today_ids),
@@ -438,12 +441,12 @@ class Api:
                 round_id = self.round_id
                 if round_id is None:
                     row = conn.execute(
-                        "SELECT id, started_at, finished_at, status, phase FROM rounds "
+                        "SELECT id, started_at, finished_at, status, phase, note FROM rounds "
                         "WHERE status!='进行中' ORDER BY id DESC LIMIT 1"
                     ).fetchone()
                 else:
                     row = conn.execute(
-                        "SELECT id, started_at, finished_at, status, phase FROM rounds WHERE id=?",
+                        "SELECT id, started_at, finished_at, status, phase, note FROM rounds WHERE id=?",
                         (round_id,),
                     ).fetchone()
                 if row is None:
@@ -510,8 +513,12 @@ class Api:
                     note = "本轮正常完成。"
                     tag = "正常完成"
                 elif status == "意外中止":
-                    note = "本轮因整轮 deny 达到阈值而意外中止，已抓取数据已保留；本轮不可续跑，请启动新的抓取轮次。"
-                    tag = "意外中止"
+                    if row.get("note") == DAY_BOUNDARY_NOTE:
+                        note = "本轮因库存数据即将跨天而中止，已抓取数据已保留；请0点后启动新的抓取轮次。"
+                        tag = "跨天中止"
+                    else:
+                        note = "本轮因整轮 deny 达到阈值而意外中止，已抓取数据已保留；本轮不可续跑，请启动新的抓取轮次。"
+                        tag = "意外中止"
                 else:
                     note = "本轮非正常结束，已抓取数据已保留；未抓取店铺见下方。"
                     tag = "意外中止"

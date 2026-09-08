@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from bestseller_monitor import browser_pw, pipeline
 from bestseller_monitor.config import Shop
-from bestseller_monitor.db import Database, connect
+from bestseller_monitor.db import Database, connect, DayBoundaryReached, DAY_BOUNDARY_NOTE
 from bestseller_monitor.detail import DetailParseFailed, parse_detail_html
 from bestseller_monitor.guard import InterventionTimeout, RoundPauseRequired
 from bestseller_monitor.listing import ListingLoadFailed
@@ -17,8 +17,11 @@ class P1Tests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.conn = connect(Path(self.tmp.name) / "test.db")
         self.db = Database(self.conn)
+        self._day_patcher = patch("bestseller_monitor.db.past_day_cutoff", return_value=False)
+        self._day_patcher.start()
 
     def tearDown(self):
+        self._day_patcher.stop()
         self.conn.close()
         self.tmp.cleanup()
 
@@ -116,6 +119,29 @@ class P1Tests(unittest.TestCase):
             self.assertEqual(row["phase"], "done")
             self.assertIsNotNone(row["finished_at"])
             self.assertIn("不可续跑", row["note"])
+            self.assertEqual(Database(conn).start_or_resume(), row["id"] + 1)
+        finally:
+            conn.close()
+
+    def test_day_boundary_finishes_round_and_forces_new_round(self):
+        db_path = Path(self.tmp.name) / "day.db"
+        cfg = SimpleNamespace(
+            db_file=db_path,
+            driver="pw_cdp",
+            ensure_dirs=MagicMock(),
+        )
+        with patch.object(pipeline, "_run_pwcdp_round", side_effect=DayBoundaryReached()):
+            pipeline.run_round(cfg, [Shop("A01", "店铺A", "https://shop.example/")])
+
+        conn = connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT id, status, phase, finished_at, note FROM rounds ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            self.assertEqual(row["status"], "意外中止")
+            self.assertEqual(row["phase"], "done")
+            self.assertIsNotNone(row["finished_at"])
+            self.assertEqual(row["note"], DAY_BOUNDARY_NOTE)
             self.assertEqual(Database(conn).start_or_resume(), row["id"] + 1)
         finally:
             conn.close()

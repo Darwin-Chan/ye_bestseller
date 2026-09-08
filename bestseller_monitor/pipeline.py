@@ -11,7 +11,7 @@ from playwright.sync_api import sync_playwright
 from . import browser_dp, browser_pw
 from .browser_pw import DenyTracker, ShopDenyExceeded, RoundDenyExceeded
 from .config import Config, Shop
-from .db import Database, connect, utcnow, cst_date
+from .db import Database, connect, utcnow, cst_date, DayBoundaryReached, DAY_BOUNDARY_NOTE
 from .delay import Humanizer
 from .detail import DetailParseFailed, capture_detail_payload, save_raw_page
 from .guard import RoundPauseRequired
@@ -70,6 +70,10 @@ def run_round(cfg: Config, shops: list[Shop]) -> None:
         db.finish_round(round_id, status="意外中止", note=note)
         log.error("本轮意外中止：%s", note)
         print(f"\n>>> {note}，请启动新的抓取轮次。\n")
+    except DayBoundaryReached:
+        db.finish_round(round_id, status="意外中止", note=DAY_BOUNDARY_NOTE)
+        log.warning("轮次 #%s：%s", round_id, DAY_BOUNDARY_NOTE)
+        print(f"\n>>> {DAY_BOUNDARY_NOTE}。\n")
     except RoundPauseRequired as exc:
         # 人工处理超时等情况：保留轮次状态，提示稍后续跑
         log.error("本轮暂停：%s", exc)
@@ -156,7 +160,7 @@ def _run_detail_dp(db: Database, cfg: Config, round_id: int, page) -> None:
         processed += 1
         try:
             _capture_one_dp(db, cfg, human, round_id, offer, page)
-        except RoundPauseRequired:
+        except (RoundPauseRequired, DayBoundaryReached):
             raise
         except Exception as exc:
             log.exception("详情抓取意外失败：%s", offer["product_url"])
@@ -277,7 +281,7 @@ def _run_detail_phase(db: Database, cfg: Config, round_id: int, page) -> None:
         processed += 1
         try:
             _capture_one(db, cfg, human, round_id, offer, page)
-        except RoundPauseRequired:
+        except (RoundPauseRequired, DayBoundaryReached):
             raise
         except Exception as exc:  # 兜底：异常也记录失败，不中断整轮
             log.exception("详情抓取意外失败：%s", offer["product_url"])
@@ -447,7 +451,7 @@ def _run_detail_pw(db: Database, cfg: Config, round_id: int, page, emit=None) ->
         processed += 1
         try:
             _capture_one_pw(db, cfg, human, round_id, offer, page, emit=emit)
-        except RoundPauseRequired:
+        except (RoundPauseRequired, DayBoundaryReached):
             raise
         except Exception as exc:
             log.exception("详情抓取意外失败：%s", offer["product_url"])

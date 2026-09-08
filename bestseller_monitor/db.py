@@ -186,6 +186,29 @@ def cst_date(iso_utc: str | None = None) -> str:
         return datetime.now(CST).strftime("%Y-%m-%d")
 
 
+DAY_CUTOFF = (23, 55)
+DAY_BOUNDARY_NOTE = "库存数据即将跨天，请0点后继续抓取"
+
+
+class DayBoundaryReached(RuntimeError):
+    """库存数据即将跨天（北京时间 ≥ 23:55），当前轮次需中止，0 点后继续。"""
+
+
+def past_day_cutoff(iso_utc: str | None = None) -> bool:
+    """判断北京时间是否已达到或超过 23:55（当日抓取的安全截止线）。"""
+    if iso_utc:
+        try:
+            dt = datetime.fromisoformat(iso_utc)
+        except ValueError:
+            dt = datetime.now(timezone.utc)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = datetime.now(timezone.utc)
+    cst = dt.astimezone(CST)
+    return (cst.hour, cst.minute) >= DAY_CUTOFF
+
+
 _CARD_POS_RE = re.compile(r"page=(\d+)&idx=(\d+)")
 
 
@@ -492,6 +515,8 @@ class Database:
         except Exception:
             self.conn.rollback()
             raise
+        if past_day_cutoff():
+            raise DayBoundaryReached()
 
     def _upsert_skus(self, rows: list[dict]) -> None:
         now = utcnow()
