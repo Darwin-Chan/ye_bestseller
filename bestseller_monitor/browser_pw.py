@@ -17,9 +17,8 @@ from .db import utcnow, cst_date
 from .delay import Humanizer
 from .detail import DetailParseFailed
 from .parse import extract_skus_from_html, extract_title, extract_main_image
-from . import sound
 from .guard import (
-    body_text, captcha_visible, deny_resolved, detect, intervention_kind,
+    body_text, captcha_visible, detect, intervention_kind,
     is_deny_url, is_login_url, is_punish_url, resolved, vtype, wait_for_resolution,
 )
 
@@ -31,7 +30,6 @@ _launched_proc = None
 # 兼容旧私有名/旧名（本文件内部与诊断工具仍引用）
 _body_text = body_text
 _captcha_visible = captcha_visible
-_deny_resolved = deny_resolved
 _is_punish_url = is_punish_url
 _is_deny_url = is_deny_url
 _resolved = resolved
@@ -573,7 +571,7 @@ def _capture_card(page, img, list_title, cfg, punished, on_response, se, db, rou
                   offers, seen, idx: int = 0, page_no: int = 0, human=None,
                   deny_tracker=None) -> str | None:
     """点开卡片弹出、offer_id 去重、读 SKU、入库；成功返回 offer_id，否则返回 None。
-    deny 处理：第1/2次退避重试；第3次响铃提醒扫码、解除后重抓，30s 未成功视为失败。
+    deny 处理：第1/2次退避重试；第3次关闭详情并跳过当前商品。
     可能抛 ShopDenyExceeded / RoundDenyExceeded。"""
     cnote = f"page={page_no}&idx={idx}"
     per_product_denies = 0
@@ -608,50 +606,12 @@ def _capture_card(page, img, list_title, cfg, punished, on_response, se, db, rou
                 if human is not None:
                     human.sleep(cfg.deny_retry2_backoff_sec)
                 continue
-            return _handle_deny_scan(page, detail_page, popup, img, cfg, punished, on_response,
-                                     se, db, round_id, shop, offers, seen, list_title, cnote, human)
+            se("click_deny", phase="detail", note=cnote + "&n=3&skip")
+            log.warning("店铺 %s 商品第 3 次命中 deny，跳过当前商品", shop.key)
+            _close_popup_or_back(detail_page, popup, page)
+            return None
         return _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_response,
                               se, db, round_id, shop, offers, seen, cnote)
-    return None
-
-
-def _handle_deny_scan(page, detail_page, popup, img, cfg, punished, on_response, se, db,
-                      round_id, shop, offers, seen, list_title, cnote, human) -> str | None:
-    """第 3 次 deny：保留 deny 弹窗供扫码，响铃直到其 URL 离开 deny，再重新抓取。"""
-    se("click_deny", phase="detail", note=cnote + "&n=3&scan")
-    log.warning("店铺 %s 商品被 deny 第 3 次，请在 Edge 窗口扫码解除（响铃直到解除）", shop.key)
-    appear_ts = time.time()
-    while not _deny_resolved(detail_page):
-        if time.time() - appear_ts > cfg.human_pause_minutes * 60:
-            raise RuntimeError("人工介入(deny 扫码)超时")
-        sound.play_alarm(count=1)
-        time.sleep(3)
-    log.info("店铺 %s 的 deny 界面已解除，停止响铃", shop.key)
-    if re.search(r"/(?:offer|item)/(\d+)\.html", detail_page.url or ""):
-        oid = _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_response,
-                             se, db, round_id, shop, offers, seen, cnote)
-        return oid
-    _close_popup_or_back(detail_page, popup, page)
-    return _retry_recapture(page, img, cfg, punished, on_response, se, db, round_id, shop,
-                            offers, seen, list_title, cnote, human)
-
-
-def _retry_recapture(page, img, cfg, punished, on_response, se, db, round_id, shop,
-                     offers, seen, list_title, cnote, human) -> str | None:
-    """扫码解除后限时重抓：deny_scan_wait_sec 秒内抓到即返回，否则视为失败。"""
-    deadline = time.time() + cfg.deny_scan_wait_sec
-    while time.time() < deadline:
-        detail_page, popup = _click_one_product(page, img, cfg, punished, on_response, emit=se)
-        if detail_page is not None and not _is_deny_url(detail_page.url or ""):
-            oid = _ingest_detail(page, detail_page, popup, list_title, cfg, punished,
-                                 on_response, se, db, round_id, shop, offers, seen, cnote)
-            if oid:
-                return oid
-        if detail_page is not None:
-            _close_popup_or_back(detail_page, popup, page)
-        time.sleep(1)
-    log.warning("店铺 %s 商品扫码后 %.0f 秒内仍未抓取成功，标记失败",
-                shop.key, cfg.deny_scan_wait_sec)
     return None
 
 

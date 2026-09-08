@@ -14,7 +14,6 @@ intervention_confirmation_sec = 2.0
 # 命中淘宝 deny/验证拦截页（反爬限流）时的退避时长（秒）：自动放慢，降低再次触发限流概率
 deny_backoff_sec = 30.0         # 商品第 1 次 deny 的退避
 deny_retry2_backoff_sec = 60.0  # 商品第 2 次 deny 的退避
-deny_scan_wait_sec = 30.0       # 扫码解除后重新抓取的成功判定超时（秒），超时视为该商品失败
 deny_window_minutes = 10        # deny 计数滚动窗口（分钟）
 deny_shop_limit = 7             # 窗口内该店 deny≥N -> 跳过该店
 deny_round_limit = 10           # 窗口内整轮 deny≥N -> 中止本轮
@@ -86,7 +85,5 @@ raw_page_dir = "data/raw_pages"
 confirm_poll_sec = 0.3
 # 判定需人工介入后、先刷新一次，刷新后等页面恢复的等待
 reload_recover_sec = 1.5
-# 人工介入解决前（以及 deny 响铃扫码时），每次响铃的间隔
+# 人工介入解决前，每次响铃的间隔
 alarm_interval_sec = 3.0
-# deny 解除后限时重抓（deny_scan_wait_sec 内）的每次重试间隔
-deny_retry_poll_sec = 1.0

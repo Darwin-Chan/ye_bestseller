@@ -44,7 +44,6 @@ class Config:
     intervention_confirmation_sec: float
     deny_backoff_sec: float
     deny_retry2_backoff_sec: float
-    deny_scan_wait_sec: float
     deny_window_minutes: int
     deny_shop_limit: int
     deny_round_limit: int
@@ -107,7 +106,6 @@ class Config:
             intervention_confirmation_sec=float(run.get("intervention_confirmation_sec", 2.0)),
             deny_backoff_sec=float(run.get("deny_backoff_sec", 30.0)),
             deny_retry2_backoff_sec=float(run.get("deny_retry2_backoff_sec", 60.0)),
-            deny_scan_wait_sec=float(run.get("deny_scan_wait_sec", 30.0)),
             deny_window_minutes=int(run.get("deny_window_minutes", 10)),
             deny_shop_limit=int(run.get("deny_shop_limit", 7)),
             deny_round_limit=int(run.get("deny_round_limit", 10)),
