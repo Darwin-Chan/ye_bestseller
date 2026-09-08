@@ -12,12 +12,16 @@ import re
 import subprocess
 import time
 
+from playwright.sync_api import Error as PlaywrightError
+
 from .config import Config, Shop
 from .db import utcnow, cst_date
 from .delay import Humanizer
-from .detail import DetailParseFailed
-from .parse import extract_skus_from_html, extract_title, extract_main_image
+from .detail import DetailParseFailed, parse_detail_html, save_raw_page
+from .parse import extract_main_image
+from .listing import ListingLoadFailed
 from .guard import (
+    RoundPauseRequired,
     body_text, captcha_visible, detect, intervention_kind,
     is_deny_url, is_login_url, is_punish_url, resolved, vtype, wait_for_resolution,
 )
@@ -42,6 +46,7 @@ _WAIT_SORT_SEC = 10.0      # 点「销量」排序后等列表刷新
 _WAIT_SCROLL_SEC = 3.0     # 每次滚动后等新一批卡片
 _WAIT_NEXT_SEC = 10.0      # 翻页/加载更多后等列表刷新
 _WAIT_BACK_SEC = 8.0       # 返回上一页后等就绪
+_WAIT_POPUP_MS = 2500      # 点击后等待新标签页；有效弹窗通常在 2 秒内出现
 
 
 def _wait_until(page, describe: str, predicate, timeout_sec: float, poll: float = 0.4) -> bool:
@@ -64,6 +69,49 @@ def _wait_cards(page, min_count: int = 1, timeout_sec: float = _WAIT_UI_SEC,
     return _wait_until(page, describe,
                        lambda: page.locator(_PRODUCT_IMG_SEL).count() >= min_count,
                        timeout_sec)
+
+
+def _scroll_cards_until_stable(page, describe: str = "滚动加载新卡片") -> int:
+    """滚动加载卡片，首次无新增即停止，返回当前卡片数。
+
+    每次滚动已经有条件等待；再次对同一无新增状态等待没有信息增益，
+    只会给每页额外增加一个完整的超时窗口。
+    """
+    for _ in range(12):
+        baseline = page.locator(_PRODUCT_IMG_SEL).count()
+        try:
+            page.mouse.wheel(0, 6000)
+            page.wait_for_load_state("domcontentloaded")
+        except Exception:
+            break
+        loaded = _wait_until(
+            page,
+            describe,
+            lambda: page.locator(_PRODUCT_IMG_SEL).count() > baseline,
+            _WAIT_SCROLL_SEC,
+        )
+        cur = page.locator(_PRODUCT_IMG_SEL).count()
+        if not loaded or cur <= baseline:
+            break
+    return page.locator(_PRODUCT_IMG_SEL).count()
+
+
+def _page_html(page) -> str:
+    try:
+        return page.content()
+    except Exception:
+        return ""
+
+
+def _listing_load_failed(page, reason: str) -> ListingLoadFailed:
+    try:
+        cards = page.locator(_PRODUCT_IMG_SEL).count()
+    except Exception:
+        cards = "unknown"
+    return ListingLoadFailed(
+        f"{reason}（current_url={getattr(page, 'url', '')}，cards={cards}）",
+        html=_page_html(page),
+    )
 
 
 def open_session(cfg: Config):
@@ -133,7 +181,7 @@ class ShopDenyExceeded(Exception):
     """某店滚动窗口内 deny 数达到阈值，跳过该店。"""
 
 
-class RoundDenyExceeded(Exception):
+class RoundDenyExceeded(RoundPauseRequired):
     """整轮滚动窗口内 deny 数达到阈值，中止本轮。"""
 
 
@@ -315,13 +363,10 @@ def capture_detail(page, product_url: str, cfg: Config, human: Humanizer, emit=N
         wait_for_resolution(page, cfg.human_pause_minutes, emit=emit,
                             verification_type=_vtype(kind),
                             confirm_sec=cfg.intervention_confirmation_sec)
-    html = page.content()
-    rows = extract_skus_from_html(html)
-    if not rows:
-        raise DetailParseFailed(f"详情页未解析到 SKU：{product_url}", html=html)
+    payload = parse_detail_html(page.content(), product_url)
     if emit:
-        emit("detail_parse", phase="detail", note=f"sku_count={len(rows)}")
-    return {"product_name": extract_title(html) or "", "html": html, "rows": rows}
+        emit("detail_parse", phase="detail", note=f"sku_count={len(payload['rows'])}")
+    return payload
 
 
 def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
@@ -332,6 +377,7 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
     offers: list[tuple[int, str, str, str, str]] = []
     seen: set[str] = set()
     name_counter: dict[str, int] = {}
+    name_pages: dict[str, set[int]] = {}
     punished = [False]
     pages_read = 0
 
@@ -350,7 +396,14 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
     page.on("response", on_response)
     page.goto(shop.url, wait_until="domcontentloaded")
     human.after_load()          # read_delay_sec：页面加载后、读取数据前的拟人化延迟
-    _wait_cards(page, min_count=1, describe="店铺首屏商品卡片")   # 条件等待，替代固定 4s
+    cards_ready = _wait_cards(page, min_count=1, describe="店铺首屏商品卡片")
+    kind = intervention_kind(page, punished[0])
+    if kind:
+        wait_for_resolution(page, cfg.human_pause_minutes, emit=se,
+                            verification_type=_vtype(kind),
+                            confirm_sec=cfg.intervention_confirmation_sec)
+    if not cards_ready and not _wait_cards(page, min_count=1, describe="验证后商品卡片"):
+        raise _listing_load_failed(page, f"店铺首屏未加载商品卡片：{shop.url}")
     se("list_load", note=shop.url)
     human.before_action()       # action_delay_sec：点击排序前的拟人化延迟
     if _click_text_in_frames(page, "销量"):
@@ -358,43 +411,21 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                     describe="销量排序后商品卡片")   # 条件等待，替代固定 3s
         log.info("已点击「销量」排序")
         se("list_sort")
-    kind = intervention_kind(page, punished[0])
-    if kind:
-        wait_for_resolution(page, cfg.human_pause_minutes, emit=se,
-                            verification_type=_vtype(kind),
-                            confirm_sec=cfg.intervention_confirmation_sec)
-
     while pages_read < max_pages:
         pages_read += 1
         human.before_list_page()
         se("list_page", note=f"page={pages_read}")
         # 滚动到底部触发懒加载，直到图片数量不再增加
-        prev = -1
-        for _ in range(12):
-            baseline = page.locator(_PRODUCT_IMG_SEL).count()
-            try:
-                page.mouse.wheel(0, 6000)
-                page.wait_for_load_state("domcontentloaded")
-            except Exception:
-                break
-            # 等新一批卡片出现（条件等待，替代固定 1.2s；无新增则很快超时并停止滚动）
-            _wait_until(page, "滚动加载新卡片",
-                        lambda: page.locator(_PRODUCT_IMG_SEL).count() > baseline,
-                        _WAIT_SCROLL_SEC)
-            cur = page.locator(_PRODUCT_IMG_SEL).count()
-            if cur == prev:
-                break
-            prev = cur
-        n = page.locator(_PRODUCT_IMG_SEL).count()
+        n = _scroll_cards_until_stable(page)
         log.info("店铺 %s 第 %s 页图片总数 %s（滚动后）", shop.key, pages_read, n)
 
         for i in range(n):
-            human.before_detail()   # 加大并随机化商品详情访问间隔
             se("product_open")
             list_title = _read_card_title(page, i)   # 点前读列表页商品名
             if list_title:
                 name_counter[list_title] = name_counter.get(list_title, 0) + 1
                 c = name_counter[list_title]
+                name_pages.setdefault(list_title, set()).add(pages_read)
                 if c >= 2:
                     # 同店（同页/跨页）重复商品名异常检测（第 2 次及以上出现）
                     log.warning("异常：店铺 %s 出现重复商品名「%s」（第 %s 个商品）",
@@ -419,6 +450,8 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                         db.mark_skipped(round_id, shop.key, shop.url, shop.name, def_oid,
                                         def_url, list_title, note="今日已有同名库存，跳过")
                     continue
+            # 只有确认需要进入详情后才消耗详情间隔和长停顿预算。
+            human.before_detail()
             img = page.locator(_PRODUCT_IMG_SEL).nth(i)
             _capture_card(page, img, list_title, cfg, punished, on_response, se, db,
                           round_id, shop, offers, seen, idx=i, page_no=pages_read,
@@ -440,7 +473,10 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
     # 第二遍：计数>1 的同名商品，按名找回并补抓（offer_id 去重，避免重复/遗漏）
     ambiguous = {n for n, c in name_counter.items() if c > 1}
     if ambiguous:
-        log.info("店铺 %s 发现 %s 个同名商品名，回头补抓", shop.key, len(ambiguous))
+        ambiguous_pages = set().union(*(name_pages[n] for n in ambiguous))
+        rescue_last_page = max(ambiguous_pages)
+        log.info("店铺 %s 发现 %s 个同名商品名，回头补抓第 %s 页（共 %s 页）",
+                 shop.key, len(ambiguous), ",".join(map(str, sorted(ambiguous_pages))), rescue_last_page)
         page.goto(shop.url, wait_until="domcontentloaded")
         human.after_load()
         _wait_cards(page, min_count=1, describe="补抓店铺首屏商品卡片")
@@ -453,35 +489,21 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
             wait_for_resolution(page, cfg.human_pause_minutes, emit=se,
                                 verification_type=_vtype(rkind),
                                 confirm_sec=cfg.intervention_confirmation_sec)
-        for rpg in range(1, max_pages + 1):
+        for rpg in range(1, rescue_last_page + 1):
             human.before_list_page()
             se("list_page", note=f"rescue_page={rpg}")
-            prev = -1
-            for _ in range(12):
-                baseline = page.locator(_PRODUCT_IMG_SEL).count()
-                try:
-                    page.mouse.wheel(0, 6000)
-                    page.wait_for_load_state("domcontentloaded")
-                except Exception:
-                    break
-                _wait_until(page, "补抓滚动加载新卡片",
-                            lambda: page.locator(_PRODUCT_IMG_SEL).count() > baseline,
-                            _WAIT_SCROLL_SEC)
-                cur = page.locator(_PRODUCT_IMG_SEL).count()
-                if cur == prev:
-                    break
-                prev = cur
-            n = page.locator(_PRODUCT_IMG_SEL).count()
-            for i in range(n):
-                name = _read_card_title(page, i)
-                if name and name in ambiguous:
-                    human.before_detail()
-                    se("product_open")
-                    img = page.locator(_PRODUCT_IMG_SEL).nth(i)
-                    _capture_card(page, img, name, cfg, punished, on_response, se, db,
-                                  round_id, shop, offers, seen, idx=i, page_no=rpg,
-                                  human=human, deny_tracker=deny_tracker)
-            if rpg >= max_pages:
+            if rpg in ambiguous_pages:
+                n = _scroll_cards_until_stable(page, "补抓滚动加载新卡片")
+                for i in range(n):
+                    name = _read_card_title(page, i)
+                    if name and name in ambiguous:
+                        human.before_detail()
+                        se("product_open")
+                        img = page.locator(_PRODUCT_IMG_SEL).nth(i)
+                        _capture_card(page, img, name, cfg, punished, on_response, se, db,
+                                      round_id, shop, offers, seen, idx=i, page_no=rpg,
+                                      human=human, deny_tracker=deny_tracker)
+            if rpg >= rescue_last_page:
                 break
             human.before_action()
             advanced = _click_text_in_frames(page, "下一页")
@@ -493,15 +515,16 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
             page.wait_for_load_state("domcontentloaded", timeout=cfg.timeout_ms)
             _wait_cards(page, min_count=1, timeout_sec=_WAIT_NEXT_SEC,
                         describe="补抓翻页后商品卡片")
+    if not offers:
+        raise _listing_load_failed(page, f"店铺列表未解析到商品：{shop.url}")
     return offers, pages_read
 
 
 def _click_one_product(page, img, cfg, punished, on_response, emit=None):
     """点击单个商品图的“可点击父元素”；返回 (detail_page, popup)。"""
-    detail_page = None
     popup = None
     try:
-        with page.expect_popup(timeout=4000) as pi:
+        with page.expect_popup(timeout=_WAIT_POPUP_MS) as pi:
             img.evaluate(
                 """el => {
                     let t = el;
@@ -519,25 +542,39 @@ def _click_one_product(page, img, cfg, punished, on_response, emit=None):
                 }"""
             )
         popup = pi.value
-        if popup:
+    except PlaywrightError:
+        # 无新标签页时，商品可能在当前页面跳转；其余点击失败按无弹窗处理。
+        popup = None
+
+    if popup is not None:
+        try:
             popup.wait_for_load_state("domcontentloaded", timeout=cfg.timeout_ms)
-            detail_page = popup
-            popup.on("response", on_response)
-            pk = intervention_kind(popup, punished[0])
-            if pk:
-                wait_for_resolution(popup, cfg.human_pause_minutes, emit=emit,
-                                    verification_type=_vtype(pk),
-                                    confirm_sec=cfg.intervention_confirmation_sec)
-    except Exception:
-        if "detail.1688.com/offer/" in (page.url or ""):
-            detail_page = page
-            page.wait_for_load_state("domcontentloaded", timeout=cfg.timeout_ms)
-            pk = intervention_kind(page, punished[0])
-            if pk:
-                wait_for_resolution(page, cfg.human_pause_minutes, emit=emit,
-                                    verification_type=_vtype(pk),
-                                    confirm_sec=cfg.intervention_confirmation_sec)
-    return detail_page, popup
+        except PlaywrightError:
+            try:
+                popup.close()
+            except PlaywrightError:
+                pass
+            return None, None
+        popup.on("response", on_response)
+        kind = intervention_kind(popup, punished[0])
+        if kind:
+            wait_for_resolution(popup, cfg.human_pause_minutes, emit=emit,
+                                verification_type=_vtype(kind),
+                                confirm_sec=cfg.intervention_confirmation_sec)
+        return popup, popup
+
+    if "detail.1688.com/offer/" not in (page.url or ""):
+        return None, None
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=cfg.timeout_ms)
+    except PlaywrightError:
+        return None, None
+    kind = intervention_kind(page, punished[0])
+    if kind:
+        wait_for_resolution(page, cfg.human_pause_minutes, emit=emit,
+                            verification_type=_vtype(kind),
+                            confirm_sec=cfg.intervention_confirmation_sec)
+    return page, None
 
 
 def _read_card_title(page, idx: int) -> str:
@@ -648,17 +685,22 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
     if db and round_id and first_time:
         try:
             html = detail_page.content()
-        except Exception:
-            se("click_no_popup", offer_id=oid, note=cnote + "&offer_id=" + oid)
+        except Exception as exc:
+            note = f"详情页读取失败：{exc}"
+            db.mark_failure(
+                round_id, shop.key, oid, 1, note,
+                shop_url=shop.url, shop_name=shop.name, product_url=url,
+                product_name=list_title or None,
+            )
+            se("click_parse_error", offer_id=oid, note=cnote + "&offer_id=" + oid)
             se("popup_close", offer_id=oid)
             _close_popup_or_back(detail_page, popup, page)
             return None
-        title = extract_title(html) or ""
-        rows = extract_skus_from_html(html)
-        if rows:
+        try:
+            payload = parse_detail_html(html, url)
             img_url = extract_main_image(html)
-            db.upsert_product(oid, url, title, img_url)
-            se("detail_parse", offer_id=oid, note=f"sku_count={len(rows)}")
+            title = payload["product_name"]
+            rows = payload["rows"]
             snap_rows = [
                 {
                     "round_id": round_id, "shop_key": shop.key,
@@ -674,13 +716,38 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
                 }
                 for sku in rows
             ]
-            db.clear_failures(round_id, shop.key, oid)
-            db.save_snapshot_rows(round_id, shop.key, snap_rows)
-            se("click_ok", offer_id=oid, note=cnote + "&offer_id=" + oid + f"&sku={len(rows)}")
-        else:
-            db.mark_failure(round_id, shop.key, oid, 1, "popup未解析到SKU")
-            se("click_parse_empty", offer_id=oid, note=cnote + "&offer_id=" + oid)
+        except DetailParseFailed as exc:
+            raw_path = save_raw_page(cfg, round_id, oid, exc.html) if exc.html else ""
+            note = f"解析失败：{exc}；原始页面：{raw_path}"
+            db.mark_failure(
+                round_id, shop.key, oid, 1, note,
+                shop_url=shop.url, shop_name=shop.name, product_url=url,
+                product_name=list_title or None,
+            )
+            se("click_parse_error", offer_id=oid, note=cnote + "&offer_id=" + oid)
             se("detail_parse", offer_id=oid, note="sku_count=0")
+            se("popup_close", offer_id=oid)
+            _close_popup_or_back(detail_page, popup, page)
+            return None
+        except Exception as exc:
+            raw_path = save_raw_page(cfg, round_id, oid, html) if html else ""
+            note = f"详情页解析异常：{exc}；原始页面：{raw_path}"
+            db.mark_failure(
+                round_id, shop.key, oid, 1, note,
+                shop_url=shop.url, shop_name=shop.name, product_url=url,
+                product_name=list_title or None,
+            )
+            se("click_parse_error", offer_id=oid, note=cnote + "&offer_id=" + oid)
+            se("detail_parse", offer_id=oid, note="sku_count=0")
+            se("popup_close", offer_id=oid)
+            _close_popup_or_back(detail_page, popup, page)
+            return None
+
+        db.upsert_product(oid, url, title, img_url)
+        se("detail_parse", offer_id=oid, note=f"sku_count={len(rows)}")
+        db.save_snapshot_rows(round_id, shop.key, snap_rows)
+        db.clear_failures(round_id, shop.key, oid)
+        se("click_ok", offer_id=oid, note=cnote + "&offer_id=" + oid + f"&sku={len(rows)}")
     elif db and round_id:
         se("click_skipped", offer_id=oid, note=cnote + "&offer_id=" + oid + "&dup=1")
     se("popup_close", offer_id=oid)

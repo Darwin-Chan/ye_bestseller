@@ -13,6 +13,15 @@ from . import sound
 
 log = logging.getLogger(__name__)
 
+
+class RoundPauseRequired(RuntimeError):
+    """轮次必须暂停并保留进度，等待后续人工或环境恢复。"""
+
+
+class InterventionTimeout(RoundPauseRequired):
+    """人工验证或扫码未在配置时限内解决。"""
+
+
 # 滑块/验证文案（含 punish，用于页面正文命中）
 SLIDER_MARKERS = ("向右滑动验证", "请完成验证", "滑块验证", "拖动滑块", "安全验证", "punish")
 # 登录相关文案
@@ -157,7 +166,7 @@ def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | 
             log.info("人工介入已解决，停止响铃，继续。")
             return
         if time.time() > deadline:
-            raise RuntimeError("人工介入超时")
+            raise InterventionTimeout("人工介入超时")
         sound.play_alarm(count=1)   # 每次约 1 秒，循环播放
         time.sleep(3)
 

@@ -14,8 +14,9 @@ from .config import Config, Shop
 from .db import Database, connect, utcnow, cst_date
 from .delay import Humanizer
 from .detail import DetailParseFailed, capture_detail_payload, save_raw_page
+from .guard import RoundPauseRequired
 from .parse import extract_main_image
-from .listing import crawl_shop_listing
+from .listing import ListingLoadFailed, crawl_shop_listing, save_raw_listing_page
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +40,15 @@ def _pending_detail_offers(db: Database, round_id: int, cfg: Config):
     return out
 
 
+def _record_listing_failure(
+    db: Database, cfg: Config, round_id: int, shop: Shop, exc: ListingLoadFailed,
+) -> None:
+    raw_path = save_raw_listing_page(cfg, round_id, shop.key, exc.html) if exc.html else ""
+    note = f"榜单失败：{exc}；原始页面：{raw_path}"
+    db.mark_listing_failure(round_id, shop.key, note)
+    log.warning("店铺 %s 榜单失败，保留待续跑：%s", shop.key, note)
+
+
 def run_round(cfg: Config, shops: list[Shop]) -> None:
     cfg.ensure_dirs()
     conn = connect(cfg.db_file)
@@ -54,7 +64,13 @@ def run_round(cfg: Config, shops: list[Shop]) -> None:
         else:
             _run_pw_round(db, cfg, round_id, shops)
         _finalize_round(db, cfg, round_id)
-    except RuntimeError as exc:
+    except RoundDenyExceeded as exc:
+        # 整轮 deny 超限是终态：数据保留，但本轮不可续跑，只能新开一轮。
+        note = f"本轮因整轮 deny 超过阈值而意外中止：{exc}；已抓取数据已保留，不可续跑"
+        db.finish_round(round_id, status="意外中止", note=note)
+        log.error("本轮意外中止：%s", note)
+        print(f"\n>>> {note}，请启动新的抓取轮次。\n")
+    except RoundPauseRequired as exc:
         # 人工处理超时等情况：保留轮次状态，提示稍后续跑
         log.error("本轮暂停：%s", exc)
         print(f"\n>>> 本轮已暂停（可再次运行续跑）：{exc}\n")
@@ -112,14 +128,17 @@ def _run_dp_round(db: Database, cfg: Config, round_id: int, shops: list[Shop]) -
 
 def _run_listing_dp(db: Database, cfg: Config, round_id: int, shops: list[Shop], page) -> None:
     db.set_phase(round_id, "listing")
-    done = {row["shop_key"] for row in db.shops_to_list(round_id) if row["list_status"] == "完成"}
+    done = db.completed_listing_keys(round_id)
     human = Humanizer(cfg)
     for shop in shops:
         if shop.key in done:
             log.info("店铺 %s 本轮已完成榜单，跳过", shop.key)
             continue
-        offers, pages_read = browser_dp.crawl_shop_listing(page, shop, cfg, human)
-        db.save_shop_offers(round_id, shop.key, shop.url, shop.name, offers, pages_read)
+        try:
+            offers, pages_read = browser_dp.crawl_shop_listing(page, shop, cfg, human)
+            db.save_shop_offers(round_id, shop.key, shop.url, shop.name, offers, pages_read)
+        except ListingLoadFailed as exc:
+            _record_listing_failure(db, cfg, round_id, shop, exc)
     log.info("榜单阶段完成")
 
 
@@ -137,7 +156,7 @@ def _run_detail_dp(db: Database, cfg: Config, round_id: int, page) -> None:
         processed += 1
         try:
             _capture_one_dp(db, cfg, human, round_id, offer, page)
-        except RuntimeError:
+        except RoundPauseRequired:
             raise
         except Exception as exc:
             log.exception("详情抓取意外失败：%s", offer["product_url"])
@@ -180,7 +199,7 @@ def _capture_one_dp(db: Database, cfg: Config, human: Humanizer, round_id: int, 
             if attempt < max_attempts:
                 human.sleep(human.retry_delay(attempt))
             continue
-        except RuntimeError:
+        except RoundPauseRequired:
             raise
         except Exception as exc:
             note = f"访问异常：{exc}"
@@ -215,28 +234,31 @@ def _capture_one_dp(db: Database, cfg: Config, human: Humanizer, round_id: int, 
                     "attempt": attempt,
                 }
             )
-        db.clear_failures(round_id, shop_key, offer_id)
         for r in rows:
             r["main_image_url"] = img
         for r in rows:
             r["main_image_url"] = img
         db.save_snapshot_rows(round_id, shop_key, rows)
+        db.clear_failures(round_id, shop_key, offer_id)
         log.info("店铺 %s 商品 %s 抓取成功：%s 个 SKU（第 %s 次）", shop_key, offer_id, len(rows), attempt)
         return
 
 
 def _run_listing_phase(db: Database, cfg: Config, round_id: int, shops: list[Shop], page) -> None:
     db.set_phase(round_id, "listing")
-    done = {row["shop_key"] for row in db.shops_to_list(round_id) if row["list_status"] == "完成"}
+    done = db.completed_listing_keys(round_id)
     human = Humanizer(cfg)
     for shop in shops:
         if shop.key in done:
             log.info("店铺 %s 本轮已完成榜单，跳过", shop.key)
             continue
-        offers, pages_read = crawl_shop_listing(page, shop, cfg, human)
-        db.save_shop_offers(
-            round_id, shop.key, shop.url, shop.name, offers, pages_read,
-        )
+        try:
+            offers, pages_read = crawl_shop_listing(page, shop, cfg, human)
+            db.save_shop_offers(
+                round_id, shop.key, shop.url, shop.name, offers, pages_read,
+            )
+        except ListingLoadFailed as exc:
+            _record_listing_failure(db, cfg, round_id, shop, exc)
     log.info("榜单阶段完成")
 
 
@@ -255,7 +277,7 @@ def _run_detail_phase(db: Database, cfg: Config, round_id: int, page) -> None:
         processed += 1
         try:
             _capture_one(db, cfg, human, round_id, offer, page)
-        except RuntimeError:
+        except RoundPauseRequired:
             raise
         except Exception as exc:  # 兜底：异常也记录失败，不中断整轮
             log.exception("详情抓取意外失败：%s", offer["product_url"])
@@ -300,7 +322,7 @@ def _capture_one(
             if attempt < max_attempts:
                 human.sleep(human.retry_delay(attempt))
             continue
-        except RuntimeError:
+        except RoundPauseRequired:
             raise
         except Exception as exc:
             note = f"访问异常：{exc}"
@@ -335,10 +357,10 @@ def _capture_one(
                     "attempt": attempt,
                 }
             )
-        db.clear_failures(round_id, shop_key, offer_id)
         for r in rows:
             r["main_image_url"] = img
         db.save_snapshot_rows(round_id, shop_key, rows)
+        db.clear_failures(round_id, shop_key, offer_id)
         log.info(
             "店铺 %s 商品 %s 抓取成功：%s 个 SKU（第 %s 次尝试）",
             shop_key, offer_id, len(rows), attempt,
@@ -347,6 +369,10 @@ def _capture_one(
 
 
 def _finalize_round(db: Database, cfg: Config, round_id: int) -> None:
+    incomplete = db.incomplete_listings(round_id)
+    if incomplete:
+        keys = ", ".join(row["shop_key"] for row in incomplete)
+        raise RoundPauseRequired(f"榜单阶段未完成：{keys}；请检查存档页面后续跑")
     total, succeeded = db.offer_counts(round_id)
     click_fail = db.click_card_failures(round_id)   # 点击后未得到商品编号的卡片
     attempted = total + click_fail
@@ -382,7 +408,7 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int, shops: list[Shop]
 def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop], page,
                     emit=None, deny_tracker=None) -> None:
     db.set_phase(round_id, "listing")
-    done = {row["shop_key"] for row in db.shops_to_list(round_id) if row["list_status"] == "完成"}
+    done = db.completed_listing_keys(round_id)
     human = Humanizer(cfg)
     for shop in shops:
         if shop.key in done:
@@ -397,10 +423,13 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
             db.save_shop_offers(round_id, shop.key, shop.url, shop.name, offers, pages_read)
         except ShopDenyExceeded as exc:
             log.warning("店铺 %s 因 deny 超过阈值，跳过（本轮不保存残缺榜单）：%s", shop.key, exc)
+            db.mark_listing_failure(round_id, shop.key, f"榜单 deny 超过阈值：{exc}")
             continue
         except RoundDenyExceeded as exc:
             log.error("整轮 deny 超过阈值，中止本轮：%s", exc)
-            raise RuntimeError(str(exc)) from exc
+            raise
+        except ListingLoadFailed as exc:
+            _record_listing_failure(db, cfg, round_id, shop, exc)
     log.info("榜单阶段完成")
 
 
@@ -418,7 +447,7 @@ def _run_detail_pw(db: Database, cfg: Config, round_id: int, page, emit=None) ->
         processed += 1
         try:
             _capture_one_pw(db, cfg, human, round_id, offer, page, emit=emit)
-        except RuntimeError:
+        except RoundPauseRequired:
             raise
         except Exception as exc:
             log.exception("详情抓取意外失败：%s", offer["product_url"])
@@ -466,7 +495,7 @@ def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, 
             if attempt < max_attempts:
                 human.sleep(human.retry_delay(attempt))
             continue
-        except RuntimeError:
+        except RoundPauseRequired:
             raise
         except Exception as exc:
             note = f"访问异常：{exc}"
@@ -492,7 +521,7 @@ def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, 
                 "sku_stock": sku["sku_stock"], "collected_at": collected_at,
                 "page_status": "成功", "attempt": attempt,
             })
-        db.clear_failures(round_id, shop_key, offer_id)
         db.save_snapshot_rows(round_id, shop_key, rows)
+        db.clear_failures(round_id, shop_key, offer_id)
         log.info("店铺 %s 商品 %s 抓取成功：%s 个 SKU（第 %s 次）", shop_key, offer_id, len(rows), attempt)
         return
