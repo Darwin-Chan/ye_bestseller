@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>1688 畅销品监控 · GUI</title>
+<style>
+  :root{--bg:#f5f7fa;--card:#fff;--line:#e5e9f0;--txt:#1f2937;--mut:#6b7280;--pri:#2563eb;--red:#dc2626;--grn:#16a34a;--amb:#d97706}
+  *{box-sizing:border-box;font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  body{margin:0;background:var(--bg);color:var(--txt)}
+  .wrap{max-width:1080px;margin:0 auto;padding:20px}
+  header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+  header h1{font-size:20px;margin:0}
+  .tabs{display:flex;gap:6px;margin-bottom:14px}
+  .tab{flex:1;padding:10px;text-align:center;background:#e2e8f0;border-radius:8px;cursor:pointer;font-weight:600}
+  .tab.active{background:var(--pri);color:#fff}
+  .panel{display:none}
+  .panel.active{display:block}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:12px}
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+  .stat .n{font-size:24px;font-weight:700;color:var(--pri)}
+  .stat .l{font-size:12px;color:var(--mut)}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left}
+  th{background:#f8fafc;color:var(--mut);font-weight:600}
+  tr:hover td{background:#fafcff}
+  .chk input{transform:scale(1.25)}
+  .pill{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px}
+  .pill.g{background:#dcfce7;color:var(--grn)}
+  .pill.r{background:#fee2e2;color:var(--red)}
+  .pill.a{background:#fef3c7;color:var(--amb)}
+  .btn{background:var(--pri);color:#fff;border:0;padding:11px 26px;border-radius:9px;font-size:15px;font-weight:600;cursor:pointer}
+  .btn:hover{filter:brightness(1.05)}
+  .btn.danger{background:var(--red)}
+  .btn.ghost{background:#fff;color:var(--txt);border:1px solid var(--line)}
+  .bar{height:10px;background:#e2e8f0;border-radius:99px;overflow:hidden}
+  .bar > i{display:block;height:100%;background:linear-gradient(90deg,#60a5fa,#2563eb);width:55%}
+  .flex{display:flex;justify-content:space-between;align-items:center}
+  .muted{color:var(--mut);font-size:13px}
+  .foot{margin-top:16px;text-align:center;color:var(--mut);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>1688 畅销品监控 · 每日库存抓取</h1>
+    <span class="muted">GUI 原型 · 数据为示例</span>
+  </header>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="start">① 开始</div>
+    <div class="tab" data-tab="run">② 过程</div>
+    <div class="tab" data-tab="result">③ 结果</div>
+  </div>
+
+  <!-- 开始 -->
+  <div class="panel active" id="panel-start">
+    <div class="card">
+      <div class="grid" style="grid-template-columns:repeat(3,1fr)">
+        <div class="stat"><div class="l">今日已抓取商品</div><div class="n" id="stProducts">945</div></div>
+        <div class="stat"><div class="l">今日已抓取SKU</div><div class="n" id="stSkus">5,249</div></div>
+        <div class="stat"><div class="l">今日已抓取轮次</div><div class="n" id="stRounds">1</div></div>
+      </div>
+      <p class="muted" style="margin:12px 0 0" id="todaySummary">今日已抓取轮次：09-06 00:21 开始 · 跑约 127 分钟 · 因反爬 deny 中止（deny≈203 次）</p>
+    </div>
+    <div class="card">
+      <div class="flex" style="margin-bottom:10px">
+        <b>选择要抓取的店铺</b>
+        <span class="muted" id="selCnt">已选 0 / 12</span>
+      </div>
+      <table>
+        <thead><tr><th style="width:40px">✓</th><th>店铺</th><th>今日已抓取商品</th><th>今日已抓取SKU</th><th>今日已抓取轮次/耗时</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <p class="muted" style="margin:10px 0 0">默认勾选：今日已抓取商品数 &lt; 抓取页数×30（例：页数3 → 今日已抓取&lt;90 时默认勾选）；未勾选任意店铺时禁止开始。</p>
+      <div style="margin-top:16px;text-align:right">
+        <button class="btn" id="startBtn">开始抓取</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 过程 -->
+  <div class="panel" id="panel-run">
+    <div class="card">
+      <div class="grid" style="grid-template-columns:repeat(3,1fr)">
+        <div class="stat"><div class="l">已完成店铺</div><div class="n">4 / 12</div></div>
+        <div class="stat"><div class="l">已抓时长</div><div class="n">42:10</div></div>
+        <div class="stat"><div class="l">deny 次数</div><div class="n">203</div></div>
+      </div>
+      <div class="muted" style="margin:10px 0 6px">进度：点击成功率约 65% · 当前处理 A04（第 4 家）</div>
+      <div class="bar"><i></i></div>
+    </div>
+    <div class="card">
+      <b>已完成店铺（4）</b>
+      <table><thead><tr><th>店铺</th><th>已抓取商品</th><th>已抓取SKU</th><th>耗时</th><th>deny次数</th></tr></thead>
+      <tbody><tr><td><b>A01</b> 义乌市中茂箱包有限公司</td><td>33</td><td>174</td><td>34.5 分</td><td>55</td></tr>
+      <tr><td><b>A02</b> 义乌市奔此日用品有限公司</td><td>40</td><td>192</td><td>33.0 分</td><td>52</td></tr>
+      <tr><td><b>A03</b> 义乌市中茂专业设计有限公司</td><td>33</td><td>181</td><td>34.6 分</td><td>56</td></tr>
+      <tr><td><b>A04</b> 义乌市快茂日用品有限公司</td><td>40</td><td>176</td><td>33.8 分</td><td>40</td></tr></tbody></table>
+    </div>
+    <div class="card">
+      <b>未完成店铺（8）</b>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px">
+        <span class="pill a">A05</span><span class="pill a">A06</span><span class="pill a">A07</span><span class="pill a">A08</span>
+        <span class="pill a">A09</span><span class="pill a">A10</span><span class="pill a">A11</span><span class="pill a">A12</span>
+      </div>
+      <p class="muted" style="margin:12px 0 0">暂停＝保留本轮可续跑；中止＝放弃本轮（数据保留，不再续跑，下次开新轮）。</p>
+      <div style="margin-top:16px;text-align:right;display:flex;gap:10px;justify-content:flex-end">
+        <button class="btn ghost" onclick="alert('原型：暂停本轮（保留为进行中，稍后可续跑）')">暂停本轮</button>
+        <button class="btn danger" onclick="alert('原型：中止＝放弃本轮（数据保留，不再续跑，下次开新轮）')">中止本轮（放弃）</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 结果 -->
+  <div class="panel" id="panel-result">
+    <div class="card">
+      <div style="display:flex;gap:20px;align-items:stretch">
+        <div style="flex:1">
+          <div class="muted" style="font-size:12px">完成店铺</div>
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:8px;margin-top:2px">
+            <span style="font-size:28px;font-weight:800;color:var(--pri)">4/12</span>
+            <span class="muted" style="font-size:12px;padding-bottom:4px">其中商品 146 · SKU 723</span>
+          </div>
+        </div>
+        <div style="flex:1;border-left:1px solid var(--line);padding-left:20px">
+          <div class="muted" style="font-size:12px">总耗时</div>
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:8px;margin-top:2px">
+            <span style="font-size:28px;font-weight:800;color:var(--pri)">127<span style="font-size:14px;font-weight:600">分</span></span>
+            <span class="muted" style="font-size:12px;padding-bottom:4px">deny 203 次</span>
+          </div>
+        </div>
+      </div>
+      <p class="muted" style="margin:14px 0 0;display:flex;gap:6px;align-items:center">
+        <span class="pill r">意外中止</span> 本轮因整轮 deny 达到阈值而中止（未人工干预），已抓取数据已保留；未抓取店铺见下方。
+      </p>
+    </div>
+    <div class="card">
+      <b>已抓取店铺（4）</b>
+      <table><thead><tr><th>店铺</th><th>已抓取商品</th><th>已抓取SKU</th><th>耗时</th><th>deny次数</th></tr></thead>
+      <tbody>
+        <tr><td><b>A01</b> 义乌市中茂箱包有限公司</td><td>33</td><td>174</td><td>34.5 分</td><td>55</td></tr>
+        <tr><td><b>A02</b> 义乌市奔此日用品有限公司</td><td>40</td><td>192</td><td>33.0 分</td><td>52</td></tr>
+        <tr><td><b>A03</b> 义乌市中茂专业设计有限公司</td><td>33</td><td>181</td><td>34.6 分</td><td>56</td></tr>
+        <tr><td><b>A04</b> 义乌市快茂日用品有限公司</td><td>40</td><td>176</td><td>33.8 分</td><td>40</td></tr>
+      </tbody></table>
+    </div>
+    <div class="card">
+      <b>未抓取店铺（8）</b>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px">
+        <span class="pill a">A05</span><span class="pill a">A06</span><span class="pill a">A07</span><span class="pill a">A08</span>
+        <span class="pill a">A09</span><span class="pill a">A10</span><span class="pill a">A11</span><span class="pill a">A12</span>
+      </div>
+      <div style="margin-top:16px;text-align:right">
+        <button class="btn ghost" onclick="document.querySelector('.tab[data-tab=start]').click();window.scrollTo(0,0)">返回开始</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">界面原型 · 仅为排版示意，数据为示例，不代表真实抓取结果</div>
+</div>
+
+<script>
+  // TODAY_STARTED=false 时演示「今天尚未开始」：各店今日已抓取清零 + 顶部提示 + 全店默认勾选
+  const TODAY_STARTED = true;
+
+  const shops=[
+    {key:"A01",name:"义乌市中茂箱包有限公司",products:92,skus:614,rounds:"09-06 00:21 · 34.5 分",pages:3},
+    {key:"A02",name:"义乌市奔此日用品有限公司",products:95,skus:530,rounds:"09-06 00:55 · 33.0 分",pages:3},
+    {key:"A03",name:"义乌市中茂专业设计有限公司",products:90,skus:542,rounds:"09-06 01:29 · 34.6 分",pages:3},
+    {key:"A04",name:"义乌市快茂日用品有限公司",products:87,skus:432,rounds:"09-06 02:03 · 进行中",pages:3},
+    {key:"A05",name:"义乌市中蓝箱包有限公司",products:90,skus:515,rounds:"—",pages:3},
+    {key:"A06",name:"义乌市快勤日用品有限公司",products:81,skus:460,rounds:"—",pages:3},
+    {key:"A07",name:"义乌市暖宏纺织品有限公司",products:30,skus:118,rounds:"—",pages:3},
+    {key:"A08",name:"义乌市创柔文化用品有限公司",products:89,skus:549,rounds:"—",pages:3},
+    {key:"A09",name:"义乌市启弘纺织品有限公司",products:62,skus:285,rounds:"—",pages:3},
+    {key:"A10",name:"义乌市中腾箱包有限公司",products:90,skus:490,rounds:"—",pages:3},
+    {key:"A11",name:"义乌市通伟塑料制品有限公司",products:90,skus:441,rounds:"—",pages:3},
+    {key:"A12",name:"义乌市远强不锈钢制品有限公司",products:49,skus:273,rounds:"—",pages:3}];
+
+  if(!TODAY_STARTED){
+    shops.forEach(s=>{s.products=0;s.skus=0;s.rounds="—";});
+    document.getElementById("stProducts").textContent="0";
+    document.getElementById("stSkus").textContent="0";
+    document.getElementById("stRounds").textContent="0";
+    document.getElementById("todaySummary").innerHTML='<span class="pill r">今天尚未开始</span> 还没有今日抓取轮次，勾选店铺后点「开始抓取」';
+  }else{
+    document.getElementById("stProducts").textContent=shops.reduce((a,s)=>a+s.products,0).toLocaleString();
+    document.getElementById("stSkus").textContent=shops.reduce((a,s)=>a+s.skus,0).toLocaleString();
+    document.getElementById("stRounds").textContent="1";
+  }
+
+  // 默认勾选规则：今日已抓取商品数 < 抓取页数×30
+  const rows=shops.map((s,i)=>`<tr><td class="chk"><input type="checkbox" data-i="${i}" ${s.products< s.pages*30?'checked':''}></td><td><b>${s.key}</b> ${s.name}</td><td>${s.products}</td><td>${s.skus}</td><td>${s.rounds}</td></tr>`).join("");
+  document.getElementById("rows").innerHTML=rows;
+  document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{
+    document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x===t));
+    document.querySelectorAll(".panel").forEach(p=>p.classList.toggle("active",p.id==="panel-"+t.dataset.tab));
+  });
+  function upd(){document.getElementById("selCnt").textContent="已选 "+document.querySelectorAll("#rows input:checked").length+" / "+shops.length;}
+  document.querySelectorAll("#rows input").forEach(c=>c.onchange=upd);
+  upd();
+  document.getElementById("startBtn").addEventListener("click",()=>{
+    const n=document.querySelectorAll("#rows input:checked").length;
+    if(!n){alert("请至少勾选一个店铺再开始抓取");return;}
+    alert(`原型：开始抓取勾选的 ${n} 个店铺`);
+  });
+</script>
+</body>
+</html>

@@ -9,10 +9,17 @@ import time
 
 from .config import Config, Shop
 from .delay import Humanizer
-from .detail import DetailParseFailed
-from .parse import extract_skus_from_html, extract_title
+from .detail import parse_detail_html
 from . import sound
-from .guard import SLIDER_MARKERS, LOGIN_MARKERS, is_login_url, is_punish_url, is_deny_url
+from .guard import (
+    InterventionTimeout,
+    SLIDER_MARKERS,
+    LOGIN_MARKERS,
+    is_login_url,
+    is_punish_url,
+    is_deny_url,
+)
+from .listing import ListingLoadFailed
 
 log = logging.getLogger(__name__)
 
@@ -94,6 +101,13 @@ def _body_text(page) -> str:
         return ""
 
 
+def _page_html(page) -> str:
+    try:
+        return page.html or ""
+    except Exception:
+        return ""
+
+
 def detect(page) -> str | None:
     url = (getattr(page, "url", "") or "").lower()
     if is_login_url(url):
@@ -123,7 +137,7 @@ def wait_for_human(page, kind: str, minutes: int) -> None:
         except Exception:
             pass
         if time.time() > deadline:
-            raise RuntimeError(f"人工处理超时（{kind}），请稍后重新运行续跑。")
+            raise InterventionTimeout(f"人工处理超时（{kind}），请稍后重新运行续跑。")
         sound.play_alarm(count=1)
         time.sleep(3)
 
@@ -145,7 +159,7 @@ def _get_offer_links(page) -> list[tuple[str, str]]:
     return out
 
 
-def wait_for_offers(page, seconds: int = 180) -> None:
+def wait_for_offers(page, seconds: int = 180) -> bool:
     """等待商品链接真正出现（通常需要人工在此窗口处理滑块验证）。"""
     # 不误报：仅在确认出现验证时才由 wait_for_human 响铃，这里静默等待商品
     deadline = time.time() + seconds
@@ -159,8 +173,9 @@ def wait_for_offers(page, seconds: int = 180) -> None:
             pass
         if _get_offer_links(page):
             log.info("已检测到商品链接，继续。")
-            return
+            return True
     log.warning("超时仍未检测到商品。")
+    return False
 
 
 def crawl_shop_listing(
@@ -178,8 +193,11 @@ def crawl_shop_listing(
     kind = detect(page)
     if kind:
         wait_for_human(page, kind, cfg.human_pause_minutes)
-    if not _get_offer_links(page):
-        wait_for_offers(page, cfg.human_pause_minutes * 60)
+    if not _get_offer_links(page) and not wait_for_offers(page, cfg.human_pause_minutes * 60):
+        raise ListingLoadFailed(
+            f"店铺列表未加载出商品链接：{shop.url}（current_url={getattr(page, 'url', '')}）",
+            html=_page_html(page),
+        )
 
     try:
         btn = page.ele("text:销量", timeout=5)
@@ -241,6 +259,11 @@ def crawl_shop_listing(
         except Exception:
             log.info("店铺 %s 翻页结束", shop.key)
             break
+    if not offers:
+        raise ListingLoadFailed(
+            f"店铺列表未解析到商品：{shop.url}（current_url={getattr(page, 'url', '')}）",
+            html=_page_html(page),
+        )
     return offers, pages_read
 
 
@@ -253,11 +276,4 @@ def capture_detail_payload(page, product_url: str, cfg: Config, human: Humanizer
     if kind:
         wait_for_human(page, kind, cfg.human_pause_minutes)
     html = page.html
-    rows = extract_skus_from_html(html)
-    if not rows:
-        raise DetailParseFailed(f"详情页未解析到 SKU：{product_url}", html=html)
-    return {
-        "product_name": extract_title(html) or "",
-        "html": html,
-        "rows": rows,
-    }
+    return parse_detail_html(html, product_url)

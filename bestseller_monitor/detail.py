@@ -20,6 +20,20 @@ class DetailParseFailed(Exception):
         self.html = html
 
 
+def parse_detail_html(html: str, product_url: str) -> dict:
+    """解析并校验详情页，只有所有 SKU 都有库存时才可作为成功快照写入。"""
+    try:
+        rows = extract_skus_from_html(html)
+        product_name = extract_title(html) or ""
+    except Exception as exc:
+        raise DetailParseFailed(f"详情页 SKU 解析异常：{exc}", html=html) from exc
+    if not rows:
+        raise DetailParseFailed(f"详情页未解析到 SKU：{product_url}", html=html)
+    if any(row.get("sku_stock") is None for row in rows):
+        raise DetailParseFailed(f"详情页存在缺失库存的 SKU：{product_url}", html=html)
+    return {"product_name": product_name, "html": html, "rows": rows}
+
+
 def capture_detail_payload(page, product_url: str, cfg: Config, human: Humanizer) -> dict:
     """打开详情页并返回解析结果；解析失败抛出 DetailParseFailed。"""
     page.goto(product_url, wait_until="domcontentloaded", timeout=cfg.timeout_ms)
@@ -28,14 +42,7 @@ def capture_detail_payload(page, product_url: str, cfg: Config, human: Humanizer
     if kind:
         wait_for_human(page, kind, cfg.human_pause_minutes)
     html = page.content()
-    rows = extract_skus_from_html(html)
-    if not rows:
-        raise DetailParseFailed(f"详情页未解析到 SKU：{product_url}", html=html)
-    return {
-        "product_name": extract_title(html) or "",
-        "html": html,
-        "rows": rows,
-    }
+    return parse_detail_html(html, product_url)
 
 
 def save_raw_page(cfg: Config, round_id: int, offer_id: str, html: str) -> Path:

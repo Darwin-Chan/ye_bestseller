@@ -27,8 +27,17 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(parse_stock("6486515个"), 6486515)
         self.assertEqual(parse_stock("64.8万"), 648000)
         self.assertEqual(parse_stock("1,234"), 1234)
+        self.assertEqual(parse_stock(0), 0)
+        self.assertEqual(parse_stock(0.0), 0)
+        self.assertEqual(parse_stock("0"), 0)
         self.assertIsNone(parse_stock("暂无"))
+        self.assertIsNone(parse_stock(-1))
+        self.assertIsNone(parse_stock(False))
         self.assertEqual(parse_price("¥0.18"), 0.18)
+        self.assertEqual(parse_price(1.25), 1.25)
+        self.assertEqual(parse_price(0), 0.0)
+        self.assertIsNone(parse_price(-1))
+        self.assertIsNone(parse_price(False))
 
     def test_title_and_sku_rows(self):
         html = """
@@ -60,14 +69,20 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(rows[0]["sku_stock"], 648651)
         self.assertEqual(rows[0]["sku_id"], "111")
 
+    def test_sku_map_preserves_numeric_zero_stock_and_price(self):
+        html = (
+            '<script>{"skuInfoMap":{"小号":{"skuId":111,"discountPrice":0,'
+            '"canBookCount":0,"specAttrs":"小号"}}}</script>'
+        )
+        rows = extract_skus_from_html(html)
+        self.assertEqual(rows[0]["sku_price"], 0.0)
+        self.assertEqual(rows[0]["sku_stock"], 0)
+
     def test_single_spec_default_sku(self):
-        # skuInfoMap 为空数组（单规格），商品级有 price
+        # skuInfoMap 为空数组且仅有价格：没有明确库存时不得作为成功 SKU 返回。
         html = '<script>var x={"skuModel":{"skuInfoMap":[],"skuPriceScale":"0.02"},"price":"0.02","amount":1};</script>'
         rows = extract_skus_from_html(html)
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["sku_name"], "默认(单规格)")
-        self.assertEqual(rows[0]["sku_price"], 0.02)
-        self.assertIsNone(rows[0]["sku_stock"])  # amount 不做库存，避免误判
+        self.assertEqual(rows, [])  # amount 不做库存，避免误判
 
 
 if __name__ == "__main__":

@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>1688 畅销品监控 · GUI</title>
+<style>
+  :root{--bg:#f5f7fa;--card:#fff;--line:#e5e9f0;--txt:#1f2937;--mut:#6b7280;--pri:#2563eb;--red:#dc2626;--grn:#16a34a;--amb:#d97706}
+  *{box-sizing:border-box;font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  body{margin:0;background:var(--bg);color:var(--txt)}
+  .wrap{max-width:1080px;margin:0 auto;padding:20px}
+  header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+  header h1{font-size:20px;margin:0}
+  .tabs{display:flex;align-items:stretch;margin-bottom:14px}
+  .step{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;position:relative}
+  .step .dot{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;background:#fff;border:2px solid var(--line);color:var(--mut);z-index:1}
+  .step .lbl{font-size:14px;font-weight:600;color:var(--mut)}
+  .step::after{content:"";position:absolute;top:17px;left:50%;width:100%;height:2px;background:var(--line);z-index:0}
+  .step:last-child::after{display:none}
+  .step.active .dot{background:var(--pri);border-color:var(--pri);color:#fff}
+  .step.active .lbl{color:var(--pri)}
+  .step.done .dot{background:var(--grn);border-color:var(--grn);color:#fff}
+  .step.done .lbl{color:var(--grn)}
+  .step.done::after{background:var(--grn)}
+  .panel{display:none}
+  .panel.active{display:block}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:12px}
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+  .stat .l{font-size:12px;color:var(--mut)}
+  .stat .n{font-size:24px;font-weight:700;color:var(--pri);margin-top:2px}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left}
+  th{background:#f8fafc;color:var(--mut);font-weight:600}
+  tr:hover td{background:#fafcff}
+  .chk input{transform:scale(1.25)}
+  .pill{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px}
+  .pill.g{background:#dcfce7;color:var(--grn)}
+  .pill.r{background:#fee2e2;color:var(--red)}
+  .pill.a{background:#fef3c7;color:var(--amb)}
+  .btn{background:var(--pri);color:#fff;border:0;padding:10px 24px;border-radius:9px;font-size:15px;font-weight:600;cursor:pointer}
+  .btn:hover{filter:brightness(1.05)}
+  .btn.danger{background:var(--red)}
+  .btn.ghost{background:#fff;color:var(--txt);border:1px solid var(--line)}
+  .btn:disabled{opacity:.5;cursor:not-allowed;filter:none}
+  .bar{height:10px;background:#e2e8f0;border-radius:99px;overflow:hidden;margin-top:6px}
+  .bar > i{display:block;height:100%;background:linear-gradient(90deg,#60a5fa,#2563eb)}
+  .flex{display:flex;justify-content:space-between;align-items:center}
+  .muted{color:var(--mut);font-size:13px}
+  .banner{padding:10px 12px;border-radius:8px;font-size:13px;margin-top:12px}
+  .banner.warn{background:#fef9c3;border:1px solid #fde68a}
+  .banner.err{background:#fee2e2;border:1px solid #fecaca}
+  #confirmModal{position:fixed;inset:0;z-index:50;display:none;align-items:center;justify-content:center}
+  #confirmModal.show{display:flex}
+  .modal-mask{position:absolute;inset:0;background:rgba(15,23,42,.35)}
+  .modal-box{position:relative;background:#fff;border-radius:12px;padding:22px 24px;width:340px;box-shadow:0 12px 32px rgba(0,0,0,.2)}
+  .modal-title{font-size:16px;font-weight:700;color:var(--txt)}
+  .modal-sub{font-size:12.5px;color:var(--mut);margin-top:8px;line-height:1.5}
+  .modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:18px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>1688 畅销品监控 · 每日库存抓取</h1>
+  </header>
+
+  <div class="tabs">
+    <div class="step active" data-tab="start"><span class="dot">1</span><span class="lbl">开始</span></div>
+    <div class="step" data-tab="run"><span class="dot">2</span><span class="lbl">过程</span></div>
+    <div class="step" data-tab="result"><span class="dot">3</span><span class="lbl">结果</span></div>
+  </div>
+
+  <!-- 开始 -->
+  <div class="panel active" id="panel-start">
+    <div class="card">
+      <div class="grid" style="grid-template-columns:repeat(3,1fr)">
+        <div class="stat"><div class="l">今日已抓取商品</div><div class="n" id="stProducts">0</div></div>
+        <div class="stat"><div class="l">今日已抓取SKU</div><div class="n" id="stSkus">0</div></div>
+        <div class="stat"><div class="l">今日已抓取轮次</div><div class="n" id="stRounds">0</div></div>
+      </div>
+      <p class="muted" style="margin:12px 0 0" id="todaySummary">—</p>
+      <div class="banner warn" id="activeRoundBanner" style="display:none">检测到有进行中的抓取轮次，点「开始抓取」会续跑该轮。</div>
+    </div>
+    <div class="card">
+      <div class="flex" style="margin-bottom:10px">
+        <b>选择要抓取的店铺</b>
+        <span class="muted" id="selCnt">已选 0 / 0</span>
+      </div>
+      <table>
+        <thead><tr><th style="width:40px">✓</th><th>店铺</th><th>今日已抓取商品</th><th>今日已抓取SKU</th><th>今日已抓取轮次/耗时</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <p class="muted" style="margin:10px 0 0">默认勾选：今日已抓取商品数 &lt; 抓取页数×30；未勾选任意店铺时禁止开始。</p>
+      <div style="margin-top:16px;text-align:right">
+        <button class="btn" id="startBtn">开始抓取</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 过程 -->
+  <div class="panel" id="panel-run">
+    <div class="card">
+      <div class="grid" style="grid-template-columns:repeat(3,1fr)">
+        <div class="stat"><div class="l">已完成店铺</div><div class="n" id="rDone">—</div></div>
+        <div class="stat"><div class="l">已抓时长</div><div class="n" id="rElapsed">—</div></div>
+        <div class="stat"><div class="l">deny 次数</div><div class="n" id="rDeny">0</div></div>
+      </div>
+      <div class="muted" style="margin:10px 0 0" id="rProgressLine">正在启动…</div>
+      <div class="bar"><i id="rBar" style="width:0%"></i></div>
+      <div class="banner warn" id="rPaused" style="display:none">已暂停（轮次保留为「进行中」，点「继续」接着抓取本轮剩余任务）。</div>
+    </div>
+    <div class="card">
+      <b id="rDoneTitle">已完成店铺（0）</b>
+      <table><thead><tr><th>店铺</th><th>已抓取商品</th><th>已抓取SKU</th><th>耗时</th><th>deny次数</th></tr></thead>
+      <tbody id="rDoneRows"></tbody></table>
+    </div>
+    <div class="card">
+      <b id="rTodoTitle">未完成店铺（0）</b>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px" id="rTodoPills"></div>
+      <p class="muted" style="margin:12px 0 0">暂停＝保留本轮可续跑；中止＝放弃本轮（数据保留，不再续跑，下次开新轮）。</p>
+      <div style="margin-top:16px;text-align:right;display:flex;gap:10px;justify-content:flex-end">
+        <button class="btn ghost" id="resumeBtn" style="display:none">继续</button>
+        <button class="btn ghost" id="pauseBtn">暂停本轮</button>
+        <button class="btn danger" id="abortBtn">中止本轮（放弃）</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 结果 -->
+  <div class="panel" id="panel-result">
+    <div class="card">
+      <div style="display:flex;gap:20px;align-items:stretch">
+        <div style="flex:1">
+          <div class="muted" style="font-size:12px">完成店铺</div>
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:8px;margin-top:2px">
+            <span style="font-size:28px;font-weight:800;color:var(--pri)" id="resDoneBig">—</span>
+            <span class="muted" style="font-size:12px;padding-bottom:4px" id="resDoneSmall">—</span>
+          </div>
+        </div>
+        <div style="flex:1;border-left:1px solid var(--line);padding-left:20px">
+          <div class="muted" style="font-size:12px">总耗时</div>
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:8px;margin-top:2px">
+            <span style="font-size:28px;font-weight:800;color:var(--pri)" id="resDur">—</span>
+            <span class="muted" style="font-size:12px;padding-bottom:4px" id="resNoteSmall">—</span>
+          </div>
+        </div>
+      </div>
+      <p class="muted" style="margin:14px 0 0;display:flex;gap:6px;align-items:center">
+        <span class="pill r" id="resTag">—</span> <span id="resNote" style="font-size:13px;color:var(--mut)">—</span>
+      </p>
+    </div>
+    <div class="card">
+      <b id="resDoneTitle">已抓取店铺（0）</b>
+      <table><thead><tr><th>店铺</th><th>已抓取商品</th><th>已抓取SKU</th><th>耗时</th><th>deny次数</th></tr></thead>
+      <tbody id="resDoneRows"></tbody></table>
+    </div>
+    <div class="card">
+      <b id="resTodoTitle">未抓取店铺（0）</b>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px" id="resTodoPills"></div>
+      <div style="margin-top:16px;text-align:right">
+        <button class="btn ghost" id="backBtn">返回开始</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div id="confirmModal">
+  <div class="modal-mask"></div>
+  <div class="modal-box">
+    <div class="modal-title">确认终止本轮抓取？</div>
+    <div class="modal-sub">已抓取数据已被存储，未抓取数据将被忽略。</div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="confirmCancel">取消</button>
+      <button class="btn danger" id="confirmOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  let api = null;
+  let pollTimer = null;
+  let hasStartedRun = false;
+
+  const $ = id => document.getElementById(id);
+
+  const STEP_ORDER = ["start", "run", "result"];
+  function updateSteps(cur) {
+    const idx = STEP_ORDER.indexOf(cur);
+    document.querySelectorAll(".step").forEach(s => {
+      const i = STEP_ORDER.indexOf(s.dataset.tab);
+      s.classList.toggle("active", i === idx);
+      s.classList.toggle("done", i < idx);
+    });
+  }
+  function switchTab(name) {
+    updateSteps(name);
+    document.querySelectorAll(".panel").forEach(p => p.classList.toggle("active", p.id === "panel-" + name));
+    if (name === "start") refreshStart();
+  }
+
+  function fmtDur(sec) {
+    if (sec == null) return "—";
+    sec = Math.floor(sec);
+    if (sec < 60) return sec + " 秒";
+    const m = Math.floor(sec / 60), s = sec % 60;
+    if (m < 60) return m + " 分";
+    return Math.floor(m / 60) + " 时 " + (m % 60) + " 分";
+  }
+  function fmtDurMin(sec) {
+    if (sec == null || sec < 0) return "—";
+    return (sec / 60).toFixed(1) + " 分";
+  }
+
+  // ---------- 开始页 ----------
+  async function refreshStart() {
+    const d = await api.get_start();
+    $("stProducts").textContent = d.ov.products.toLocaleString();
+    $("stSkus").textContent = d.ov.skus.toLocaleString();
+    $("stRounds").textContent = d.summary.rounds;
+    $("todaySummary").textContent = d.summary.started
+      ? ("今日已抓取轮次：" + d.summary.text)
+      : "今天尚未开始，可勾选店铺后点「开始抓取」";
+    $("activeRoundBanner").style.display = d.active_round_id ? "block" : "none";
+
+    const total = d.total_shops;
+    const rows = d.shops.map((s, i) => {
+      const chk = s.default_checked ? "checked" : "";
+      return `<tr><td class="chk"><input type="checkbox" data-i="${i}" ${chk}></td>` +
+        `<td><b>${s.key}</b> ${s.name}</td><td>${s.products}</td><td>${s.skus}</td><td>${s.rounds_text}</td></tr>`;
+    }).join("");
+    $("rows").innerHTML = rows;
+    $("selCnt").textContent = "已选 " + document.querySelectorAll("#rows input:checked").length + " / " + total;
+    document.querySelectorAll("#rows input").forEach(c => c.onchange = updateSel);
+    api.__shops = d.shops;
+  }
+
+  function updateSel() {
+    const n = document.querySelectorAll("#rows input:checked").length;
+    $("selCnt").textContent = "已选 " + n + " / " + (api && api.__shops ? api.__shops.length : 0);
+  }
+
+  async function startRun() {
+    const boxes = [...document.querySelectorAll("#rows input:checked")];
+    if (boxes.length === 0) { alert("请至少勾选一个店铺再开始抓取"); return; }
+    const keys = boxes.map(b => api.__shops[+b.dataset.i].key);
+    const r = await api.start_run(keys);
+    if (!r.ok) { alert(r.error || "启动失败"); return; }
+    hasStartedRun = true;
+    switchTab("run");
+    startPolling();
+  }
+
+  // ---------- 过程页 ----------
+  function startPolling() {
+    stopPolling();
+    pollTimer = setInterval(tickRun, 2000);
+    tickRun();
+  }
+  function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+  async function tickRun() {
+    const d = await api.get_run();
+    if (d.has_round) {
+      $("rDone").textContent = d.done_count + " / " + d.total_count;
+      $("rElapsed").textContent = fmtDur(d.elapsed_sec);
+      $("rDeny").textContent = d.deny;
+      $("rBar").style.width = (d.progress * 100) + "%";
+      const cur = d.current_shop ? d.current_shop + "（第 " + (d.done_count + 1) + " 家）" : "准备中";
+      $("rProgressLine").textContent = "进度：当前处理 " + cur + " · 已抓 " + fmtDur(d.elapsed_sec);
+      $("rDoneTitle").textContent = "已完成店铺（" + d.done_count + "）";
+      $("rDoneRows").innerHTML = d.done.map(s =>
+        `<tr><td><b>${s.key}</b> ${s.name}</td><td>${s.products}</td><td>${s.skus}</td><td>${s.duration}</td><td>${s.deny}</td></tr>`
+      ).join("") || `<tr><td colspan="5" class="muted">还没有完成的店铺</td></tr>`;
+      $("rTodoTitle").textContent = "未完成店铺（" + d.todo.length + "）";
+      $("rTodoPills").innerHTML = d.todo.map(s => `<span class="pill a">${s.key}</span>`).join("");
+      $("rPaused").style.display = d.manually_paused ? "block" : "none";
+      // 暂停态显示“继续”，运行态显示“暂停”
+      $("resumeBtn").style.display = d.manually_paused ? "" : "none";
+      $("pauseBtn").style.display = d.manually_paused ? "none" : "";
+    } else {
+      $("rProgressLine").textContent = d.running ? "抓取进程正在启动…" : "本轮已结束，正在加载结果…";
+    }
+
+    // 结束判定：子进程结束且非暂停 -> 看结果
+    if (!d.running && !d.manually_paused && hasStartedRun) {
+      stopPolling();
+      const res = await api.get_result();
+      if (res.has_round) { renderResult(res); switchTab("result"); }
+    }
+  }
+
+  async function pauseRun() { await api.pause_run(); await tickRun(); }
+  async function resumeRun() {
+    const r = await api.resume_run();
+    if (!r.ok) { alert(r.error || "继续失败"); return; }
+    startPolling();
+  }
+  function openConfirm() { $("confirmModal").classList.add("show"); }
+  function closeConfirm() { $("confirmModal").classList.remove("show"); }
+  async function doAbort() {
+    await api.abort_run();
+    stopPolling();
+    const res = await api.get_result();
+    if (res.has_round) { renderResult(res); switchTab("result"); }
+  }
+
+  // ---------- 结果页 ----------
+  function renderResult(d) {
+    $("resDoneBig").textContent = d.done_count + " / " + d.total_count;
+    $("resDoneSmall").textContent = "其中商品 " + d.products_total + " · SKU " + d.skus_total;
+    $("resDur").textContent = d.duration_text;
+    $("resNoteSmall").textContent = "deny " + d.deny + " 次";
+    $("resTag").textContent = d.tag;
+    $("resNote").textContent = d.note;
+    $("resDoneTitle").textContent = "已抓取店铺（" + d.done.length + "）";
+    $("resDoneRows").innerHTML = d.done.map(s =>
+      `<tr><td><b>${s.key}</b> ${s.name}</td><td>${s.products}</td><td>${s.skus}</td><td>${s.duration}</td><td>${s.deny}</td></tr>`
+    ).join("") || `<tr><td colspan="5" class="muted">没有已抓取的店铺</td></tr>`;
+    $("resTodoTitle").textContent = "未抓取店铺（" + d.todo.length + "）";
+    $("resTodoPills").innerHTML = d.todo.map(s => `<span class="pill a">${s.key}</span>`).join("");
+  }
+
+  async function showResultIfExists() {
+    const res = await api.get_result();
+    if (res.has_round) renderResult(res);
+  }
+
+  // ---------- 初始化 ----------
+  function init() {
+    api = window.pywebview.api;
+    $("startBtn").onclick = startRun;
+    $("pauseBtn").onclick = pauseRun;
+    $("abortBtn").onclick = openConfirm;
+    $("confirmCancel").onclick = closeConfirm;
+    $("confirmOk").onclick = async () => { closeConfirm(); await doAbort(); };
+    $("resumeBtn").onclick = resumeRun;
+    $("backBtn").onclick = () => switchTab("start");
+    refreshStart();
+  }
+
+  if (window.pywebview && window.pywebview.api) {
+    init();
+  } else {
+    window.addEventListener("pywebviewready", init);
+  }
+</script>
+</body>
+</html>

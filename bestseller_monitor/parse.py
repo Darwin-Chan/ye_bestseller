@@ -8,6 +8,7 @@ from __future__ import annotations
 import html as _html
 import json
 import hashlib
+import math
 import re
 
 OFFER_HREF_RE = re.compile(r"""href=["']([^"']*?(?:/offer/|/item/)(\d+)\.html[^"']*)["']""", re.I)
@@ -61,21 +62,41 @@ def extract_title(html_text: str) -> str | None:
     return None
 
 
-def parse_price(text: str | None) -> float | None:
+def parse_price(value: object) -> float | None:
+    """解析价格；保留合法的 0，拒绝负数、布尔值和非有限数。"""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) and parsed >= 0 else None
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
     if not text:
         return None
-    m = re.search(r"\d+(?:\.\d+)?", text.replace(",", "").replace("，", ""))
-    return float(m.group(0)) if m else None
+    m = re.search(r"(?<![-\d.])\d+(?:\.\d+)?", text.replace(",", "").replace("，", ""))
+    if not m:
+        return None
+    parsed = float(m.group(0))
+    return parsed if math.isfinite(parsed) and parsed >= 0 else None
 
 
-def parse_stock(text: str | None) -> int | None:
+def parse_stock(value: object) -> int | None:
     """把 '6486515个' / '64.8万' / '1,234' 转成整数；失败返回 None。"""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed < 0 or not parsed.is_integer():
+            return None
+        return int(parsed)
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
     if not text:
         return None
-    if isinstance(text, (int, float)):
-        return int(text)
-    t = text.replace(",", "").replace("，", "").strip()
-    m = re.search(r"(\d+(?:\.\d+)?)\s*(万|亿)?", t)
+    t = text.replace(",", "").replace("，", "")
+    m = re.search(r"(?<![-\d.])(\d+(?:\.\d+)?)\s*(万|亿)?", t)
     if not m:
         return None
     val = float(m.group(1))
@@ -84,7 +105,7 @@ def parse_stock(text: str | None) -> int | None:
         val *= 10_000
     elif unit == "亿":
         val *= 100_000_000
-    return int(val)
+    return int(val) if math.isfinite(val) and val >= 0 else None
 
 
 def extract_sku_rows(html_text: str) -> list[dict]:
@@ -137,7 +158,7 @@ def _extract_default_sku(html_text: str) -> list[dict]:
         if m:
             stock = parse_stock(m.group(1))
             break
-    if price is None and stock is None:
+    if stock is None:
         return []
     return [{
         "sku_id": "default",
@@ -180,7 +201,10 @@ def extract_skus_from_html(html_text: str) -> list[dict]:
             if not isinstance(val, dict):
                 continue
             name = str(val.get("specAttrs") or key).strip() or str(key).strip()
-            price = parse_price(val.get("discountPrice") or val.get("price"))
+            price_value = val.get("discountPrice")
+            if price_value is None:
+                price_value = val.get("price")
+            price = parse_price(price_value)
             stock = val.get("canBookCount")
             if stock is None:
                 stock = val.get("quantity")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 from typing import Callable
 
 from .config import Config, Shop
@@ -15,7 +16,15 @@ log = logging.getLogger(__name__)
 Offer = tuple[int, str, str, str, str]  # rank, offer_id, product_url, list_title, list_price
 
 
-class ListingCalibrationRequired(Exception):
+class ListingLoadFailed(Exception):
+    """列表无法确认可用，不能把空结果写成完成榜单。"""
+
+    def __init__(self, message: str, html: str = ""):
+        super().__init__(message)
+        self.html = html
+
+
+class ListingCalibrationRequired(ListingLoadFailed):
     """列表页结构与预期不符，需要人工校准。"""
 
 
@@ -48,6 +57,16 @@ def _next_page_available(page) -> bool:
         return disabled is None
     except Exception:
         return False
+
+
+def save_raw_listing_page(cfg: Config, round_id: int, shop_key: str, html: str) -> Path:
+    """存档失败列表页，供选择器或页面结构校准。"""
+    d = cfg.raw_page_dir / f"round_{round_id}"
+    d.mkdir(parents=True, exist_ok=True)
+    safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", shop_key)
+    path = d / f"listing_{safe_key}.html"
+    path.write_text(html, encoding="utf-8")
+    return path
 
 
 def crawl_shop_listing(
@@ -94,7 +113,7 @@ def crawl_shop_listing(
                 for _oid, url in extract_offer_links(html)
             ]
             if not items:
-                raise ListingCalibrationRequired(f"店铺列表无法解析：{shop.url}（{exc}）")
+                raise ListingCalibrationRequired(f"店铺列表无法解析：{shop.url}（{exc}）", html=html)
 
         added = 0
         for item in items:
@@ -122,4 +141,13 @@ def crawl_shop_listing(
             log.warning("点击下一页失败：%s", exc)
             break
 
+    if not offers:
+        try:
+            html = page.content()
+        except Exception:
+            html = ""
+        raise ListingLoadFailed(
+            f"店铺列表未解析到商品：{shop.url}（current_url={getattr(page, 'url', '')}）",
+            html=html,
+        )
     return offers, pages_read

@@ -39,17 +39,17 @@ python run.py --pages-per-shop 2 --max-detail 20 --limit-shops A01
 
 运行说明：
 
-- 必须使用真实登录过的浏览器 profile（`profiles/account1_edge`），首次请运行
+- 必须使用真实登录过的浏览器 profile（`config/config.toml` 的 `profile_dir`，现为 `F:/AI/bestseller_runtime/profiles/account1_edge`），首次请运行
   `python login_chrome.py` 扫码登录一次。
 - 出现滑块/登录墙时程序会暂停等待人工处理。
 - 中断后可再次运行续跑；每轮只有完整完成后才参与库存差分。
-- 结果写入 `data/bestseller.db`；解析失败的原始页面存 `data/raw_pages/round_<轮次>/`；不再自动生成 CSV/Excel。运行数据均已加入 `.gitignore`。
+- 结果写入 `F:/AI/bestseller_runtime/data/bestseller.db`；解析失败的原始页面存 `F:/AI/bestseller_runtime/data/raw_pages/round_<轮次>/`；不再自动生成 CSV/Excel。运行数据已移出工作区（路径见 `config/config.toml`）。
 
 ## 校准说明
 
 1688 页面结构会变化。首次实机运行时若详情页 SKU 或店铺列表解析失败，程序会：
 
-- 把原始 HTML 存到 `data/raw_pages/round_<轮次>/`；
+- 把原始 HTML 存到 `F:/AI/bestseller_runtime/data/raw_pages/round_<轮次>/`；
 - 在数据库（rounds/snapshots）与日志中标记「需人工/解析失败」；
 - 根据存档页面调整 `bestseller_monitor/parse.py` 里的解析规则后重跑即可，其余模块无需改动。
 

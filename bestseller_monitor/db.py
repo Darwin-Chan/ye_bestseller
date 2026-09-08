@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS shop_rounds (
     list_status TEXT NOT NULL DEFAULT '待处理',
     list_pages_read INTEGER DEFAULT 0,
     offer_count INTEGER DEFAULT 0,
+    list_note TEXT,
     PRIMARY KEY (round_id, shop_key)
 );
 
@@ -242,6 +243,10 @@ def connect(db_path: Path) -> sqlite3.Connection:
     except sqlite3.OperationalError:
         pass
     try:
+        conn.execute("ALTER TABLE shop_rounds ADD COLUMN list_note TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
         info = conn.execute('PRAGMA table_info("skus")').fetchall()
         if any(r[1] == "main_image_url" for r in info):
             conn.execute("ALTER TABLE skus DROP COLUMN main_image_url")
@@ -327,6 +332,13 @@ class Database:
         )
         return cur.fetchall()
 
+    def completed_listing_keys(self, round_id: int) -> set[str]:
+        cur = self.conn.execute(
+            "SELECT shop_key FROM shop_rounds WHERE round_id=? AND list_status='完成'",
+            (round_id,),
+        )
+        return {str(row["shop_key"]) for row in cur.fetchall()}
+
     def add_shop(self, round_id: int, shop_key: str, shop_url: str, shop_name: str) -> None:
         self.conn.execute(
             "INSERT OR IGNORE INTO shop_rounds(round_id, shop_key, shop_url, shop_name) "
@@ -355,7 +367,11 @@ class Database:
         shop_name: str,
         offers: list[tuple[int, str, str, str, str]],  # rank, offer_id, url, title, price
         pages_read: int,
+        *,
+        confirmed_empty: bool = False,
     ) -> None:
+        if not offers and not confirmed_empty:
+            raise ValueError("未确认的空榜单不能标记为完成")
         self.conn.execute("DELETE FROM shop_offers WHERE round_id=? AND shop_key=?", (round_id, shop_key))
         rows = [
             (round_id, shop_key, shop_url, shop_name, rank, oid, url, title, price)
@@ -367,12 +383,27 @@ class Database:
             rows,
         )
         self.conn.execute(
-            "UPDATE shop_rounds SET list_status='完成', list_pages_read=?, offer_count=? "
+            "UPDATE shop_rounds SET list_status='完成', list_pages_read=?, offer_count=?, list_note=NULL "
             "WHERE round_id=? AND shop_key=?",
             (pages_read, len(rows), round_id, shop_key),
         )
         self.conn.commit()
         log.info("店铺 %s 榜单入库 %s 个商品（读了 %s 页）", shop_key, len(rows), pages_read)
+
+    def mark_listing_failure(self, round_id: int, shop_key: str, note: str) -> None:
+        """记录列表页失败；保留店铺为未完成状态，供同轮续跑。"""
+        self.conn.execute(
+            "UPDATE shop_rounds SET list_status='失败', list_note=? WHERE round_id=? AND shop_key=?",
+            (note, round_id, shop_key),
+        )
+        self.conn.commit()
+
+    def incomplete_listings(self, round_id: int) -> list[sqlite3.Row]:
+        cur = self.conn.execute(
+            "SELECT * FROM shop_rounds WHERE round_id=? AND list_status!='完成' ORDER BY shop_key",
+            (round_id,),
+        )
+        return cur.fetchall()
 
     def pending_offers(self, round_id: int, max_attempts: int) -> Iterator[sqlite3.Row]:
         sql = """
@@ -392,7 +423,19 @@ class Database:
         """
         yield from self.conn.execute(sql, {"rid": round_id, "max_attempts": max_attempts})
 
-    def mark_failure(self, round_id: int, shop_key: str, offer_id: str, attempt: int, note: str) -> None:
+    def mark_failure(
+        self,
+        round_id: int,
+        shop_key: str,
+        offer_id: str,
+        attempt: int,
+        note: str,
+        *,
+        shop_url: str | None = None,
+        shop_name: str | None = None,
+        product_url: str | None = None,
+        product_name: str | None = None,
+    ) -> None:
         row = self.conn.execute(
             "SELECT shop_url, shop_name, product_url, list_title AS product_name "
             "FROM shop_offers "
@@ -400,7 +443,14 @@ class Database:
             (round_id, shop_key, offer_id),
         ).fetchone()
         if row is None:
-            return
+            if shop_url is None or shop_name is None or product_url is None:
+                raise ValueError(f"缺少失败商品元数据：{shop_key}/{offer_id}")
+            row = {
+                "shop_url": shop_url,
+                "shop_name": shop_name,
+                "product_url": product_url,
+                "product_name": product_name,
+            }
         self.conn.execute(
             "INSERT INTO snapshots(round_id, shop_key, shop_url, shop_name, offer_id, product_url, "
             "product_name, collected_at, page_status, attempt, detail_note) "
@@ -422,6 +472,10 @@ class Database:
 
     def save_snapshot_rows(self, round_id: int, shop_key: str, rows: list[dict]) -> None:
         """按 offer 写 snapshots + skus + inventory；失败回滚该 offer（不产生半截数据）。"""
+        if not rows:
+            raise ValueError("成功快照不能为空")
+        if any(not row.get("sku_id") or row.get("sku_stock") is None for row in rows):
+            raise ValueError("成功快照的每个 SKU 都必须有编号和库存")
         try:
             self.conn.execute("BEGIN")
             self.conn.executemany(
@@ -496,19 +550,21 @@ class Database:
         self.conn.commit()
 
     def inventory_exists(self, shop_key: str, offer_id: str, date: str) -> bool:
-        """某 (shop_key, offer_id, date) 是否已有库存记录（任意 SKU 存在即视为已有）。"""
+        """某 (shop_key, offer_id, date) 是否已有完整库存记录。"""
         row = self.conn.execute(
-            "SELECT 1 FROM inventory WHERE shop_key=? AND offer_id=? AND date=? LIMIT 1",
+            "SELECT 1 FROM inventory WHERE shop_key=? AND offer_id=? AND date=? "
+            "AND stock IS NOT NULL LIMIT 1",
             (shop_key, offer_id, date),
         ).fetchone()
         return row is not None
 
     def inventory_exists_by_name(self, shop_key: str, product_name: str, date: str) -> bool:
-        """某 (shop_key, product_name, date) 是否已有库存记录（按列表页商品名匹配）。"""
+        """某 (shop_key, product_name, date) 是否已有完整库存记录（按列表页商品名匹配）。"""
         if not product_name:
             return False
         row = self.conn.execute(
-            "SELECT 1 FROM inventory WHERE shop_key=? AND product_name=? AND date=? LIMIT 1",
+            "SELECT 1 FROM inventory WHERE shop_key=? AND product_name=? AND date=? "
+            "AND stock IS NOT NULL LIMIT 1",
             (shop_key, product_name, date),
         ).fetchone()
         return row is not None
@@ -523,7 +579,7 @@ class Database:
             return None
         rows = self.conn.execute(
             "SELECT DISTINCT offer_id FROM inventory "
-            "WHERE shop_key=? AND product_name=? AND date=?",
+            "WHERE shop_key=? AND product_name=? AND date=? AND stock IS NOT NULL",
             (shop_key, product_name, date),
         ).fetchall()
         ids = [r["offer_id"] for r in rows]
@@ -579,12 +635,19 @@ class Database:
 
     def offer_counts(self, round_id: int) -> tuple[int, int]:
         total = self.conn.execute(
-            "SELECT COUNT(*) AS c FROM (SELECT 1 FROM shop_offers WHERE round_id=?)",
+            "SELECT COUNT(*) AS c FROM ("
+            "SELECT shop_key, offer_id FROM shop_offers WHERE round_id=? "
+            "GROUP BY shop_key, offer_id)",
             (round_id,),
         ).fetchone()["c"]
         ok = self.conn.execute(
-            "SELECT COUNT(*) AS c FROM (SELECT 1 FROM snapshots WHERE round_id=? "
-            "AND page_status='成功')",
+            "SELECT COUNT(*) AS c FROM ("
+            "SELECT so.shop_key, so.offer_id FROM shop_offers so "
+            "WHERE so.round_id=? AND EXISTS ("
+            "SELECT 1 FROM snapshots s WHERE s.round_id=so.round_id "
+            "AND s.shop_key=so.shop_key AND s.offer_id=so.offer_id "
+            "AND s.page_status='成功') "
+            "GROUP BY so.shop_key, so.offer_id)",
             (round_id,),
         ).fetchone()["c"]
         return int(total), int(ok)

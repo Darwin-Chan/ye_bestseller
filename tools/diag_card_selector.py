@@ -1,15 +1,23 @@
 """诊断：店铺商品列表页可点击卡片元素的真实 tag/class（临时工具）。"""
 import json
-import os
 import subprocess
+import sys
 import time
+from pathlib import Path
+
+_REPO = Path(__file__).resolve().parent.parent
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
 
 from playwright.sync_api import sync_playwright
+from bestseller_monitor.config import Config
 
 EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-PROFILE = os.path.abspath("profiles/account1_edge")
 PORT = 9222
 URL = "https://yipihuo8.1688.com/page/offerlist.htm"
+
+_cfg = Config.from_file(_REPO / "config" / "config.toml", root=_REPO)
+PROFILE = str(_cfg.user_data_path)
 
 
 def main():

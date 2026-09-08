@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import logging.handlers
 import sys
 from pathlib import Path
 
@@ -72,7 +73,7 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler(cfg.logs_dir / "run.log", encoding="utf-8"),
+            logging.handlers.RotatingFileHandler(cfg.logs_dir / "run.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8"),
         ],
     )
 

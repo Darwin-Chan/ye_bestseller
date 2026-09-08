@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import time
+from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 
 try:
@@ -31,10 +32,12 @@ from playwright.sync_api import sync_playwright
 from bestseller_monitor.config import Config, load_shops
 
 EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-PROFILE = os.path.abspath("profiles/account1_edge")
 PORT = 9222
 ROOT = os.path.dirname(REPO)
 cfg_timeout = 45000
+
+_cfg = Config.from_file(Path(REPO) / "config/config.toml", root=Path(REPO))
+PROFILE = str(_cfg.user_data_path)
 
 
 def pick_url(arg: str | None) -> str:
