@@ -428,7 +428,8 @@ class Database:
         )
         return cur.fetchall()
 
-    def pending_offers(self, round_id: int, max_attempts: int) -> Iterator[sqlite3.Row]:
+    def pending_offers(self, round_id: int, max_attempts: int,
+                       shop_key: str | None = None) -> Iterator[sqlite3.Row]:
         sql = """
         SELECT so.* FROM shop_offers so
         WHERE so.round_id = :rid
@@ -442,9 +443,13 @@ class Database:
             WHERE s2.round_id = so.round_id AND s2.shop_key = so.shop_key
               AND s2.offer_id = so.offer_id
           ), 0) < :max_attempts
-        ORDER BY so.id
         """
-        yield from self.conn.execute(sql, {"rid": round_id, "max_attempts": max_attempts})
+        params = {"rid": round_id, "max_attempts": max_attempts}
+        if shop_key is not None:
+            sql += "          AND so.shop_key = :shop_key\n"
+            params["shop_key"] = shop_key
+        sql += "        ORDER BY so.id"
+        yield from self.conn.execute(sql, params)
 
     def mark_failure(
         self,

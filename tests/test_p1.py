@@ -32,6 +32,9 @@ class P1Tests(unittest.TestCase):
             "human_pause_minutes": 1,
             "intervention_confirmation_sec": 0,
             "fail_rate_limit": 0.1,
+            "max_attempts_per_page": 2,
+            "max_detail_pages_per_round": 1000,
+            "shuffle_within_shop": False,
             "long_pause_interval": (1, 1),
             "detail_delay_sec": (0.0, 0.0),
             "long_pause_sec": (0.0, 0.0),
@@ -283,7 +286,7 @@ class P1Tests(unittest.TestCase):
             browser_pw,
             "crawl_store_by_click",
             side_effect=[ListingLoadFailed("首屏无卡片", "<html>failed</html>"), (ok_offers, 1)],
-        ):
+        ), patch.object(pipeline, "_retry_shop_pending_pw") as retry:
             pipeline._run_listing_pw(self.db, cfg, round_id, shops, MagicMock())
 
         rows = self.conn.execute(
@@ -291,6 +294,44 @@ class P1Tests(unittest.TestCase):
         ).fetchall()
         self.assertEqual([tuple(row) for row in rows], [("A01", "失败"), ("A02", "完成")])
         self.assertTrue((Path(self.tmp.name) / "raw" / f"round_{round_id}" / "listing_A01.html").exists())
+        # 只有榜单成功的 A02 会立即进入补抓，A01 榜单失败则不会。
+        retry.assert_called_once()
+        self.assertEqual(retry.call_args[0][3].key, "A02")
+
+    def test_failed_offers_retried_immediately_after_their_shop(self):
+        round_id = self.db.start_or_resume()
+        shops = [
+            Shop("A01", "店A", "https://shop-a.example/"),
+            Shop("A02", "店B", "https://shop-b.example/"),
+        ]
+        for shop in shops:
+            self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        cfg = self._cfg()
+
+        self.db.mark_failure(
+            round_id, "A01", "1", 1, "解析失败",
+            shop_url="https://shop-a.example/", shop_name="店A",
+            product_url="https://detail.1688.com/offer/1.html", product_name="商品1",
+        )
+        self.db.mark_skipped(round_id, "A02", "https://shop-b.example/", "店B", "2",
+                             "https://detail.1688.com/offer/2.html", "商品2", "今日已有库存，跳过")
+
+        events = []
+
+        def fake_crawl(page, shop, cfg_, human, db=None, round_id=None, emit=None,
+                       deny_tracker=None):
+            events.append(("list", shop.key))
+            oid = "1" if shop.key == "A01" else "2"
+            return [(1, oid, f"https://detail.1688.com/offer/{oid}.html", f"商品{oid}", "")], 1
+
+        def fake_capture(db, cfg_, human, rid, offer, page, emit=None):
+            events.append(("retry", offer["shop_key"]))
+
+        with patch.object(browser_pw, "crawl_store_by_click", side_effect=fake_crawl), \
+             patch.object(pipeline, "_capture_one_pw", side_effect=fake_capture):
+            pipeline._run_listing_pw(self.db, cfg, round_id, shops, MagicMock())
+
+        self.assertEqual(events, [("list", "A01"), ("retry", "A01"), ("list", "A02")])
 
 
 if __name__ == "__main__":

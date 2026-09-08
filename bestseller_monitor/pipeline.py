@@ -26,8 +26,9 @@ def _ensure_db_shops(db: Database, round_id: int, shops: list[Shop]) -> None:
         db.add_shop(round_id, shop.key, shop.url, shop.name)
 
 
-def _pending_detail_offers(db: Database, round_id: int, cfg: Config):
-    rows = list(db.pending_offers(round_id, cfg.max_attempts_per_page))
+def _pending_detail_offers(db: Database, round_id: int, cfg: Config,
+                           shop_key: str | None = None):
+    rows = list(db.pending_offers(round_id, cfg.max_attempts_per_page, shop_key=shop_key))
     if not cfg.shuffle_within_shop:
         return rows
     grouped: dict[str, list] = defaultdict(list)
@@ -143,7 +144,7 @@ def _run_listing_dp(db: Database, cfg: Config, round_id: int, shops: list[Shop],
             db.save_shop_offers(round_id, shop.key, shop.url, shop.name, offers, pages_read)
         except ListingLoadFailed as exc:
             _record_listing_failure(db, cfg, round_id, shop, exc)
-    log.info("榜单阶段完成")
+    log.info("店铺阶段完成（含逐店即时补抓）")
 
 
 def _run_detail_dp(db: Database, cfg: Config, round_id: int, page) -> None:
@@ -404,7 +405,6 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int, shops: list[Shop]
     deny_tracker = DenyTracker(cfg.deny_window_minutes * 60)
     try:
         _run_listing_pw(db, cfg, round_id, shops, page, emit=emit, deny_tracker=deny_tracker)
-        _run_detail_pw(db, cfg, round_id, page, emit=emit)
     finally:
         browser_pw.close_session(pw, br)
 
@@ -414,9 +414,12 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
     db.set_phase(round_id, "listing")
     done = db.completed_listing_keys(round_id)
     human = Humanizer(cfg)
+    detail_state = {"processed": 0, "cap": cfg.max_detail_pages_per_round}
     for shop in shops:
         if shop.key in done:
-            log.info("店铺 %s 本轮已完成榜单，跳过", shop.key)
+            log.info("店铺 %s 本轮已完成榜单，跳过列表", shop.key)
+            _retry_shop_pending_pw(db, cfg, round_id, shop, page, human, emit=emit,
+                                   state=detail_state)
             continue
         try:
             offers, pages_read = browser_pw.crawl_store_by_click(
@@ -434,21 +437,25 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
             raise
         except ListingLoadFailed as exc:
             _record_listing_failure(db, cfg, round_id, shop, exc)
+            continue
+        _retry_shop_pending_pw(db, cfg, round_id, shop, page, human, emit=emit,
+                               state=detail_state)
     log.info("榜单阶段完成")
 
 
-def _run_detail_pw(db: Database, cfg: Config, round_id: int, page, emit=None) -> None:
-    db.set_phase(round_id, "detail")
-    human = Humanizer(cfg)
-    offers = _pending_detail_offers(db, round_id, cfg)
-    log.info("详情阶段：待处理商品 %s 个", len(offers))
-    processed = 0
-    cap = cfg.max_detail_pages_per_round
+def _retry_shop_pending_pw(db: Database, cfg: Config, round_id: int, shop: Shop, page,
+                           human: Humanizer, emit=None, state: dict | None = None) -> None:
+    """某店榜单保存完成后，立即补抓该店本轮尚未成功的商品，再进入下一家店。"""
+    offers = _pending_detail_offers(db, round_id, cfg, shop_key=shop.key)
+    if not offers:
+        return
+    log.info("店铺 %s 榜单完成后立即补抓 %s 个失败商品", shop.key, len(offers))
     for offer in offers:
-        if processed >= cap:
-            log.warning("已达单轮详情上限 %s，剩余留待下一轮。", cap)
+        if state is not None and state["processed"] >= state["cap"]:
+            log.warning("已达单轮详情上限 %s，剩余留待下一轮。", state["cap"])
             break
-        processed += 1
+        if state is not None:
+            state["processed"] += 1
         try:
             _capture_one_pw(db, cfg, human, round_id, offer, page, emit=emit)
         except (RoundPauseRequired, DayBoundaryReached):
@@ -456,9 +463,8 @@ def _run_detail_pw(db: Database, cfg: Config, round_id: int, page, emit=None) ->
         except Exception as exc:
             log.exception("详情抓取意外失败：%s", offer["product_url"])
             db.mark_failure(round_id, offer["shop_key"], offer["offer_id"], 1, str(exc))
-        if processed % cfg.batch_size == 0:
+        if state is not None and state["processed"] % cfg.batch_size == 0:
             human.before_batch_rest()
-    log.info("详情阶段结束：本轮处理 %s 个商品", processed)
 
 
 def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, offer, page,
