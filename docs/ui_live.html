@@ -77,7 +77,7 @@
         <div class="stat"><div class="l">今日已抓取SKU</div><div class="n" id="stSkus">0</div></div>
         <div class="stat"><div class="l">今日已抓取轮次</div><div class="n" id="stRounds">0</div></div>
       </div>
-      <p class="muted" style="margin:12px 0 0" id="todaySummary">—</p>
+      <p class="muted" style="margin:12px 0 0;white-space:pre-line" id="todaySummary">—</p>
       <div class="banner warn" id="activeRoundBanner" style="display:none">检测到有进行中的抓取轮次，点「开始抓取」会续跑该轮。</div>
     </div>
     <div class="card">
@@ -218,7 +218,7 @@
     $("stSkus").textContent = d.ov.skus.toLocaleString();
     $("stRounds").textContent = d.summary.rounds;
     $("todaySummary").textContent = d.summary.started
-      ? ("今日已抓取轮次：" + d.summary.text)
+      ? d.summary.text
       : "今天尚未开始，可勾选店铺后点「开始抓取」";
     $("activeRoundBanner").style.display = d.active_round_id ? "block" : "none";
 

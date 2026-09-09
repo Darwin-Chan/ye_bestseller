@@ -68,9 +68,9 @@ def _fmt_dur(seconds: float | None) -> str:
     s = int(seconds)
     if s < 60:
         return f"{s} 秒"
-    m, rem = divmod(s, 60)
+    m = s // 60
     if m < 60:
-        return f"{m} 分" if rem < 30 else f"{m}:{rem//60*60//60:02d}".replace(":00", "")
+        return f"{m} 分"
     h, m = divmod(m, 60)
     return f"{h} 时 {m} 分"
 
@@ -130,25 +130,26 @@ class Api:
             if dt.astimezone(CST).strftime("%Y-%m-%d") == today:
                 today_ids.append(dict(r))
         started = bool(today_ids)
-        last = today_ids[-1] if today_ids else None
 
         if not started:
-            summary = {
+            return {
                 "started": False,
                 "rounds": 0,
                 "text": "今天尚未开始",
             }
-        else:
-            started_at = last["started_at"]
-            finished_at = last.get("finished_at")
+
+        lines = []
+        for r in today_ids:
+            started_at = r["started_at"]
+            finished_at = r.get("finished_at")
             dur = None
             if finished_at:
                 try:
                     dur = (datetime.fromisoformat(finished_at) - datetime.fromisoformat(started_at)).total_seconds()
                 except ValueError:
                     dur = None
-            status = last["status"]
-            if status == "意外中止" and last.get("note") == DAY_BOUNDARY_NOTE:
+            status = r["status"]
+            if status == "意外中止" and r.get("note") == DAY_BOUNDARY_NOTE:
                 note = "，跨天中止"
             else:
                 note = {
@@ -157,12 +158,12 @@ class Api:
                     "意外中止": "，deny 超限意外中止",
                     "需人工-失败率超限": "，失败率超限暂停",
                 }.get(status, "")
-            summary = {
-                "started": True,
-                "rounds": len(today_ids),
-                "text": f"{_fmt_hhmm(started_at)} 开始 · 跑约 {_fmt_dur(dur)}{note}",
-            }
-        return summary
+            lines.append(f"{_fmt_hhmm(started_at)} 开始 · 跑约 {_fmt_dur(dur)}{note}")
+        return {
+            "started": True,
+            "rounds": len(today_ids),
+            "text": "\n".join(lines),
+        }
 
     def _start_shops(self, conn) -> list[dict]:
         today = self._today()
