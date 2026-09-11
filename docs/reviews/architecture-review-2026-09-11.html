@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bestseller | Architecture Review | 2026-09-11</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "strict", fontFamily: "Segoe UI, Microsoft YaHei, sans-serif", flowchart: { htmlLabels: false, useMaxWidth: true } });
+  </script>
+  <style>
+    :root { color-scheme: light; --ink:#202621; --muted:#5d675f; --line:#dce2dc; --green:#096347; --red:#b33636; --amber:#925c14; }
+    * { box-sizing:border-box; letter-spacing:0; }
+    html { scroll-behavior:smooth; }
+    body { margin:0; color:var(--ink); background:#f5f7f5; font:15px/1.65 "Segoe UI","Microsoft YaHei",sans-serif; }
+    main { width:min(1152px,100%); margin:auto; padding:42px 28px; }
+    h1,h2,h3,p,figure { margin:0; }
+    body h1 { font-size:34px; line-height:1.2; font-weight:700; }
+    body h2 { font-size:24px; line-height:1.4; font-weight:650; }
+    body h3 { font-size:14px; font-weight:650; }
+    a { color:var(--green); text-decoration:underline; text-underline-offset:3px; }
+    body code { font-family:Consolas,monospace; font-size:12px; overflow-wrap:anywhere; }
+    header { padding-bottom:25px; border-bottom:1px solid var(--line); }
+    .eyebrow { color:var(--green); font-size:12px; font-weight:700; margin-bottom:9px; }
+    .heading { display:flex; justify-content:space-between; align-items:flex-end; gap:20px; }
+    .meta { color:var(--muted); font-size:12px; }
+    .meta.right { text-align:right; }
+    .scope { display:flex; flex-wrap:wrap; gap:10px 22px; margin-top:18px; font-size:13px; }
+    .scope b { color:var(--green); }
+    .legend { display:flex; flex-wrap:wrap; gap:9px 22px; color:var(--muted); font-size:12px; margin-top:17px; }
+    .legend span { display:flex; align-items:center; gap:7px; }
+    .legend i { display:inline-block; width:22px; height:13px; border:1px solid #829187; }
+    .legend i.dashed { height:0; border:0; border-top:2px dashed #829187; }
+    .legend i.leak { height:0; border:0; border-top:2px solid var(--red); }
+    .legend i.dark { background:#273d32; border:3px solid #273d32; }
+    nav { display:flex; flex-wrap:wrap; gap:12px 24px; padding:20px 0; font-size:13px; }
+    article { background:#fff; border:1px solid var(--line); border-radius:8px; padding:26px; margin-bottom:24px; scroll-margin-top:20px; }
+    .card-title { display:flex; justify-content:space-between; align-items:flex-start; gap:20px; }
+    .number { color:#7e8d81; font-size:13px; margin-bottom:5px; }
+    .badges { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:7px; max-width:270px; }
+    .badge { font:600 11px/1.5 "Segoe UI",sans-serif; padding:3px 8px; border-radius:3px; background:#edf0ed; color:#5c665e; white-space:nowrap; }
+    .strong { color:#086044; background:#e2f3e9; }
+    .worth { color:#88500b; background:#fff0d5; }
+    .files { margin:14px 0 20px; color:var(--muted); line-height:1.8; }
+    .files code { display:block; }
+    .diagrams { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:22px; margin-bottom:22px; }
+    figure { min-width:0; }
+    figcaption { font-size:12px; font-weight:700; display:flex; justify-content:space-between; align-items:center; gap:8px; padding-bottom:10px; }
+    figcaption span { color:var(--muted); font-weight:400; text-align:right; }
+    .diagram { min-height:312px; padding:17px; background:#f8faf8; border-top:2px solid #cbd5cc; display:flex; flex-direction:column; justify-content:center; gap:9px; }
+    .after .diagram { border-color:#3c8260; background:#f1f7f3; }
+    .module { border:1px solid #a8b5aa; padding:9px 12px; background:#fff; text-align:center; font-size:13px; line-height:1.55; min-width:0; }
+    .module small { display:block; color:var(--muted); font-size:11px; }
+    .module.alert { border-color:#c17474; color:#962c2c; }
+    .parallel { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+    .arrow { text-align:center; color:var(--muted); line-height:1; font-size:19px; min-height:19px; }
+    .arrow.red { color:var(--red); }
+    .rail { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:11px; text-align:center; }
+    .rail::before,.rail::after { content:""; flex:1; border-top:1px dashed #8caa95; }
+    .deep-module { border:3px solid #274f39; background:#273d32; color:#fff; padding:13px; text-align:center; }
+    .deep-module b { display:block; font-size:14px; font-weight:650; }
+    .deep-module .inside { margin-top:9px; display:grid; gap:6px; grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .deep-module .inside span { font-size:11px; color:#e0ece3; border-top:1px solid #55705e; padding-top:5px; }
+    .deep-module .inside.single { grid-template-columns:1fr; }
+    .diagram-note { font-size:11px; color:var(--muted); text-align:center; }
+    .diagram-note.red { color:var(--red); }
+    .diagram .mermaid { margin:0; text-align:center; }
+    .mermaid:not([data-processed="true"]) { display:none; }
+    .diagram:has(.mermaid[data-processed="true"]) .graph-fallback { display:none; }
+    .mermaid svg { width:100%; height:auto; max-height:272px; }
+    .graph-fallback { display:flex; flex-direction:column; gap:9px; }
+    .copy { display:grid; grid-template-columns:65px minmax(0,1fr); gap:9px 14px; font-size:14px; }
+    .copy dt { color:var(--muted); font-size:12px; padding-top:2px; }
+    .copy dd { margin:0; }
+    .wins { display:flex; gap:9px 22px; flex-wrap:wrap; margin:17px 0 0; padding:0; list-style:none; font-size:12px; color:var(--green); }
+    .wins li::before { content:"+ "; font-weight:700; }
+    .evidence { margin-top:19px; border-top:1px solid var(--line); padding-top:15px; display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:18px; }
+    .evidence p { font-size:12px; color:var(--muted); margin-top:5px; }
+    .evidence strong { color:var(--ink); font-weight:600; }
+    .fact { color:#864715; border-left:3px solid #c8904b; padding-left:10px; margin-top:13px; font-size:12px; }
+    .state { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; }
+    .state span { background:#eef3ef; padding:7px 3px; text-align:center; border-bottom:2px solid #9dad9f; font-size:11px; }
+    .state span.terminal { background:#f6e9e7; border-color:#bd7165; }
+    #top-recommendation { border-top:3px solid #28714e; padding:24px 0 14px; margin-top:32px; }
+    #top-recommendation h2 { font-size:23px; margin:7px 0 10px; }
+    #top-recommendation p { color:var(--muted); max-width:800px; font-size:14px; }
+    footer { margin-top:25px; border-top:1px solid var(--line); padding-top:16px; font-size:11px; color:var(--muted); }
+    footer code { font-size:11px; }
+    @media(max-width:700px) {
+      main { padding:25px 16px; }
+      body h1 { font-size:30px; } body h2 { font-size:21px; }
+      .heading,.card-title { flex-direction:column; align-items:flex-start; gap:12px; }
+      .meta.right { text-align:left; }
+      .badges { justify-content:flex-start; max-width:none; }
+      article { padding:19px 16px; }
+      .diagrams,.evidence { grid-template-columns:1fr; }
+      .diagrams { gap:20px; }
+      .diagram { min-height:300px; padding:14px; }
+      .diagram .mermaid { display:none; }
+      .diagram:has(.mermaid[data-processed="true"]) .graph-fallback { display:flex; }
+      .copy { grid-template-columns:1fr; gap:3px; }
+      .copy dd { margin-bottom:7px; }
+      .wins { gap:7px 16px; }
+    }
+    @media print { body { background:#fff; } main { width:100%; padding:10px; } article { break-inside:avoid; } nav { display:none; } }
+  </style>
+</head>
+<body class="antialiased">
+<main>
+  <p class="fact" style="margin:0 0 18px">归档说明：本报告是 2026-09-11 的快照（当时 HEAD <code>98624f8</code>，28 个提交），文中的文件行号与测试数字指向当时的工作区，之后已位移。候选 03「轮次生命周期」已于 2026-09-12 实现，见 <code>.scratch/round-identity/</code> 的规格与五张工单；候选 01「商品库存快照提交」与候选 02「同日去重与补采」尚未动。</p>
+  <header>
+    <div class="heading">
+      <div><p class="eyebrow">ARCHITECTURE REVIEW / 1688 库存快照</p><h1>Bestseller</h1></div>
+      <div class="meta right">2026-09-11 · 当前工作区，含未提交改动<br>HEAD <code>98624f8</code> · 回看全部 28 个提交</div>
+    </div>
+    <div class="scope"><span>变更热点 <b>browser_pw.py 11 次</b></span><span><b>pipeline.py 9 次</b></span><span><b>db.py 7 次</b></span><span>现有 unittest <b>59 / 59 通过</b></span></div>
+    <div class="legend"><span><i></i>module</span><span><i class="dashed"></i>seam</span><span><i class="leak"></i>调用方承担规则</span><span><i class="dark"></i>deep module</span></div>
+  </header>
+  <nav aria-label="候选方案"><a href="#snapshot">01 库存快照提交</a><a href="#dedupe">02 同日去重与补采</a><a href="#round">03 轮次生命周期</a><a href="#top-recommendation">优先推荐</a></nav>
+
+  <article id="snapshot">
+    <div class="card-title">
+      <div><p class="number">CANDIDATE 01</p><h2>加深商品库存快照提交 module</h2></div>
+      <div class="badges"><span class="badge strong">Strong</span><span class="badge">local-substitutable</span></div>
+    </div>
+    <div class="files"><code>bestseller_monitor/pipeline.py:174, :295, :470 · 三条详情提交路径</code><code>bestseller_monitor/browser_pw.py:655 · 点击详情提交</code><code>bestseller_monitor/db.py:493, :501, :638 · tests/test_db.py:69, :129, :154</code></div>
+    <div class="diagrams">
+      <figure>
+        <figcaption>BEFORE <span>4 个调用方重复学习写入约定</span></figcaption>
+        <div class="diagram">
+          <div class="parallel"><div class="module">点击详情</div><div class="module">CDP / DP / PW 详情</div></div>
+          <div class="arrow red">↓</div>
+          <div class="module alert">各自拼 SKU、决定标题与时间</div>
+          <div class="arrow red">↓</div>
+          <div class="module">更新商品 → 提交库存快照<small>snapshots + skus + inventory 已有事务</small></div>
+          <div class="arrow red">↓</div>
+          <div class="module alert">调用方再清理失败记录<small>提交后抛 DayBoundaryReached 会越过此步</small></div>
+        </div>
+      </figure>
+      <figure class="after">
+        <figcaption>AFTER <span>depth：完整提交行为集中</span></figcaption>
+        <div class="diagram">
+          <div class="module">4 个调用方的商品采集结果</div>
+          <div class="rail">商品库存快照提交 seam</div>
+          <div class="deep-module"><b>商品库存快照提交 module</b><div class="inside"><span>SKU 编号与字段</span><span>商品与库存写入</span><span>成功后的失败清理</span><span>提交完成后的终止</span></div></div>
+          <div class="arrow">↓</div>
+          <div class="module">SQLite<small>运行：文件 · 测试：内存 / 临时文件</small></div>
+          <p class="diagram-note">相同 implementation；无需新增远程 adapter</p>
+        </div>
+      </figure>
+    </div>
+    <dl class="copy">
+      <dt>问题</dt><dd>提交这一侧的 interface 仍偏 shallow：调用方要构造数据库行并遵守多步顺序，四处 implementation 已出现标题优先级差异。</dd>
+      <dt>改进</dt><dd>把 SKU 整理、商品写入、库存快照事务和成功收尾集中到一个 deep module，保留已有“最后一个商品提交后再终止”的行为。</dd>
+      <dt>删除检验</dt><dd>只加一层转发，删除它不会损失能力；真正有效的 module 删除后，完整提交约定会重新散落到四个调用方。</dd>
+    </dl>
+    <ul class="wins"><li>locality：提交规则一处维护</li><li>leverage：四处共享同一行为</li><li>interface 成为测试入口</li></ul>
+    <div class="evidence">
+      <div><h3>证据与现有测试</h3><p><code>test_db.py:69</code> 先清失败再保存，顺序与生产路径相反；<code>:154</code> 只证明提交后抛终止异常，未覆盖其后的失败清理。</p></div>
+      <div><h3>测试迁移</h3><p>保留零库存、缺库存、库存差分和回滚断言；提交与收尾组合经同一 interface 验证，替换手工编排顺序的测试。</p></div>
+    </div>
+    <p class="fact">现有库存快照事务本身有价值；候选增加的是完整商品结果的 depth。浏览器导航、重试资格归候选 02，轮次终态归候选 03。</p>
+  </article>
+
+  <article id="dedupe">
+    <div class="card-title">
+      <div><p class="number">CANDIDATE 02</p><h2>统一同日去重与补采 module</h2></div>
+      <div class="badges"><span class="badge strong">Strong</span><span class="badge">mock</span><span class="badge">local-substitutable</span></div>
+    </div>
+    <div class="files"><code>bestseller_monitor/browser_pw.py:372, :432, :468, :675 · 暂缓、同名补采、按商品编号去重</code><code>bestseller_monitor/pipeline.py:418, :446, :481 · 详情预算、逐店补采、按名跳过</code><code>bestseller_monitor/db.py:431, :582, :591 · tests/test_p1.py:170, :207, :301 · IS-29 / IS-34</code></div>
+    <div class="diagrams">
+      <figure>
+        <figcaption>BEFORE <span>同一商品被两套规则判定</span></figcaption>
+        <div class="diagram">
+          <pre class="mermaid">
+flowchart TB
+  A["点击采集 module"] --> B["同名暂缓 / 歧义补采"]
+  B --> C["按商品编号查库存"]
+  D["失败补采 module"] --> E["先按名称查库存"]
+  E --> F["同名已有库存 → 跳过"]
+  D -.-> G["详情上限只在此累计"]
+  classDef regular fill:#ffffff,stroke:#93a297,color:#202621;
+  classDef leak fill:#fff3f0,stroke:#b33636,color:#8c2929;
+  class A,B,C,D regular;
+  class E,F,G leak;
+  linkStyle 3,4 stroke:#b33636,stroke-width:2px;
+          </pre>
+          <div class="graph-fallback">
+            <div class="parallel"><div class="module">点击采集 module<small>同名暂缓与歧义补采</small></div><div class="module">失败补采 module<small>先按名称查库存</small></div></div>
+            <div class="arrow red">↓</div>
+            <div class="module alert">同名商品有库存 → 失败商品被跳过</div>
+            <div class="module alert">详情上限仅在补采侧累计</div>
+          </div>
+        </div>
+      </figure>
+      <figure class="after">
+        <figcaption>AFTER <span>depth：统一访问资格与消耗</span></figcaption>
+        <div class="diagram">
+          <div class="module">榜单批次中的商品 / 待补采商品</div>
+          <div class="rail">同日去重与补采 seam</div>
+          <div class="deep-module"><b>同日去重与补采 module</b><div class="inside"><span>完整库存判定</span><span>同名歧义与商品编号</span><span>逐店补采顺序</span><span>共享详情预算</span></div></div>
+          <div class="arrow">↓</div>
+          <div class="parallel"><div class="module">browser adapter<small>运行：真实浏览器</small></div><div class="module">mock adapter<small>测试：受控页面结果</small></div></div>
+        </div>
+      </figure>
+    </div>
+    <dl class="copy">
+      <dt>问题</dt><dd>当前 interface 把待补采集合、按名跳过和详情计数泄露给两个调用方；仅把这些 shallow 查询拼起来，无法保证一致行为。</dd>
+      <dt>改进</dt><dd>把同名暂缓、失败与不完整库存补采资格、逐店顺序和访问预算集中到一个 deep module，浏览器 adapter 负责取得页面结果。</dd>
+      <dt>删除检验</dt><dd>仅封装库存查询不产生 depth；删除目标 module 后，去重与补采判定会重新复制到点击和已知商品路径。</dd>
+    </dl>
+    <ul class="wins"><li>locality：补采规则集中</li><li>leverage：两种入口共享预算</li><li>测试跨同一 interface</li></ul>
+    <div class="evidence">
+      <div><h3>内存 SQLite 已复现</h3><p>商品 11 今日有库存；同店同名商品 22 失败待补采。实际执行补采函数后：<strong>详情访问 0 次、商品 22 仍无库存、却已退出待补采集合</strong>。</p></div>
+      <div><h3>测试迁移</h3><p>保留“店 A 列表 → 店 A 补采 → 店 B”的行为断言；将目前 mock 掉详情的测试扩展为同名失败商品、部分 SKU 缺库存、点击与补采共用预算。</p></div>
+    </div>
+    <p class="fact">1688 为外部依赖：真实浏览器 adapter 与测试 mock adapter 有实际用途；SQLite 用真引擎测试。保留现有驱动结构；此候选不要求统一不同驱动的导航方式。</p>
+  </article>
+
+  <article id="round">
+    <div class="card-title">
+      <div><p class="number">CANDIDATE 03</p><h2>集中轮次身份与终止规则 module</h2></div>
+      <div class="badges"><span class="badge worth">Worth exploring</span><span class="badge">local-substitutable</span></div>
+    </div>
+    <div class="files"><code>gui.py:108, :330, :351, :410 · GUI 轮次读取与启动</code><code>bestseller_monitor/pipeline.py:24, :53, :376 · 加店铺、启停与完成判定</code><code>bestseller_monitor/db.py:309, :327, :365, :523 · 续跑、终止、日期检查</code><code>tests/test_db.py:33, :154 · tests/test_p1.py:104, :129 · CONTEXT.md / Rules</code></div>
+    <div class="diagrams">
+      <figure>
+        <figcaption>BEFORE <span>轮次身份由多个调用方拼出</span></figcaption>
+        <div class="diagram">
+          <div class="parallel"><div class="module">GUI module<small>创建 / 续跑轮次</small></div><div class="module">调度 module<small>再次创建 / 续跑</small></div></div>
+          <div class="arrow red">↓</div>
+          <div class="module alert">进行中 → 直接复用 round_id<small>不比较轮次日期与店铺集合</small></div>
+          <div class="arrow red">↓</div>
+          <div class="module">调度追加当前选择的店铺</div>
+          <div class="module alert">23:55 检查在成功写库存之后<small>续跑资格与终止原因不在同一处</small></div>
+        </div>
+      </figure>
+      <figure class="after">
+        <figcaption>AFTER <span>depth：一个轮次身份贯穿流程</span></figcaption>
+        <div class="diagram">
+          <div class="module">GUI / 命令行发起轮次操作</div>
+          <div class="rail">轮次生命周期 seam</div>
+          <div class="deep-module"><b>轮次 module</b><div class="inside"><span>固定北京时间日期</span><span>固定店铺集合</span><span>续跑资格</span><span>统一终态与原因</span></div></div>
+          <div class="arrow">↓</div>
+          <div class="state"><span>进行中 / 暂停<br>同轮续跑</span><span class="terminal">跨日 / 超限<br>新轮次</span><span class="terminal">完成 / 放弃<br>新轮次</span></div>
+          <p class="diagram-note">SQLite：文件运行 / 内存测试；无需远程 adapter</p>
+        </div>
+      </figure>
+    </div>
+    <dl class="copy">
+      <dt>问题</dt><dd>当前轮次操作相对业务规则是 shallow interface：GUI 与调度都要判断可续跑状态，日期、店铺范围和终止条件散落在不同 implementation。</dd>
+      <dt>改进</dt><dd>将轮次日期、店铺范围、续跑资格与终态归入一个 deep module，让 GUI 和调度读取同一套轮次事实。</dd>
+      <dt>删除检验</dt><dd>只集中状态常量，删除后复杂度不变；目标 module 必须吸收状态转移约束，否则这些约束仍会泄露给调用方。</dd>
+    </dl>
+    <ul class="wins"><li>locality：轮次约束集中</li><li>leverage：GUI 与命令行一致</li><li>interface 覆盖跨日行为</li></ul>
+    <div class="evidence">
+      <div><h3>内存 SQLite 已复现</h3><p>9 月 9 日创建轮次 1，仅含 A01；模拟 9 月 11 日续跑并选择 A02：<strong>仍返回轮次 1，店铺集合变成 A01 + A02</strong>，与领域 Rules 不符。</p></div>
+      <div><h3>测试迁移</h3><p>保留 deny 超限、失败率与跨日终止的数据保留断言；新增昨日暂停轮、换店铺续跑、仅跳过库存而无成功写入的日期检查。</p></div>
+    </div>
+    <p class="fact">范围跨 GUI 与采集进程，变更成本高于候选 01。进程退出确认与浏览器清理是相邻问题（IS-39），应单独验证；本轮没有实机验证这些行为。</p>
+  </article>
+
+  <section id="top-recommendation">
+    <p class="eyebrow">TOP RECOMMENDATION</p>
+    <h2>先做 01：商品库存快照提交 module</h2>
+    <p>四个现有调用方能直接获得 leverage，SKU、写入与成功收尾形成明确 locality；已有 SQLite 测试足以验证主要行为，能以较小范围获得可验证的 depth。</p>
+    <p style="margin-top:12px"><a href="#snapshot">查看候选 01 ↑</a></p>
+  </section>
+  <footer>
+    依据：<code>CONTEXT.md</code>、<code>.scratch/1688-inventory-snapshot/spec.md</code>、当前代码与提交历史。验收范围：单账号、2 家店、每店最多 5 个榜单批次。<br>
+    验证：<code>python -B -m unittest discover -s tests</code>，59 项通过；两项内存 SQLite 复现。未访问真实 1688、运行数据库或登录 profile。<br>
+    本报告为候选评估，尚未设计具体 interface。报告与检查产物位于系统临时目录。
+  </footer>
+</main>
+</body>
+</html>
