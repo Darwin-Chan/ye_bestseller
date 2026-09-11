@@ -48,7 +48,7 @@ PROJECT_ROOT = _project_root()
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from bestseller_monitor.config import Config, load_shops  # noqa: E402
-from bestseller_monitor.db import Database, cst_date, utcnow  # noqa: E402
+from bestseller_monitor.db import Database, connect, cst_date, utcnow  # noqa: E402
 from bestseller_monitor.rounds import (  # noqa: E402
     RoundRequest,
     ScopeMismatch,
@@ -174,9 +174,11 @@ class Api:
 
     # ---------- 基础 ----------
     def _open_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.cfg.db_file))
-        conn.row_factory = sqlite3.Row
-        return conn
+        """走数据层的连接入口：它会建目录、建表并执行迁移。
+
+        界面自己开连接就会绕过迁移，对着旧结构的库报 `no such column`（IS-37）。
+        """
+        return connect(self.cfg.db_file)
 
     @staticmethod
     def _today() -> str:

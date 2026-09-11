@@ -1,4 +1,5 @@
 import logging
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -297,6 +298,56 @@ class GuiRoundScopeTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(result["round_id"], rid)
             spawn.assert_called_once_with()
+
+
+class GuiConnectionTests(unittest.TestCase):
+    """界面自己的连接也要走迁移，否则旧结构的库会让三个页面一起报错（IS-37）。"""
+
+    @staticmethod
+    def _legacy_db(db_path):
+        raw = sqlite3.connect(str(db_path))
+        raw.execute(
+            "CREATE TABLE rounds (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "started_at TEXT NOT NULL, finished_at TEXT, "
+            "status TEXT NOT NULL DEFAULT '进行中', phase TEXT NOT NULL DEFAULT 'listing', note TEXT)"
+        )
+        raw.execute(
+            "INSERT INTO rounds(started_at, status, phase, note) "
+            "VALUES ('2026-09-08T15:13:11+00:00', '完成', 'done', NULL)"
+        )
+        raw.commit()
+        raw.close()
+
+    def test_opens_a_legacy_database_and_migrates_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "legacy.db"
+            self._legacy_db(db_path)
+            api = Api.__new__(Api)
+            api._lock = RLock()
+            api.proc = None
+            api.round_id = None
+            api.user_paused = False
+            api._elapsed_base = 0.0
+            api._run_start_ts = None
+            api.shops = [Shop("A01", "店铺A01", "https://A01.example/")]
+            api.cfg = SimpleNamespace(db_file=db_path, max_pages_per_shop=3)
+
+            # 三个页面都不再抛 no such column
+            start = api.get_start()
+            self.assertFalse(start["summary"]["started"])  # 那一轮是 9/8 的
+            self.assertFalse(api.get_run()["has_round"])
+            self.assertTrue(api.get_result()["has_round"])
+
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            try:
+                columns = {r[1] for r in conn.execute('PRAGMA table_info("rounds")')}
+                round_row = conn.execute("SELECT * FROM rounds WHERE id=1").fetchone()
+            finally:
+                conn.close()
+            self.assertNotIn("status", columns)
+            self.assertEqual(dict(round_row)["run_date"], "2026-09-08")
+            self.assertEqual(dict(round_row)["terminal_reason"], "COMPLETED")
 
 
 if __name__ == "__main__":
