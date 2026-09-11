@@ -108,7 +108,7 @@
 </head>
 <body class="antialiased">
 <main>
-  <p class="fact" style="margin:0 0 18px">归档说明：本报告是 2026-09-11 的快照（当时 HEAD <code>98624f8</code>，28 个提交），文中的文件行号与测试数字指向当时的工作区，之后已位移。候选 03「轮次生命周期」已于 2026-09-12 实现，见 <code>.scratch/round-identity/</code> 的规格与五张工单；候选 01「商品库存快照提交」与候选 02「同日去重与补采」尚未动。</p>
+  <p class="fact" style="margin:0 0 18px">归档说明：本报告是 2026-09-11 的快照（当时 HEAD <code>98624f8</code>，28 个提交），文中的文件行号与测试数字指向当时的工作区，之后已位移。三个候选均已落地：候选 01「商品库存快照提交」收敛到 <code>Database.submit_inventory_snapshot()</code>（<code>bd24140</code>，2026-09-11）；候选 02「同日去重与补采」的规则先随 <code>165a05a</code> 修正，再把详情机会与尝试额度收敛到 <code>bestseller_monitor/dedupe.py</code>（<code>de58037</code>，2026-09-11）；候选 03「轮次生命周期」见 <code>.scratch/round-identity/</code> 的规格与五张工单（2026-09-12）。正文保持 2026-09-11 快照原样，不随实现更新。</p>
   <header>
     <div class="heading">
       <div><p class="eyebrow">ARCHITECTURE REVIEW / 1688 库存快照</p><h1>Bestseller</h1></div>
