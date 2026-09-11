@@ -23,7 +23,9 @@ CREATE TABLE IF NOT EXISTS rounds (
     status TEXT NOT NULL DEFAULT '进行中',
     phase TEXT NOT NULL DEFAULT 'listing',
     note TEXT,
-    detail_budget_limit INTEGER
+    detail_budget_limit INTEGER,
+    run_date TEXT,
+    terminal_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS shops (
@@ -203,6 +205,38 @@ DAY_CUTOFF = (23, 55)
 DAY_BOUNDARY_NOTE = "库存数据即将跨天，请0点后继续抓取"
 DETAIL_BUDGET_NOTE = "本轮详情预算已用尽，剩余商品留待下一轮"
 
+# 过渡期：轮次终态改用稳定标识判定，旧的中文状态列在收敛前与它并存。
+# 收敛（删掉状态列）之后，这张映射表与 terminal_status_text() 一起删除。
+LEGACY_STATUS_REASONS = {
+    "完成": "COMPLETED",
+    "需人工-失败率超限": "FAIL_RATE_EXCEEDED",
+    "详情预算耗尽": "DETAIL_BUDGET_EXHAUSTED",
+    "已放弃": "ABANDONED",
+    "意外中止": "DENY_EXCEEDED",
+}
+LEGACY_UNKNOWN_REASON = "LEGACY_UNKNOWN"
+
+# 终态标识折回中文状态串时用；跨天与 deny 超限在旧状态串里同为「意外中止」。
+_REASON_STATUS_TEXT = {value: status for status, value in LEGACY_STATUS_REASONS.items()}
+_REASON_STATUS_TEXT["DAY_BOUNDARY"] = "意外中止"
+
+
+def legacy_terminal_reason(status: str | None, note: str | None) -> str | None:
+    """把旧状态串与说明折算成轮次终态标识；「进行中」返回 None。"""
+    if not status or status == "进行中":
+        return None
+    if status == "意外中止" and note == DAY_BOUNDARY_NOTE:
+        return "DAY_BOUNDARY"
+    return LEGACY_STATUS_REASONS.get(status, LEGACY_UNKNOWN_REASON)
+
+
+def terminal_status_text(reason: str) -> str:
+    """终态标识折算回中文状态串（过渡期写兼容列用）。"""
+    try:
+        return _REASON_STATUS_TEXT[reason]
+    except KeyError:
+        raise ValueError(f"没有对应的中文状态：{reason}") from None
+
 
 class DayBoundaryReached(RuntimeError):
     """库存数据即将跨天（北京时间 ≥ 23:55），当前轮次需中止，0 点后继续。"""
@@ -253,6 +287,23 @@ def _card_pos(note: str | None) -> tuple[int, int] | None:
         return None
     m = _CARD_POS_RE.search(note)
     return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def _backfill_round_identity(conn: sqlite3.Connection) -> None:
+    """给旧轮次补上轮次日期与终态标识；可重复执行。"""
+    rows = conn.execute("SELECT id, started_at, status, note, run_date FROM rounds").fetchall()
+    for row in rows:
+        if row["run_date"] is None:
+            conn.execute(
+                "UPDATE rounds SET run_date=? WHERE id=?",
+                (cst_date(row["started_at"]), row["id"]),
+            )
+        reason = legacy_terminal_reason(row["status"], row["note"])
+        if reason is not None:
+            conn.execute(
+                "UPDATE rounds SET terminal_reason=? WHERE id=? AND terminal_reason IS NULL",
+                (reason, row["id"]),
+            )
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -309,6 +360,20 @@ def connect(db_path: Path) -> sqlite3.Connection:
         conn.execute("ALTER TABLE rounds ADD COLUMN detail_budget_limit INTEGER")
     except sqlite3.OperationalError:
         pass
+    # 兼容旧库：轮次身份（北京日期）与终态标识（稳定标识取代中文状态串的判定作用）
+    try:
+        conn.execute("ALTER TABLE rounds ADD COLUMN run_date TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE rounds ADD COLUMN terminal_reason TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        _backfill_round_identity(conn)
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        log.debug("回填轮次日期与终态失败：%s", exc)
     # 兼容旧库：详情机会记录上绑定的商品编号（旧库残留的 attempts 列不再使用）
     try:
         conn.execute("ALTER TABLE detail_opportunities ADD COLUMN offer_id TEXT")
@@ -379,8 +444,9 @@ class Database:
             log.info("续跑进行中的轮次 #%s（阶段 %s）", row["id"], row["phase"])
             return int(row["id"])
         cur = self.conn.execute(
-            "INSERT INTO rounds(started_at, status, phase) VALUES (?, '进行中', 'listing')",
-            (utcnow(),),
+            "INSERT INTO rounds(started_at, status, phase, run_date) "
+            "VALUES (?, '进行中', 'listing', ?)",
+            (utcnow(), cst_date()),
         )
         self.conn.commit()
         rid = int(cur.lastrowid)
@@ -392,9 +458,16 @@ class Database:
         self.conn.commit()
 
     def finish_round(self, round_id: int, status: str = "完成", note: str | None = None) -> None:
+        reason = legacy_terminal_reason(status, note)
+        if reason is None or reason == LEGACY_UNKNOWN_REASON:
+            raise ValueError(
+                f"未知的轮次状态：{status!r}；轮次终态是封闭集合，"
+                "「历史未分类」只能来自旧库迁移"
+            )
         self.conn.execute(
-            "UPDATE rounds SET status=?, phase='done', finished_at=?, note=? WHERE id=?",
-            (status, utcnow(), note, round_id),
+            "UPDATE rounds SET status=?, terminal_reason=?, phase='done', finished_at=?, note=? "
+            "WHERE id=?",
+            (status, reason, utcnow(), note, round_id),
         )
         self.conn.commit()
 
@@ -408,7 +481,8 @@ class Database:
           - 已放弃轮不再被“续跑”（status 不是 '进行中'，下次运行会开新轮）。
         """
         self.conn.execute(
-            "UPDATE rounds SET status='已放弃', phase='abandoned', finished_at=?, note=? "
+            "UPDATE rounds SET status='已放弃', terminal_reason='ABANDONED', phase='abandoned', "
+            "finished_at=?, note=? "
             "WHERE id=?",
             (utcnow(), note, round_id),
         )
