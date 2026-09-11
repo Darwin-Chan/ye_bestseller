@@ -31,6 +31,9 @@
   th,td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left}
   th{background:#f8fafc;color:var(--mut);font-weight:600}
   tr:hover td{background:#fafcff}
+  th.col-gray{background:#e8edf4}
+  td.col-gray{background:#f1f4f9}
+  tr:hover td.col-gray{background:#eaeff7}
   .chk input{transform:scale(1.25)}
   .pill{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px}
   .pill.g{background:#dcfce7;color:var(--grn)}
@@ -40,6 +43,7 @@
   .btn:hover{filter:brightness(1.05)}
   .btn.danger{background:var(--red)}
   .btn.ghost{background:#fff;color:var(--txt);border:1px solid var(--line)}
+  .btn.sm{padding:6px 14px;border-radius:8px;font-size:13px}
   .btn:disabled{opacity:.5;cursor:not-allowed;filter:none}
   .bar{height:10px;background:#e2e8f0;border-radius:99px;overflow:hidden;margin-top:6px}
   .bar > i{display:block;height:100%;background:linear-gradient(90deg,#60a5fa,#2563eb)}
@@ -83,10 +87,14 @@
     <div class="card">
       <div class="flex" style="margin-bottom:10px">
         <b>选择要抓取的店铺</b>
-        <span class="muted" id="selCnt">已选 0 / 0</span>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="muted" id="selCnt">已选 0 / 0</span>
+          <button class="btn ghost sm" id="selAllBtn">全选</button>
+          <button class="btn ghost sm" id="selNoneBtn">全不选</button>
+        </div>
       </div>
       <table>
-        <thead><tr><th style="width:40px">✓</th><th>店铺</th><th>今日已抓取商品</th><th>今日已抓取SKU</th><th>今日已抓取轮次/耗时</th></tr></thead>
+        <thead><tr><th style="width:40px">✓</th><th>店铺</th><th>抓取页数</th><th class="col-gray">今日已抓取商品</th><th class="col-gray">今日已抓取SKU</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
       <p class="muted" style="margin:10px 0 0">默认勾选：今日已抓取商品数 &lt; 抓取页数×30；未勾选任意店铺时禁止开始。</p>
@@ -226,12 +234,18 @@
     const rows = d.shops.map((s, i) => {
       const chk = s.default_checked ? "checked" : "";
       return `<tr><td class="chk"><input type="checkbox" data-i="${i}" ${chk}></td>` +
-        `<td><b>${s.key}</b> ${s.name}</td><td>${s.products}</td><td>${s.skus}</td><td>${s.rounds_text}</td></tr>`;
+        `<td><b>${s.key}</b> ${s.name}</td><td>${s.pages} 页</td>` +
+        `<td class="col-gray">${s.products}</td><td class="col-gray">${s.skus}</td></tr>`;
     }).join("");
     $("rows").innerHTML = rows;
     $("selCnt").textContent = "已选 " + document.querySelectorAll("#rows input:checked").length + " / " + total;
     document.querySelectorAll("#rows input").forEach(c => c.onchange = updateSel);
     api.__shops = d.shops;
+  }
+
+  function setAllShops(checked) {
+    document.querySelectorAll("#rows input").forEach(c => { c.checked = checked; });
+    updateSel();
   }
 
   function updateSel() {
@@ -335,6 +349,8 @@
     $("confirmOk").onclick = async () => { closeConfirm(); await doAbort(); };
     $("resumeBtn").onclick = resumeRun;
     $("backBtn").onclick = () => switchTab("start");
+    $("selAllBtn").onclick = () => setAllShops(true);
+    $("selNoneBtn").onclick = () => setAllShops(false);
     refreshStart();
   }
 

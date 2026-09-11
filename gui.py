@@ -177,41 +177,13 @@ class Api:
                 "SELECT COUNT(*) c FROM inventory WHERE shop_key=? AND date=?",
                 (s.key, today),
             ).fetchone()["c"]
-            # 该店今日所属轮次/耗时
-            snap = conn.execute(
-                "SELECT s.round_id, r.started_at, r.finished_at, r.status "
-                "FROM snapshots s JOIN rounds r ON r.id=s.round_id "
-                "WHERE s.shop_key=? AND s.page_status='成功' AND s.sku_id IS NOT NULL "
-                "ORDER BY s.id DESC LIMIT 1",
-                (s.key,),
-            ).fetchone()
-            if snap:
-                dt = datetime.fromisoformat(snap["started_at"])
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                same_day = dt.astimezone(CST).strftime("%Y-%m-%d") == today
-                if same_day:
-                    if snap["status"] == "进行中":
-                        rt = f"{_fmt_hhmm(snap['started_at'])} · 进行中"
-                    else:
-                        dur = None
-                        if snap["finished_at"]:
-                            try:
-                                dur = (datetime.fromisoformat(snap["finished_at"]) - datetime.fromisoformat(snap["started_at"])).total_seconds()
-                            except ValueError:
-                                dur = None
-                        rt = f"{_fmt_hhmm(snap['started_at'])} · {_fmt_dur(dur)}"
-                else:
-                    rt = "—"
-            else:
-                rt = "—"
-            pages = s.pages or 0
+            # 该店实际翻页上限：店铺未单独配置时回落到全局默认（与抓取逻辑一致）
+            pages = s.pages or self.cfg.max_pages_per_shop
             out.append({
                 "key": s.key,
                 "name": s.name,
                 "products": p,
                 "skus": k,
-                "rounds_text": rt,
                 "pages": pages,
                 "default_checked": (p < pages * 30),
             })
@@ -544,6 +516,37 @@ class Api:
                 conn.close()
 
 
+# 默认窗口高度：设计基准 1128 × 1.2 ≈ 1354；屏幕放不下时收缩到可用区域内。
+_PREFERRED_HEIGHT = 1354
+_MIN_HEIGHT = 720
+_SCREEN_MARGIN = 60
+_SPI_GETWORKAREA = 0x0030
+
+
+def _screen_work_height() -> int | None:
+    """当前屏幕可用高度（Windows 下排除任务栏）；查询不到返回 None。"""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        rect = wintypes.RECT()
+        if ctypes.windll.user32.SystemParametersInfoW(_SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+            return int(rect.bottom - rect.top)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _default_window_height() -> int:
+    """默认高度按屏幕自适应：够高用 1354，不够则收缩到可用高度内（不低于 720）。"""
+    avail = _screen_work_height()
+    if avail is None:
+        return _PREFERRED_HEIGHT
+    return max(_MIN_HEIGHT, min(_PREFERRED_HEIGHT, avail - _SCREEN_MARGIN))
+
+
 def main():
     api = Api()
     here = Path(getattr(sys, "_MEIPASS", PROJECT_ROOT))
@@ -556,7 +559,7 @@ def main():
         html=html,
         js_api=api,
         width=1120,
-        height=1128,
+        height=_default_window_height(),
         min_size=(960, 720),
     )
     webview.start(debug=False)

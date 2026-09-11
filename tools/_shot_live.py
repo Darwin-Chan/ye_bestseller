@@ -16,10 +16,8 @@ const shops = (() => {
     "义乌市启弘纺织品有限公司","义乌市中腾箱包有限公司","义乌市通伟塑料制品有限公司","义乌市远强不锈钢制品有限公司"];
   const prod = [92,95,90,87,90,81,30,89,62,90,90,49];
   const sku = [614,530,542,432,515,460,118,549,285,490,441,273];
-  const rt = ["09-06 00:21 · 34.5 分","09-06 00:55 · 33.0 分","09-06 01:29 · 34.6 分","09-06 02:03 · 进行中",
-    "—","—","—","—","—","—","—","—"];
   return names.map((n,i)=>({key:"A"+(i+1).toString().padStart(2,"0"), name:n, products:prod[i], skus:sku[i],
-    rounds_text:rt[i], pages:3, default_checked: prod[i] < 3*30}));
+    pages:3, default_checked: prod[i] < 3*30}));
 })();
 
 const done = [

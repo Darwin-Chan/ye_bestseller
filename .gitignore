@@ -34,3 +34,7 @@ profiles/
 *.db
 *.xlsx
 config/shops.csv
+
+# 本地 Agent 配置与工单草稿（不上传）
+.codex/
+.scratch/

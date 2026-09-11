@@ -23,6 +23,9 @@
   th,td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left}
   th{background:#f8fafc;color:var(--mut);font-weight:600}
   tr:hover td{background:#fafcff}
+  th.col-gray{background:#e8edf4}
+  td.col-gray{background:#f1f4f9}
+  tr:hover td.col-gray{background:#eaeff7}
   .chk input{transform:scale(1.25)}
   .pill{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px}
   .pill.g{background:#dcfce7;color:var(--grn)}
@@ -32,6 +35,7 @@
   .btn:hover{filter:brightness(1.05)}
   .btn.danger{background:var(--red)}
   .btn.ghost{background:#fff;color:var(--txt);border:1px solid var(--line)}
+  .btn.sm{padding:6px 14px;border-radius:8px;font-size:13px}
   .bar{height:10px;background:#e2e8f0;border-radius:99px;overflow:hidden}
   .bar > i{display:block;height:100%;background:linear-gradient(90deg,#60a5fa,#2563eb);width:55%}
   .flex{display:flex;justify-content:space-between;align-items:center}
@@ -65,10 +69,14 @@
     <div class="card">
       <div class="flex" style="margin-bottom:10px">
         <b>选择要抓取的店铺</b>
-        <span class="muted" id="selCnt">已选 0 / 12</span>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="muted" id="selCnt">已选 0 / 12</span>
+          <button class="btn ghost sm" id="selAllBtn">全选</button>
+          <button class="btn ghost sm" id="selNoneBtn">全不选</button>
+        </div>
       </div>
       <table>
-        <thead><tr><th style="width:40px">✓</th><th>店铺</th><th>今日已抓取商品</th><th>今日已抓取SKU</th><th>今日已抓取轮次/耗时</th></tr></thead>
+        <thead><tr><th style="width:40px">✓</th><th>店铺</th><th>抓取页数</th><th class="col-gray">今日已抓取商品</th><th class="col-gray">今日已抓取SKU</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
       <p class="muted" style="margin:10px 0 0">默认勾选：今日已抓取商品数 &lt; 抓取页数×30（例：页数3 → 今日已抓取&lt;90 时默认勾选）；未勾选任意店铺时禁止开始。</p>
@@ -164,21 +172,21 @@
   const TODAY_STARTED = true;
 
   const shops=[
-    {key:"A01",name:"义乌市中茂箱包有限公司",products:92,skus:614,rounds:"09-06 00:21 · 34.5 分",pages:3},
-    {key:"A02",name:"义乌市奔此日用品有限公司",products:95,skus:530,rounds:"09-06 00:55 · 33.0 分",pages:3},
-    {key:"A03",name:"义乌市中茂专业设计有限公司",products:90,skus:542,rounds:"09-06 01:29 · 34.6 分",pages:3},
-    {key:"A04",name:"义乌市快茂日用品有限公司",products:87,skus:432,rounds:"09-06 02:03 · 进行中",pages:3},
-    {key:"A05",name:"义乌市中蓝箱包有限公司",products:90,skus:515,rounds:"—",pages:3},
-    {key:"A06",name:"义乌市快勤日用品有限公司",products:81,skus:460,rounds:"—",pages:3},
-    {key:"A07",name:"义乌市暖宏纺织品有限公司",products:30,skus:118,rounds:"—",pages:3},
-    {key:"A08",name:"义乌市创柔文化用品有限公司",products:89,skus:549,rounds:"—",pages:3},
-    {key:"A09",name:"义乌市启弘纺织品有限公司",products:62,skus:285,rounds:"—",pages:3},
-    {key:"A10",name:"义乌市中腾箱包有限公司",products:90,skus:490,rounds:"—",pages:3},
-    {key:"A11",name:"义乌市通伟塑料制品有限公司",products:90,skus:441,rounds:"—",pages:3},
-    {key:"A12",name:"义乌市远强不锈钢制品有限公司",products:49,skus:273,rounds:"—",pages:3}];
+    {key:"A01",name:"义乌市中茂箱包有限公司",products:92,skus:614,pages:3},
+    {key:"A02",name:"义乌市奔此日用品有限公司",products:95,skus:530,pages:3},
+    {key:"A03",name:"义乌市中茂专业设计有限公司",products:90,skus:542,pages:3},
+    {key:"A04",name:"义乌市快茂日用品有限公司",products:87,skus:432,pages:3},
+    {key:"A05",name:"义乌市中蓝箱包有限公司",products:90,skus:515,pages:3},
+    {key:"A06",name:"义乌市快勤日用品有限公司",products:81,skus:460,pages:3},
+    {key:"A07",name:"义乌市暖宏纺织品有限公司",products:30,skus:118,pages:3},
+    {key:"A08",name:"义乌市创柔文化用品有限公司",products:89,skus:549,pages:3},
+    {key:"A09",name:"义乌市启弘纺织品有限公司",products:62,skus:285,pages:3},
+    {key:"A10",name:"义乌市中腾箱包有限公司",products:90,skus:490,pages:3},
+    {key:"A11",name:"义乌市通伟塑料制品有限公司",products:90,skus:441,pages:3},
+    {key:"A12",name:"义乌市远强不锈钢制品有限公司",products:49,skus:273,pages:3}];
 
   if(!TODAY_STARTED){
-    shops.forEach(s=>{s.products=0;s.skus=0;s.rounds="—";});
+    shops.forEach(s=>{s.products=0;s.skus=0;});
     document.getElementById("stProducts").textContent="0";
     document.getElementById("stSkus").textContent="0";
     document.getElementById("stRounds").textContent="0";
@@ -190,7 +198,7 @@
   }
 
   // 默认勾选规则：今日已抓取商品数 < 抓取页数×30
-  const rows=shops.map((s,i)=>`<tr><td class="chk"><input type="checkbox" data-i="${i}" ${s.products< s.pages*30?'checked':''}></td><td><b>${s.key}</b> ${s.name}</td><td>${s.products}</td><td>${s.skus}</td><td>${s.rounds}</td></tr>`).join("");
+  const rows=shops.map((s,i)=>`<tr><td class="chk"><input type="checkbox" data-i="${i}" ${s.products< s.pages*30?'checked':''}></td><td><b>${s.key}</b> ${s.name}</td><td>${s.pages} 页</td><td class="col-gray">${s.products}</td><td class="col-gray">${s.skus}</td></tr>`).join("");
   document.getElementById("rows").innerHTML=rows;
   document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{
     document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x===t));
@@ -198,6 +206,9 @@
   });
   function upd(){document.getElementById("selCnt").textContent="已选 "+document.querySelectorAll("#rows input:checked").length+" / "+shops.length;}
   document.querySelectorAll("#rows input").forEach(c=>c.onchange=upd);
+  function setAll(checked){document.querySelectorAll("#rows input").forEach(c=>{c.checked=checked;});upd();}
+  document.getElementById("selAllBtn").addEventListener("click",()=>setAll(true));
+  document.getElementById("selNoneBtn").addEventListener("click",()=>setAll(false));
   upd();
   document.getElementById("startBtn").addEventListener("click",()=>{
     const n=document.querySelectorAll("#rows input:checked").length;
