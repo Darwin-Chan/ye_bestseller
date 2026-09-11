@@ -7,7 +7,7 @@ from collections import defaultdict
 
 from playwright.sync_api import sync_playwright
 
-from . import browser_dp, browser_pw
+from . import browser_dp, browser_pw, dedupe
 from .browser_pw import DenyTracker, ShopDenyExceeded, RoundDenyExceeded
 from .config import Config, Shop
 from .db import (
@@ -185,7 +185,7 @@ def _run_pending_detail_phase(db: Database, cfg: Config, round_id: int, capture)
             log.exception("详情抓取意外失败：%s", offer["product_url"])
             db.mark_failure(
                 round_id, offer["shop_key"], offer["offer_id"],
-                db.detail_attempts_used(round_id, offer["shop_key"], offer["offer_id"]) + 1,
+                dedupe.next_attempt(db, round_id, offer["shop_key"], offer["offer_id"]),
                 str(exc),
             )
         if processed % cfg.batch_size == 0:
@@ -217,20 +217,18 @@ def _capture_offer_detail(db: Database, cfg: Config, human: Humanizer, round_id:
         log.info("店铺 %s 商品 %s 今日已有库存，跳过详情抓取", shop_key, offer_id)
         return
 
-    attempts_used = db.detail_attempts_used(round_id, shop_key, offer_id)
-    if attempts_used >= max_attempts:
+    # 初次访问和补采共享同一份尝试额度；已经用尽的商品不再进入详情。
+    next_attempt_no = dedupe.next_attempt(db, round_id, shop_key, offer_id)
+    if next_attempt_no > max_attempts:
         log.info("店铺 %s 商品 %s 本轮尝试已用尽（%s/%s），不再补采",
-                 shop_key, offer_id, attempts_used, max_attempts)
+                 shop_key, offer_id, next_attempt_no - 1, max_attempts)
         return
 
     # 同日跳过不消耗预算；只有真正要进入详情的商品才申请机会。
-    grant = db.claim_detail_opportunity(
-        round_id, shop_key, offer_id, cfg.max_detail_pages_per_round,
-    )
-    if not grant.granted:
-        raise DetailBudgetExhausted(DETAIL_BUDGET_NOTE)
+    dedupe.claim_detail_slot(db, round_id, shop_key, offer_id,
+                             cfg.max_detail_pages_per_round)
 
-    for attempt in range(attempts_used + 1, max_attempts + 1):
+    for attempt in range(next_attempt_no, max_attempts + 1):
         try:
             payload = fetch()
         except DetailParseFailed as exc:
@@ -405,7 +403,7 @@ def _retry_shop_pending_pw(db: Database, cfg: Config, round_id: int, shop: Shop,
             log.exception("详情抓取意外失败：%s", offer["product_url"])
             db.mark_failure(
                 round_id, offer["shop_key"], offer["offer_id"],
-                db.detail_attempts_used(round_id, offer["shop_key"], offer["offer_id"]) + 1,
+                dedupe.next_attempt(db, round_id, offer["shop_key"], offer["offer_id"]),
                 str(exc),
             )
         if processed % cfg.batch_size == 0:

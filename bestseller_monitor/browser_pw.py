@@ -13,14 +13,9 @@ import time
 
 from playwright.sync_api import Error as PlaywrightError
 
+from . import dedupe
 from .config import Config, Shop
-from .db import (
-    DayBoundaryReached,
-    DetailBudgetExhausted,
-    DETAIL_BUDGET_NOTE,
-    utcnow,
-    cst_date,
-)
+from .db import DayBoundaryReached, utcnow, cst_date
 from .delay import Humanizer
 from .detail import DetailParseFailed, parse_detail_html, save_raw_page
 from .parse import extract_main_image
@@ -387,11 +382,8 @@ def _claim_detail_slot(db, round_id, shop_key: str, card_ref: str, cfg: Config) 
     """
     if db is None or round_id is None:
         return
-    grant = db.claim_detail_opportunity(
-        round_id, shop_key, card_ref, cfg.max_detail_pages_per_round,
-    )
-    if not grant.granted:
-        raise DetailBudgetExhausted(DETAIL_BUDGET_NOTE)
+    dedupe.claim_detail_slot(db, round_id, shop_key, card_ref,
+                             cfg.max_detail_pages_per_round)
 
 
 def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
@@ -716,7 +708,7 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
     stop_round = False
     if db and round_id and first_time:
         # 初次访问与补采共享同一份尝试额度：本次是第几次尝试要接着已用掉的次数。
-        attempt = db.detail_attempts_used(round_id, shop.key, oid) + 1
+        attempt = dedupe.next_attempt(db, round_id, shop.key, oid)
         try:
             html = detail_page.content()
         except Exception as exc:
