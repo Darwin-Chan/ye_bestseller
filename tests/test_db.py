@@ -11,6 +11,7 @@ from bestseller_monitor.db import (
     cst_date,
     past_day_cutoff,
 )
+from bestseller_monitor.parse import DEFAULT_SKU_ID, DEFAULT_SKU_NAME
 
 
 class DbTests(unittest.TestCase):
@@ -477,18 +478,20 @@ class DbTests(unittest.TestCase):
         ])
 
         self._submit_offer(rid, "2026-09-05T03:00:00+00:00", [
-            {"sku_id": "default", "sku_name": "默认(单规格)", "sku_price": 1.0, "sku_stock": 300},
+            {"sku_id": DEFAULT_SKU_ID, "sku_name": DEFAULT_SKU_NAME,
+             "sku_price": 1.0, "sku_stock": 300},
         ])
 
         snapshots, inventory = self._same_day_rows()
-        self.assertEqual(snapshots, ["default"])
-        self.assertEqual(inventory, [("default", 300)])
+        self.assertEqual(snapshots, [DEFAULT_SKU_ID])
+        self.assertEqual(inventory, [(DEFAULT_SKU_ID, 300)])
 
     def test_sku_level_submit_replaces_single_spec_rows_for_same_day(self):
         rid = self.db.start_or_resume()
         self._add_shop(rid)
         self._submit_offer(rid, "2026-09-05T02:00:00+00:00", [
-            {"sku_id": "default", "sku_name": "默认(单规格)", "sku_price": 1.0, "sku_stock": 300},
+            {"sku_id": DEFAULT_SKU_ID, "sku_name": DEFAULT_SKU_NAME,
+             "sku_price": 1.0, "sku_stock": 300},
         ])
 
         self._submit_offer(rid, "2026-09-05T03:00:00+00:00", [
@@ -498,6 +501,27 @@ class DbTests(unittest.TestCase):
         snapshots, inventory = self._same_day_rows()
         self.assertEqual(snapshots, ["a"])
         self.assertEqual(inventory, [("a", 100)])
+
+    def test_granularity_cleanup_keeps_earlier_date_rows(self):
+        # 粒度切换只清当天，更早日期的历史观测保留。
+        rid = self.db.start_or_resume()
+        self._add_shop(rid)
+        self._submit_offer(rid, "2026-09-04T02:00:00+00:00", [
+            {"sku_id": "a", "sku_name": "小号", "sku_price": 1.0, "sku_stock": 100},
+        ])
+
+        self._submit_offer(rid, "2026-09-05T03:00:00+00:00", [
+            {"sku_id": DEFAULT_SKU_ID, "sku_name": DEFAULT_SKU_NAME,
+             "sku_price": 1.0, "sku_stock": 300},
+        ])
+
+        earlier = [
+            tuple(r) for r in self.conn.execute(
+                "SELECT sku_id, stock FROM inventory WHERE offer_id='11' AND date='2026-09-04' "
+                "ORDER BY sku_id"
+            )
+        ]
+        self.assertEqual(earlier, [("a", 100)])
 
     def test_failure_with_explicit_metadata_is_recorded_before_listing_write(self):
         rid = self.db.start_or_resume()

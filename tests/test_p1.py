@@ -69,6 +69,16 @@ class P1Tests(unittest.TestCase):
         payload = parse_detail_html(zero, "https://detail.1688.com/offer/1.html")
         self.assertEqual(payload["rows"][0]["sku_stock"], 0)
 
+    def test_single_spec_page_without_bookable_amount_reports_incomplete_stock(self):
+        # 单规格页缺商品级可售量：属于不完整库存观测，备注要与页面结构变化区分开。
+        html = (
+            '<script>var x={"offerSign":{"isSkuOffer":false},'
+            '"skuModel":{"skuInfoMap":[]},'
+            '"tradeModel":{"priceDisplay":"0.02"}};</script>'
+        )
+        with self.assertRaisesRegex(DetailParseFailed, "单规格商品缺少商品级可售量"):
+            parse_detail_html(html, "https://detail.1688.com/offer/1.html")
+
     def test_capture_one_success_uses_submitted_payload_rows_for_logging(self):
         round_id = self.db.start_or_resume()
         offer = {

@@ -5,7 +5,7 @@
     python tools/check_single_spec.py <目录>     # 指定原始页目录
 
 按页面标记分组统计：单规格商品应各自解析出一条带库存的默认 SKU 行，多规格商品
-应仍按 SKU 明细解析，反爬拦截页不应产出任何库存行。
+应仍按 SKU 明细解析，没有平台标记的页面（存档里是反爬拦截页）不应产出任何库存行。
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from bestseller_monitor.parse import (  # noqa: E402
 def classify(html: str) -> str:
     rows = extract_skus_from_html(html)
     if '"isSkuOffer"' not in html:
-        return "反爬拦截页"
+        return "无平台标记页"
     if is_single_spec_offer(html):
         first = rows[0] if rows else {}
         return ("单规格已解析" if first.get("sku_id") == DEFAULT_SKU_ID

@@ -100,6 +100,35 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(rows[0]["sku_stock"], 2119641)
         self.assertEqual(rows[0]["sku_price"], 0.05)
 
+    def test_single_spec_requires_sku_trade_unsupported(self):
+        # skuTradeSupported 作佐证：平台自述支持 SKU 交易却给不出明细，按页面结构变化处理。
+        html = (
+            '<script>var x={"offerSign":{"isSkuOffer":false},'
+            '"skuModel":{"skuInfoMap":[]},'
+            '"tradeModel":{"canBookedAmount":100,"skuTradeSupported":true,'
+            '"priceDisplay":"0.02"}};</script>'
+        )
+        self.assertEqual(extract_skus_from_html(html), [])
+
+    def test_single_spec_requires_explicit_empty_sku_map(self):
+        # isSkuOffer=false 但 skuInfoMap 键完全缺失：属于页面结构变化，不能按单规格兜底。
+        html = (
+            '<script>var x={"offerSign":{"isSkuOffer":false},'
+            '"tradeModel":{"canBookedAmount":100,"priceDisplay":"0.02"}};</script>'
+        )
+        self.assertEqual(extract_skus_from_html(html), [])
+
+    def test_single_spec_price_falls_back_to_current_price_range(self):
+        # 没有 priceDisplay 时退到当前区间价首档，口径与多规格取 discountPrice 一致。
+        html = (
+            '<script>var x={"offerSign":{"isSkuOffer":false},'
+            '"skuModel":{"skuInfoMap":[]},'
+            '"tradeModel":{"canBookedAmount":100,"offerPriceModel":'
+            '{"currentPrices":[{"beginAmount":2,"price":"0.07"}]}}};</script>'
+        )
+        rows = extract_skus_from_html(html)
+        self.assertEqual(rows[0]["sku_price"], 0.07)
+
     def test_page_without_single_spec_signal_is_not_single_spec(self):
         # 没有 isSkuOffer / skuInfoMap 标记的页面属于结构变化，不能被商品级字段兜底成成功。
         html = '<script>var x={"price":"0.02","quantity":5,"amount":1};</script>'

@@ -133,6 +133,7 @@ DEFAULT_SKU_NAME = "默认(单规格)"
 
 _SKU_MAP_EMPTY_RE = re.compile(r'"skuInfoMap"\s*:\s*\[\s*\]')
 _IS_SKU_OFFER_RE = re.compile(r'"isSkuOffer"\s*:\s*(true|false)', re.I)
+_SKU_TRADE_SUPPORTED_RE = re.compile(r'"skuTradeSupported"\s*:\s*(true|false)', re.I)
 
 
 def _extract_json_object(html_text: str, key: str) -> dict | None:
@@ -162,13 +163,17 @@ def is_single_spec_offer(html_text: str) -> bool:
     """页面是否表明这是不使用 SKU 交易的单规格商品。
 
     判定要求平台标记 isSkuOffer=false 且页面显式给出空的 skuInfoMap；
-    skuTradeSupported=false 只作佐证。明细键完全缺失不算单规格——那属于页面
-    结构变化，由上层记失败并留档。
+    skuTradeSupported=false 作佐证，平台自述支持 SKU 交易却给不出明细时按页面
+    没渲染完处理。明细键完全缺失同样不算单规格——那属于页面结构变化，由上层
+    记失败并留档。页面上 isSkuOffer 可能出现多次，取值不一致的页面按非单规格处理。
     """
-    m = _IS_SKU_OFFER_RE.search(html_text)
-    if m is None or m.group(1).lower() != "false":
+    flags = {v.lower() for v in _IS_SKU_OFFER_RE.findall(html_text)}
+    if flags != {"false"}:
         return False
-    return _SKU_MAP_EMPTY_RE.search(html_text) is not None
+    if _SKU_MAP_EMPTY_RE.search(html_text) is None:
+        return False
+    corroboration = {v.lower() for v in _SKU_TRADE_SUPPORTED_RE.findall(html_text)}
+    return not (corroboration - {"false"})
 
 
 def _single_spec_price(trade_model: dict) -> float | None:
@@ -205,16 +210,12 @@ def _extract_default_sku(html_text: str) -> list[dict]:
     }]
 
 
-def _extract_sku_map_json(html_text: str) -> dict | None:
-    return _extract_json_object(html_text, "skuInfoMap")
-
-
 def extract_skus_from_html(html_text: str) -> list[dict]:
-    """优先解析内嵌 JSON skuInfoMap（含 canBookCount 真实可售库存）；失败再走可见文本。
-    返回 [{sku_id, sku_name, sku_price, sku_stock}]。
+    """优先解析内嵌 JSON skuInfoMap（含 canBookCount 真实可售库存）；失败再走可见文本，
+    最后对单规格商品取商品级可售量。返回 [{sku_id, sku_name, sku_price, sku_stock}]。
     """
     rows: list[dict] = []
-    obj = _extract_sku_map_json(html_text)
+    obj = _extract_json_object(html_text, "skuInfoMap")
     if obj:
         for key, val in obj.items():
             if not isinstance(val, dict):

@@ -7,7 +7,7 @@ from pathlib import Path
 from .config import Config
 from .delay import Humanizer
 from .guard import detect, wait_for_human
-from .parse import extract_skus_from_html, extract_title
+from .parse import extract_skus_from_html, extract_title, is_single_spec_offer
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +28,10 @@ def parse_detail_html(html: str, product_url: str) -> dict:
     except Exception as exc:
         raise DetailParseFailed(f"详情页 SKU 解析异常：{exc}", html=html) from exc
     if not rows:
+        if is_single_spec_offer(html):
+            raise DetailParseFailed(
+                f"单规格商品缺少商品级可售量：{product_url}", html=html,
+            )
         raise DetailParseFailed(f"详情页未解析到 SKU：{product_url}", html=html)
     if any(row.get("sku_stock") is None for row in rows):
         raise DetailParseFailed(f"详情页存在缺失库存的 SKU：{product_url}", html=html)
