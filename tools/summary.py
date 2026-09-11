@@ -1,9 +1,15 @@
 """读取最近一轮的抓取结果摘要（不打印日志）。"""
 import sqlite3
+import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from bestseller_monitor import rounds  # noqa: E402
+from bestseller_monitor.db import Database  # noqa: E402
+
 DB = ROOT / "data" / "bestseller.db"
 
 
@@ -39,16 +45,18 @@ def main():
         return
     con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
-    r = con.execute("SELECT * FROM rounds ORDER BY id DESC LIMIT 1").fetchone()
-    if not r:
-        print("no rounds")
-        return
-    rid = r["id"]
-    counts = summarize(con, rid)
-    print(f"round={rid} status={r['status']} shop_offers={counts['shop_offers']} "
-          f"ok_offers={counts['ok_offers']} fail_offers={counts['fail_offers']} "
-          f"sku_rows={counts['sku_rows']}")
-    con.close()
+    try:
+        run = rounds.latest(Database(con))
+        if run is None:
+            print("no rounds")
+            return
+        counts = summarize(con, run.id)
+        reason = run.reason.value if run.reason is not None else "IN_PROGRESS"
+        print(f"round={run.id} date={run.run_date} reason={reason} "
+              f"shop_offers={counts['shop_offers']} ok_offers={counts['ok_offers']} "
+              f"fail_offers={counts['fail_offers']} sku_rows={counts['sku_rows']}")
+    finally:
+        con.close()
 
 
 if __name__ == "__main__":

@@ -48,8 +48,13 @@ PROJECT_ROOT = _project_root()
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from bestseller_monitor.config import Config, load_shops  # noqa: E402
-from bestseller_monitor.db import Database, cst_date, DAY_BOUNDARY_NOTE  # noqa: E402
-from bestseller_monitor.rounds import RoundRequest, ScopeMismatch, ShopScope  # noqa: E402
+from bestseller_monitor.db import Database, cst_date, utcnow  # noqa: E402
+from bestseller_monitor.rounds import (  # noqa: E402
+    RoundRequest,
+    ScopeMismatch,
+    ShopScope,
+    TerminalReason,
+)
 from bestseller_monitor import rounds  # noqa: E402
 from bestseller_monitor import browser_proc  # noqa: E402
 
@@ -107,6 +112,52 @@ def _fmt_minutes(seconds: float | None) -> str:
     return f"{round(seconds / 60, 1)} 分"
 
 
+_TERMINAL_TEXT = {
+    TerminalReason.COMPLETED: ("正常完成", "本轮正常完成。"),
+    TerminalReason.DAY_BOUNDARY: (
+        "跨天中止",
+        "本轮因库存数据即将跨天而中止，已抓取数据已保留；请0点后启动新的抓取轮次。",
+    ),
+    TerminalReason.DENY_EXCEEDED: (
+        "意外中止",
+        "本轮因整轮 deny 达到阈值而意外中止，已抓取数据已保留；本轮不可续跑，请启动新的抓取轮次。",
+    ),
+    TerminalReason.FAIL_RATE_EXCEEDED: (
+        "暂停待处理",
+        "本轮因失败率超过阈值而暂停，需人工决策；未抓取店铺见下方。",
+    ),
+    TerminalReason.DETAIL_BUDGET_EXHAUSTED: (
+        "预算耗尽",
+        "本轮详情预算已用尽，已抓取数据已保留；剩余商品留待下一轮重新发现。",
+    ),
+    TerminalReason.ABANDONED: (
+        "人工中止",
+        "本轮由人工中止（放弃），已抓取数据已保留、不再续跑；未抓取店铺见下方。",
+    ),
+}
+
+
+def _terminal_text(reason) -> tuple[str, str]:
+    """轮次终态 → 结果页的标签与说明。改文案不影响任何判定。"""
+    if reason is None:
+        return "进行中", "本轮仍在进行；未抓取店铺见下方。"
+    return _TERMINAL_TEXT.get(reason, ("意外中止", "本轮非正常结束，已抓取数据已保留；未抓取店铺见下方。"))
+
+
+def _terminal_suffix(reason) -> str:
+    """开始页摘要里的一句短注；进行中的轮次不加注。"""
+    return "" if reason is None else "，" + _terminal_text(reason)[0]
+
+
+def _duration_seconds(started_at: str | None, finished_at: str | None) -> float | None:
+    if not started_at or not finished_at:
+        return None
+    try:
+        return (datetime.fromisoformat(finished_at) - datetime.fromisoformat(started_at)).total_seconds()
+    except ValueError:
+        return None
+
+
 class Api:
     """暴露给 pywebview 前端的方法。返回 JSON 可序列化的基本类型。"""
 
@@ -131,11 +182,6 @@ class Api:
     def _today() -> str:
         return cst_date()
 
-    def _active_round(self, conn):
-        return conn.execute(
-            "SELECT id, started_at, phase, status FROM rounds WHERE status='进行中' ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-
     def _current_elapsed(self) -> float:
         """当前已抓时长：运行中 = 累计段 + 当前段；暂停 = 仅累计段（冻结）。"""
         if self._run_start_ts is not None:
@@ -145,19 +191,8 @@ class Api:
     # ---------- 开始页 ----------
     def _start_summary(self, conn) -> dict:
         today = self._today()
-        rounds_today = conn.execute(
-            "SELECT id, started_at, finished_at, status, note FROM rounds"
-        ).fetchall()
-        today_ids = []
-        for r in rounds_today:
-            dt = datetime.fromisoformat(r["started_at"])
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            if dt.astimezone(CST).strftime("%Y-%m-%d") == today:
-                today_ids.append(dict(r))
-        started = bool(today_ids)
-
-        if not started:
+        today_rounds = rounds.on_date(Database(conn), today)
+        if not today_rounds:
             return {
                 "started": False,
                 "rounds": 0,
@@ -165,30 +200,15 @@ class Api:
             }
 
         lines = []
-        for r in today_ids:
-            started_at = r["started_at"]
-            finished_at = r.get("finished_at")
-            dur = None
-            if finished_at:
-                try:
-                    dur = (datetime.fromisoformat(finished_at) - datetime.fromisoformat(started_at)).total_seconds()
-                except ValueError:
-                    dur = None
-            status = r["status"]
-            if status == "意外中止" and r.get("note") == DAY_BOUNDARY_NOTE:
-                note = "，跨天中止"
-            else:
-                note = {
-                    "完成": "",
-                    "已放弃": "，人工放弃",
-                    "意外中止": "，deny 超限意外中止",
-                    "需人工-失败率超限": "，失败率超限暂停",
-                    "详情预算耗尽": "，详情预算耗尽",
-                }.get(status, "")
-            lines.append(f"{_fmt_hhmm(started_at)} 开始 · 跑约 {_fmt_dur(dur)}{note}")
+        for run in today_rounds:
+            dur = _duration_seconds(run.started_at, run.finished_at)
+            lines.append(
+                f"{_fmt_hhmm(run.started_at)} 开始 · 跑约 {_fmt_dur(dur)}"
+                f"{_terminal_suffix(run.reason)}"
+            )
         return {
             "started": True,
-            "rounds": len(today_ids),
+            "rounds": len(today_rounds),
             "text": "\n".join(lines),
         }
 
@@ -227,7 +247,17 @@ class Api:
                 ov_skus = conn.execute(
                     "SELECT COUNT(*) c FROM inventory WHERE date=?", (today,)
                 ).fetchone()["c"]
-                active = self._active_round(conn)
+                db = Database(conn)
+                current = rounds.active_round(db, today)
+                stale = None if current is not None else rounds.active_round(db)
+                if current is not None:
+                    hint = (f"轮次 #{current.id} 正在进行（{current.run_date}），"
+                            "点「开始抓取」会按它的店铺范围续跑。")
+                elif stale is not None:
+                    hint = (f"轮次 #{stale.id}（{stale.run_date}）已经跨天，不会再续跑；"
+                            "点「开始抓取」会新建一轮。")
+                else:
+                    hint = ""
                 return {
                     "ov": {
                         "products": ov_products,
@@ -236,7 +266,7 @@ class Api:
                     "summary": self._start_summary(conn),
                     "shops": self._start_shops(conn),
                     "total_shops": len(self.shops),
-                    "active_round_id": active["id"] if active else None,
+                    "start_hint": hint,
                 }
             finally:
                 conn.close()
@@ -274,11 +304,13 @@ class Api:
             running = self.proc is not None and self.proc.poll() is None
             conn = self._open_conn()
             try:
-                active = self._active_round(conn)
+                active = rounds.active_round(Database(conn), self._today())
                 if active is None:
                     return {"running": running, "manually_paused": self.user_paused, "has_round": False}
-                rid = int(active["id"])
-                started_at = active["started_at"]
+                rid = active.id
+                # 轮次由采集子进程创建，界面在这里随轮询认领它。
+                self.round_id = rid
+                started_at = active.started_at
                 elapsed = self._current_elapsed()
 
                 deny = conn.execute(
@@ -333,7 +365,6 @@ class Api:
                     "total_count": total,
                     "progress": (len(done) / total) if total else 0.0,
                     "current_shop": current,
-                    "phase": active["phase"],
                     "done": done,
                     "todo": todo_names,
                 }
@@ -341,9 +372,12 @@ class Api:
                 conn.close()
 
     # ---------- 控制 ----------
-    def _spawn_crawler(self, keys: list[str]):
-        limit = ",".join(k for k in keys if k)
-        cmd = [_python_exe(), str(PROJECT_ROOT / "run.py"), "--limit-shops", limit]
+    def _spawn_crawler(self, keys: list[str] | None = None):
+        """拉起采集子进程；keys 为空表示「开始或续跑」，范围由子进程按轮次决定。"""
+        cmd = [_python_exe(), str(PROJECT_ROOT / "run.py")]
+        limit = ",".join(k for k in (keys or []) if k)
+        if limit:
+            cmd += ["--limit-shops", limit]
         # 子进程静默运行：不弹控制台窗口，stdout/stderr 丢弃（详细日志仍写入 run.log）
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         self.proc = subprocess.Popen(
@@ -358,28 +392,27 @@ class Api:
         with self._lock:
             if self.proc is not None and self.proc.poll() is None:
                 return {"ok": False, "error": "已有抓取任务在运行，请先暂停或中止。"}
+            by_key = {shop.key: shop for shop in self.shops}
+            missing = [key for key in keys if key not in by_key]
+            if missing:
+                return {"ok": False, "error": "勾选的店铺已不在配置中：" + "、".join(missing)}
+            request = RoundRequest(
+                run_date=self._today(),
+                shops=tuple(
+                    ShopScope(by_key[key].key, by_key[key].url, by_key[key].name)
+                    for key in keys
+                ),
+            )
             conn = self._open_conn()
             try:
-                # 勾选的店铺就是本次的范围请求；今天已有轮次但范围不同会被拒绝，
-                # 而不是把新店铺并进进行中的那一轮。
-                by_key = {shop.key: shop for shop in self.shops}
-                missing = [key for key in keys if key not in by_key]
-                if missing:
-                    return {"ok": False, "error": "勾选的店铺已不在配置中：" + "、".join(missing)}
-                request = RoundRequest(
-                    run_date=self._today(),
-                    shops=tuple(
-                        ShopScope(by_key[key].key, by_key[key].url, by_key[key].name)
-                        for key in keys
-                    ),
-                )
-                try:
-                    rid = rounds.open(Database(conn), request).round.id
-                except ScopeMismatch as exc:
-                    return {"ok": False, "error": str(exc)}
+                # 只读地问一句会不会被拒：今天已有轮次但范围不同就给出可读理由。
+                # 轮次本身由采集子进程创建，启动失败不会留下空的「进行中」轮次。
+                rounds.check_scope(Database(conn), request)
+            except ScopeMismatch as exc:
+                return {"ok": False, "error": str(exc)}
             finally:
                 conn.close()
-            self.round_id = rid
+            self.round_id = None
             self.start_ts = time.time()
             self.user_paused = False
             self._elapsed_base = 0.0
@@ -388,7 +421,7 @@ class Api:
                 self._spawn_crawler(keys)
             except Exception as exc:  # noqa: BLE001
                 return {"ok": False, "error": f"启动抓取失败：{exc}"}
-            return {"ok": True, "round_id": rid}
+            return {"ok": True}
 
     def resume_run(self) -> dict:
         """在“过程”页暂停后点击“继续”：重新拉起抓取，续跑本轮未完成店铺，并停留在过程页。"""
@@ -397,24 +430,32 @@ class Api:
                 return {"ok": False, "error": "抓取已在运行，无需继续。"}
             conn = self._open_conn()
             try:
-                active = self._active_round(conn)
-                if active is None:
+                db = Database(conn)
+                current = rounds.active_round(db, self._today())
+                if current is None:
+                    stale = rounds.active_round(db)
+                    if stale is not None:
+                        return {"ok": False, "error": (
+                            f"轮次 #{stale.id}（{stale.run_date}）已经跨天，不能再续跑；"
+                            "请点「开始抓取」新建一轮。"
+                        )}
                     return {"ok": False, "error": "没有进行中的轮次可继续。"}
-                rid = int(active["id"])
-                rows = conn.execute(
-                    "SELECT shop_key FROM shop_rounds WHERE round_id=?", (rid,)
-                ).fetchall()
-                keys = [r["shop_key"] for r in rows]
+                if not current.resumable_on(utcnow()):
+                    return {"ok": False, "error": (
+                        f"轮次 #{current.id}（{current.run_date}）现在不可续跑；"
+                        "请点「开始抓取」新建一轮。"
+                    )}
+                rid = current.id
             finally:
                 conn.close()
-            if not keys:
-                return {"ok": False, "error": "该轮次没有可继续的店铺。"}
             self.round_id = rid
             self.start_ts = time.time()
             self.user_paused = False
             self._run_start_ts = time.time()
             try:
-                self._spawn_crawler(keys)
+                # 不带范围：子进程按「开始或续跑」处理，范围以轮次自身为准，
+                # 配置里删掉过的店铺也能继续跑完。
+                self._spawn_crawler()
             except Exception as exc:  # noqa: BLE001
                 return {"ok": False, "error": f"继续抓取失败：{exc}"}
             return {"ok": True, "round_id": rid}
@@ -434,13 +475,20 @@ class Api:
             self.user_paused = False
             self._kill_proc()
             self._kill_browser()
-            if self.round_id is not None:
-                conn = self._open_conn()
-                try:
-                    db = Database(conn)
-                    db.abandon_round(self.round_id, note="GUI 人工中止（放弃）")
-                finally:
-                    conn.close()
+            if self.round_id is None and self.proc is None:
+                return {"ok": True}  # 没起过任务，也没有认领到轮次
+            conn = self._open_conn()
+            try:
+                db = Database(conn)
+                # 轮次由采集子进程创建，界面可能还没认领到编号：按今天进行中的轮次兜底。
+                rid = self.round_id
+                if rid is None:
+                    current = rounds.active_round(db, self._today())
+                    rid = current.id if current is not None else None
+                if rid is not None:
+                    db.abandon_round(rid, note="GUI 人工中止（放弃）")
+            finally:
+                conn.close()
             return {"ok": True}
 
     def _kill_proc(self):
@@ -466,32 +514,16 @@ class Api:
         with self._lock:
             conn = self._open_conn()
             try:
-                round_id = self.round_id
-                if round_id is None:
-                    row = conn.execute(
-                        "SELECT id, started_at, finished_at, status, phase, note FROM rounds "
-                        "WHERE status!='进行中' ORDER BY id DESC LIMIT 1"
-                    ).fetchone()
-                else:
-                    row = conn.execute(
-                        "SELECT id, started_at, finished_at, status, phase, note FROM rounds WHERE id=?",
-                        (round_id,),
-                    ).fetchone()
-                if row is None:
+                db = Database(conn)
+                run = (rounds.load(db, self.round_id) if self.round_id is not None
+                       else rounds.latest(db, finished=True))
+                if run is None:
                     return {"has_round": False}
-                row = dict(row)
-                rid = int(row["id"])
-                started = row["started_at"]
-                finished = row.get("finished_at")
-                dur = None
-                if finished:
-                    try:
-                        dur = (datetime.fromisoformat(finished) - datetime.fromisoformat(started)).total_seconds()
-                    except ValueError:
-                        dur = None
-                elif rid == self.round_id:
-                    # RoundPauseRequired keeps the round resumable, so it has no
-                    # finished_at even though the current crawler process stopped.
+                rid = run.id
+                dur = _duration_seconds(run.started_at, run.finished_at)
+                if dur is None and rid == self.round_id:
+                    # 榜单未完成时轮次保持进行中、没有 finished_at，
+                    # 即便抓取进程已经停下也仍可续跑，所以用当前已抓时长。
                     dur = self._current_elapsed()
                 deny = conn.execute(
                     "SELECT COUNT(*) c FROM event_log WHERE round_id=? AND event='click_deny'",
@@ -530,35 +562,13 @@ class Api:
                         "deny": d,
                     })
                 todo = [{"key": r["shop_key"], "name": r["shop_name"]} for r in todo_rows]
-                status = row["status"]
-                if status == "已放弃":
-                    note = "本轮由人工中止（放弃），已抓取数据已保留、不再续跑；未抓取店铺见下方。"
-                    tag = "人工中止"
-                elif status == "详情预算耗尽":
-                    note = "本轮详情预算已用尽，已抓取数据已保留；剩余商品留待下一轮重新发现。"
-                    tag = "预算耗尽"
-                elif status == "需人工-失败率超限":
-                    note = "本轮因失败率超过阈值而暂停，需人工决策；未抓取店铺见下方。"
-                    tag = "暂停待处理"
-                elif status == "完成":
-                    note = "本轮正常完成。"
-                    tag = "正常完成"
-                elif status == "意外中止":
-                    if row.get("note") == DAY_BOUNDARY_NOTE:
-                        note = "本轮因库存数据即将跨天而中止，已抓取数据已保留；请0点后启动新的抓取轮次。"
-                        tag = "跨天中止"
-                    else:
-                        note = "本轮因整轮 deny 达到阈值而意外中止，已抓取数据已保留；本轮不可续跑，请启动新的抓取轮次。"
-                        tag = "意外中止"
-                else:
-                    note = "本轮非正常结束，已抓取数据已保留；未抓取店铺见下方。"
-                    tag = "意外中止"
+                tag, note = _terminal_text(run.reason)
                 return {
                     "has_round": True,
                     "round_id": rid,
-                    "status": status,
-                    "started_hhmm": _fmt_hhmm(started),
-                    "finished_hhmm": _fmt_hhmm(finished),
+                    "reason": run.reason.value if run.reason is not None else None,
+                    "started_hhmm": _fmt_hhmm(run.started_at),
+                    "finished_hhmm": _fmt_hhmm(run.finished_at),
                     "duration_text": _fmt_dur(dur),
                     "deny": deny,
                     "done_count": len(done),

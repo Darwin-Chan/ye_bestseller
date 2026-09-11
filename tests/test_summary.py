@@ -5,7 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from bestseller_monitor.db import Database, connect
+from bestseller_monitor import rounds
+from bestseller_monitor.db import Database, connect, cst_date
+from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
 from tools import summary
 
 
@@ -56,6 +58,31 @@ class SummaryTests(unittest.TestCase):
             text = buf.getvalue()
             self.assertIn(f"round={rid}", text)
             self.assertNotIn("latest_excel", text)
+
+    def test_summary_reports_the_same_round_and_reason_as_the_module(self):
+        """摘要工具的轮次与终态来自轮次模块，界面说的是同一件事。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "bestseller.db"
+            conn = connect(db_path)
+            try:
+                db = Database(conn)
+                rid = rounds.open(db, RoundRequest(
+                    cst_date(), (ShopScope("A01", "https://a.example/", "店铺A"),),
+                )).round.id
+                rounds.finish(db, rounds.load(db, rid), TerminalReason.DAY_BOUNDARY)
+            finally:
+                conn.close()
+
+            buf = io.StringIO()
+            with patch.object(summary, "ROOT", tmp_path), \
+                    patch.object(summary, "DB", db_path), \
+                    contextlib.redirect_stdout(buf):
+                summary.main()
+
+            text = buf.getvalue()
+            self.assertIn(f"round={rid}", text)
+            self.assertIn("reason=DAY_BOUNDARY", text)
 
 
 if __name__ == "__main__":

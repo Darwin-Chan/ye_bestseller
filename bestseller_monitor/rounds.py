@@ -19,6 +19,8 @@ from .db import (
     utcnow,
 )
 
+_ROUND_COLUMNS = "id, run_date, terminal_reason, started_at, finished_at"
+
 
 class TerminalReason(str, Enum):
     """轮次终态；「进行中」由没有终态表达。"""
@@ -70,6 +72,8 @@ class Round:
     run_date: str
     shop_keys: tuple[str, ...]
     reason: TerminalReason | None
+    started_at: str | None = None
+    finished_at: str | None = None
 
     @property
     def in_progress(self) -> bool:
@@ -110,12 +114,7 @@ def open(db: Database, request: RoundRequest, *, now=None) -> OpenResult:
     same_day = [row for row in active if row.run_date == request.run_date]
     if same_day:
         current = same_day[0]
-        if current.shop_keys != request.shop_keys:
-            raise ScopeMismatch(
-                f"轮次 #{current.id}（{current.run_date}）已在进行中，店铺范围是"
-                f"{_keys_text(current.shop_keys)}；本次是{_keys_text(request.shop_keys)}。"
-                "要换店铺范围，请先中止本轮。"
-            )
+        _require_same_scope(current, request)
         return OpenResult(round=current, created=False)
     superseded = tuple(active)
     for stale in superseded:
@@ -142,28 +141,66 @@ def finish(db: Database, round: Round, reason: TerminalReason, *,
             f"轮次 #{round.id} 已经是 {current}，不能改写成 {reason.value}"
         )
     phase = "abandoned" if reason is TerminalReason.ABANDONED else "done"
+    finished_at = _utc_iso(now)
     db.conn.execute(
         "UPDATE rounds SET terminal_reason=?, status=?, phase=?, finished_at=?, note=? WHERE id=?",
-        (reason.value, terminal_status_text(reason.value), phase,
-         _utc_iso(now), note, round.id),
+        (reason.value, terminal_status_text(reason.value), phase, finished_at, note, round.id),
     )
     db.conn.commit()
     return Round(id=round.id, run_date=round.run_date,
-                 shop_keys=round.shop_keys, reason=reason)
+                 shop_keys=round.shop_keys, reason=reason,
+                 started_at=round.started_at, finished_at=finished_at)
 
 
-def active_round(db: Database, run_date: str) -> Round | None:
-    """某一天进行中的轮次（若有）。"""
+def active_round(db: Database, run_date: str | None = None) -> Round | None:
+    """进行中的轮次；给了日期就只要那一天的。"""
     for row in _active_rounds(db):
-        if row.run_date == run_date:
+        if run_date is None or row.run_date == run_date:
             return row
     return None
+
+
+def on_date(db: Database, run_date: str) -> tuple[Round, ...]:
+    """某一天的轮次，旧的在前。"""
+    rows = db.conn.execute(
+        f"SELECT {_ROUND_COLUMNS} FROM rounds WHERE run_date=? ORDER BY id", (run_date,)
+    ).fetchall()
+    return tuple(_load_round(db, row) for row in rows)
+
+
+def latest(db: Database, *, finished: bool = False) -> Round | None:
+    """最近一轮；finished=True 时只要已经终态的（结果页用）。"""
+    where = " WHERE terminal_reason IS NOT NULL" if finished else ""
+    row = db.conn.execute(
+        f"SELECT {_ROUND_COLUMNS} FROM rounds{where} ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return _load_round(db, row) if row is not None else None
+
+
+def check_scope(db: Database, request: RoundRequest) -> None:
+    """只读地问一句：这次启动会不会因为范围不同被拒绝。
+
+    界面在拉起采集子进程之前用它给出可读的拒绝理由，浏览本身不改任何数据。
+    """
+    current = active_round(db, request.run_date)
+    if current is not None:
+        _require_same_scope(current, request)
+
+
+def _require_same_scope(current: Round, request: RoundRequest) -> None:
+    if current.shop_keys == request.shop_keys:
+        return
+    raise ScopeMismatch(
+        f"轮次 #{current.id}（{current.run_date}）已在进行中，店铺范围是"
+        f"{_keys_text(current.shop_keys)}；本次是{_keys_text(request.shop_keys)}。"
+        "要换店铺范围，请先中止本轮。"
+    )
 
 
 def load(db: Database, round_id: int) -> Round:
     """按 id 读一轮的当前事实；只有轮次编号的调用方用它问判据。"""
     row = db.conn.execute(
-        "SELECT id, run_date, terminal_reason FROM rounds WHERE id=?", (round_id,)
+        f"SELECT {_ROUND_COLUMNS} FROM rounds WHERE id=?", (round_id,)
     ).fetchone()
     if row is None:
         raise ValueError(f"轮次不存在：{round_id}")
@@ -198,7 +235,7 @@ def _active_rounds(db: Database) -> list[Round]:
     过渡期同时要求两个列一致；状态列收敛之后只认 terminal_reason。
     """
     rows = db.conn.execute(
-        "SELECT id, run_date, terminal_reason FROM rounds "
+        f"SELECT {_ROUND_COLUMNS} FROM rounds "
         "WHERE terminal_reason IS NULL AND status='进行中' ORDER BY id DESC"
     ).fetchall()
     return [_load_round(db, row) for row in rows]
@@ -216,6 +253,8 @@ def _load_round(db: Database, row) -> Round:
         run_date=row["run_date"],
         shop_keys=keys,
         reason=TerminalReason(raw) if raw else None,
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
     )
 
 
@@ -230,7 +269,7 @@ def _create_round(db: Database, request: RoundRequest, started_at: str) -> Round
         db.add_shop(round_id, shop.key, shop.url, shop.name)
     db.conn.commit()
     return Round(id=round_id, run_date=request.run_date,
-                 shop_keys=request.shop_keys, reason=None)
+                 shop_keys=request.shop_keys, reason=None, started_at=started_at)
 
 
 def _cst_moment(now) -> datetime:
