@@ -21,6 +21,7 @@ from bestseller_monitor.guard import InterventionTimeout, RoundPauseRequired
 from bestseller_monitor.listing import ListingLoadFailed
 from bestseller_monitor.rounds import RoundRequest, ShopScope
 from helpers import new_round
+from tools import check_orphans
 
 
 def _yesterday() -> str:
@@ -449,18 +450,22 @@ class P1Tests(unittest.TestCase):
             conn.close()
 
     def test_budget_exhaustion_keeps_the_listing_progress(self):
-        """预算在抓榜单途中用尽：已发现的商品要落库，店铺保持未完成。"""
+        """预算在抓榜单途中用尽：已发现的商品仍在库里，店铺记为未完成并说明原因。
+
+        已发现商品由抓取途中的增量落库保住，不再靠异常携带它们出来。
+        """
         round_id = new_round(self.db)
         shop = Shop("A01", "店铺A", "https://shop.example/")
         self.db.add_shop(round_id, shop.key, shop.url, shop.name)
-        partial = [(1, "11", "https://detail.1688.com/offer/11.html", "商品1", "")]
+        url11 = "https://detail.1688.com/offer/11.html"
 
-        with patch.object(
-            browser_pw, "crawl_store_by_click",
-            side_effect=pipeline.DetailBudgetExhausted(
-                pipeline.DETAIL_BUDGET_NOTE, partial_offers=partial, pages_read=2,
-            ),
-        ):
+        def fake_crawl(*args, **kwargs):
+            db, rid = kwargs["db"], kwargs["round_id"]
+            db.remember_shop_offer(rid, shop.key, shop.url, shop.name,
+                                   (1, "11", url11, "商品1", ""))
+            raise pipeline.DetailBudgetExhausted(pipeline.DETAIL_BUDGET_NOTE)
+
+        with patch.object(browser_pw, "crawl_store_by_click", side_effect=fake_crawl):
             with self.assertRaises(pipeline.DetailBudgetExhausted):
                 pipeline._run_listing_pw(
                     self.db, self._cfg(), round_id, [shop], MagicMock(),
@@ -477,8 +482,9 @@ class P1Tests(unittest.TestCase):
             (round_id, shop.key),
         ).fetchone()
         self.assertEqual(round_row["offer_count"], 1)
-        self.assertNotEqual(round_row["list_status"], "完成", "榜单没跑完，不能记成完整榜单")
-        self.assertIn("详情预算耗尽", round_row["list_note"], "中断原因要留在店铺备注里")
+        self.assertEqual(round_row["list_status"], "失败", "尝试过但没拿到完整榜单")
+        self.assertEqual(round_row["list_note"], pipeline.DETAIL_BUDGET_NOTE,
+                         "中断原因要留在店铺备注里")
 
     def test_dp_detail_phase_stops_when_budget_exhausted(self):
         round_id = new_round(self.db)
@@ -803,6 +809,183 @@ class P1Tests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(shop_row["list_status"], "完成")
         self.assertEqual(shop_row["offer_count"], len(rows))
+
+    def test_no_orphan_snapshots_whichever_way_the_listing_ends(self):
+        """四种离开榜单阶段的方式，都不留下「有快照、无榜单行」的商品。"""
+        cases = [
+            ("店铺 deny 跳店", browser_pw.ShopDenyExceeded("店铺 A01 10 分钟内 deny≥7"), False),
+            ("整轮 deny 中止", browser_pw.RoundDenyExceeded("整轮 10 分钟内 deny≥10"), True),
+            ("人工验证超时", InterventionTimeout("人工验证超时"), True),
+            ("详情预算耗尽", pipeline.DetailBudgetExhausted(pipeline.DETAIL_BUDGET_NOTE), True),
+        ]
+        for label, exc, raises in cases:
+            with self.subTest(label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    conn = connect(Path(tmp) / "test.db")
+                    try:
+                        db = Database(conn)
+                        round_id = new_round(db)
+                        shop = Shop("A01", "店铺A", "https://shop-a.example/")
+                        db.add_shop(round_id, shop.key, shop.url, shop.name)
+                        url11 = "https://detail.1688.com/offer/11.html"
+
+                        def fake_crawl(*args, _exc=exc, **kwargs):
+                            d, rid = kwargs["db"], kwargs["round_id"]
+                            d.remember_shop_offer(rid, shop.key, shop.url, shop.name,
+                                                  (1, "11", url11, "商品11", ""))
+                            d.submit_inventory_snapshot(
+                                round_id=rid, shop_key=shop.key, shop_url=shop.url,
+                                shop_name=shop.name, offer_id="11", product_url=url11,
+                                list_title="商品11", detail_title="商品11",
+                                main_image_url=None,
+                                sku_rows=[{"sku_id": "s1", "sku_name": "标准",
+                                           "sku_price": 1.0, "sku_stock": 5}],
+                                collected_at=utcnow(), attempt=1,
+                            )
+                            raise _exc
+
+                        with patch.object(browser_pw, "crawl_store_by_click",
+                                          side_effect=fake_crawl):
+                            if raises:
+                                with self.assertRaises(type(exc)):
+                                    pipeline._run_listing_pw(
+                                        db, self._cfg(), round_id, [shop], MagicMock())
+                            else:
+                                pipeline._run_listing_pw(
+                                    db, self._cfg(), round_id, [shop], MagicMock())
+
+                        self.assertEqual(check_orphans.audit(conn, round_id)["orphans"], [])
+                    finally:
+                        conn.close()
+
+    def test_unexpected_error_propagates_without_faking_the_shop_state(self):
+        """未预期异常：不吞、不伪装店铺状态，已落库的榜单行不丢。"""
+        round_id = new_round(self.db)
+        shop = Shop("A01", "店A", "https://shop-a.example/")
+        self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        url11 = "https://detail.1688.com/offer/11.html"
+
+        def fake_crawl(*args, **kwargs):
+            db, rid = kwargs["db"], kwargs["round_id"]
+            db.remember_shop_offer(rid, shop.key, shop.url, shop.name,
+                                   (1, "11", url11, "商品11", ""))
+            raise RuntimeError("浏览器崩了")
+
+        with patch.object(browser_pw, "crawl_store_by_click", side_effect=fake_crawl):
+            with self.assertRaises(RuntimeError):
+                pipeline._run_listing_pw(self.db, self._cfg(), round_id, [shop], MagicMock())
+
+        row = self.conn.execute(
+            "SELECT list_status, list_note FROM shop_rounds WHERE round_id=? AND shop_key='A01'",
+            (round_id,),
+        ).fetchone()
+        self.assertEqual(row["list_status"], "待处理", "进程崩了不该假装知道这家店的进度")
+        self.assertIsNone(row["list_note"])
+        offers = self.conn.execute(
+            "SELECT offer_id FROM shop_offers WHERE round_id=? AND shop_key='A01'",
+            (round_id,),
+        ).fetchall()
+        self.assertEqual([r["offer_id"] for r in offers], ["11"], "已发现商品不丢")
+
+    def test_intervention_timeout_records_the_shop_and_keeps_the_round_resumable(self):
+        """人工验证等不到结果：店铺记为未完成，轮次仍可续跑，异常不被吞掉。"""
+        round_id = new_round(self.db)
+        shop = Shop("A01", "店A", "https://shop-a.example/")
+        self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        url11 = "https://detail.1688.com/offer/11.html"
+
+        def fake_crawl(*args, **kwargs):
+            db, rid = kwargs["db"], kwargs["round_id"]
+            db.remember_shop_offer(rid, shop.key, shop.url, shop.name,
+                                   (1, "11", url11, "商品11", ""))
+            raise InterventionTimeout("人工验证超时")
+
+        with patch.object(browser_pw, "crawl_store_by_click", side_effect=fake_crawl):
+            with self.assertRaises(InterventionTimeout):
+                pipeline._run_listing_pw(self.db, self._cfg(), round_id, [shop], MagicMock())
+
+        row = self.conn.execute(
+            "SELECT list_status, list_note FROM shop_rounds WHERE round_id=? AND shop_key='A01'",
+            (round_id,),
+        ).fetchone()
+        self.assertEqual(row["list_status"], "失败")
+        self.assertIn("人工", row["list_note"])
+        terminal = self.conn.execute(
+            "SELECT terminal_reason FROM rounds WHERE id=?", (round_id,)
+        ).fetchone()["terminal_reason"]
+        self.assertIsNone(terminal, "人工介入只是暂停，轮次仍可续跑")
+        offers = self.conn.execute(
+            "SELECT offer_id FROM shop_offers WHERE round_id=? AND shop_key='A01'",
+            (round_id,),
+        ).fetchall()
+        self.assertEqual([r["offer_id"] for r in offers], ["11"])
+
+    def test_round_deny_abort_records_current_shop_and_leaves_others_untouched(self):
+        """整轮 deny 中止：正在处理的那家店如实记录，还没轮到的店仍是「未开始」。"""
+        round_id = new_round(self.db)
+        shops = [
+            Shop("A01", "店A", "https://shop-a.example/"),
+            Shop("A02", "店B", "https://shop-b.example/"),
+        ]
+        for shop in shops:
+            self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        url11 = "https://detail.1688.com/offer/11.html"
+
+        def fake_crawl(*args, **kwargs):
+            db, rid = kwargs["db"], kwargs["round_id"]
+            db.remember_shop_offer(rid, "A01", shop.url, shop.name,
+                                   (1, "11", url11, "商品11", ""))
+            raise browser_pw.RoundDenyExceeded("整轮 10 分钟内 deny≥10")
+
+        with patch.object(browser_pw, "crawl_store_by_click", side_effect=fake_crawl):
+            with self.assertRaises(browser_pw.RoundDenyExceeded):
+                pipeline._run_listing_pw(self.db, self._cfg(), round_id, shops, MagicMock())
+
+        rows = self.conn.execute(
+            "SELECT shop_key, list_status, list_note FROM shop_rounds "
+            "WHERE round_id=? ORDER BY shop_key",
+            (round_id,),
+        ).fetchall()
+        self.assertEqual([row["shop_key"] for row in rows], ["A01", "A02"])
+        self.assertEqual(rows[0]["list_status"], "失败", "处理到一半被打断")
+        self.assertIn("deny", rows[0]["list_note"])
+        self.assertEqual(rows[1]["list_status"], "待处理", "还没轮到的店不背这个状态")
+        self.assertIsNone(rows[1]["list_note"])
+        offers = self.conn.execute(
+            "SELECT offer_id FROM shop_offers WHERE round_id=? AND shop_key='A01'",
+            (round_id,),
+        ).fetchall()
+        self.assertEqual([r["offer_id"] for r in offers], ["11"])
+
+    def test_shop_deny_skip_keeps_discovered_offers_and_records_the_reason(self):
+        """店铺 deny 跳店：已发现的商品与榜单行都留着，店铺记为未完成并带原因。"""
+        round_id = new_round(self.db)
+        shop = Shop("A01", "店铺A", "https://shop-a.example/")
+        self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        url11 = "https://detail.1688.com/offer/11.html"
+
+        def fake_crawl(*args, **kwargs):
+            db, rid = kwargs["db"], kwargs["round_id"]
+            db.remember_shop_offer(rid, shop.key, shop.url, shop.name,
+                                   (1, "11", url11, "商品11", ""))
+            raise browser_pw.ShopDenyExceeded("店铺 A01 10 分钟内 deny≥7")
+
+        with patch.object(browser_pw, "crawl_store_by_click", side_effect=fake_crawl):
+            pipeline._run_listing_pw(self.db, self._cfg(), round_id, [shop], MagicMock())
+
+        row = self.conn.execute(
+            "SELECT list_status, offer_count, list_note FROM shop_rounds "
+            "WHERE round_id=? AND shop_key='A01'",
+            (round_id,),
+        ).fetchone()
+        self.assertEqual(row["list_status"], "失败", "尝试过但没拿到完整榜单")
+        self.assertIn("deny", row["list_note"])
+        self.assertEqual(row["offer_count"], 1)
+        offers = self.conn.execute(
+            "SELECT offer_id FROM shop_offers WHERE round_id=? AND shop_key='A01'",
+            (round_id,),
+        ).fetchall()
+        self.assertEqual([r["offer_id"] for r in offers], ["11"], "已发现商品留在榜单里")
 
     def test_listing_failure_keeps_that_shop_pending_and_continues(self):
         round_id = new_round(self.db)

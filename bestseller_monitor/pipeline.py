@@ -100,6 +100,12 @@ def _record_listing_failure(
     log.warning("店铺 %s 榜单失败，保留待续跑：%s", shop.key, note)
 
 
+def _record_incomplete_listing(db: Database, round_id: int, shop: Shop, note: str) -> None:
+    """店铺尝试过但没拿到完整榜单：记失败态与原因，已发现的商品原样保留。"""
+    db.mark_listing_failure(round_id, shop.key, note)
+    log.warning("店铺 %s 榜单未完成（已发现商品保留）：%s", shop.key, note)
+
+
 def run_round(cfg: Config, shops: list[Shop]) -> None:
     """开始或续跑一轮。
 
@@ -459,35 +465,27 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
             log.info("店铺 %s 榜单：%s 个商品（%s 页）", shop.key, len(offers), pages_read)
             db.save_shop_offers(round_id, shop.key, shop.url, shop.name, offers, pages_read)
         except ShopDenyExceeded as exc:
-            log.warning("店铺 %s 因 deny 超过阈值，跳过（本轮不保存残缺榜单）：%s", shop.key, exc)
-            db.mark_listing_failure(round_id, shop.key, f"榜单 deny 超过阈值：{exc}")
+            _record_incomplete_listing(db, round_id, shop, f"榜单 deny 超过阈值：{exc}")
             continue
         except RoundDenyExceeded as exc:
+            _record_incomplete_listing(db, round_id, shop, f"整轮 deny 超过阈值：{exc}")
             log.error("整轮 deny 超过阈值，中止本轮：%s", exc)
             raise
-        except DetailBudgetExhausted as exc:
-            _save_partial_listing(db, round_id, shop, exc)
+        except DetailBudgetExhausted:
+            _record_incomplete_listing(db, round_id, shop, DETAIL_BUDGET_NOTE)
+            raise
+        except DayBoundaryReached:
+            _record_incomplete_listing(db, round_id, shop, DAY_BOUNDARY_NOTE)
+            raise
+        except RoundPauseRequired as exc:
+            # 人工验证等不到结果：轮次保持可续跑，这家店要如实记为未完成。
+            _record_incomplete_listing(db, round_id, shop, f"人工介入未完成：{exc}")
             raise
         except ListingLoadFailed as exc:
             _record_listing_failure(db, cfg, round_id, shop, exc)
             continue
         _retry_shop_pending_pw(db, cfg, round_id, shop, page, human, emit=emit)
     log.info("榜单阶段完成")
-
-
-def _save_partial_listing(db: Database, round_id: int, shop: Shop,
-                          exc: DetailBudgetExhausted) -> None:
-    """详情预算在抓榜单途中用尽：先把已发现的商品落库，再结束本轮。
-
-    榜单没跑完，因此店铺保持未完成状态，不会被当成完整榜单。
-    """
-    if not exc.partial_offers:
-        return
-    db.save_shop_offers(round_id, shop.key, shop.url, shop.name,
-                        exc.partial_offers, exc.pages_read, complete=False,
-                        note="详情预算耗尽，榜单未跑完")
-    log.warning("店铺 %s 榜单未跑完（详情预算耗尽），已保存 %s 个已发现商品",
-                shop.key, len(exc.partial_offers))
 
 
 def _retry_shop_pending_pw(db: Database, cfg: Config, round_id: int, shop: Shop, page,

@@ -79,18 +79,13 @@ class DbTests(unittest.TestCase):
         self.assertEqual(shop["list_status"], "完成")
         self.assertEqual(shop["offer_count"], 2)
 
-    def test_partial_listing_only_adds_and_keeps_earlier_discoveries(self):
-        """残缺榜单只增不减：续跑再次中断，先前发现的商品不能被抹掉。"""
+    def test_remembering_offers_keeps_earlier_discoveries(self):
+        """已发现集合只增不减：续跑再次中断，先前发现的商品不能被抹掉。"""
         rid = new_round(self.db)
         self._add_shop(rid)
         self._remember(rid, (1, "11", "https://detail.1688.com/offer/11.html", "商品11", ""))
         self._remember(rid, (2, "22", "https://detail.1688.com/offer/22.html", "商品22", ""))
-
-        self.db.save_shop_offers(
-            rid, "A01", "https://a.example/", "店铺A",
-            [(1, "33", "https://detail.1688.com/offer/33.html", "商品33", "")],
-            2, complete=False,
-        )
+        self._remember(rid, (1, "33", "https://detail.1688.com/offer/33.html", "商品33", ""))
 
         rows = self.conn.execute(
             "SELECT offer_id FROM shop_offers WHERE round_id=? AND shop_key='A01' ORDER BY offer_id",
@@ -101,24 +96,24 @@ class DbTests(unittest.TestCase):
             "SELECT list_status, offer_count FROM shop_rounds WHERE round_id=? AND shop_key='A01'",
             (rid,),
         ).fetchone()
-        self.assertNotEqual(shop["list_status"], "完成", "榜单没跑完，不能记成完整榜单")
+        self.assertEqual(shop["list_status"], "待处理", "只发现商品不等于跑完榜单")
         self.assertEqual(shop["offer_count"], 3, "已发现商品数包含先前发现的行")
 
-    def test_incomplete_listing_note_comes_from_the_caller(self):
-        """中断原因由调用方给出：数据层不再写死某一种中断原因的文案。"""
+    def test_mark_listing_failure_records_the_callers_reason(self):
+        """中断原因由调用方给出：数据层不写死任何一种中断原因的文案。"""
         rid = new_round(self.db)
         self._add_shop(rid)
 
-        self.db.save_shop_offers(
-            rid, "A01", "https://a.example/", "店铺A",
-            [(1, "33", "https://detail.1688.com/offer/33.html", "商品33", "")],
-            2, complete=False, note="榜单 deny 超过阈值：店铺 A01 10 分钟内 deny≥7",
+        self.db.mark_listing_failure(
+            rid, "A01", "榜单 deny 超过阈值：店铺 A01 10 分钟内 deny≥7",
         )
 
-        note = self.conn.execute(
-            "SELECT list_note FROM shop_rounds WHERE round_id=? AND shop_key='A01'", (rid,)
-        ).fetchone()["list_note"]
-        self.assertEqual(note, "榜单 deny 超过阈值：店铺 A01 10 分钟内 deny≥7")
+        row = self.conn.execute(
+            "SELECT list_status, list_note FROM shop_rounds WHERE round_id=? AND shop_key='A01'",
+            (rid,),
+        ).fetchone()
+        self.assertEqual(row["list_status"], "失败")
+        self.assertEqual(row["list_note"], "榜单 deny 超过阈值：店铺 A01 10 分钟内 deny≥7")
 
     def test_remembering_tolerates_pre_existing_duplicate_rows(self):
         """不新增唯一约束：既有库里同商品多行时仍能继续写入，不需要人工迁移。"""

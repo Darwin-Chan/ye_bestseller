@@ -415,23 +415,17 @@ def _remember_discovery(db, round_id, shop, offers: list, offer_id: str,
         db.remember_shop_offer(round_id, shop.key, shop.url, shop.name, offers[-1])
 
 
-def _claim_card_slot(db, round_id, shop: Shop, cfg: Config, card_ref: str,
-                     offers: list, pages_read: int) -> None:
+def _claim_card_slot(db, round_id, shop: Shop, cfg: Config, card_ref: str) -> None:
     """向同日去重与补采 module 申请一次详情机会，预算耗尽时结束本轮。
 
     点击式列表在打开卡片前还拿不到商品编号，因此这里用卡片位置作为机会标识；
     同一轮里重复扫到同一张卡片只会复用机会，不重复占用预算。
-    预算耗尽时把已发现的商品一并带出，调用方才能先保存进度再结束本轮。
+    已发现的商品在发现时就已落库，预算耗尽只需结束本轮。
     """
     if db is None or round_id is None:
         return
-    try:
-        dedupe.claim_card_slot(db, round_id, shop.key, card_ref,
-                               cfg.max_detail_opportunities_per_round)
-    except DetailBudgetExhausted as exc:
-        raise DetailBudgetExhausted(
-            str(exc), partial_offers=offers, pages_read=pages_read,
-        ) from None
+    dedupe.claim_card_slot(db, round_id, shop.key, card_ref,
+                           cfg.max_detail_opportunities_per_round)
 
 
 def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
@@ -517,8 +511,7 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                                         def_url, list_title, note="今日已有同名库存，跳过")
                     continue
             # 只有确认需要进入详情后才消耗详情间隔和长停顿预算。
-            _claim_card_slot(db, round_id, shop, cfg, _card_ref(pages_read, i),
-                             offers, pages_read)
+            _claim_card_slot(db, round_id, shop, cfg, _card_ref(pages_read, i))
             human.before_detail()
             img = page.locator(_PRODUCT_IMG_SEL).nth(i)
             _capture_card(page, img, list_title, cfg, punished, on_response, se, db,
@@ -565,8 +558,7 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                 for i in range(n):
                     name = _read_card_title(page, i)
                     if name and name in ambiguous:
-                        _claim_card_slot(db, round_id, shop, cfg, _card_ref(rpg, i),
-                                         offers, rpg)
+                        _claim_card_slot(db, round_id, shop, cfg, _card_ref(rpg, i))
                         human.before_detail()
                         se("product_open")
                         img = page.locator(_PRODUCT_IMG_SEL).nth(i)

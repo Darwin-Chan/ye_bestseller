@@ -231,15 +231,11 @@ class DayBoundaryReached(RuntimeError):
 class DetailBudgetExhausted(RuntimeError):
     """本轮详情预算已用尽但仍有待处理商品；轮次进入终态，剩余留待下一轮。
 
-    若预算是在抓榜单的过程中用尽，抛出方把已发现的商品放进 partial_offers，
-    调用方就能先保存进度再结束本轮。
+    已发现的商品在抓取途中就已落库，不需要随这个异常携带出来。
     """
 
-    def __init__(self, note: str = DETAIL_BUDGET_NOTE, *, partial_offers=None,
-                 pages_read: int = 0) -> None:
+    def __init__(self, note: str = DETAIL_BUDGET_NOTE) -> None:
         super().__init__(note)
-        self.partial_offers = list(partial_offers or [])
-        self.pages_read = pages_read
 
 
 _CARD_POS_RE = re.compile(r"page=(\d+)&idx=(\d+)")
@@ -447,8 +443,6 @@ class Database:
         shop_url: str,
         shop_name: str,
         offer: tuple[int, str, str, str, str],
-        *,
-        update_existing: bool = True,
     ) -> None:
         """写入或更新一条榜单行；同一轮同店同商品只留一行。不提交事务。"""
         rank, offer_id, product_url, list_title, list_price = offer
@@ -463,7 +457,7 @@ class Database:
                 (round_id, shop_key, shop_url, shop_name, rank, offer_id,
                  product_url, list_title, list_price),
             )
-        elif update_existing:
+        else:
             self.conn.execute(
                 "UPDATE shop_offers SET rank=?, product_url=?, list_title=?, list_price=? WHERE id=?",
                 (rank, product_url, list_title, list_price, existing["id"]),
@@ -511,35 +505,33 @@ class Database:
         pages_read: int,
         *,
         confirmed_empty: bool = False,
-        complete: bool = True,
-        note: str | None = None,
     ) -> None:
-        """把一次榜单遍历的结果落库。
+        """把一次完整榜单遍历的结果落库：整体替换该店本轮的行，rank 反映传入顺序。
 
-        完整榜单是权威列表：整体替换该店本轮的行，rank 反映传入顺序。
-        残缺榜单只增不减：中断前已发现的商品不因「这次没再出现」而消失。
-        中断说明由调用方给出，数据层不写死任何一种中断原因的文案。
+        中断时保住已发现的商品是 remember_shop_offer() 的职责——那些行不属于完整
+        榜单，由店铺状态与备注说明。
         """
         if not offers and not confirmed_empty:
             raise ValueError("未确认的空榜单不能标记为完成")
-        if complete:
-            self.conn.execute(
-                "DELETE FROM shop_offers WHERE round_id=? AND shop_key=?", (round_id, shop_key)
-            )
-        # 残缺榜单是「本轮已发现的商品集合」，只增不减：已有的行不被这次遍历覆盖或删除。
-        for offer in offers:
-            self._upsert_offer_row(
-                round_id, shop_key, shop_url, shop_name, offer, update_existing=complete,
-            )
-        offer_count = self._offer_count_in_db(round_id, shop_key)
         self.conn.execute(
-            "UPDATE shop_rounds SET list_status=?, list_pages_read=?, offer_count=?, list_note=? "
-            "WHERE round_id=? AND shop_key=?",
-            ("完成" if complete else "待处理", pages_read, offer_count,
-             None if complete else note, round_id, shop_key),
+            "DELETE FROM shop_offers WHERE round_id=? AND shop_key=?", (round_id, shop_key)
+        )
+        rows = [
+            (round_id, shop_key, shop_url, shop_name, rank, oid, url, title, price)
+            for rank, oid, url, title, price in offers
+        ]
+        self.conn.executemany(
+            "INSERT INTO shop_offers(round_id, shop_key, shop_url, shop_name, rank, offer_id, "
+            "product_url, list_title, list_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        self.conn.execute(
+            "UPDATE shop_rounds SET list_status='完成', list_pages_read=?, offer_count=?, "
+            "list_note=NULL WHERE round_id=? AND shop_key=?",
+            (pages_read, len(rows), round_id, shop_key),
         )
         self.conn.commit()
-        log.info("店铺 %s 榜单入库 %s 个商品（读了 %s 页）", shop_key, offer_count, pages_read)
+        log.info("店铺 %s 榜单入库 %s 个商品（读了 %s 页）", shop_key, len(rows), pages_read)
 
     def mark_listing_failure(self, round_id: int, shop_key: str, note: str) -> None:
         """记录列表页失败；保留店铺为未完成状态，供同轮续跑。"""
