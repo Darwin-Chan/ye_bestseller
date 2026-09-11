@@ -41,6 +41,29 @@ class DedupeTests(unittest.TestCase):
         with self.assertRaises(DetailBudgetExhausted):
             dedupe.claim_offer_slot(self.db, self.rid, "A01", "222", 5)
 
+    def test_budget_survives_reopening_the_database(self):
+        """重启不能绕过单轮预算：重新打开同一个库后，已用尽的预算仍然用尽。"""
+        path = Path(self.tmp.name) / "restart.db"
+        first = connect(path)
+        try:
+            db = Database(first)
+            rid = db.start_or_resume()
+            dedupe.claim_offer_slot(db, rid, "A01", "111", 1)
+        finally:
+            first.close()
+
+        second = connect(path)
+        try:
+            db = Database(second)
+            self.assertEqual(db.detail_opportunity_total(rid), 1)
+            with self.assertRaises(DetailBudgetExhausted):
+                dedupe.claim_offer_slot(db, rid, "A01", "222", 1)
+            # 已经占过机会的商品只是重试，不该被预算耗尽挡住
+            dedupe.claim_offer_slot(db, rid, "A01", "111", 1)
+            self.assertEqual(db.detail_opportunity_total(rid), 1)
+        finally:
+            second.close()
+
     def test_binding_merges_when_offer_already_holds_a_slot(self):
         dedupe.claim_offer_slot(self.db, self.rid, "A01", "33", 5)
         dedupe.claim_card_slot(self.db, self.rid, "A01", "card:p2:i1", 5)
