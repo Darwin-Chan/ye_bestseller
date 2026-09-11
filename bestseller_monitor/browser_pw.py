@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-import hashlib
 import os
 import re
 import subprocess
@@ -15,7 +14,7 @@ import time
 from playwright.sync_api import Error as PlaywrightError
 
 from .config import Config, Shop
-from .db import utcnow, cst_date
+from .db import DayBoundaryReached, utcnow, cst_date
 from .delay import Humanizer
 from .detail import DetailParseFailed, parse_detail_html, save_raw_page
 from .parse import extract_main_image
@@ -682,6 +681,7 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
         se("skip_existing", offer_id=oid, note="inventory_exists_today")
         _close_popup_or_back(detail_page, popup, page)
         return oid
+    stop_round = False
     if db and round_id and first_time:
         try:
             html = detail_page.content()
@@ -701,21 +701,6 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
             img_url = extract_main_image(html)
             title = payload["product_name"]
             rows = payload["rows"]
-            snap_rows = [
-                {
-                    "round_id": round_id, "shop_key": shop.key,
-                    "shop_url": shop.url, "shop_name": shop.name,
-                    "offer_id": oid, "product_url": url,
-                    "product_name": list_title or title,
-                    "sku_id": sku.get("sku_id") or hashlib.sha1(
-                        f"{oid}|{sku['sku_name']}".encode("utf-8")
-                    ).hexdigest()[:16],
-                    "sku_name": sku["sku_name"], "sku_price": sku["sku_price"],
-                    "sku_stock": sku["sku_stock"], "collected_at": utcnow(),
-                    "main_image_url": img_url, "page_status": "成功", "attempt": 1,
-                }
-                for sku in rows
-            ]
         except DetailParseFailed as exc:
             raw_path = save_raw_page(cfg, round_id, oid, exc.html) if exc.html else ""
             note = f"解析失败：{exc}；原始页面：{raw_path}"
@@ -743,15 +728,29 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
             _close_popup_or_back(detail_page, popup, page)
             return None
 
-        db.upsert_product(oid, url, title, img_url)
         se("detail_parse", offer_id=oid, note=f"sku_count={len(rows)}")
-        db.save_snapshot_rows(round_id, shop.key, snap_rows)
-        db.clear_failures(round_id, shop.key, oid)
+        result = db.submit_inventory_snapshot(
+            round_id=round_id,
+            shop_key=shop.key,
+            shop_url=shop.url,
+            shop_name=shop.name,
+            offer_id=oid,
+            product_url=url,
+            list_title=list_title,
+            detail_title=title,
+            main_image_url=img_url,
+            sku_rows=rows,
+            collected_at=utcnow(),
+            attempt=1,
+        )
         se("click_ok", offer_id=oid, note=cnote + "&offer_id=" + oid + f"&sku={len(rows)}")
+        stop_round = result.stop_round
     elif db and round_id:
         se("click_skipped", offer_id=oid, note=cnote + "&offer_id=" + oid + "&dup=1")
     se("popup_close", offer_id=oid)
     _close_popup_or_back(detail_page, popup, page)
+    if stop_round:
+        raise DayBoundaryReached()
     return oid
 
 

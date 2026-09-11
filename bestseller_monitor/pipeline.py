@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import hashlib
 import random
 from collections import defaultdict
 
@@ -113,9 +112,11 @@ def _run_pw_round(db: Database, cfg: Config, round_id: int, shops: list[Shop]) -
             window.chrome = window.chrome || { runtime: {} };
             """
         )
-        _run_listing_phase(db, cfg, round_id, shops, page)
-        _run_detail_phase(db, cfg, round_id, page)
-        context.close()
+        try:
+            _run_listing_phase(db, cfg, round_id, shops, page)
+            _run_detail_phase(db, cfg, round_id, page)
+        finally:
+            context.close()
 
 
 def _run_dp_round(db: Database, cfg: Config, round_id: int, shops: list[Shop]) -> None:
@@ -179,7 +180,6 @@ def _capture_one_dp(db: Database, cfg: Config, human: Humanizer, round_id: int, 
     shop_url = offer["shop_url"]
     shop_name = offer["shop_name"]
     max_attempts = cfg.max_attempts_per_page
-    collected_at = utcnow()
 
     day = cst_date()
     if offer["list_title"] and db.inventory_exists_by_name(shop_key, offer["list_title"], day):
@@ -215,37 +215,26 @@ def _capture_one_dp(db: Database, cfg: Config, human: Humanizer, round_id: int, 
             continue
 
         img = extract_main_image(payload["html"])
-        db.upsert_product(offer_id, product_url, payload["product_name"], img)
-        rows = []
-        for sku in payload["rows"]:
-            sku_id = sku.get("sku_id") or hashlib.sha1(
-                f"{offer_id}|{sku['sku_name']}".encode("utf-8")
-            ).hexdigest()[:16]
-            rows.append(
-                {
-                    "round_id": round_id,
-                    "shop_key": shop_key,
-                    "shop_url": shop_url,
-                    "shop_name": shop_name,
-                    "offer_id": offer_id,
-                    "product_url": product_url,
-                    "product_name": payload["product_name"] or offer["list_title"],
-                    "sku_id": sku_id,
-                    "sku_name": sku["sku_name"],
-                    "sku_price": sku["sku_price"],
-                    "sku_stock": sku["sku_stock"],
-                    "collected_at": collected_at,
-                    "page_status": "成功",
-                    "attempt": attempt,
-                }
-            )
-        for r in rows:
-            r["main_image_url"] = img
-        for r in rows:
-            r["main_image_url"] = img
-        db.save_snapshot_rows(round_id, shop_key, rows)
-        db.clear_failures(round_id, shop_key, offer_id)
-        log.info("店铺 %s 商品 %s 抓取成功：%s 个 SKU（第 %s 次）", shop_key, offer_id, len(rows), attempt)
+        result = db.submit_inventory_snapshot(
+            round_id=round_id,
+            shop_key=shop_key,
+            shop_url=shop_url,
+            shop_name=shop_name,
+            offer_id=offer_id,
+            product_url=product_url,
+            list_title=offer["list_title"],
+            detail_title=payload["product_name"],
+            main_image_url=img,
+            sku_rows=payload["rows"],
+            collected_at=utcnow(),
+            attempt=attempt,
+        )
+        if result.stop_round:
+            raise DayBoundaryReached()
+        log.info(
+            "店铺 %s 商品 %s 抓取成功：%s 个 SKU（第 %s 次）",
+            shop_key, offer_id, len(payload["rows"]), attempt,
+        )
         return
 
 
@@ -302,7 +291,6 @@ def _capture_one(
     shop_url = offer["shop_url"]
     shop_name = offer["shop_name"]
     max_attempts = cfg.max_attempts_per_page
-    collected_at = utcnow()
 
     day = cst_date()
     if offer["list_title"] and db.inventory_exists_by_name(shop_key, offer["list_title"], day):
@@ -338,37 +326,25 @@ def _capture_one(
             continue
 
         img = extract_main_image(payload["html"])
-        db.upsert_product(offer_id, product_url, payload["product_name"], img)
-        rows = []
-        for sku in payload["rows"]:
-            sku_id = sku.get("sku_id") or hashlib.sha1(
-                f"{offer_id}|{sku['sku_name']}".encode("utf-8")
-            ).hexdigest()[:16]
-            rows.append(
-                {
-                    "round_id": round_id,
-                    "shop_key": shop_key,
-                    "shop_url": shop_url,
-                    "shop_name": shop_name,
-                    "offer_id": offer_id,
-                    "product_url": product_url,
-                    "product_name": payload["product_name"] or offer["list_title"],
-                    "sku_id": sku_id,
-                    "sku_name": sku["sku_name"],
-                    "sku_price": sku["sku_price"],
-                    "sku_stock": sku["sku_stock"],
-                    "collected_at": collected_at,
-                    "page_status": "成功",
-                    "attempt": attempt,
-                }
-            )
-        for r in rows:
-            r["main_image_url"] = img
-        db.save_snapshot_rows(round_id, shop_key, rows)
-        db.clear_failures(round_id, shop_key, offer_id)
+        result = db.submit_inventory_snapshot(
+            round_id=round_id,
+            shop_key=shop_key,
+            shop_url=shop_url,
+            shop_name=shop_name,
+            offer_id=offer_id,
+            product_url=product_url,
+            list_title=offer["list_title"],
+            detail_title=payload["product_name"],
+            main_image_url=img,
+            sku_rows=payload["rows"],
+            collected_at=utcnow(),
+            attempt=attempt,
+        )
+        if result.stop_round:
+            raise DayBoundaryReached()
         log.info(
             "店铺 %s 商品 %s 抓取成功：%s 个 SKU（第 %s 次尝试）",
-            shop_key, offer_id, len(rows), attempt,
+            shop_key, offer_id, len(payload["rows"]), attempt,
         )
         return
 
@@ -475,7 +451,6 @@ def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, 
     shop_url = offer["shop_url"]
     shop_name = offer["shop_name"]
     max_attempts = cfg.max_attempts_per_page
-    collected_at = utcnow()
 
     day = cst_date()
     if offer["list_title"] and db.inventory_exists_by_name(shop_key, offer["list_title"], day):
@@ -517,21 +492,24 @@ def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, 
             continue
 
         img = extract_main_image(payload["html"])
-        db.upsert_product(offer_id, product_url, payload["product_name"], img)
-        rows = []
-        for sku in payload["rows"]:
-            sku_id = sku.get("sku_id") or hashlib.sha1(
-                f"{offer_id}|{sku['sku_name']}".encode("utf-8")
-            ).hexdigest()[:16]
-            rows.append({
-                "round_id": round_id, "shop_key": shop_key, "shop_url": shop_url,
-                "shop_name": shop_name, "offer_id": offer_id, "product_url": product_url,
-                "product_name": payload["product_name"] or offer["list_title"],
-                "sku_id": sku_id, "sku_name": sku["sku_name"], "sku_price": sku["sku_price"],
-                "sku_stock": sku["sku_stock"], "collected_at": collected_at,
-                "page_status": "成功", "attempt": attempt,
-            })
-        db.save_snapshot_rows(round_id, shop_key, rows)
-        db.clear_failures(round_id, shop_key, offer_id)
-        log.info("店铺 %s 商品 %s 抓取成功：%s 个 SKU（第 %s 次）", shop_key, offer_id, len(rows), attempt)
+        result = db.submit_inventory_snapshot(
+            round_id=round_id,
+            shop_key=shop_key,
+            shop_url=shop_url,
+            shop_name=shop_name,
+            offer_id=offer_id,
+            product_url=product_url,
+            list_title=offer["list_title"],
+            detail_title=payload["product_name"],
+            main_image_url=img,
+            sku_rows=payload["rows"],
+            collected_at=utcnow(),
+            attempt=attempt,
+        )
+        if result.stop_round:
+            raise DayBoundaryReached()
+        log.info(
+            "店铺 %s 商品 %s 抓取成功：%s 个 SKU（第 %s 次）",
+            shop_key, offer_id, len(payload["rows"]), attempt,
+        )
         return

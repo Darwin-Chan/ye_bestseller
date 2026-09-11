@@ -6,6 +6,7 @@ import sqlite3
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
@@ -194,6 +195,13 @@ class DayBoundaryReached(RuntimeError):
     """库存数据即将跨天（北京时间 ≥ 23:55），当前轮次需中止，0 点后继续。"""
 
 
+@dataclass(frozen=True)
+class SnapshotCommitResult:
+    """已提交的库存快照结果；停止信号不表示事务失败。"""
+
+    stop_round: bool = False
+
+
 def past_day_cutoff(iso_utc: str | None = None) -> bool:
     """判断北京时间是否已达到或超过 23:55（当日抓取的安全截止线）。"""
     if iso_utc:
@@ -285,6 +293,28 @@ def connect(db_path: Path) -> sqlite3.Connection:
             log.info("已物理删除 snapshots.stock_delta 列")
     except sqlite3.OperationalError as exc:
         log.debug("删除 snapshots.stock_delta 列失败（可能已删除或版本不支持）：%s", exc)
+    # 迁移：同一轮、店铺、商品和 SKU 只保留最新成功快照，再建立最终唯一约束。
+    # 失败记录与无 SKU 的跳过记录不参与该约束。极旧库可能还没有 page_status，
+    # 先完成其列迁移，等新写入路径可用时再建立约束。
+    snapshot_cols = {
+        row[1] for row in conn.execute('PRAGMA table_info("snapshots")').fetchall()
+    }
+    if {"id", "round_id", "shop_key", "offer_id", "sku_id", "page_status"} <= snapshot_cols:
+        conn.execute(
+            "DELETE FROM snapshots WHERE id IN ("
+            "SELECT older.id FROM snapshots older "
+            "JOIN snapshots newer ON newer.round_id=older.round_id "
+            "AND newer.shop_key=older.shop_key AND newer.offer_id=older.offer_id "
+            "AND newer.sku_id=older.sku_id AND newer.page_status='成功' "
+            "AND newer.sku_id IS NOT NULL AND newer.id > older.id "
+            "WHERE older.page_status='成功' AND older.sku_id IS NOT NULL"
+            ")"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_success_key "
+            "ON snapshots(round_id, shop_key, offer_id, sku_id) "
+            "WHERE page_status='成功' AND sku_id IS NOT NULL"
+        )
     conn.commit()
     return conn
 
@@ -490,38 +520,112 @@ class Database:
         )
         self.conn.commit()
 
-    def clear_failures(self, round_id: int, shop_key: str, offer_id: str) -> None:
+    def _clear_failures(self, round_id: int, shop_key: str, offer_id: str) -> None:
         self.conn.execute(
             "DELETE FROM snapshots WHERE round_id=? AND shop_key=? AND offer_id=? "
             "AND page_status!='成功'",
             (round_id, shop_key, offer_id),
         )
-        self.conn.commit()
 
-    def save_snapshot_rows(self, round_id: int, shop_key: str, rows: list[dict]) -> None:
-        """按 offer 写 snapshots + skus + inventory；失败回滚该 offer（不产生半截数据）。"""
-        if not rows:
+    def submit_inventory_snapshot(
+        self,
+        *,
+        round_id: int,
+        shop_key: str,
+        shop_url: str,
+        shop_name: str,
+        offer_id: str,
+        product_url: str,
+        list_title: str | None,
+        detail_title: str | None,
+        main_image_url: str | None,
+        sku_rows: list[dict],
+        collected_at: str,
+        attempt: int,
+    ) -> SnapshotCommitResult:
+        """原子提交一次完整商品库存快照。
+
+        调用方只交出解析后的商品结果。相同轮次、店铺、商品和 SKU 的成功
+        快照按 SKU 替换；本次未出现的旧 SKU 保留。提交完成后再返回跨天停止信号。
+        """
+        if not sku_rows:
             raise ValueError("成功快照不能为空")
-        if any(not row.get("sku_id") or row.get("sku_stock") is None for row in rows):
-            raise ValueError("成功快照的每个 SKU 都必须有编号和库存")
+        collected_at = str(collected_at).strip() if collected_at is not None else ""
+        if not collected_at:
+            raise ValueError("成功快照必须有采集时间")
+        offer_id = str(offer_id).strip() if offer_id is not None else ""
+        shop_key = str(shop_key).strip() if shop_key is not None else ""
+        product_url = str(product_url).strip() if product_url is not None else ""
+        if not offer_id or not product_url or not shop_key:
+            raise ValueError("成功快照缺少商品或店铺标识")
+
+        list_name = str(list_title).strip() if list_title else ""
+        detail_name = str(detail_title).strip() if detail_title else ""
+        image_url = str(main_image_url).strip() if main_image_url else ""
+        snapshot_name = list_name or detail_name or None
+        normalized: list[dict] = []
+        seen_sku_ids: set[str] = set()
+        for sku in sku_rows:
+            if not isinstance(sku, dict):
+                raise ValueError("成功快照的每个 SKU 必须是结构化记录")
+            sku_name = str(sku.get("sku_name") or "").strip()
+            stock = sku.get("sku_stock")
+            if not sku_name or stock is None or isinstance(stock, bool) or not isinstance(stock, int):
+                raise ValueError("成功快照的每个 SKU 都必须有名称和整数库存")
+            sku_id = sku.get("sku_id")
+            if sku_id is None or str(sku_id).strip() == "":
+                sku_id = hashlib.sha1(
+                    f"{offer_id}|{sku_name}".encode("utf-8")
+                ).hexdigest()[:16]
+            else:
+                sku_id = str(sku_id).strip()
+            if sku_id in seen_sku_ids:
+                raise ValueError(f"成功快照包含重复 SKU 编号：{sku_id}")
+            seen_sku_ids.add(sku_id)
+            normalized.append({
+                "round_id": round_id,
+                "shop_key": shop_key,
+                "shop_url": shop_url,
+                "shop_name": shop_name,
+                "offer_id": offer_id,
+                "product_url": product_url,
+                "product_name": snapshot_name,
+                "sku_id": sku_id,
+                "sku_name": sku_name,
+                "sku_price": sku.get("sku_price"),
+                "sku_stock": stock,
+                "collected_at": collected_at,
+                "page_status": "成功",
+                "attempt": attempt,
+            })
+
         try:
             self.conn.execute("BEGIN")
+            self._upsert_product(
+                offer_id, product_url, detail_name or None, image_url or None,
+            )
+            self._upsert_skus(normalized)
+            for row in normalized:
+                self.conn.execute(
+                    "DELETE FROM snapshots WHERE round_id=? AND shop_key=? "
+                    "AND offer_id=? AND sku_id=? AND page_status='成功'",
+                    (round_id, shop_key, offer_id, row["sku_id"]),
+                )
             self.conn.executemany(
                 "INSERT INTO snapshots(round_id, shop_key, shop_url, shop_name, offer_id, product_url, "
                 "product_name, sku_id, sku_name, sku_price, sku_stock, collected_at, page_status, "
                 "attempt) VALUES (:round_id, :shop_key, :shop_url, :shop_name, :offer_id, "
                 ":product_url, :product_name, :sku_id, :sku_name, :sku_price, :sku_stock, "
                 ":collected_at, :page_status, :attempt)",
-                rows,
+                normalized,
             )
-            self._upsert_skus(rows)
-            self._upsert_inventory(rows)
+            self._upsert_inventory(normalized)
+            self._clear_failures(round_id, shop_key, offer_id)
             self.conn.commit()
         except Exception:
             self.conn.rollback()
             raise
-        if past_day_cutoff():
-            raise DayBoundaryReached()
+        return SnapshotCommitResult(stop_round=past_day_cutoff())
 
     def _upsert_skus(self, rows: list[dict]) -> None:
         now = utcnow()
@@ -539,11 +643,6 @@ class Database:
             "sku_name=excluded.sku_name, last_seen_at=excluded.last_seen_at",
             sku_rows,
         )
-
-    def upsert_skus(self, rows: list[dict]) -> None:
-        """按 (offer_id, sku_id) upsert；first_seen_at 保留，仅更新 sku_name/last_seen_at。"""
-        self._upsert_skus(rows)
-        self.conn.commit()
 
     def _upsert_inventory(self, rows: list[dict]) -> None:
         """每次抓到 SKU 库存写一条每日库存；diff = 今日 stock − 最近一个更早日期 stock。"""
@@ -574,10 +673,6 @@ class Database:
                     r.get("shop_name"), r.get("product_name"), r.get("sku_name"),
                 ),
             )
-
-    def upsert_inventory(self, rows: list[dict]) -> None:
-        self._upsert_inventory(rows)
-        self.conn.commit()
 
     def inventory_exists(self, shop_key: str, offer_id: str, date: str) -> bool:
         """某 (shop_key, offer_id, date) 是否已有完整库存记录。"""
@@ -635,19 +730,20 @@ class Database:
         )
         self.conn.commit()
 
-    def upsert_product(self, offer_id: str, product_url: str, product_name: str | None,
-                       main_image_url: str | None = None) -> None:
+    def _upsert_product(self, offer_id: str, product_url: str, product_name: str | None,
+                        main_image_url: str | None = None) -> None:
         now = utcnow()
         self.conn.execute(
             "INSERT INTO products(offer_id, product_url, product_name, main_image_url, "
             "first_seen_at, last_seen_at) "
             "VALUES (?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(offer_id) DO UPDATE SET "
-            "product_url=excluded.product_url, product_name=excluded.product_name, "
-            "main_image_url=excluded.main_image_url, last_seen_at=excluded.last_seen_at",
+            "product_url=COALESCE(NULLIF(excluded.product_url, ''), products.product_url), "
+            "product_name=COALESCE(NULLIF(excluded.product_name, ''), products.product_name), "
+            "main_image_url=COALESCE(NULLIF(excluded.main_image_url, ''), products.main_image_url), "
+            "last_seen_at=excluded.last_seen_at",
             (offer_id, product_url, product_name, main_image_url, now, now),
         )
-        self.conn.commit()
 
     def success_rows(self, round_id: int) -> list[sqlite3.Row]:
         cur = self.conn.execute(

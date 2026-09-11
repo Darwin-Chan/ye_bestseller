@@ -6,10 +6,10 @@ from unittest.mock import patch
 
 from bestseller_monitor.db import (
     Database,
+    SCHEMA,
     connect,
     cst_date,
     past_day_cutoff,
-    DayBoundaryReached,
 )
 
 
@@ -29,6 +29,262 @@ class DbTests(unittest.TestCase):
 
     def _add_shop(self, round_id):
         self.db.add_shop(round_id, "A01", "https://a.example/", "店铺A")
+
+    def test_submit_inventory_snapshot_persists_complete_result(self):
+        rid = self.db.start_or_resume()
+        self._add_shop(rid)
+
+        result = self.db.submit_inventory_snapshot(
+            round_id=rid,
+            shop_key="A01",
+            shop_url="https://a.example/",
+            shop_name="店铺A",
+            offer_id="111",
+            product_url="https://detail.1688.com/offer/111.html",
+            list_title="榜单标题",
+            detail_title="详情标题",
+            main_image_url="https://img.example/111.jpg",
+            sku_rows=[{
+                "sku_id": None,
+                "sku_name": "红色 / M",
+                "sku_price": 12.5,
+                "sku_stock": 0,
+            }],
+            collected_at="2026-09-04T02:00:00+00:00",
+            attempt=2,
+        )
+
+        self.assertFalse(result.stop_round)
+        product = self.conn.execute(
+            "SELECT product_name, main_image_url FROM products WHERE offer_id='111'"
+        ).fetchone()
+        self.assertEqual(tuple(product), ("详情标题", "https://img.example/111.jpg"))
+        snapshot = self.conn.execute(
+            "SELECT product_name, sku_name, sku_stock, attempt FROM snapshots "
+            "WHERE round_id=? AND offer_id='111' AND page_status='成功'",
+            (rid,),
+        ).fetchone()
+        self.assertEqual(tuple(snapshot), ("榜单标题", "红色 / M", 0, 2))
+        inventory = self.conn.execute(
+            "SELECT product_name, stock FROM inventory "
+            "WHERE shop_key='A01' AND offer_id='111'"
+        ).fetchone()
+        self.assertEqual(tuple(inventory), ("榜单标题", 0))
+
+    def test_submit_inventory_snapshot_replaces_same_sku_and_preserves_absent_sku(self):
+        rid = self.db.start_or_resume()
+        self._add_shop(rid)
+        base = dict(
+            round_id=rid,
+            shop_key="A01",
+            shop_url="https://a.example/",
+            shop_name="店铺A",
+            offer_id="111",
+            product_url="https://detail.1688.com/offer/111.html",
+            list_title="榜单标题",
+            detail_title="详情标题",
+            main_image_url="https://img.example/111.jpg",
+            collected_at="2026-09-04T02:00:00+00:00",
+            attempt=1,
+        )
+        self.db.submit_inventory_snapshot(
+            **base,
+            sku_rows=[
+                {"sku_id": "red", "sku_name": "红色", "sku_price": 10, "sku_stock": 10},
+                {"sku_id": "blue", "sku_name": "蓝色", "sku_price": 11, "sku_stock": 11},
+            ],
+        )
+        self.db.submit_inventory_snapshot(
+            **{**base, "detail_title": "", "main_image_url": "", "attempt": 2},
+            sku_rows=[
+                {"sku_id": "red", "sku_name": "红色新名", "sku_price": 12, "sku_stock": 2},
+                {"sku_id": "green", "sku_name": "绿色", "sku_price": 13, "sku_stock": 13},
+            ],
+        )
+
+        rows = self.conn.execute(
+            "SELECT sku_id, sku_name, sku_stock, attempt FROM snapshots "
+            "WHERE round_id=? AND shop_key='A01' AND offer_id='111' AND page_status='成功' "
+            "ORDER BY sku_id",
+            (rid,),
+        ).fetchall()
+        self.assertEqual([tuple(row) for row in rows], [
+            ("blue", "蓝色", 11, 1),
+            ("green", "绿色", 13, 2),
+            ("red", "红色新名", 2, 2),
+        ])
+        product = self.conn.execute(
+            "SELECT product_name, main_image_url FROM products WHERE offer_id='111'"
+        ).fetchone()
+        self.assertEqual(tuple(product), ("详情标题", "https://img.example/111.jpg"))
+
+    def test_submit_inventory_snapshot_rolls_back_all_data_and_keeps_failure(self):
+        rid = self.db.start_or_resume()
+        self._add_shop(rid)
+        self.db.mark_failure(
+            rid,
+            "A01",
+            "111",
+            1,
+            "上一次解析失败",
+            shop_url="https://a.example/",
+            shop_name="店铺A",
+            product_url="https://detail.1688.com/offer/111.html",
+            product_name="榜单标题",
+        )
+
+        with patch.object(self.db, "_upsert_inventory", side_effect=sqlite3.OperationalError("写入失败")):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.db.submit_inventory_snapshot(
+                    round_id=rid,
+                    shop_key="A01",
+                    shop_url="https://a.example/",
+                    shop_name="店铺A",
+                    offer_id="111",
+                    product_url="https://detail.1688.com/offer/111.html",
+                    list_title="榜单标题",
+                    detail_title="详情标题",
+                    main_image_url="https://img.example/111.jpg",
+                    sku_rows=[{
+                        "sku_id": "red",
+                        "sku_name": "红色",
+                        "sku_price": 10,
+                        "sku_stock": 10,
+                    }],
+                    collected_at="2026-09-04T02:00:00+00:00",
+                    attempt=2,
+                )
+
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM products").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM skus").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM inventory").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM snapshots WHERE page_status!='成功' AND round_id=?", (rid,)
+        ).fetchone()[0], 1)
+
+    def test_submit_inventory_snapshot_rejects_duplicate_generated_sku_before_transaction(self):
+        rid = self.db.start_or_resume()
+        self._add_shop(rid)
+        with self.assertRaisesRegex(ValueError, "重复 SKU 编号"):
+            self.db.submit_inventory_snapshot(
+                round_id=rid,
+                shop_key="A01",
+                shop_url="https://a.example/",
+                shop_name="店铺A",
+                offer_id="111",
+                product_url="https://detail.1688.com/offer/111.html",
+                list_title="榜单标题",
+                detail_title="详情标题",
+                main_image_url=None,
+                sku_rows=[
+                    {"sku_id": None, "sku_name": "红色", "sku_price": 10, "sku_stock": 10},
+                    {"sku_id": None, "sku_name": "红色", "sku_price": 11, "sku_stock": 11},
+                ],
+                collected_at="2026-09-04T02:00:00+00:00",
+                attempt=1,
+            )
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM products").fetchone()[0], 0)
+
+    def test_submit_inventory_snapshot_rejects_blank_product_url_before_transaction(self):
+        rid = self.db.start_or_resume()
+        self._add_shop(rid)
+        with self.assertRaisesRegex(ValueError, "缺少商品或店铺标识"):
+            self.db.submit_inventory_snapshot(
+                round_id=rid,
+                shop_key="A01",
+                shop_url="https://a.example/",
+                shop_name="店铺A",
+                offer_id="111",
+                product_url="   ",
+                list_title="榜单标题",
+                detail_title="详情标题",
+                main_image_url=None,
+                sku_rows=[{"sku_id": "red", "sku_name": "红色", "sku_price": 10, "sku_stock": 10}],
+                collected_at="2026-09-04T02:00:00+00:00",
+                attempt=1,
+            )
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM products").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0], 0)
+
+    def test_submit_inventory_snapshot_rejects_blank_time_and_malformed_sku_before_transaction(self):
+        rid = self.db.start_or_resume()
+        self._add_shop(rid)
+        base = dict(
+            round_id=rid,
+            shop_key="A01",
+            shop_url="https://a.example/",
+            shop_name="店铺A",
+            offer_id="111",
+            product_url="https://detail.1688.com/offer/111.html",
+            list_title="榜单标题",
+            detail_title="详情标题",
+            main_image_url=None,
+            collected_at="2026-09-04T02:00:00+00:00",
+            attempt=1,
+        )
+        with self.assertRaisesRegex(ValueError, "必须有采集时间"):
+            self.db.submit_inventory_snapshot(
+                **{**base, "collected_at": "   "},
+                sku_rows=[{"sku_id": "red", "sku_name": "红色", "sku_price": 10, "sku_stock": 10}],
+            )
+        with self.assertRaisesRegex(ValueError, "必须是结构化记录"):
+            self.db.submit_inventory_snapshot(**base, sku_rows=["not-a-sku"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM products").fetchone()[0], 0)
+
+    def test_submit_inventory_snapshot_returns_stop_after_commit(self):
+        rid = self.db.start_or_resume()
+        self._add_shop(rid)
+        with patch("bestseller_monitor.db.past_day_cutoff", return_value=True):
+            result = self.db.submit_inventory_snapshot(
+                round_id=rid,
+                shop_key="A01",
+                shop_url="https://a.example/",
+                shop_name="店铺A",
+                offer_id="111",
+                product_url="https://detail.1688.com/offer/111.html",
+                list_title="榜单标题",
+                detail_title="详情标题",
+                main_image_url=None,
+                sku_rows=[{"sku_id": "red", "sku_name": "红色", "sku_price": 10, "sku_stock": 10}],
+                collected_at="2026-09-09T15:54:00+00:00",
+                attempt=1,
+            )
+        self.assertTrue(result.stop_round)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM inventory").fetchone()[0], 1)
+
+    def test_connect_deduplicates_success_snapshots_before_unique_index(self):
+        legacy_tmp = tempfile.TemporaryDirectory()
+        db_path = Path(legacy_tmp.name) / "legacy-duplicates.db"
+        raw = sqlite3.connect(db_path)
+        raw.executescript(SCHEMA)
+        raw.execute("INSERT INTO rounds(id, started_at) VALUES (1, '2026-09-04T00:00:00+00:00')")
+        raw.executemany(
+            "INSERT INTO snapshots(round_id, shop_key, shop_url, shop_name, offer_id, product_url, "
+            "product_name, sku_id, sku_name, sku_price, sku_stock, collected_at, page_status, attempt) "
+            "VALUES (1, 'A01', 'https://a.example/', '店铺A', '111', 'https://detail/111', "
+            "'榜单标题', 'red', '红色', ?, ?, ?, '成功', ?)",
+            [(10, 10, "2026-09-04T02:00:00+00:00", 1),
+             (12, 2, "2026-09-04T03:00:00+00:00", 2)],
+        )
+        raw.commit()
+        raw.close()
+
+        conn = connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT sku_stock, attempt FROM snapshots WHERE round_id=1 AND shop_key='A01' "
+                "AND offer_id='111' AND sku_id='red' AND page_status='成功'"
+            ).fetchone()
+            self.assertEqual(tuple(row), (2, 2))
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM snapshots WHERE round_id=1 AND shop_key='A01' "
+                "AND offer_id='111' AND sku_id='red' AND page_status='成功'"
+            ).fetchone()[0], 1)
+            indexes = conn.execute("PRAGMA index_list('snapshots')").fetchall()
+            self.assertTrue(any("success" in row[1] for row in indexes))
+        finally:
+            conn.close()
+            legacy_tmp.cleanup()
 
     def test_resume_same_round_and_shop_complete_preserved(self):
         rid = self.db.start_or_resume()
@@ -75,17 +331,20 @@ class DbTests(unittest.TestCase):
             1,
         )
         self.db.mark_failure(rid, "A01", "111", 1, "先失败")
-        self.db.clear_failures(rid, "A01", "111")
-        self.db.save_snapshot_rows(rid, "A01", [
-            {
-                "round_id": rid, "shop_key": "A01",
-                "shop_url": "https://a.example/", "shop_name": "店铺A",
-                "offer_id": "111", "product_url": "https://detail.1688.com/offer/111.html",
-                "product_name": "商品", "sku_id": "111:1", "sku_name": "小号",
-                "sku_price": 1.0, "sku_stock": 100, "collected_at": "2026-09-04T00:00:00+00:00",
-                "page_status": "成功", "attempt": 2,
-            }
-        ])
+        self.db.submit_inventory_snapshot(
+            round_id=rid,
+            shop_key="A01",
+            shop_url="https://a.example/",
+            shop_name="店铺A",
+            offer_id="111",
+            product_url="https://detail.1688.com/offer/111.html",
+            list_title="商品",
+            detail_title="商品详情",
+            main_image_url=None,
+            sku_rows=[{"sku_id": "111:1", "sku_name": "小号", "sku_price": 1.0, "sku_stock": 100}],
+            collected_at="2026-09-04T00:00:00+00:00",
+            attempt=2,
+        )
         total, ok = self.db.offer_counts(rid)
         self.assertEqual((total, ok), (1, 1))
         self.assertEqual(len(self.db.failed_rows(rid)), 0)
@@ -98,52 +357,44 @@ class DbTests(unittest.TestCase):
             for i in range(1, 11)
         ]
         self.db.save_shop_offers(rid, "A01", "https://a.example/", "店铺A", offers, 1)
-        rows = [
-            {
-                "round_id": rid, "shop_key": "A01", "shop_url": "https://a.example/",
-                "shop_name": "店铺A", "offer_id": "1",
-                "product_url": "https://detail.1688.com/offer/1.html", "product_name": "商品1",
-                "sku_id": f"1:{i}", "sku_name": f"规格{i}", "sku_price": 1.0,
-                "sku_stock": 100, "collected_at": "2026-09-04T00:00:00+00:00",
-                "page_status": "成功", "attempt": 1,
-            }
-            for i in range(10)
-        ]
-        self.db.save_snapshot_rows(rid, "A01", rows)
+        self.db.submit_inventory_snapshot(
+            round_id=rid,
+            shop_key="A01",
+            shop_url="https://a.example/",
+            shop_name="店铺A",
+            offer_id="1",
+            product_url="https://detail.1688.com/offer/1.html",
+            list_title="商品1",
+            detail_title="商品1详情",
+            main_image_url=None,
+            sku_rows=[
+                {"sku_id": f"1:{i}", "sku_name": f"规格{i}", "sku_price": 1.0, "sku_stock": 100}
+                for i in range(10)
+            ],
+            collected_at="2026-09-04T00:00:00+00:00",
+            attempt=1,
+        )
         for offer_id in map(str, range(2, 11)):
             self.db.mark_failure(rid, "A01", offer_id, 1, "解析失败")
         self.assertEqual(self.db.offer_counts(rid), (10, 1))
 
     def test_success_snapshot_requires_stock_and_id(self):
         rid = self.db.start_or_resume()
-        with self.assertRaisesRegex(ValueError, "编号和库存"):
-            self.db.save_snapshot_rows(rid, "A01", [{
-                "round_id": rid, "shop_key": "A01", "shop_url": "https://a.example/",
-                "shop_name": "店铺A", "offer_id": "1",
-                "product_url": "https://detail.1688.com/offer/1.html", "product_name": "商品",
-                "sku_id": "1:1", "sku_name": "规格", "sku_price": 1.0,
-                "sku_stock": None, "collected_at": "2026-09-04T00:00:00+00:00",
-                "page_status": "成功", "attempt": 1,
-            }])
-
-    def test_snapshot_transaction_rolls_back_on_inventory_write_failure(self):
-        rid = self.db.start_or_resume()
-        row = {
-            "round_id": rid, "shop_key": "A01", "shop_url": "https://a.example/",
-            "shop_name": "店铺A", "offer_id": "1",
-            "product_url": "https://detail.1688.com/offer/1.html", "product_name": "商品",
-            "sku_id": "1:1", "sku_name": "规格", "sku_price": 1.0,
-            "sku_stock": 1, "collected_at": "2026-09-04T00:00:00+00:00",
-            "page_status": "成功", "attempt": 1,
-        }
-        with patch.object(self.db, "_upsert_inventory", side_effect=sqlite3.OperationalError("写入失败")):
-            with self.assertRaises(sqlite3.OperationalError):
-                self.db.save_snapshot_rows(rid, "A01", [row])
-
-        self.assertEqual(
-            self.conn.execute("SELECT COUNT(*) FROM snapshots WHERE round_id=?", (rid,)).fetchone()[0], 0,
-        )
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM skus").fetchone()[0], 0)
+        with self.assertRaisesRegex(ValueError, "名称和整数库存"):
+            self.db.submit_inventory_snapshot(
+                round_id=rid,
+                shop_key="A01",
+                shop_url="https://a.example/",
+                shop_name="店铺A",
+                offer_id="1",
+                product_url="https://detail.1688.com/offer/1.html",
+                list_title="商品",
+                detail_title="商品详情",
+                main_image_url=None,
+                sku_rows=[{"sku_id": "1:1", "sku_name": "规格", "sku_price": 1.0, "sku_stock": None}],
+                collected_at="2026-09-04T00:00:00+00:00",
+                attempt=1,
+            )
 
     def test_past_day_cutoff_uses_beijing_time(self):
         self.assertFalse(past_day_cutoff("2026-09-09T15:54:00+00:00"))  # 北京 23:54
@@ -151,21 +402,25 @@ class DbTests(unittest.TestCase):
         self.assertTrue(past_day_cutoff("2026-09-09T15:59:59+00:00"))   # 北京 23:59:59
         self.assertFalse(past_day_cutoff("2026-09-09T16:00:00+00:00"))  # 北京次日 00:00
 
-    def test_save_snapshot_rows_raises_day_boundary_after_commit(self):
+    def test_submit_inventory_snapshot_returns_stop_after_commit_at_day_boundary(self):
         rid = self.db.start_or_resume()
-        rows = [{
-            "round_id": rid, "shop_key": "A01", "shop_url": "https://a.example/",
-            "shop_name": "店铺A", "offer_id": "1",
-            "product_url": "https://detail.1688.com/offer/1.html", "product_name": "商品",
-            "sku_id": "1:1", "sku_name": "规格", "sku_price": 1.0,
-            "sku_stock": 100, "collected_at": "2026-09-09T15:54:00+00:00",
-            "page_status": "成功", "attempt": 1,
-        }]
         with patch("bestseller_monitor.db.past_day_cutoff", return_value=True):
-            with self.assertRaises(DayBoundaryReached):
-                self.db.save_snapshot_rows(rid, "A01", rows)
+            result = self.db.submit_inventory_snapshot(
+                round_id=rid,
+                shop_key="A01",
+                shop_url="https://a.example/",
+                shop_name="店铺A",
+                offer_id="1",
+                product_url="https://detail.1688.com/offer/1.html",
+                list_title="商品",
+                detail_title="商品详情",
+                main_image_url=None,
+                sku_rows=[{"sku_id": "1:1", "sku_name": "规格", "sku_price": 1.0, "sku_stock": 100}],
+                collected_at="2026-09-09T15:54:00+00:00",
+                attempt=1,
+            )
 
-        # 已提交后才中止：该商品最后一个 SKU 已完整入库。
+        self.assertTrue(result.stop_round)
         self.assertEqual(self.conn.execute(
             "SELECT COUNT(*) FROM snapshots WHERE round_id=?", (rid,)
         ).fetchone()[0], 1)
@@ -194,67 +449,70 @@ class DbTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(dict(row), {"shop_name": "店铺A", "product_name": "商品", "page_status": "失败"})
 
-    def test_skus_master_only_upsert_never_delete(self):
-        self.db.upsert_skus([{"offer_id": "11", "sku_name": "S", "sku_id": "a"}])
-        self.db.upsert_skus([{"offer_id": "11", "sku_name": "S2", "sku_id": "a"}])  # 同(offer,sku_id)更新名称
-        self.db.upsert_skus([{"offer_id": "12", "sku_name": "T", "sku_id": "b"}])  # 新增offer
-        rows = self.db.conn.execute(
-            "SELECT offer_id, sku_name, sku_id FROM skus ORDER BY offer_id, sku_id"
-        ).fetchall()
-        self.assertEqual(len(rows), 2)
-        self.assertEqual(dict(rows[0]), {"offer_id": "11", "sku_name": "S2", "sku_id": "a"})
-        self.assertEqual(dict(rows[1]), {"offer_id": "12", "sku_name": "T", "sku_id": "b"})
-        # 即便后续只写了 offer 12，offer 11 仍保留（不删除）
-        self.db.upsert_skus([{"offer_id": "12", "sku_name": "T2", "sku_id": "b"}])
-        self.assertEqual(self.db.conn.execute("SELECT COUNT(*) FROM skus").fetchone()[0], 2)
-        self.assertEqual(
-            dict(self.db.conn.execute(
-                "SELECT offer_id, sku_name, sku_id FROM skus WHERE offer_id='12'"
-            ).fetchone()),
-            {"offer_id": "12", "sku_name": "T2", "sku_id": "b"},
+    def test_submit_updates_sku_master_and_preserves_product_first_seen(self):
+        rid = self.db.start_or_resume()
+        base = dict(
+            round_id=rid,
+            shop_key="A",
+            shop_url="https://a.example/",
+            shop_name="店铺A",
+            offer_id="11",
+            product_url="https://a/offer/11.html",
+            list_title="榜单商品",
+            detail_title="详情商品",
+            main_image_url="https://img/a.jpg",
+            collected_at="2026-09-04T02:00:00+00:00",
+            attempt=1,
         )
-
-    def test_products_upsert_update_and_never_delete(self):
-        self.db.upsert_product("11", "https://a/offer/11.html", "旧名")
-        first = self.db.conn.execute(
+        self.db.submit_inventory_snapshot(
+            **base,
+            sku_rows=[{"sku_id": "a", "sku_name": "S", "sku_price": 1.0, "sku_stock": 100}],
+        )
+        first_seen = self.conn.execute(
             "SELECT first_seen_at FROM products WHERE offer_id='11'"
         ).fetchone()[0]
-        self.db.upsert_product("11", "https://a/offer/11_new.html", "新名")
-        row = self.db.conn.execute(
-            "SELECT product_url, product_name, first_seen_at, last_seen_at FROM products WHERE offer_id='11'"
-        ).fetchone()
-        self.assertEqual(dict(row)["product_url"], "https://a/offer/11_new.html")
-        self.assertEqual(dict(row)["product_name"], "新名")
-        self.assertEqual(dict(row)["first_seen_at"], first)  # 保留首次时间
-        self.assertEqual(
-            self.db.conn.execute("SELECT COUNT(*) FROM products WHERE offer_id='11'").fetchone()[0],
-            1,
+        self.db.submit_inventory_snapshot(
+            **{**base, "product_url": "https://a/offer/11_new.html", "detail_title": "新详情名"},
+            sku_rows=[{"sku_id": "a", "sku_name": "S2", "sku_price": 1.0, "sku_stock": 90}],
         )
-
-    def test_inventory_upsert_and_diff(self):
-        base = {
-            "shop_key": "A", "offer_id": "11", "sku_id": "s1", "sku_name": "S",
-            "shop_name": "店铺A", "product_name": "商品", "sku_price": 1.0,
-        }
-        self.db.upsert_inventory([{**base, "sku_stock": 200, "collected_at": "2026-09-04T02:00:00+00:00"}])
-        r = self.db.conn.execute(
-            "SELECT stock, diff, date FROM inventory WHERE shop_key='A' AND date='2026-09-04'"
+        product = self.conn.execute(
+            "SELECT product_url, product_name, first_seen_at FROM products WHERE offer_id='11'"
         ).fetchone()
-        self.assertEqual((r["stock"], r["diff"], r["date"]), (200, None, "2026-09-04"))
-
-        self.db.upsert_inventory([{**base, "sku_stock": 160, "collected_at": "2026-09-05T02:00:00+00:00"}])
-        r2 = self.db.conn.execute(
-            "SELECT stock, diff FROM inventory WHERE shop_key='A' AND date='2026-09-05'"
+        self.assertEqual(tuple(product), ("https://a/offer/11_new.html", "新详情名", first_seen))
+        sku = self.conn.execute(
+            "SELECT offer_id, sku_name, sku_id FROM skus WHERE offer_id='11'"
         ).fetchone()
-        self.assertEqual(r2["diff"], -40)
+        self.assertEqual(tuple(sku), ("11", "S2", "a"))
 
-        # 同一天再次抓取：覆盖 stock，diff 仍对比前一日(200)
-        self.db.upsert_inventory([{**base, "sku_stock": 180, "collected_at": "2026-09-05T02:00:00+00:00"}])
-        r3 = self.db.conn.execute(
-            "SELECT stock, diff FROM inventory WHERE shop_key='A' AND date='2026-09-05'"
+    def test_submit_inventory_diff_uses_previous_date_and_updates_same_day(self):
+        rid = self.db.start_or_resume()
+        base = dict(
+            round_id=rid,
+            shop_key="A",
+            shop_url="https://a.example/",
+            shop_name="店铺A",
+            offer_id="11",
+            product_url="https://a/offer/11.html",
+            list_title="商品",
+            detail_title="商品详情",
+            main_image_url=None,
+            attempt=1,
+        )
+        for collected_at, stock in [
+            ("2026-09-04T02:00:00+00:00", 200),
+            ("2026-09-05T02:00:00+00:00", 160),
+            ("2026-09-05T03:00:00+00:00", 180),
+        ]:
+            self.db.submit_inventory_snapshot(
+                **base,
+                collected_at=collected_at,
+                sku_rows=[{"sku_id": "s1", "sku_name": "S", "sku_price": 1.0, "sku_stock": stock}],
+            )
+        row = self.conn.execute(
+            "SELECT stock, diff, date FROM inventory WHERE shop_key='A' AND offer_id='11' "
+            "AND date='2026-09-05'"
         ).fetchone()
-        self.assertEqual(r3["stock"], 180)
-        self.assertEqual(r3["diff"], -20)
+        self.assertEqual(tuple(row), (180, -20, "2026-09-05"))
 
     def test_event_log_append_only_and_interval_per_channel(self):
         rid = self.db.start_or_resume()
@@ -305,24 +563,28 @@ class DbTests(unittest.TestCase):
         self.assertIn("detail_delay_sec", row["config_json"])
 
     def test_inventory_exists_by_shop_offer_date(self):
-        base = {
-            "shop_key": "A", "offer_id": "11", "sku_id": "s1", "sku_name": "S",
-            "shop_name": "店铺A", "product_name": "商品", "sku_price": 1.0,
-        }
-        self.db.upsert_inventory([{**base, "sku_stock": 200,
-                                   "collected_at": "2026-09-05T02:00:00+00:00"}])
+        rid = self.db.start_or_resume()
+        self.db.submit_inventory_snapshot(
+            round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
+            offer_id="11", product_url="https://a/offer/11.html", list_title="商品",
+            detail_title="详情商品", main_image_url=None,
+            sku_rows=[{"sku_id": "s1", "sku_name": "S", "sku_price": 1.0, "sku_stock": 200}],
+            collected_at="2026-09-05T02:00:00+00:00", attempt=1,
+        )
         self.assertTrue(self.db.inventory_exists("A", "11", "2026-09-05"))
         self.assertFalse(self.db.inventory_exists("A", "11", "2026-09-06"))   # 其它日期
         self.assertFalse(self.db.inventory_exists("A", "99", "2026-09-05"))   # 其它商品
         self.assertFalse(self.db.inventory_exists("B", "11", "2026-09-05"))   # 其它店铺
 
     def test_inventory_exists_by_name(self):
-        base = {
-            "shop_key": "A", "offer_id": "11", "sku_id": "s1", "sku_name": "S",
-            "shop_name": "店铺A", "product_name": "厨房清洁膏", "sku_price": 1.0,
-        }
-        self.db.upsert_inventory([{**base, "sku_stock": 200,
-                                   "collected_at": "2026-09-05T02:00:00+00:00"}])
+        rid = self.db.start_or_resume()
+        self.db.submit_inventory_snapshot(
+            round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
+            offer_id="11", product_url="https://a/offer/11.html", list_title="厨房清洁膏",
+            detail_title="详情商品", main_image_url=None,
+            sku_rows=[{"sku_id": "s1", "sku_name": "S", "sku_price": 1.0, "sku_stock": 200}],
+            collected_at="2026-09-05T02:00:00+00:00", attempt=1,
+        )
         self.assertTrue(self.db.inventory_exists_by_name("A", "厨房清洁膏", "2026-09-05"))
         self.assertFalse(self.db.inventory_exists_by_name("A", "厨房清洁膏", "2026-09-06"))  # 其它日期
         self.assertFalse(self.db.inventory_exists_by_name("A", "别的商品", "2026-09-05"))   # 其它名称
@@ -356,12 +618,14 @@ class DbTests(unittest.TestCase):
         ).fetchone()[0], 1)
 
     def test_find_offer_id_by_name_unique_vs_ambiguous(self):
-        base = {
-            "shop_key": "A", "offer_id": "11", "sku_id": "s1", "sku_name": "S",
-            "shop_name": "店铺A", "product_name": "厨房清洁膏", "sku_price": 1.0,
-        }
-        self.db.upsert_inventory([{**base, "sku_stock": 200,
-                                   "collected_at": "2026-09-05T02:00:00+00:00"}])
+        rid = self.db.start_or_resume()
+        self.db.submit_inventory_snapshot(
+            round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
+            offer_id="11", product_url="https://a/offer/11.html", list_title="厨房清洁膏",
+            detail_title="详情商品", main_image_url=None,
+            sku_rows=[{"sku_id": "s1", "sku_name": "S", "sku_price": 1.0, "sku_stock": 200}],
+            collected_at="2026-09-05T02:00:00+00:00", attempt=1,
+        )
         # 唯一 offer_id：返回它
         self.assertEqual(self.db.find_offer_id_by_name("A", "厨房清洁膏", "2026-09-05"), "11")
         # 其它日期 / 店铺 / 名称拿不到
@@ -369,9 +633,13 @@ class DbTests(unittest.TestCase):
         self.assertIsNone(self.db.find_offer_id_by_name("B", "厨房清洁膏", "2026-09-05"))
         self.assertIsNone(self.db.find_offer_id_by_name("A", "别的商品", "2026-09-05"))
         # 同名多品（两个不同 offer_id）→ 不猜，返回 None
-        base2 = {**base, "offer_id": "22", "sku_id": "s2"}
-        self.db.upsert_inventory([{**base2, "sku_stock": 100,
-                                   "collected_at": "2026-09-05T02:00:00+00:00"}])
+        self.db.submit_inventory_snapshot(
+            round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
+            offer_id="22", product_url="https://a/offer/22.html", list_title="厨房清洁膏",
+            detail_title="详情商品", main_image_url=None,
+            sku_rows=[{"sku_id": "s2", "sku_name": "S", "sku_price": 1.0, "sku_stock": 100}],
+            collected_at="2026-09-05T02:00:00+00:00", attempt=1,
+        )
         self.assertIsNone(self.db.find_offer_id_by_name("A", "厨房清洁膏", "2026-09-05"))
 
     def test_click_card_failures_dedup_by_card(self):

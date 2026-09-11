@@ -62,6 +62,33 @@ class P1Tests(unittest.TestCase):
         payload = parse_detail_html(zero, "https://detail.1688.com/offer/1.html")
         self.assertEqual(payload["rows"][0]["sku_stock"], 0)
 
+    def test_capture_one_success_uses_submitted_payload_rows_for_logging(self):
+        round_id = self.db.start_or_resume()
+        offer = {
+            "shop_key": "A01",
+            "shop_url": "https://shop.example/",
+            "shop_name": "店铺A",
+            "offer_id": "111",
+            "product_url": "https://detail.1688.com/offer/111.html",
+            "list_title": "榜单标题",
+        }
+        payload = {
+            "html": "<html></html>",
+            "product_name": "详情标题",
+            "rows": [{"sku_id": "red", "sku_name": "红色", "sku_price": 10, "sku_stock": 3}],
+        }
+        with patch.object(pipeline, "capture_detail_payload", return_value=payload), \
+             patch.object(pipeline, "extract_main_image", return_value=None):
+            pipeline._capture_one(
+                self.db, self._cfg(), MagicMock(), round_id, offer, MagicMock(),
+            )
+
+        row = self.conn.execute(
+            "SELECT sku_id, sku_stock FROM snapshots WHERE round_id=? AND page_status='成功'",
+            (round_id,),
+        ).fetchone()
+        self.assertEqual(tuple(row), ("red", 3))
+
     def test_failed_offer_with_many_skus_triggers_failure_rate_pause(self):
         round_id = self.db.start_or_resume()
         self.db.add_shop(round_id, "A01", "https://shop.example/", "店铺A")
@@ -70,14 +97,23 @@ class P1Tests(unittest.TestCase):
             for index in range(1, 11)
         ]
         self.db.save_shop_offers(round_id, "A01", "https://shop.example/", "店铺A", offers, 1)
-        rows = [{
-            "round_id": round_id, "shop_key": "A01", "shop_url": "https://shop.example/",
-            "shop_name": "店铺A", "offer_id": "1", "product_url": "https://detail.1688.com/offer/1.html",
-            "product_name": "商品1", "sku_id": f"1:{index}", "sku_name": f"规格{index}",
-            "sku_price": 1.0, "sku_stock": 10, "collected_at": "2026-09-08T00:00:00+00:00",
-            "page_status": "成功", "attempt": 1,
-        } for index in range(10)]
-        self.db.save_snapshot_rows(round_id, "A01", rows)
+        self.db.submit_inventory_snapshot(
+            round_id=round_id,
+            shop_key="A01",
+            shop_url="https://shop.example/",
+            shop_name="店铺A",
+            offer_id="1",
+            product_url="https://detail.1688.com/offer/1.html",
+            list_title="商品1",
+            detail_title="商品1详情",
+            main_image_url=None,
+            sku_rows=[
+                {"sku_id": f"1:{index}", "sku_name": f"规格{index}", "sku_price": 1.0, "sku_stock": 10}
+                for index in range(10)
+            ],
+            collected_at="2026-09-08T00:00:00+00:00",
+            attempt=1,
+        )
         for offer_id in map(str, range(2, 11)):
             self.db.mark_failure(round_id, "A01", offer_id, 1, "解析失败")
 
@@ -260,6 +296,26 @@ class P1Tests(unittest.TestCase):
         self.assertEqual(row["page_status"], "失败")
         self.assertIn("图片字段异常", row["detail_note"])
         self.assertTrue((Path(self.tmp.name) / "raw" / f"round_{round_id}" / "11.html").exists())
+
+    def test_click_detail_closes_popup_before_stopping_at_day_boundary(self):
+        round_id = self.db.start_or_resume()
+        page = MagicMock()
+        popup = MagicMock()
+        detail_page = MagicMock()
+        detail_page.url = "https://detail.1688.com/offer/11.html"
+        detail_page.content.return_value = (
+            '<script>{"skuInfoMap":{"A":{"skuId":1,"canBookCount":1}}}</script>'
+        )
+        shop = Shop("A01", "店铺A", "https://shop.example/")
+        with patch("bestseller_monitor.db.past_day_cutoff", return_value=True):
+            with self.assertRaises(DayBoundaryReached):
+                browser_pw._ingest_detail(
+                    page, detail_page, popup, "商品", self._cfg(), [False], MagicMock(),
+                    MagicMock(), self.db, round_id, shop, [], set(), "page=1&idx=0",
+                )
+
+        popup.close.assert_called_once_with()
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM inventory").fetchone()[0], 1)
 
     def test_click_listing_rejects_unconfirmed_zero_cards(self):
         page = MagicMock()
