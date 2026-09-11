@@ -67,6 +67,8 @@
     <h1>1688 畅销品监控 · 每日库存抓取</h1>
   </header>
 
+  <div class="banner err" id="apiError" style="display:none"></div>
+
   <div class="tabs">
     <div class="step active" data-tab="start"><span class="dot">1</span><span class="lbl">开始</span></div>
     <div class="step" data-tab="run"><span class="dot">2</span><span class="lbl">过程</span></div>
@@ -191,6 +193,32 @@
 
   const $ = id => document.getElementById(id);
 
+  // ---------- API 调用 ----------
+  // pywebview 把 Python 异常变成 rejected promise。这里统一兜住：失败要在页面上
+  // 看得见，而且下一次成功调用会自动把提示收起来（IS-37）。
+  function showApiError(name, err) {
+    const detail = (err && err.message) ? err.message : String(err);
+    const box = $("apiError");
+    box.textContent = "界面调用 " + name + " 失败：" + detail
+      + "。可重试；若反复失败，请把 logs/gui.log 和这一步的操作一起报给维护者。";
+    box.style.display = "block";
+  }
+
+  function clearApiError() {
+    $("apiError").style.display = "none";
+  }
+
+  async function callApi(name, ...args) {
+    try {
+      const value = await api[name](...args);
+      clearApiError();
+      return value;
+    } catch (err) {
+      showApiError(name, err);
+      return null;
+    }
+  }
+
   const STEP_ORDER = ["start", "run", "result"];
   function updateSteps(cur) {
     const idx = STEP_ORDER.indexOf(cur);
@@ -221,7 +249,8 @@
 
   // ---------- 开始页 ----------
   async function refreshStart() {
-    const d = await api.get_start();
+    const d = await callApi("get_start");
+    if (!d) return;
     $("stProducts").textContent = d.ov.products.toLocaleString();
     $("stSkus").textContent = d.ov.skus.toLocaleString();
     $("stRounds").textContent = d.summary.rounds;
@@ -258,7 +287,8 @@
     const boxes = [...document.querySelectorAll("#rows input:checked")];
     if (boxes.length === 0) { alert("请至少勾选一个店铺再开始抓取"); return; }
     const keys = boxes.map(b => api.__shops[+b.dataset.i].key);
-    const r = await api.start_run(keys);
+    const r = await callApi("start_run", keys);
+    if (!r) return;
     if (!r.ok) { alert(r.error || "启动失败"); return; }
     hasStartedRun = true;
     switchTab("run");
@@ -274,7 +304,8 @@
   function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
 
   async function tickRun() {
-    const d = await api.get_run();
+    const d = await callApi("get_run");
+    if (!d) return;
     if (d.has_round) {
       $("rDone").textContent = d.done_count + " / " + d.total_count;
       $("rElapsed").textContent = fmtDur(d.elapsed_sec);
@@ -299,24 +330,25 @@
     // 结束判定：子进程结束且非暂停 -> 看结果
     if (!d.running && !d.manually_paused && hasStartedRun) {
       stopPolling();
-      const res = await api.get_result();
-      if (res.has_round) { renderResult(res); switchTab("result"); }
+      const res = await callApi("get_result");
+      if (res && res.has_round) { renderResult(res); switchTab("result"); }
     }
   }
 
-  async function pauseRun() { await api.pause_run(); await tickRun(); }
+  async function pauseRun() { await callApi("pause_run"); await tickRun(); }
   async function resumeRun() {
-    const r = await api.resume_run();
+    const r = await callApi("resume_run");
+    if (!r) return;
     if (!r.ok) { alert(r.error || "继续失败"); return; }
     startPolling();
   }
   function openConfirm() { $("confirmModal").classList.add("show"); }
   function closeConfirm() { $("confirmModal").classList.remove("show"); }
   async function doAbort() {
-    await api.abort_run();
+    await callApi("abort_run");
     stopPolling();
-    const res = await api.get_result();
-    if (res.has_round) { renderResult(res); switchTab("result"); }
+    const res = await callApi("get_result");
+    if (res && res.has_round) { renderResult(res); switchTab("result"); }
   }
 
   // ---------- 结果页 ----------
@@ -336,8 +368,8 @@
   }
 
   async function showResultIfExists() {
-    const res = await api.get_result();
-    if (res.has_round) renderResult(res);
+    const res = await callApi("get_result");
+    if (res && res.has_round) renderResult(res);
   }
 
   // ---------- 初始化 ----------
