@@ -609,6 +609,79 @@ class P1Tests(unittest.TestCase):
         # Initial pages 1/2 plus rescue page 2; rescue page 1 has no ambiguous name.
         self.assertEqual(scroll.call_count, 3)
 
+    def test_click_listing_records_a_listing_row_for_a_deferred_same_name_offer(self):
+        """按名暂缓命中的商品同样要立刻落榜单行，否则它的跳过快照会成为孤儿。"""
+        round_id = self.db.start_or_resume()
+        shop = Shop("A01", "店铺A", "https://shop.example/")
+        self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        self.db.submit_inventory_snapshot(
+            round_id=round_id, shop_key=shop.key, shop_url=shop.url, shop_name=shop.name,
+            offer_id="123", product_url="https://detail.1688.com/offer/123.html",
+            list_title="商品1", detail_title="商品1详情", main_image_url=None,
+            sku_rows=[{"sku_id": "s1", "sku_name": "标准", "sku_price": 1.0, "sku_stock": 5}],
+            collected_at=utcnow(), attempt=1,
+        )
+        page = MagicMock()
+        locator = MagicMock()
+        locator.count.return_value = 1
+        page.locator.return_value = locator
+
+        with patch.object(browser_pw, "_wait_cards", return_value=True), \
+             patch.object(browser_pw, "_scroll_cards_until_stable", return_value=1), \
+             patch.object(browser_pw, "intervention_kind", return_value=None), \
+             patch.object(browser_pw, "_click_text_in_frames", return_value=False), \
+             patch.object(browser_pw, "_read_card_title", return_value="商品1"), \
+             patch.object(browser_pw, "_capture_card") as capture, \
+             patch.object(self.db, "mark_skipped") as mark_skipped:
+            browser_pw.crawl_store_by_click(
+                page, shop, self._cfg(max_pages_per_shop=1), MagicMock(),
+                db=self.db, round_id=round_id,
+            )
+
+        capture.assert_not_called()
+        mark_skipped.assert_called_once()
+        rows = self.conn.execute(
+            "SELECT offer_id FROM shop_offers WHERE round_id=? AND shop_key='A01'",
+            (round_id,),
+        ).fetchall()
+        self.assertEqual([row["offer_id"] for row in rows], ["123"])
+        count = self.conn.execute(
+            "SELECT offer_count FROM shop_rounds WHERE round_id=? AND shop_key='A01'",
+            (round_id,),
+        ).fetchone()["offer_count"]
+        self.assertEqual(count, 1)
+
+    def test_click_detail_records_a_listing_row_when_the_offer_is_discovered(self):
+        """详情里拿到编号的那一刻就落榜单行：中途离开榜单阶段也不会留下孤儿快照。"""
+        round_id = self.db.start_or_resume()
+        shop = Shop("A01", "店铺A", "https://shop.example/")
+        self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        page = MagicMock()
+        popup = MagicMock()
+        detail_page = MagicMock()
+        detail_page.url = "https://detail.1688.com/offer/11.html"
+        detail_page.content.return_value = (
+            '<script>{"skuInfoMap":{"A":{"skuId":1,"canBookCount":1}}}</script>'
+        )
+        offers: list = []
+        seen: set = set()
+
+        browser_pw._ingest_detail(
+            page, detail_page, popup, "商品11", self._cfg(), [False], MagicMock(),
+            MagicMock(), self.db, round_id, shop, offers, seen, "page=1&idx=0",
+        )
+
+        rows = self.conn.execute(
+            "SELECT offer_id FROM shop_offers WHERE round_id=? AND shop_key='A01'",
+            (round_id,),
+        ).fetchall()
+        self.assertEqual([row["offer_id"] for row in rows], ["11"])
+        count = self.conn.execute(
+            "SELECT offer_count FROM shop_rounds WHERE round_id=? AND shop_key='A01'",
+            (round_id,),
+        ).fetchone()["offer_count"]
+        self.assertEqual(count, 1, "已发现商品数随发现即时更新")
+
     def test_click_detail_parse_exception_is_isolated_and_archived(self):
         round_id = self.db.start_or_resume()
         page = MagicMock()
@@ -666,6 +739,62 @@ class P1Tests(unittest.TestCase):
                 browser_pw.crawl_store_by_click(
                     page, shop, self._cfg(max_pages_per_shop=1), MagicMock(),
                 )
+
+    def test_rediscovering_the_same_offer_keeps_one_listing_row(self):
+        """同轮重复发现同一商品（如补抓再扫到同一张卡）仍只留一行榜单。"""
+        round_id = self.db.start_or_resume()
+        shop = Shop("A01", "店铺A", "https://shop.example/")
+        self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        page = MagicMock()
+        popup = MagicMock()
+        detail_page = MagicMock()
+        detail_page.url = "https://detail.1688.com/offer/11.html"
+        detail_page.content.return_value = (
+            '<script>{"skuInfoMap":{"A":{"skuId":1,"canBookCount":1}}}</script>'
+        )
+
+        for _ in range(2):
+            browser_pw._ingest_detail(
+                page, detail_page, popup, "商品11", self._cfg(), [False], MagicMock(),
+                MagicMock(), self.db, round_id, shop, [], set(), "page=1&idx=0",
+            )
+
+        rows = self.conn.execute(
+            "SELECT offer_id FROM shop_offers WHERE round_id=? AND shop_key='A01'",
+            (round_id,),
+        ).fetchall()
+        self.assertEqual([row["offer_id"] for row in rows], ["11"])
+        count = self.conn.execute(
+            "SELECT offer_count FROM shop_rounds WHERE round_id=? AND shop_key='A01'",
+            (round_id,),
+        ).fetchone()["offer_count"]
+        self.assertEqual(count, 1)
+
+    def test_completed_listing_matches_the_crawled_offers(self):
+        """正常跑完一店：榜单行等于该店列表，已发现商品数与行数一致。"""
+        round_id = self.db.start_or_resume()
+        shop = Shop("A01", "店铺A", "https://shop.example/")
+        self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        offers = [
+            (1, "11", "https://detail.1688.com/offer/11.html", "商品11", ""),
+            (2, "22", "https://detail.1688.com/offer/22.html", "商品22", ""),
+        ]
+
+        with patch.object(browser_pw, "crawl_store_by_click", return_value=(offers, 1)), \
+             patch.object(pipeline, "_retry_shop_pending_pw"):
+            pipeline._run_listing_pw(self.db, self._cfg(), round_id, [shop], MagicMock())
+
+        rows = self.conn.execute(
+            "SELECT offer_id FROM shop_offers WHERE round_id=? AND shop_key='A01' ORDER BY rank",
+            (round_id,),
+        ).fetchall()
+        self.assertEqual([row["offer_id"] for row in rows], ["11", "22"])
+        shop_row = self.conn.execute(
+            "SELECT list_status, offer_count FROM shop_rounds WHERE round_id=? AND shop_key='A01'",
+            (round_id,),
+        ).fetchone()
+        self.assertEqual(shop_row["list_status"], "完成")
+        self.assertEqual(shop_row["offer_count"], len(rows))
 
     def test_listing_failure_keeps_that_shop_pending_and_continues(self):
         round_id = self.db.start_or_resume()

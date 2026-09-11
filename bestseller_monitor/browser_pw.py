@@ -403,6 +403,18 @@ def _card_ref(page_no: int, idx: int) -> str:
     return f"card:p{page_no}:i{idx}"
 
 
+def _remember_discovery(db, round_id, shop, offers: list, offer_id: str,
+                        product_url: str, list_title: str) -> None:
+    """把刚发现的商品计入本轮榜单：内存清单 + 立即落一条榜单行。
+
+    商品在列表遍历途中一经发现就落库，因此无论以哪种方式中途离开榜单阶段，
+    已写入的快照都有榜单行可对应，不会变成孤儿。没有数据库句柄时只记内存。
+    """
+    offers.append((len(offers) + 1, offer_id, product_url, list_title, ""))
+    if db is not None and round_id is not None:
+        db.remember_shop_offer(round_id, shop.key, shop.url, shop.name, offers[-1])
+
+
 def _claim_card_slot(db, round_id, shop: Shop, cfg: Config, card_ref: str,
                      offers: list, pages_read: int) -> None:
     """向同日去重与补采 module 申请一次详情机会，预算耗尽时结束本轮。
@@ -499,7 +511,8 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                         def_url = f"https://detail.1688.com/offer/{def_oid}.html"
                         if def_oid not in seen:
                             seen.add(def_oid)
-                            offers.append((len(offers) + 1, def_oid, def_url, list_title, ""))
+                            _remember_discovery(db, round_id, shop, offers,
+                                                def_oid, def_url, list_title)
                         db.mark_skipped(round_id, shop.key, shop.url, shop.name, def_oid,
                                         def_url, list_title, note="今日已有同名库存，跳过")
                     continue
@@ -734,7 +747,7 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
     first_time = oid not in seen
     if first_time:
         seen.add(oid)
-        offers.append((len(offers) + 1, oid, url, list_title or "", ""))
+        _remember_discovery(db, round_id, shop, offers, oid, url, list_title or "")
         log.info("命中商品 %s（累计 %s）", oid, len(offers))
     if db and round_id and db.inventory_exists(shop.key, oid, cst_date()):
         # 今天已采过：仍把该商品计入本轮榜单，并补写一条“成功/跳过”快照，
