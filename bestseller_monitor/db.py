@@ -6,7 +6,6 @@ import sqlite3
 import hashlib
 import json
 import re
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
@@ -254,28 +253,6 @@ class DetailBudgetExhausted(RuntimeError):
         super().__init__(note)
         self.partial_offers = list(partial_offers or [])
         self.pages_read = pages_read
-
-
-@dataclass(frozen=True)
-class SnapshotCommitResult:
-    """已提交的库存快照结果；停止信号不表示事务失败。"""
-
-    stop_round: bool = False
-
-
-def past_day_cutoff(iso_utc: str | None = None) -> bool:
-    """判断北京时间是否已达到或超过 23:55（当日抓取的安全截止线）。"""
-    if iso_utc:
-        try:
-            dt = datetime.fromisoformat(iso_utc)
-        except ValueError:
-            dt = datetime.now(timezone.utc)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-    else:
-        dt = datetime.now(timezone.utc)
-    cst = dt.astimezone(CST)
-    return (cst.hour, cst.minute) >= DAY_CUTOFF
 
 
 _CARD_POS_RE = re.compile(r"page=(\d+)&idx=(\d+)")
@@ -724,11 +701,12 @@ class Database:
         sku_rows: list[dict],
         collected_at: str,
         attempt: int,
-    ) -> SnapshotCommitResult:
+    ) -> None:
         """原子提交一次完整商品库存快照。
 
         调用方只交出解析后的商品结果。相同轮次、店铺、商品和 SKU 的成功
-        快照按 SKU 替换；本次未出现的旧 SKU 保留。提交完成后再返回跨天停止信号。
+        快照按 SKU 替换；本次未出现的旧 SKU 保留。是否停止本轮由调用方按
+        轮次日期与当前时刻判定，提交本身不改变轮次状态。
         """
         if not sku_rows:
             raise ValueError("成功快照不能为空")
@@ -812,7 +790,6 @@ class Database:
         except Exception:
             self.conn.rollback()
             raise
-        return SnapshotCommitResult(stop_round=past_day_cutoff())
 
     def _clear_other_granularity(self, round_id: int, shop_key: str, offer_id: str,
                                  day: str, *, offer_level: bool) -> None:

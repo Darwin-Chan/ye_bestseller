@@ -9,7 +9,6 @@ from bestseller_monitor.db import (
     SCHEMA,
     connect,
     cst_date,
-    past_day_cutoff,
 )
 from bestseller_monitor.parse import DEFAULT_SKU_ID, DEFAULT_SKU_NAME
 
@@ -19,12 +18,8 @@ class DbTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.conn = connect(Path(self.tmp.name) / "test.db")
         self.db = Database(self.conn)
-        # 测试期间禁用“23:55 跨天中止”，避免在真实窗口内运行测试时误触发。
-        self._day_patcher = patch("bestseller_monitor.db.past_day_cutoff", return_value=False)
-        self._day_patcher.start()
 
     def tearDown(self):
-        self._day_patcher.stop()
         self.conn.close()
         self.tmp.cleanup()
 
@@ -35,7 +30,7 @@ class DbTests(unittest.TestCase):
         rid = self.db.start_or_resume()
         self._add_shop(rid)
 
-        result = self.db.submit_inventory_snapshot(
+        self.db.submit_inventory_snapshot(
             round_id=rid,
             shop_key="A01",
             shop_url="https://a.example/",
@@ -55,7 +50,6 @@ class DbTests(unittest.TestCase):
             attempt=2,
         )
 
-        self.assertFalse(result.stop_round)
         product = self.conn.execute(
             "SELECT product_name, main_image_url FROM products WHERE offer_id='111'"
         ).fetchone()
@@ -232,27 +226,6 @@ class DbTests(unittest.TestCase):
             self.db.submit_inventory_snapshot(**base, sku_rows=["not-a-sku"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM products").fetchone()[0], 0)
 
-    def test_submit_inventory_snapshot_returns_stop_after_commit(self):
-        rid = self.db.start_or_resume()
-        self._add_shop(rid)
-        with patch("bestseller_monitor.db.past_day_cutoff", return_value=True):
-            result = self.db.submit_inventory_snapshot(
-                round_id=rid,
-                shop_key="A01",
-                shop_url="https://a.example/",
-                shop_name="店铺A",
-                offer_id="111",
-                product_url="https://detail.1688.com/offer/111.html",
-                list_title="榜单标题",
-                detail_title="详情标题",
-                main_image_url=None,
-                sku_rows=[{"sku_id": "red", "sku_name": "红色", "sku_price": 10, "sku_stock": 10}],
-                collected_at="2026-09-09T15:54:00+00:00",
-                attempt=1,
-            )
-        self.assertTrue(result.stop_round)
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM inventory").fetchone()[0], 1)
-
     def test_connect_deduplicates_success_snapshots_before_unique_index(self):
         legacy_tmp = tempfile.TemporaryDirectory()
         db_path = Path(legacy_tmp.name) / "legacy-duplicates.db"
@@ -396,37 +369,6 @@ class DbTests(unittest.TestCase):
                 collected_at="2026-09-04T00:00:00+00:00",
                 attempt=1,
             )
-
-    def test_past_day_cutoff_uses_beijing_time(self):
-        self.assertFalse(past_day_cutoff("2026-09-09T15:54:00+00:00"))  # 北京 23:54
-        self.assertTrue(past_day_cutoff("2026-09-09T15:55:00+00:00"))   # 北京 23:55
-        self.assertTrue(past_day_cutoff("2026-09-09T15:59:59+00:00"))   # 北京 23:59:59
-        self.assertFalse(past_day_cutoff("2026-09-09T16:00:00+00:00"))  # 北京次日 00:00
-
-    def test_submit_inventory_snapshot_returns_stop_after_commit_at_day_boundary(self):
-        rid = self.db.start_or_resume()
-        with patch("bestseller_monitor.db.past_day_cutoff", return_value=True):
-            result = self.db.submit_inventory_snapshot(
-                round_id=rid,
-                shop_key="A01",
-                shop_url="https://a.example/",
-                shop_name="店铺A",
-                offer_id="1",
-                product_url="https://detail.1688.com/offer/1.html",
-                list_title="商品",
-                detail_title="商品详情",
-                main_image_url=None,
-                sku_rows=[{"sku_id": "1:1", "sku_name": "规格", "sku_price": 1.0, "sku_stock": 100}],
-                collected_at="2026-09-09T15:54:00+00:00",
-                attempt=1,
-            )
-
-        self.assertTrue(result.stop_round)
-        self.assertEqual(self.conn.execute(
-            "SELECT COUNT(*) FROM snapshots WHERE round_id=?", (rid,)
-        ).fetchone()[0], 1)
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM skus").fetchone()[0], 1)
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM inventory").fetchone()[0], 1)
 
     def test_incomplete_inventory_does_not_trigger_same_day_dedupe(self):
         self.db.conn.execute(

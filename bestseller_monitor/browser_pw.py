@@ -13,7 +13,7 @@ import time
 
 from playwright.sync_api import Error as PlaywrightError
 
-from . import browser_proc, dedupe
+from . import browser_proc, dedupe, rounds
 from .config import Config, Shop
 from .db import DayBoundaryReached, DetailBudgetExhausted, utcnow, cst_date
 from .delay import Humanizer
@@ -670,6 +670,9 @@ def _capture_card(page, img, list_title, cfg, punished, on_response, se, db, rou
     cnote = f"page={page_no}&idx={idx}"
     per_product_denies = 0
     for _ in range(3):
+        # 打开卡片就是进详情：先问轮次，跨天或已过截止线就不再开始。
+        if db and round_id:
+            rounds.ensure_workable(db, round_id, utcnow())
         detail_page, popup = _click_one_product(page, img, cfg, punished, on_response, emit=se)
         if detail_page is None:
             se("click_no_popup", note=cnote)
@@ -795,7 +798,7 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
             return None
 
         se("detail_parse", offer_id=oid, note=f"sku_count={len(rows)}")
-        result = db.submit_inventory_snapshot(
+        db.submit_inventory_snapshot(
             round_id=round_id,
             shop_key=shop.key,
             shop_url=shop.url,
@@ -810,7 +813,8 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
             attempt=attempt,
         )
         se("click_ok", offer_id=oid, note=cnote + "&offer_id=" + oid + f"&sku={len(rows)}")
-        stop_round = result.stop_round
+        # 提交之后再看一次：已提交的数据保留，停止判定不回滚它。
+        stop_round = rounds.load(db, round_id).stops_work(utcnow())
     elif db and round_id:
         se("click_skipped", offer_id=oid, note=cnote + "&offer_id=" + oid + "&dup=1")
     se("popup_close", offer_id=oid)

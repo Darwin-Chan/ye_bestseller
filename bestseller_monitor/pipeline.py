@@ -213,6 +213,8 @@ def _run_listing_dp(db: Database, cfg: Config, round_id: int, shops: list[Shop],
     done = db.completed_listing_keys(round_id)
     human = Humanizer(cfg)
     for shop in shops:
+        # 每家店开始之前先问轮次：跨天收尾发生在还没动这家店的干净点上。
+        rounds.ensure_workable(db, round_id, utcnow())
         if shop.key in done:
             log.info("店铺 %s 本轮已完成榜单，跳过", shop.key)
             continue
@@ -287,6 +289,9 @@ def _capture_offer_detail(db: Database, cfg: Config, human: Humanizer, round_id:
     shop_name = offer["shop_name"]
     max_attempts = cfg.max_attempts_per_page
 
+    # 进详情之前先问轮次：跨到次日或已过截止线就不再开始新的详情采集。
+    rounds.ensure_workable(db, round_id, utcnow())
+
     if db.inventory_exists(shop_key, offer_id, cst_date()):
         db.mark_skipped(round_id, shop_key, shop_url, shop_name, offer_id, product_url,
                         offer["list_title"])
@@ -330,7 +335,7 @@ def _capture_offer_detail(db: Database, cfg: Config, human: Humanizer, round_id:
             continue
 
         img = extract_main_image(payload["html"])
-        result = db.submit_inventory_snapshot(
+        db.submit_inventory_snapshot(
             round_id=round_id,
             shop_key=shop_key,
             shop_url=shop_url,
@@ -344,8 +349,8 @@ def _capture_offer_detail(db: Database, cfg: Config, human: Humanizer, round_id:
             collected_at=utcnow(),
             attempt=attempt,
         )
-        if result.stop_round:
-            raise DayBoundaryReached()
+        # 提交之后再看一次：已提交的数据保留，停止判定不回滚它。
+        rounds.ensure_workable(db, round_id, utcnow())
         log.info("店铺 %s 商品 %s 抓取成功：%s 个 SKU（第 %s 次尝试）",
                  shop_key, offer_id, len(payload["rows"]), attempt)
         return
@@ -364,6 +369,8 @@ def _run_listing_phase(db: Database, cfg: Config, round_id: int, shops: list[Sho
     done = db.completed_listing_keys(round_id)
     human = Humanizer(cfg)
     for shop in shops:
+        # 每家店开始之前先问轮次：跨天收尾发生在还没动这家店的干净点上。
+        rounds.ensure_workable(db, round_id, utcnow())
         if shop.key in done:
             log.info("店铺 %s 本轮已完成榜单，跳过", shop.key)
             continue
@@ -436,6 +443,8 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
     done = db.completed_listing_keys(round_id)
     human = Humanizer(cfg)
     for shop in shops:
+        # 每家店开始之前先问轮次：跨天收尾发生在还没动这家店的干净点上。
+        rounds.ensure_workable(db, round_id, utcnow())
         if shop.key in done:
             log.info("店铺 %s 本轮已完成榜单，跳过列表", shop.key)
             _retry_shop_pending_pw(db, cfg, round_id, shop, page, human, emit=emit)

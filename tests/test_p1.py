@@ -1,12 +1,14 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_dp, browser_pw, dedupe, pipeline
+from bestseller_monitor import browser_dp, browser_pw, dedupe, pipeline, rounds
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import (
+    CST,
     Database,
     connect,
     utcnow,
@@ -17,6 +19,11 @@ from bestseller_monitor.delay import Humanizer
 from bestseller_monitor.detail import DetailParseFailed, parse_detail_html
 from bestseller_monitor.guard import InterventionTimeout, RoundPauseRequired
 from bestseller_monitor.listing import ListingLoadFailed
+from bestseller_monitor.rounds import RoundRequest, ShopScope
+
+
+def _yesterday() -> str:
+    return (datetime.now(CST) - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 class P1Tests(unittest.TestCase):
@@ -24,11 +31,8 @@ class P1Tests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.conn = connect(Path(self.tmp.name) / "test.db")
         self.db = Database(self.conn)
-        self._day_patcher = patch("bestseller_monitor.db.past_day_cutoff", return_value=False)
-        self._day_patcher.start()
 
     def tearDown(self):
-        self._day_patcher.stop()
         self.conn.close()
         self.tmp.cleanup()
 
@@ -629,7 +633,10 @@ class P1Tests(unittest.TestCase):
         self.assertTrue((Path(self.tmp.name) / "raw" / f"round_{round_id}" / "11.html").exists())
 
     def test_click_detail_closes_popup_before_stopping_at_day_boundary(self):
-        round_id = self.db.start_or_resume()
+        # 轮次日期是昨天：跨日之后不再开始详情，但这次已提交的数据要保留。
+        round_id = rounds.open(self.db, RoundRequest(
+            _yesterday(), (ShopScope("A01", "https://shop.example/", "店铺A"),),
+        )).round.id
         page = MagicMock()
         popup = MagicMock()
         detail_page = MagicMock()
@@ -638,12 +645,11 @@ class P1Tests(unittest.TestCase):
             '<script>{"skuInfoMap":{"A":{"skuId":1,"canBookCount":1}}}</script>'
         )
         shop = Shop("A01", "店铺A", "https://shop.example/")
-        with patch("bestseller_monitor.db.past_day_cutoff", return_value=True):
-            with self.assertRaises(DayBoundaryReached):
-                browser_pw._ingest_detail(
-                    page, detail_page, popup, "商品", self._cfg(), [False], MagicMock(),
-                    MagicMock(), self.db, round_id, shop, [], set(), "page=1&idx=0",
-                )
+        with self.assertRaises(DayBoundaryReached):
+            browser_pw._ingest_detail(
+                page, detail_page, popup, "商品", self._cfg(), [False], MagicMock(),
+                MagicMock(), self.db, round_id, shop, [], set(), "page=1&idx=0",
+            )
 
         popup.close.assert_called_once_with()
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM inventory").fetchone()[0], 1)

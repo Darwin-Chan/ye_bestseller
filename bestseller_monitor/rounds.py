@@ -14,6 +14,7 @@ from .db import (
     DAY_BOUNDARY_NOTE,
     DAY_CUTOFF,
     Database,
+    DayBoundaryReached,
     terminal_status_text,
     utcnow,
 )
@@ -157,6 +158,25 @@ def active_round(db: Database, run_date: str) -> Round | None:
         if row.run_date == run_date:
             return row
     return None
+
+
+def load(db: Database, round_id: int) -> Round:
+    """按 id 读一轮的当前事实；只有轮次编号的调用方用它问判据。"""
+    row = db.conn.execute(
+        "SELECT id, run_date, terminal_reason FROM rounds WHERE id=?", (round_id,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"轮次不存在：{round_id}")
+    return _load_round(db, row)
+
+
+def ensure_workable(db: Database, round_id: int, now) -> None:
+    """开始一件新的采集工作之前问一次轮次；该停就抛 DayBoundaryReached。
+
+    判据本身是 Round.stops_work()，这里只是给只有轮次编号的调用方一个入口。
+    """
+    if load(db, round_id).stops_work(now):
+        raise DayBoundaryReached()
 
 
 def scope_shops(db: Database, round_id: int) -> tuple[ShopScope, ...]:
