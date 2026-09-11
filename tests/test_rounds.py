@@ -98,6 +98,35 @@ class RoundMigrationTests(unittest.TestCase):
         self.assertIsNone(rows[7]["terminal_reason"])  # 「进行中」没有终态
         self.assertEqual(rows[8]["terminal_reason"], LEGACY_UNKNOWN_REASON)
 
+    def test_drops_the_transitional_status_column(self):
+        """收敛之后：库里不再有中文状态列，「进行中」由没有终态表达。"""
+        self._legacy_db([("2026-09-08T15:13:11+00:00", "意外中止", DAY_BOUNDARY_NOTE)])
+
+        conn = connect(self.path)
+        try:
+            columns = {row[1] for row in conn.execute('PRAGMA table_info("rounds")').fetchall()}
+            self.assertNotIn("status", columns)
+            self.assertIn("terminal_reason", columns)
+            self.assertIn("run_date", columns)
+            self.assertEqual(
+                conn.execute("SELECT terminal_reason FROM rounds WHERE id=1").fetchone()[0],
+                "DAY_BOUNDARY",
+            )
+        finally:
+            conn.close()
+
+        # 再打开一次（库已经迁移过）不报错、也不再改数据。
+        again = connect(self.path)
+        try:
+            columns = {row[1] for row in again.execute('PRAGMA table_info("rounds")').fetchall()}
+            self.assertNotIn("status", columns)
+            self.assertEqual(
+                again.execute("SELECT terminal_reason FROM rounds WHERE id=1").fetchone()[0],
+                "DAY_BOUNDARY",
+            )
+        finally:
+            again.close()
+
     def test_migration_is_repeatable(self):
         self._legacy_db([("2026-09-08T15:13:11+00:00", "完成", None)])
         first = connect(self.path)
@@ -153,7 +182,6 @@ class RoundModuleTests(unittest.TestCase):
 
         row = self._row(result.round.id)
         self.assertEqual(row["run_date"], "2026-09-12")
-        self.assertEqual(row["status"], "进行中")
         self.assertIsNone(row["terminal_reason"])
         scope = {
             r["shop_key"]: r for r in self.conn.execute(
@@ -186,7 +214,6 @@ class RoundModuleTests(unittest.TestCase):
 
         stale = self._row(first.round.id)
         self.assertEqual(stale["terminal_reason"], "DAY_BOUNDARY")
-        self.assertEqual(stale["status"], "意外中止")
         self.assertEqual(stale["phase"], "done")
         self.assertIsNotNone(stale["finished_at"])
         self.assertEqual(self._round_count(), 2)
@@ -218,7 +245,6 @@ class RoundModuleTests(unittest.TestCase):
         self.assertFalse(done.in_progress)
         row = self._row(opened.round.id)
         self.assertEqual(row["terminal_reason"], "COMPLETED")
-        self.assertEqual(row["status"], "完成")
         self.assertEqual(row["phase"], "done")
         self.assertEqual(row["note"], "本轮正常完成")
         self.assertIsNotNone(row["finished_at"])
@@ -237,18 +263,6 @@ class RoundModuleTests(unittest.TestCase):
             finish(self.db, opened.round, TerminalReason.LEGACY_UNKNOWN)
 
         self.assertIsNone(self._row(opened.round.id)["terminal_reason"])
-
-    def test_legacy_finish_rejects_unknown_status(self):
-        """「历史未分类」只能由迁移写入，旧收尾路径也不得产生它。"""
-        started = self.db.start_or_resume()
-
-        with self.assertRaises(ValueError):
-            self.db.finish_round(started, status="某个没见过的状态")
-
-        row = self._row(started)
-        self.assertEqual(row["status"], "进行中")
-        self.assertIsNone(row["terminal_reason"])
-        self.assertEqual(row["run_date"], datetime.now(CST).strftime("%Y-%m-%d"))
 
     def test_resumable_and_stops_work_boundaries(self):
         opened = open(self.db, RoundRequest("2026-09-12", _shops("A01")))

@@ -9,6 +9,7 @@ from bestseller_monitor import rounds
 from bestseller_monitor.db import Database, connect, cst_date
 from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
 from tools import summary
+from helpers import new_round
 
 
 class SummaryTests(unittest.TestCase):
@@ -17,7 +18,7 @@ class SummaryTests(unittest.TestCase):
             conn = connect(Path(tmp) / "test.db")
             try:
                 db = Database(conn)
-                rid = db.start_or_resume()
+                rid = new_round(db)
                 db.save_shop_offers(
                     rid, "A", "https://a.example/", "店铺A",
                     [(1, "111", "https://detail.1688.com/offer/111.html", "商品", "")], 1,
@@ -42,7 +43,7 @@ class SummaryTests(unittest.TestCase):
             db_path = tmp_path / "bestseller.db"
             conn = connect(db_path)
             try:
-                rid = Database(conn).start_or_resume()
+                rid = new_round(Database(conn))
             finally:
                 conn.close()
             export_dir = tmp_path / "output"

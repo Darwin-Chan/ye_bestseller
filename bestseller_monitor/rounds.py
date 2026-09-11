@@ -15,7 +15,6 @@ from .db import (
     DAY_CUTOFF,
     Database,
     DayBoundaryReached,
-    terminal_status_text,
     utcnow,
 )
 
@@ -143,8 +142,8 @@ def finish(db: Database, round: Round, reason: TerminalReason, *,
     phase = "abandoned" if reason is TerminalReason.ABANDONED else "done"
     finished_at = _utc_iso(now)
     db.conn.execute(
-        "UPDATE rounds SET terminal_reason=?, status=?, phase=?, finished_at=?, note=? WHERE id=?",
-        (reason.value, terminal_status_text(reason.value), phase, finished_at, note, round.id),
+        "UPDATE rounds SET terminal_reason=?, phase=?, finished_at=?, note=? WHERE id=?",
+        (reason.value, phase, finished_at, note, round.id),
     )
     db.conn.commit()
     return Round(id=round.id, run_date=round.run_date,
@@ -230,13 +229,10 @@ def scope_shops(db: Database, round_id: int) -> tuple[ShopScope, ...]:
 
 
 def _active_rounds(db: Database) -> list[Round]:
-    """进行中的轮次，新的在前。
-
-    过渡期同时要求两个列一致；状态列收敛之后只认 terminal_reason。
-    """
+    """进行中的轮次，新的在前；「进行中」就是没有终态。"""
     rows = db.conn.execute(
         f"SELECT {_ROUND_COLUMNS} FROM rounds "
-        "WHERE terminal_reason IS NULL AND status='进行中' ORDER BY id DESC"
+        "WHERE terminal_reason IS NULL ORDER BY id DESC"
     ).fetchall()
     return [_load_round(db, row) for row in rows]
 
@@ -260,8 +256,7 @@ def _load_round(db: Database, row) -> Round:
 
 def _create_round(db: Database, request: RoundRequest, started_at: str) -> Round:
     cur = db.conn.execute(
-        "INSERT INTO rounds(started_at, status, phase, run_date) "
-        "VALUES (?, '进行中', 'listing', ?)",
+        "INSERT INTO rounds(started_at, phase, run_date) VALUES (?, 'listing', ?)",
         (started_at, request.run_date),
     )
     round_id = int(cur.lastrowid)

@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from bestseller_monitor.db import Database, connect, utcnow
+from helpers import new_round
 from tools import check_orphans
 
 
@@ -17,7 +18,7 @@ class CheckOrphansTests(unittest.TestCase):
             conn = connect(Path(tmp) / "test.db")
             try:
                 db = Database(conn)
-                rid = db.start_or_resume()
+                rid = new_round(db)
                 db.add_shop(rid, "A01", "https://a.example/", "店铺A")
                 db.submit_inventory_snapshot(
                     round_id=rid,
@@ -51,7 +52,7 @@ class CheckOrphansTests(unittest.TestCase):
             conn = connect(Path(tmp) / "test.db")
             try:
                 db = Database(conn)
-                rid = db.start_or_resume()
+                rid = new_round(db)
                 db.add_shop(rid, "A01", "https://a.example/", "店铺A")
                 db.add_shop(rid, "A02", "https://b.example/", "店铺B")
                 db.save_shop_offers(
@@ -86,7 +87,7 @@ class CheckOrphansTests(unittest.TestCase):
             conn = connect(db_path)
             try:
                 db = Database(conn)
-                rid = db.start_or_resume()
+                rid = new_round(db)
                 db.add_shop(rid, "A01", "https://a.example/", "店铺A")
                 db.submit_inventory_snapshot(
                     round_id=rid,
@@ -125,7 +126,7 @@ class CheckOrphansTests(unittest.TestCase):
             conn = connect(db_path)
             try:
                 db = Database(conn)
-                rid = db.start_or_resume()
+                rid = new_round(db)
                 db.add_shop(rid, "A01", "https://a.example/", "店铺A")
                 db.save_shop_offers(
                     rid, "A01", "https://a.example/", "店铺A",

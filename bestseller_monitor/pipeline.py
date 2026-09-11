@@ -24,7 +24,7 @@ from .delay import Humanizer
 from .detail import DetailParseFailed, capture_detail_payload, save_raw_page
 from .guard import RoundPauseRequired
 from .parse import extract_main_image
-from .rounds import RoundRequest, ShopScope
+from .rounds import Round, RoundRequest, ShopScope, TerminalReason
 from .listing import ListingLoadFailed, crawl_shop_listing, save_raw_listing_page
 
 log = logging.getLogger(__name__)
@@ -135,19 +135,20 @@ def run_round(cfg: Config, shops: list[Shop]) -> None:
             _run_dp_round(db, cfg, round_id, work_shops)
         else:
             _run_pw_round(db, cfg, round_id, work_shops)
-        _finalize_round(db, cfg, round_id)
+        _finalize_round(db, cfg, opened.round)
     except RoundDenyExceeded as exc:
         # 整轮 deny 超限是终态：数据保留，但本轮不可续跑，只能新开一轮。
         note = f"本轮因整轮 deny 超过阈值而意外中止：{exc}；已抓取数据已保留，不可续跑"
-        db.finish_round(round_id, status="意外中止", note=note)
+        rounds.finish(db, opened.round, TerminalReason.DENY_EXCEEDED, note=note)
         log.error("本轮意外中止：%s", note)
         print(f"\n>>> {note}，请启动新的抓取轮次。\n")
     except DayBoundaryReached:
-        db.finish_round(round_id, status="意外中止", note=DAY_BOUNDARY_NOTE)
+        rounds.finish(db, opened.round, TerminalReason.DAY_BOUNDARY, note=DAY_BOUNDARY_NOTE)
         log.warning("轮次 #%s：%s", round_id, DAY_BOUNDARY_NOTE)
         print(f"\n>>> {DAY_BOUNDARY_NOTE}。\n")
     except DetailBudgetExhausted:
-        db.finish_round(round_id, status="详情预算耗尽", note=DETAIL_BUDGET_NOTE)
+        rounds.finish(db, opened.round, TerminalReason.DETAIL_BUDGET_EXHAUSTED,
+                      note=DETAIL_BUDGET_NOTE)
         log.warning("轮次 #%s：%s", round_id, DETAIL_BUDGET_NOTE)
         print(f"\n>>> {DETAIL_BUDGET_NOTE}。\n")
     except RoundPauseRequired as exc:
@@ -401,7 +402,8 @@ def _capture_one(
     _capture_offer_detail(db, cfg, human, round_id, offer, fetch)
 
 
-def _finalize_round(db: Database, cfg: Config, round_id: int) -> None:
+def _finalize_round(db: Database, cfg: Config, run: Round) -> None:
+    round_id = run.id
     incomplete = db.incomplete_listings(round_id)
     if incomplete:
         keys = ", ".join(row["shop_key"] for row in incomplete)
@@ -414,11 +416,11 @@ def _finalize_round(db: Database, cfg: Config, round_id: int) -> None:
     if attempted and fail_rate > cfg.fail_rate_limit:
         note = (f"失败率 {fail_rate:.1%} 超过阈值 {cfg.fail_rate_limit:.0%}"
                 f"（快照失败 {total - succeeded}，点击未得商品 {click_fail}），需人工决策")
-        db.finish_round(round_id, status="需人工-失败率超限", note=note)
+        rounds.finish(db, run, TerminalReason.FAIL_RATE_EXCEEDED, note=note)
         log.warning("轮次 #%s：%s", round_id, note)
         print(f"\n>>> {note}。请检查数据库 data/bestseller.db 中的结果后再决定。\n")
     else:
-        db.finish_round(round_id, status="完成")
+        rounds.finish(db, run, TerminalReason.COMPLETED)
         log.info("轮次 #%s 完成（尝试 %s，成功 %s，点击未得商品 %s）",
                  round_id, attempted, succeeded, click_fail)
     db.commit()

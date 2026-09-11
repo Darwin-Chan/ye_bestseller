@@ -4,8 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from bestseller_monitor import dedupe
+from bestseller_monitor import dedupe, rounds
 from bestseller_monitor.db import Database, DetailBudgetExhausted, connect
+from bestseller_monitor.rounds import TerminalReason
+from helpers import new_round
 
 
 class DedupeTests(unittest.TestCase):
@@ -13,7 +15,7 @@ class DedupeTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.conn = connect(Path(self.tmp.name) / "test.db")
         self.db = Database(self.conn)
-        self.rid = self.db.start_or_resume()
+        self.rid = new_round(self.db)
 
     def tearDown(self):
         self.conn.close()
@@ -47,7 +49,7 @@ class DedupeTests(unittest.TestCase):
         first = connect(path)
         try:
             db = Database(first)
-            rid = db.start_or_resume()
+            rid = new_round(db)
             dedupe.claim_offer_slot(db, rid, "A01", "111", 1)
         finally:
             first.close()
@@ -103,8 +105,8 @@ class DedupeTests(unittest.TestCase):
             shop_url="https://a.example/", shop_name="店铺A",
             product_url="https://detail.1688.com/offer/111.html",
         )
-        self.db.finish_round(self.rid, status="已放弃")
-        next_round = self.db.start_or_resume()
+        rounds.finish(self.db, rounds.load(self.db, self.rid), TerminalReason.ABANDONED)
+        next_round = new_round(self.db)
         self.assertEqual(dedupe.next_attempt(self.db, next_round, "A01", "111"), 1)
 
     def test_connect_migrates_legacy_rounds_and_opportunity_tables(self):
@@ -130,6 +132,8 @@ class DedupeTests(unittest.TestCase):
         try:
             round_cols = [row[1] for row in conn.execute('PRAGMA table_info("rounds")').fetchall()]
             self.assertIn("detail_budget_limit", round_cols)
+            self.assertIn("terminal_reason", round_cols)
+            self.assertNotIn("status", round_cols, "过渡用的中文状态列应当在迁移时删掉")
             opp_cols = [
                 row[1] for row in
                 conn.execute('PRAGMA table_info("detail_opportunities")').fetchall()

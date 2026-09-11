@@ -13,6 +13,7 @@ from bestseller_monitor.config import Shop
 from bestseller_monitor.db import CST, Database, connect, cst_date, DETAIL_BUDGET_NOTE
 from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
 from gui import Api
+from helpers import new_round
 
 
 class GuiWindowHeightTests(unittest.TestCase):
@@ -39,8 +40,9 @@ class GuiResultTests(unittest.TestCase):
             conn = connect(Path(tmp) / "test.db")
             try:
                 db = Database(conn)
-                round_id = db.start_or_resume()
-                db.finish_round(round_id, status="详情预算耗尽", note=DETAIL_BUDGET_NOTE)
+                round_id = new_round(db)
+                rounds.finish(db, rounds.load(db, round_id),
+                              TerminalReason.DETAIL_BUDGET_EXHAUSTED, note=DETAIL_BUDGET_NOTE)
                 api = Api.__new__(Api)
                 api._lock = RLock()
                 api.round_id = round_id
@@ -59,7 +61,7 @@ class GuiResultTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             conn = connect(Path(tmp) / "test.db")
             try:
-                round_id = Database(conn).start_or_resume()
+                round_id = new_round(Database(conn))
                 api = Api.__new__(Api)
                 api._lock = RLock()
                 api.round_id = round_id
@@ -263,7 +265,6 @@ class GuiRoundScopeTests(unittest.TestCase):
             self.assertIn("跨天", start["start_hint"])
             self.assertIn(f"#{stale}", start["start_hint"])
             self.assertEqual(self._row(db_path, stale)["terminal_reason"], None)  # 浏览不改数据
-            self.assertEqual(self._row(db_path, stale)["status"], "进行中")
 
     def test_resume_refuses_a_round_from_a_previous_day(self):
         with tempfile.TemporaryDirectory() as tmp:

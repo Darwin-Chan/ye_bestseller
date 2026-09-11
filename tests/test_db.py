@@ -10,6 +10,7 @@ from bestseller_monitor.db import (
     connect,
     cst_date,
 )
+from helpers import new_round
 from bestseller_monitor.parse import DEFAULT_SKU_ID, DEFAULT_SKU_NAME
 
 
@@ -33,7 +34,7 @@ class DbTests(unittest.TestCase):
 
     def test_remembering_the_same_offer_twice_keeps_one_row_and_one_count(self):
         """中断时已发现的商品立刻落榜单行：重复发现不新增行、不重复计数。"""
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self._add_shop(rid)
         offer = (1, "11", "https://detail.1688.com/offer/11.html", "商品11", "")
 
@@ -53,7 +54,7 @@ class DbTests(unittest.TestCase):
 
     def test_complete_listing_replaces_earlier_discoveries_and_keeps_order(self):
         """完整榜单是权威列表：覆盖增量发现的行，rank 反映传入顺序。"""
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self._add_shop(rid)
         self._remember(rid, (1, "11", "https://detail.1688.com/offer/11.html", "商品11", ""))
         self._remember(rid, (2, "22", "https://detail.1688.com/offer/22.html", "商品22", ""))
@@ -80,7 +81,7 @@ class DbTests(unittest.TestCase):
 
     def test_partial_listing_only_adds_and_keeps_earlier_discoveries(self):
         """残缺榜单只增不减：续跑再次中断，先前发现的商品不能被抹掉。"""
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self._add_shop(rid)
         self._remember(rid, (1, "11", "https://detail.1688.com/offer/11.html", "商品11", ""))
         self._remember(rid, (2, "22", "https://detail.1688.com/offer/22.html", "商品22", ""))
@@ -105,7 +106,7 @@ class DbTests(unittest.TestCase):
 
     def test_incomplete_listing_note_comes_from_the_caller(self):
         """中断原因由调用方给出：数据层不再写死某一种中断原因的文案。"""
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self._add_shop(rid)
 
         self.db.save_shop_offers(
@@ -121,7 +122,7 @@ class DbTests(unittest.TestCase):
 
     def test_remembering_tolerates_pre_existing_duplicate_rows(self):
         """不新增唯一约束：既有库里同商品多行时仍能继续写入，不需要人工迁移。"""
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self._add_shop(rid)
         self.conn.executemany(
             "INSERT INTO shop_offers(round_id, shop_key, shop_url, shop_name, rank, offer_id, "
@@ -145,7 +146,7 @@ class DbTests(unittest.TestCase):
         self.assertEqual(count, 2, "已发现商品数按不同商品编号计")
 
     def test_submit_inventory_snapshot_persists_complete_result(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self._add_shop(rid)
 
         self.db.submit_inventory_snapshot(
@@ -185,7 +186,7 @@ class DbTests(unittest.TestCase):
         self.assertEqual(tuple(inventory), ("榜单标题", 0))
 
     def test_submit_inventory_snapshot_replaces_same_sku_and_preserves_absent_sku(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self._add_shop(rid)
         base = dict(
             round_id=rid,
@@ -232,7 +233,7 @@ class DbTests(unittest.TestCase):
         self.assertEqual(tuple(product), ("详情标题", "https://img.example/111.jpg"))
 
     def test_submit_inventory_snapshot_rolls_back_all_data_and_keeps_failure(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self._add_shop(rid)
         self.db.mark_failure(
             rid,
@@ -276,7 +277,7 @@ class DbTests(unittest.TestCase):
         ).fetchone()[0], 1)
 
     def test_submit_inventory_snapshot_rejects_duplicate_generated_sku_before_transaction(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self._add_shop(rid)
         with self.assertRaisesRegex(ValueError, "重复 SKU 编号"):
             self.db.submit_inventory_snapshot(
@@ -299,7 +300,7 @@ class DbTests(unittest.TestCase):
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM products").fetchone()[0], 0)
 
     def test_submit_inventory_snapshot_rejects_blank_product_url_before_transaction(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self._add_shop(rid)
         with self.assertRaisesRegex(ValueError, "缺少商品或店铺标识"):
             self.db.submit_inventory_snapshot(
@@ -320,7 +321,7 @@ class DbTests(unittest.TestCase):
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0], 0)
 
     def test_submit_inventory_snapshot_rejects_blank_time_and_malformed_sku_before_transaction(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self._add_shop(rid)
         base = dict(
             round_id=rid,
@@ -379,21 +380,20 @@ class DbTests(unittest.TestCase):
             legacy_tmp.cleanup()
 
     def test_resume_same_round_and_shop_complete_preserved(self):
-        rid = self.db.start_or_resume()
-        self._add_shop(rid)
+        rid = new_round(self.db, ("A01", "https://a.example/", "店铺A"))
         self.db.save_shop_offers(
             rid, "A01", "https://a.example/", "店铺A",
             [(1, "111", "https://detail.1688.com/offer/111.html", "商品", "")],
             1,
         )
-        rid2 = self.db.start_or_resume()
+        # 同一天、同一店铺范围才复用同一轮次。
+        rid2 = new_round(self.db, ("A01", "https://a.example/", "店铺A"))
         self.assertEqual(rid, rid2)
-        self._add_shop(rid2)
         remaining = self.db.shops_to_list(rid2)
         self.assertEqual(len(remaining), 0)  # 已完成店铺不会被重置
 
     def test_pending_offers_and_attempts(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self._add_shop(rid)
         self.db.save_shop_offers(
             rid, "A01", "https://a.example/", "店铺A",
@@ -415,7 +415,7 @@ class DbTests(unittest.TestCase):
         self.assertEqual([r["offer_id"] for r in pending], ["222"])
 
     def test_success_clears_failure_and_counts(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self._add_shop(rid)
         self.db.save_shop_offers(
             rid, "A01", "https://a.example/", "店铺A",
@@ -442,7 +442,7 @@ class DbTests(unittest.TestCase):
         self.assertEqual(len(self.db.failed_rows(rid)), 0)
 
     def test_offer_counts_are_per_offer_not_per_sku(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self._add_shop(rid)
         offers = [
             (i, str(i), f"https://detail.1688.com/offer/{i}.html", f"商品{i}", "")
@@ -471,7 +471,7 @@ class DbTests(unittest.TestCase):
         self.assertEqual(self.db.offer_counts(rid), (10, 1))
 
     def test_success_snapshot_requires_stock_and_id(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         with self.assertRaisesRegex(ValueError, "名称和整数库存"):
             self.db.submit_inventory_snapshot(
                 round_id=rid,
@@ -530,7 +530,7 @@ class DbTests(unittest.TestCase):
         return snapshots, inventory
 
     def test_single_spec_submit_replaces_sku_level_rows_for_same_day(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self._add_shop(rid)
         self._submit_offer(rid, "2026-09-05T02:00:00+00:00", [
             {"sku_id": "a", "sku_name": "小号", "sku_price": 1.0, "sku_stock": 100},
@@ -547,7 +547,7 @@ class DbTests(unittest.TestCase):
         self.assertEqual(inventory, [(DEFAULT_SKU_ID, 300)])
 
     def test_sku_level_submit_replaces_single_spec_rows_for_same_day(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self._add_shop(rid)
         self._submit_offer(rid, "2026-09-05T02:00:00+00:00", [
             {"sku_id": DEFAULT_SKU_ID, "sku_name": DEFAULT_SKU_NAME,
@@ -564,7 +564,7 @@ class DbTests(unittest.TestCase):
 
     def test_granularity_cleanup_keeps_earlier_date_rows(self):
         # 粒度切换只清当天，更早日期的历史观测保留。
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self._add_shop(rid)
         self._submit_offer(rid, "2026-09-04T02:00:00+00:00", [
             {"sku_id": "a", "sku_name": "小号", "sku_price": 1.0, "sku_stock": 100},
@@ -584,7 +584,7 @@ class DbTests(unittest.TestCase):
         self.assertEqual(earlier, [("a", 100)])
 
     def test_failure_with_explicit_metadata_is_recorded_before_listing_write(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self.db.mark_failure(
             rid, "A01", "111", 1, "详情页缺少库存",
             shop_url="https://a.example/", shop_name="店铺A",
@@ -596,7 +596,7 @@ class DbTests(unittest.TestCase):
         self.assertEqual(dict(row), {"shop_name": "店铺A", "product_name": "商品", "page_status": "失败"})
 
     def test_submit_updates_sku_master_and_preserves_product_first_seen(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         base = dict(
             round_id=rid,
             shop_key="A",
@@ -631,7 +631,7 @@ class DbTests(unittest.TestCase):
         self.assertEqual(tuple(sku), ("11", "S2", "a"))
 
     def test_submit_inventory_diff_uses_previous_date_and_updates_same_day(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         base = dict(
             round_id=rid,
             shop_key="A",
@@ -661,7 +661,7 @@ class DbTests(unittest.TestCase):
         self.assertEqual(tuple(row), (180, -20, "2026-09-05"))
 
     def test_event_log_append_only_and_interval_per_channel(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self.db.append_event(rid, "list_load", shop_key="A01", phase="listing")
         # 同 (round, shop) 上一条，interval 应非空
         self.db.append_event(rid, "product_open", shop_key="A01", phase="listing")
@@ -681,7 +681,7 @@ class DbTests(unittest.TestCase):
         self.assertEqual(self.db.conn.execute("SELECT COUNT(*) FROM event_log").fetchone()[0], 4)
 
     def test_record_params_dedup(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         # 用最小配置对象记录参数（只依赖配置键）
         class FakeCfg:
             detail_delay_sec = (0.8, 2.0)
@@ -709,7 +709,7 @@ class DbTests(unittest.TestCase):
         self.assertIn("detail_delay_sec", row["config_json"])
 
     def test_inventory_exists_by_shop_offer_date(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self.db.submit_inventory_snapshot(
             round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
             offer_id="11", product_url="https://a/offer/11.html", list_title="商品",
@@ -723,7 +723,7 @@ class DbTests(unittest.TestCase):
         self.assertFalse(self.db.inventory_exists("B", "11", "2026-09-05"))   # 其它店铺
 
     def test_inventory_exists_by_name(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self.db.submit_inventory_snapshot(
             round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
             offer_id="11", product_url="https://a/offer/11.html", list_title="厨房清洁膏",
@@ -742,7 +742,7 @@ class DbTests(unittest.TestCase):
         self.assertRegex(cst_date(), r"^\d{4}-\d{2}-\d{2}$")
 
     def test_skip_is_recorded_as_skip_not_success_and_idempotent(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self.db.mark_skipped(
             rid, "A", "https://a.example/", "店铺A", "111",
             "https://detail.1688.com/offer/111.html", "商品",
@@ -765,7 +765,7 @@ class DbTests(unittest.TestCase):
         ).fetchone()[0], 1)
 
     def test_skipped_offer_counts_as_handled_and_is_not_a_failure(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self.db.save_shop_offers(
             rid, "A", "https://a.example/", "店铺A",
             [(1, "111", "https://detail.1688.com/offer/111.html", "商品", "")], 1,
@@ -779,7 +779,7 @@ class DbTests(unittest.TestCase):
         self.assertEqual(self.db.failed_rows(rid), [])
 
     def test_skip_is_not_inventory_evidence(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self.db.mark_skipped(
             rid, "A", "https://a.example/", "店铺A", "111",
             "https://detail.1688.com/offer/111.html", "商品",
@@ -789,7 +789,7 @@ class DbTests(unittest.TestCase):
         self.assertFalse(self.db.inventory_exists_by_name("A", "商品", cst_date()))
 
     def test_failed_observation_is_not_dedupe_evidence(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self.db.save_shop_offers(
             rid, "A", "https://a.example/", "店铺A",
             [(1, "111", "https://detail.1688.com/offer/111.html", "商品", "")], 1,
@@ -804,7 +804,7 @@ class DbTests(unittest.TestCase):
         )
 
     def test_find_offer_id_by_name_unique_vs_ambiguous(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         self.db.submit_inventory_snapshot(
             round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
             offer_id="11", product_url="https://a/offer/11.html", list_title="厨房清洁膏",
@@ -829,7 +829,7 @@ class DbTests(unittest.TestCase):
         self.assertIsNone(self.db.find_offer_id_by_name("A", "厨房清洁膏", "2026-09-05"))
 
     def test_click_card_failures_dedup_by_card(self):
-        rid = self.db.start_or_resume()
+        rid = new_round(self.db)
         evs = [
             ("A", "click_ok", "page=1&idx=0&offer_id=1&sku=3"),
             ("A", "click_no_popup", "page=1&idx=1"),

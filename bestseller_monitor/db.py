@@ -19,7 +19,6 @@ CREATE TABLE IF NOT EXISTS rounds (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT NOT NULL,
     finished_at TEXT,
-    status TEXT NOT NULL DEFAULT '进行中',
     phase TEXT NOT NULL DEFAULT 'listing',
     note TEXT,
     detail_budget_limit INTEGER,
@@ -204,8 +203,8 @@ DAY_CUTOFF = (23, 55)
 DAY_BOUNDARY_NOTE = "库存数据即将跨天，请0点后继续抓取"
 DETAIL_BUDGET_NOTE = "本轮详情预算已用尽，剩余商品留待下一轮"
 
-# 过渡期：轮次终态改用稳定标识判定，旧的中文状态列在收敛前与它并存。
-# 收敛（删掉状态列）之后，这张映射表与 terminal_status_text() 一起删除。
+# 只用于迁移：把旧库的中文状态串折算成轮次终态标识。状态列删掉之后，
+# 这里不再有写入方，只剩打开旧库时的一次性折算。
 LEGACY_STATUS_REASONS = {
     "完成": "COMPLETED",
     "需人工-失败率超限": "FAIL_RATE_EXCEEDED",
@@ -215,10 +214,6 @@ LEGACY_STATUS_REASONS = {
 }
 LEGACY_UNKNOWN_REASON = "LEGACY_UNKNOWN"
 
-# 终态标识折回中文状态串时用；跨天与 deny 超限在旧状态串里同为「意外中止」。
-_REASON_STATUS_TEXT = {value: status for status, value in LEGACY_STATUS_REASONS.items()}
-_REASON_STATUS_TEXT["DAY_BOUNDARY"] = "意外中止"
-
 
 def legacy_terminal_reason(status: str | None, note: str | None) -> str | None:
     """把旧状态串与说明折算成轮次终态标识；「进行中」返回 None。"""
@@ -227,14 +222,6 @@ def legacy_terminal_reason(status: str | None, note: str | None) -> str | None:
     if status == "意外中止" and note == DAY_BOUNDARY_NOTE:
         return "DAY_BOUNDARY"
     return LEGACY_STATUS_REASONS.get(status, LEGACY_UNKNOWN_REASON)
-
-
-def terminal_status_text(reason: str) -> str:
-    """终态标识折算回中文状态串（过渡期写兼容列用）。"""
-    try:
-        return _REASON_STATUS_TEXT[reason]
-    except KeyError:
-        raise ValueError(f"没有对应的中文状态：{reason}") from None
 
 
 class DayBoundaryReached(RuntimeError):
@@ -266,21 +253,34 @@ def _card_pos(note: str | None) -> tuple[int, int] | None:
     return (int(m.group(1)), int(m.group(2))) if m else None
 
 
-def _backfill_round_identity(conn: sqlite3.Connection) -> None:
-    """给旧轮次补上轮次日期与终态标识；可重复执行。"""
-    rows = conn.execute("SELECT id, started_at, status, note, run_date FROM rounds").fetchall()
+def _migrate_round_columns(conn: sqlite3.Connection) -> None:
+    """给旧轮次补上日期与终态，然后丢掉过渡用的中文状态列；可重复执行。"""
+    columns = {row[1] for row in conn.execute('PRAGMA table_info("rounds")').fetchall()}
+    if not columns:
+        return
+    has_reason = "terminal_reason" in columns
+    has_status = "status" in columns
+    selected = ["id", "started_at", "run_date"]
+    if has_reason:
+        selected.append("terminal_reason")
+    if has_status:
+        selected += ["status", "note"]
+    rows = conn.execute(f"SELECT {', '.join(selected)} FROM rounds").fetchall()
     for row in rows:
         if row["run_date"] is None:
             conn.execute(
                 "UPDATE rounds SET run_date=? WHERE id=?",
                 (cst_date(row["started_at"]), row["id"]),
             )
-        reason = legacy_terminal_reason(row["status"], row["note"])
-        if reason is not None:
-            conn.execute(
-                "UPDATE rounds SET terminal_reason=? WHERE id=? AND terminal_reason IS NULL",
-                (reason, row["id"]),
-            )
+        if has_reason and has_status and row["terminal_reason"] is None:
+            reason = legacy_terminal_reason(row["status"], row["note"])
+            if reason is not None:
+                conn.execute(
+                    "UPDATE rounds SET terminal_reason=? WHERE id=?", (reason, row["id"])
+                )
+    if has_status:
+        conn.execute("ALTER TABLE rounds DROP COLUMN status")
+        log.info("已删除过渡用的 rounds.status 列（「进行中」改由没有终态表达）")
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -347,10 +347,10 @@ def connect(db_path: Path) -> sqlite3.Connection:
     except sqlite3.OperationalError:
         pass
     try:
-        _backfill_round_identity(conn)
+        _migrate_round_columns(conn)
         conn.commit()
     except sqlite3.OperationalError as exc:
-        log.debug("回填轮次日期与终态失败：%s", exc)
+        log.debug("轮次列迁移失败：%s", exc)
     # 兼容旧库：详情机会记录上绑定的商品编号（旧库残留的 attempts 列不再使用）
     try:
         conn.execute("ALTER TABLE detail_opportunities ADD COLUMN offer_id TEXT")
@@ -402,69 +402,9 @@ class Database:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
 
-    def active_round(self) -> sqlite3.Row | None:
-        cur = self.conn.execute(
-            "SELECT * FROM rounds WHERE status='进行中' ORDER BY id DESC LIMIT 1"
-        )
-        return cur.fetchone()
-
-    def previous_complete_round(self, before_id: int) -> sqlite3.Row | None:
-        cur = self.conn.execute(
-            "SELECT * FROM rounds WHERE status='完成' AND id < ? ORDER BY id DESC LIMIT 1",
-            (before_id,),
-        )
-        return cur.fetchone()
-
-    def start_or_resume(self) -> int:
-        row = self.active_round()
-        if row is not None:
-            log.info("续跑进行中的轮次 #%s（阶段 %s）", row["id"], row["phase"])
-            return int(row["id"])
-        cur = self.conn.execute(
-            "INSERT INTO rounds(started_at, status, phase, run_date) "
-            "VALUES (?, '进行中', 'listing', ?)",
-            (utcnow(), cst_date()),
-        )
-        self.conn.commit()
-        rid = int(cur.lastrowid)
-        log.info("创建新轮次 #%s", rid)
-        return rid
-
     def set_phase(self, round_id: int, phase: str) -> None:
         self.conn.execute("UPDATE rounds SET phase=? WHERE id=?", (phase, round_id))
         self.conn.commit()
-
-    def finish_round(self, round_id: int, status: str = "完成", note: str | None = None) -> None:
-        reason = legacy_terminal_reason(status, note)
-        if reason is None or reason == LEGACY_UNKNOWN_REASON:
-            raise ValueError(
-                f"未知的轮次状态：{status!r}；轮次终态是封闭集合，"
-                "「历史未分类」只能来自旧库迁移"
-            )
-        self.conn.execute(
-            "UPDATE rounds SET status=?, terminal_reason=?, phase='done', finished_at=?, note=? "
-            "WHERE id=?",
-            (status, reason, utcnow(), note, round_id),
-        )
-        self.conn.commit()
-
-    def abandon_round(self, round_id: int, note: str | None = None) -> None:
-        """把某轮标记为「已放弃」：表示不再继续抓取该轮，但已采集的数据全部保留。
-
-        语义：
-          - 已放弃 ≠ 数据有问题：已写入的 shop_offers / snapshots / inventory 一律保留，
-            并照常参与“当日去重”（同日已采即跳过）。
-          - 已放弃轮不作为后续轮次的差分基准（差分只参考 status='完成' 的轮）。
-          - 已放弃轮不再被“续跑”（status 不是 '进行中'，下次运行会开新轮）。
-        """
-        self.conn.execute(
-            "UPDATE rounds SET status='已放弃', terminal_reason='ABANDONED', phase='abandoned', "
-            "finished_at=?, note=? "
-            "WHERE id=?",
-            (utcnow(), note, round_id),
-        )
-        self.conn.commit()
-        log.info("轮次 #%s 已标记为「已放弃」（已采集数据保留，不再续跑，不作为差分基准）。", round_id)
 
     def shops_to_list(self, round_id: int) -> list[sqlite3.Row]:
         """返回本店未完成列表抓取的店铺（由调用方与 shops.csv 对照）。"""

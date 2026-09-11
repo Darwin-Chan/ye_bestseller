@@ -20,6 +20,7 @@ from bestseller_monitor.detail import DetailParseFailed, parse_detail_html
 from bestseller_monitor.guard import InterventionTimeout, RoundPauseRequired
 from bestseller_monitor.listing import ListingLoadFailed
 from bestseller_monitor.rounds import RoundRequest, ShopScope
+from helpers import new_round
 
 
 def _yesterday() -> str:
@@ -84,7 +85,7 @@ class P1Tests(unittest.TestCase):
             parse_detail_html(html, "https://detail.1688.com/offer/1.html")
 
     def test_capture_one_success_uses_submitted_payload_rows_for_logging(self):
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         offer = {
             "shop_key": "A01",
             "shop_url": "https://shop.example/",
@@ -111,7 +112,7 @@ class P1Tests(unittest.TestCase):
         self.assertEqual(tuple(row), ("red", 3))
 
     def test_failed_offer_with_many_skus_triggers_failure_rate_pause(self):
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         self.db.add_shop(round_id, "A01", "https://shop.example/", "店铺A")
         offers = [
             (index, str(index), f"https://detail.1688.com/offer/{index}.html", f"商品{index}", "")
@@ -138,23 +139,27 @@ class P1Tests(unittest.TestCase):
         for offer_id in map(str, range(2, 11)):
             self.db.mark_failure(round_id, "A01", offer_id, 1, "解析失败")
 
-        pipeline._finalize_round(self.db, self._cfg(), round_id)
+        pipeline._finalize_round(self.db, self._cfg(), rounds.load(self.db, round_id))
 
-        row = self.conn.execute("SELECT status, note FROM rounds WHERE id=?", (round_id,)).fetchone()
-        self.assertEqual(row["status"], "需人工-失败率超限")
+        row = self.conn.execute(
+            "SELECT terminal_reason, note FROM rounds WHERE id=?", (round_id,)
+        ).fetchone()
+        self.assertEqual(row["terminal_reason"], "FAIL_RATE_EXCEEDED")
         self.assertIn("90.0%", row["note"])
 
     def test_incomplete_listing_keeps_round_resumable(self):
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         self.db.add_shop(round_id, "A01", "https://shop.example/", "店铺A")
         self.db.mark_listing_failure(round_id, "A01", "首屏无商品卡片")
 
         with self.assertRaises(RoundPauseRequired):
-            pipeline._finalize_round(self.db, self._cfg(), round_id)
+            pipeline._finalize_round(self.db, self._cfg(), rounds.load(self.db, round_id))
 
-        row = self.conn.execute("SELECT status, list_status, list_note FROM rounds JOIN shop_rounds "
-                                "ON rounds.id=shop_rounds.round_id WHERE rounds.id=?", (round_id,)).fetchone()
-        self.assertEqual(row["status"], "进行中")
+        row = self.conn.execute(
+            "SELECT terminal_reason, list_status, list_note FROM rounds JOIN shop_rounds "
+            "ON rounds.id=shop_rounds.round_id WHERE rounds.id=?", (round_id,)
+        ).fetchone()
+        self.assertIsNone(row["terminal_reason"])
         self.assertEqual(row["list_status"], "失败")
         self.assertIn("首屏", row["list_note"])
 
@@ -173,13 +178,14 @@ class P1Tests(unittest.TestCase):
         conn = connect(db_path)
         try:
             row = conn.execute(
-                "SELECT id, status, phase, finished_at, note FROM rounds ORDER BY id DESC LIMIT 1"
+                "SELECT id, terminal_reason, phase, finished_at, note FROM rounds "
+                "ORDER BY id DESC LIMIT 1"
             ).fetchone()
-            self.assertEqual(row["status"], "意外中止")
+            self.assertEqual(row["terminal_reason"], "DENY_EXCEEDED")
             self.assertEqual(row["phase"], "done")
             self.assertIsNotNone(row["finished_at"])
             self.assertIn("不可续跑", row["note"])
-            self.assertEqual(Database(conn).start_or_resume(), row["id"] + 1)
+            self.assertEqual(new_round(Database(conn)), row["id"] + 1)
         finally:
             conn.close()
 
@@ -196,18 +202,19 @@ class P1Tests(unittest.TestCase):
         conn = connect(db_path)
         try:
             row = conn.execute(
-                "SELECT id, status, phase, finished_at, note FROM rounds ORDER BY id DESC LIMIT 1"
+                "SELECT id, terminal_reason, phase, finished_at, note FROM rounds "
+                "ORDER BY id DESC LIMIT 1"
             ).fetchone()
-            self.assertEqual(row["status"], "意外中止")
+            self.assertEqual(row["terminal_reason"], "DAY_BOUNDARY")
             self.assertEqual(row["phase"], "done")
             self.assertIsNotNone(row["finished_at"])
             self.assertEqual(row["note"], DAY_BOUNDARY_NOTE)
-            self.assertEqual(Database(conn).start_or_resume(), row["id"] + 1)
+            self.assertEqual(new_round(Database(conn)), row["id"] + 1)
         finally:
             conn.close()
 
     def test_unconfirmed_empty_listing_is_rejected(self):
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         self.db.add_shop(round_id, "A01", "https://shop.example/", "店铺A")
         with self.assertRaisesRegex(ValueError, "空榜单"):
             self.db.save_shop_offers(round_id, "A01", "https://shop.example/", "店铺A", [], 1)
@@ -257,7 +264,7 @@ class P1Tests(unittest.TestCase):
         locator.count.return_value = 1
         page.locator.return_value = locator
         human = MagicMock()
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         shop = Shop("A01", "店铺A", "https://shop.example/")
 
         with patch.object(browser_pw, "_wait_cards", return_value=True), \
@@ -278,7 +285,7 @@ class P1Tests(unittest.TestCase):
 
     def test_click_same_day_skip_gives_the_slot_back(self):
         """点开卡片才发现今天已观测过：这是同日跳过，不该消耗详情预算。"""
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         shop = Shop("A01", "店铺A", "https://shop.example/")
         self.db.add_shop(round_id, shop.key, shop.url, shop.name)
         url11 = "https://detail.1688.com/offer/11.html"
@@ -315,7 +322,7 @@ class P1Tests(unittest.TestCase):
 
     def test_ingest_detail_binds_card_opportunity_to_known_offer(self):
         """卡片机会在学到商品编号后绑定过去，补采重试不再重复占预算。"""
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         shop = Shop("A01", "店铺A", "https://shop.example/")
         self.db.add_shop(round_id, shop.key, shop.url, shop.name)
         dedupe.claim_card_slot(self.db, round_id, shop.key, "card:p1:i0", 1)
@@ -338,7 +345,7 @@ class P1Tests(unittest.TestCase):
 
     def _seed_same_name_failed_offer(self):
         """商品 11 今日已完整观测；同名商品 22 只有失败记录。返回 22 的待补采行。"""
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         shop = Shop("A01", "店铺A", "https://shop.example/")
         self.db.add_shop(round_id, shop.key, shop.url, shop.name)
         url11 = "https://detail.1688.com/offer/11.html"
@@ -398,7 +405,7 @@ class P1Tests(unittest.TestCase):
         self.assertEqual(capture.call_count, 1, "同名库存不应阻止已知 offer_id 的补采")
 
     def test_retry_stops_and_signals_when_detail_budget_exhausted(self):
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         shop = Shop("A01", "店铺A", "https://shop.example/")
         self.db.add_shop(round_id, shop.key, shop.url, shop.name)
         self.db.save_shop_offers(
@@ -431,9 +438,10 @@ class P1Tests(unittest.TestCase):
         conn = connect(db_path)
         try:
             row = conn.execute(
-                "SELECT status, phase, finished_at, note FROM rounds ORDER BY id DESC LIMIT 1"
+                "SELECT terminal_reason, phase, finished_at, note FROM rounds "
+                "ORDER BY id DESC LIMIT 1"
             ).fetchone()
-            self.assertEqual(row["status"], "详情预算耗尽")
+            self.assertEqual(row["terminal_reason"], "DETAIL_BUDGET_EXHAUSTED")
             self.assertEqual(row["phase"], "done")
             self.assertIsNotNone(row["finished_at"])
             self.assertEqual(row["note"], pipeline.DETAIL_BUDGET_NOTE)
@@ -442,7 +450,7 @@ class P1Tests(unittest.TestCase):
 
     def test_budget_exhaustion_keeps_the_listing_progress(self):
         """预算在抓榜单途中用尽：已发现的商品要落库，店铺保持未完成。"""
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         shop = Shop("A01", "店铺A", "https://shop.example/")
         self.db.add_shop(round_id, shop.key, shop.url, shop.name)
         partial = [(1, "11", "https://detail.1688.com/offer/11.html", "商品1", "")]
@@ -473,7 +481,7 @@ class P1Tests(unittest.TestCase):
         self.assertIn("详情预算耗尽", round_row["list_note"], "中断原因要留在店铺备注里")
 
     def test_dp_detail_phase_stops_when_budget_exhausted(self):
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         shop = Shop("A01", "店铺A", "https://shop.example/")
         self.db.add_shop(round_id, shop.key, shop.url, shop.name)
         self.db.save_shop_offers(
@@ -496,7 +504,7 @@ class P1Tests(unittest.TestCase):
 
     def test_skip_does_not_consume_detail_budget(self):
         """当日已完整观测的商品只跳过，不占用详情预算。"""
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         shop = Shop("A01", "店铺A", "https://shop.example/")
         self.db.add_shop(round_id, shop.key, shop.url, shop.name)
         url11 = "https://detail.1688.com/offer/11.html"
@@ -584,7 +592,7 @@ class P1Tests(unittest.TestCase):
         locator.count.return_value = 1
         page.locator.return_value = locator
         human = MagicMock()
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         shop = Shop("A01", "店铺A", "https://shop.example/")
         titles = iter(["唯一商品", "重复商品", "重复商品", "重复商品", "重复商品"])
         scroll_counts = iter([1, 2, 2])
@@ -611,7 +619,7 @@ class P1Tests(unittest.TestCase):
 
     def test_click_listing_records_a_listing_row_for_a_deferred_same_name_offer(self):
         """按名暂缓命中的商品同样要立刻落榜单行，否则它的跳过快照会成为孤儿。"""
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         shop = Shop("A01", "店铺A", "https://shop.example/")
         self.db.add_shop(round_id, shop.key, shop.url, shop.name)
         self.db.submit_inventory_snapshot(
@@ -653,7 +661,7 @@ class P1Tests(unittest.TestCase):
 
     def test_click_detail_records_a_listing_row_when_the_offer_is_discovered(self):
         """详情里拿到编号的那一刻就落榜单行：中途离开榜单阶段也不会留下孤儿快照。"""
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         shop = Shop("A01", "店铺A", "https://shop.example/")
         self.db.add_shop(round_id, shop.key, shop.url, shop.name)
         page = MagicMock()
@@ -683,7 +691,7 @@ class P1Tests(unittest.TestCase):
         self.assertEqual(count, 1, "已发现商品数随发现即时更新")
 
     def test_click_detail_parse_exception_is_isolated_and_archived(self):
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         page = MagicMock()
         popup = MagicMock()
         detail_page = MagicMock()
@@ -742,7 +750,7 @@ class P1Tests(unittest.TestCase):
 
     def test_rediscovering_the_same_offer_keeps_one_listing_row(self):
         """同轮重复发现同一商品（如补抓再扫到同一张卡）仍只留一行榜单。"""
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         shop = Shop("A01", "店铺A", "https://shop.example/")
         self.db.add_shop(round_id, shop.key, shop.url, shop.name)
         page = MagicMock()
@@ -772,7 +780,7 @@ class P1Tests(unittest.TestCase):
 
     def test_completed_listing_matches_the_crawled_offers(self):
         """正常跑完一店：榜单行等于该店列表，已发现商品数与行数一致。"""
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         shop = Shop("A01", "店铺A", "https://shop.example/")
         self.db.add_shop(round_id, shop.key, shop.url, shop.name)
         offers = [
@@ -797,7 +805,7 @@ class P1Tests(unittest.TestCase):
         self.assertEqual(shop_row["offer_count"], len(rows))
 
     def test_listing_failure_keeps_that_shop_pending_and_continues(self):
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         shops = [
             Shop("A01", "失败店", "https://shop-a.example/"),
             Shop("A02", "成功店", "https://shop-b.example/"),
@@ -823,7 +831,7 @@ class P1Tests(unittest.TestCase):
         self.assertEqual(retry.call_args[0][3].key, "A02")
 
     def test_failed_offers_retried_immediately_after_their_shop(self):
-        round_id = self.db.start_or_resume()
+        round_id = new_round(self.db)
         shops = [
             Shop("A01", "店A", "https://shop-a.example/"),
             Shop("A02", "店B", "https://shop-b.example/"),

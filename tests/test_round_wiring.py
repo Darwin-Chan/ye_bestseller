@@ -89,7 +89,6 @@ class RoundScopeWiringTests(unittest.TestCase):
 
         row = self._round_rows()[-1]
         self.assertEqual(row["run_date"], cst_date())
-        self.assertEqual(row["status"], "进行中")
         self.assertIsNone(row["terminal_reason"])
         self.assertEqual(self._scope(row["id"]), ["A01", "A02"])
 
@@ -119,7 +118,6 @@ class RoundScopeWiringTests(unittest.TestCase):
 
         rows = {row["id"]: row for row in self._round_rows()}
         self.assertEqual(rows[stale]["terminal_reason"], "DAY_BOUNDARY")
-        self.assertEqual(rows[stale]["status"], "意外中止")
         self.assertEqual(len(rows), 2)
         fresh_id = [rid for rid in rows if rid != stale][0]
         self.assertEqual(rows[fresh_id]["run_date"], cst_date())
@@ -154,4 +152,3 @@ class RoundScopeWiringTests(unittest.TestCase):
         shops = pipeline.requested_round_shops(self._cfg(), {"A02"})
 
         self.assertEqual([shop.key for shop in shops], ["A02"])
-

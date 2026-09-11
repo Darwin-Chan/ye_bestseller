@@ -486,7 +486,8 @@ class Api:
                     current = rounds.active_round(db, self._today())
                     rid = current.id if current is not None else None
                 if rid is not None:
-                    db.abandon_round(rid, note="GUI 人工中止（放弃）")
+                    rounds.finish(db, rounds.load(db, rid), TerminalReason.ABANDONED,
+                                  note="GUI 人工中止（放弃）")
             finally:
                 conn.close()
             return {"ok": True}
