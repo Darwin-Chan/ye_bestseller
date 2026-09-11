@@ -16,7 +16,7 @@
 - 单规格成立条件是 `isSkuOffer=false` 且页面显式给出空的 `skuInfoMap`，`skuTradeSupported=false` 作为佐证。明细键完全缺失不按单规格处理，按页面结构变化记失败并留档。
 - 库存取商品级 `canBookedAmount`，价格取商品级到手价，口径与多规格 SKU 取 `discountPrice` 一致。缺商品级可售量时按不完整库存观测记可重试失败，不写空库存的成功行。
 - SKU 的定义放宽为「商品下的一条库存行」：单规格商品整件就是一条 SKU 行，沿用 `sku_id='default'` 与 `sku_name='默认(单规格)'`，不新增粒度列。
-- 商品在单规格与多规格之间切换时，提交当日清除该商品相反粒度的记录；更早日期的历史观测保留，差分基准仍只取同一 SKU。
+- 商品在单规格与多规格之间切换时，清除该商品本轮快照与当天库存里的相反粒度记录；更早日期的历史观测保留，差分基准仍只取同一 SKU。
 - 页面上的计量单位（“套”“个”）不进入数据模型。
 - 不回填历史失败记录，修复从下一轮起生效。
 
@@ -24,6 +24,6 @@
 
 单规格商品不再进入失败集合，失败率不再被这一类商品顶高，同日去重也能对它们生效。
 
-代价有两个。报表里单规格商品计为 1 个 SKU，因此 SKU 行数不再等于平台意义上的规格数量；跨粒度切换时会删除当日的相反粒度记录，虽然只影响当天，但它是一次写入即生效的数据清理。
+代价有两个。报表里单规格商品计为 1 个 SKU，因此 SKU 行数不再等于平台意义上的规格数量；跨粒度切换时会删除本轮快照与当天库存里的相反粒度记录，虽然只影响当天，但它是一次写入即生效的数据清理。
 
-相关词汇见 [CONTEXT.md](../../CONTEXT.md) 的「SKU」「单规格商品」「库存快照提交」「不完整库存观测」；实现见 `bestseller_monitor/parse.py` 的 `_extract_default_sku()` 与 `bestseller_monitor/db.py` 的 `submit_inventory_snapshot()`；工单见 [.scratch/1688-inventory-snapshot/issues/42-is-42.md](../../.scratch/1688-inventory-snapshot/issues/42-is-42.md)。
+相关词汇见 [CONTEXT.md](../../CONTEXT.md) 的「SKU」「单规格商品」「库存快照提交」「不完整库存观测」；实现见 `bestseller_monitor/parse.py` 的 `_extract_default_sku()` 与 `bestseller_monitor/db.py` 的 `submit_inventory_snapshot()`；工单为 IS-42，放在本地工单目录 `.scratch/1688-inventory-snapshot/issues/`（按 .gitignore 约定不纳入版本库）。
