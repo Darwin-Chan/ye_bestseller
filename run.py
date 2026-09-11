@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--config", type=Path, default=ROOT / "config" / "config.toml")
     p.add_argument("--shops", type=Path, default=None, help="覆盖 config 中的店铺 CSV")
     p.add_argument("--pages-per-shop", type=int, default=None, help="覆盖每家店翻页上限")
-    p.add_argument("--max-detail", type=int, default=None, help="覆盖单轮详情页上限")
+    p.add_argument("--max-detail", type=int, default=None, help="覆盖单轮详情预算（商品机会数）")
     p.add_argument("--limit-shops", type=str, default=None, help="逗号分隔的 shop_key 白名单")
     p.add_argument("--no-shuffle", action="store_true", help="不随机打乱店内商品顺序")
     p.add_argument("--mode", choices=["shops"], default="shops",
@@ -45,7 +45,7 @@ def main() -> int:
     if args.pages_per_shop is not None:
         cfg = cfg.replace(max_pages_per_shop=args.pages_per_shop)
     if args.max_detail is not None:
-        cfg = cfg.replace(max_detail_pages_per_round=args.max_detail)
+        cfg = cfg.replace(max_detail_opportunities_per_round=args.max_detail)
     if args.no_shuffle:
         cfg = cfg.replace(shuffle_within_shop=False)
     limit_keys = None

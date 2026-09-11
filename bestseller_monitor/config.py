@@ -48,7 +48,7 @@ class Config:
     deny_shop_limit: int
     deny_round_limit: int
     max_pages_per_shop: int
-    max_detail_pages_per_round: int
+    max_detail_opportunities_per_round: int
     max_attempts_per_page: int
     fail_rate_limit: float
     shuffle_within_shop: bool
@@ -110,7 +110,7 @@ class Config:
             deny_shop_limit=int(run.get("deny_shop_limit", 7)),
             deny_round_limit=int(run.get("deny_round_limit", 10)),
             max_pages_per_shop=int(run["max_pages_per_shop"]),
-            max_detail_pages_per_round=int(run["max_detail_pages_per_round"]),
+            max_detail_opportunities_per_round=int(run["max_detail_opportunities_per_round"]),
             max_attempts_per_page=int(run["max_attempts_per_page"]),
             fail_rate_limit=float(run["fail_rate_limit"]),
             shuffle_within_shop=bool(run["shuffle_within_shop"]),

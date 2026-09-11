@@ -15,7 +15,7 @@ from playwright.sync_api import Error as PlaywrightError
 
 from . import dedupe
 from .config import Config, Shop
-from .db import DayBoundaryReached, utcnow, cst_date
+from .db import DayBoundaryReached, DetailBudgetExhausted, utcnow, cst_date
 from .delay import Humanizer
 from .detail import DetailParseFailed, parse_detail_html, save_raw_page
 from .parse import extract_main_image
@@ -374,16 +374,23 @@ def _card_ref(page_no: int, idx: int) -> str:
     return f"card:p{page_no}:i{idx}"
 
 
-def _claim_detail_slot(db, round_id, shop_key: str, card_ref: str, cfg: Config) -> None:
+def _claim_card_slot(db, round_id, shop: Shop, cfg: Config, card_ref: str,
+                     offers: list, pages_read: int) -> None:
     """向同日去重与补采 module 申请一次详情机会，预算耗尽时结束本轮。
 
     点击式列表在打开卡片前还拿不到商品编号，因此这里用卡片位置作为机会标识；
     同一轮里重复扫到同一张卡片只会复用机会，不重复占用预算。
+    预算耗尽时把已发现的商品一并带出，调用方才能先保存进度再结束本轮。
     """
     if db is None or round_id is None:
         return
-    dedupe.claim_detail_slot(db, round_id, shop_key, card_ref,
-                             cfg.max_detail_pages_per_round)
+    try:
+        dedupe.claim_card_slot(db, round_id, shop.key, card_ref,
+                               cfg.max_detail_opportunities_per_round)
+    except DetailBudgetExhausted as exc:
+        raise DetailBudgetExhausted(
+            str(exc), partial_offers=offers, pages_read=pages_read,
+        ) from None
 
 
 def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
@@ -468,7 +475,8 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                                         def_url, list_title, note="今日已有同名库存，跳过")
                     continue
             # 只有确认需要进入详情后才消耗详情间隔和长停顿预算。
-            _claim_detail_slot(db, round_id, shop.key, _card_ref(pages_read, i), cfg)
+            _claim_card_slot(db, round_id, shop, cfg, _card_ref(pages_read, i),
+                             offers, pages_read)
             human.before_detail()
             img = page.locator(_PRODUCT_IMG_SEL).nth(i)
             _capture_card(page, img, list_title, cfg, punished, on_response, se, db,
@@ -515,7 +523,8 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                 for i in range(n):
                     name = _read_card_title(page, i)
                     if name and name in ambiguous:
-                        _claim_detail_slot(db, round_id, shop.key, _card_ref(rpg, i), cfg)
+                        _claim_card_slot(db, round_id, shop, cfg, _card_ref(rpg, i),
+                                         offers, rpg)
                         human.before_detail()
                         se("product_open")
                         img = page.locator(_PRODUCT_IMG_SEL).nth(i)
@@ -688,7 +697,7 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
     oid = m.group(1)
     if db and round_id and card_ref:
         # 编号已确定：把卡片占用的详情机会绑定到该商品，补采重试才能复用同一次机会。
-        db.bind_detail_opportunity(round_id, shop.key, card_ref, oid)
+        dedupe.bind_card_to_offer(db, round_id, shop.key, card_ref, oid)
     se("popup_open", offer_id=oid)
     first_time = oid not in seen
     if first_time:
@@ -698,6 +707,8 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
     if db and round_id and db.inventory_exists(shop.key, oid, cst_date()):
         # 今天已采过：仍把该商品计入本轮榜单，并补写一条“成功/跳过”快照，
         # 避免轮次商品数被低估、或误计为失败/待处理（PRD 口径）。
+        # 本次没有产生详情观测，退还刚占用的机会：同日跳过不消耗详情预算。
+        dedupe.release_slot(db, round_id, shop.key, oid)
         if first_time:
             db.mark_skipped(round_id, shop.key, shop.url, shop.name, oid, url,
                             list_title or "", note="今日已有库存，跳过")

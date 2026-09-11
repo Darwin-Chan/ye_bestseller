@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_dp, browser_pw, pipeline
+from bestseller_monitor import browser_dp, browser_pw, dedupe, pipeline
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import (
     Database,
@@ -40,7 +40,7 @@ class P1Tests(unittest.TestCase):
             "intervention_confirmation_sec": 0,
             "fail_rate_limit": 0.1,
             "max_attempts_per_page": 2,
-            "max_detail_pages_per_round": 1000,
+            "max_detail_opportunities_per_round": 1000,
             "shuffle_within_shop": False,
             "long_pause_interval": (1, 1),
             "detail_delay_sec": (0.0, 0.0),
@@ -243,11 +243,7 @@ class P1Tests(unittest.TestCase):
         locator.count.return_value = 1
         page.locator.return_value = locator
         human = MagicMock()
-        db = MagicMock()
-        db.inventory_exists_by_name.return_value = False
-        db.claim_detail_opportunity.return_value = SimpleNamespace(
-            granted=False, budget_exhausted=True, reused=False,
-        )
+        round_id = self.db.start_or_resume()
         shop = Shop("A01", "店铺A", "https://shop.example/")
 
         with patch.object(browser_pw, "_wait_cards", return_value=True), \
@@ -255,22 +251,60 @@ class P1Tests(unittest.TestCase):
              patch.object(browser_pw, "intervention_kind", return_value=None), \
              patch.object(browser_pw, "_click_text_in_frames", return_value=False), \
              patch.object(browser_pw, "_read_card_title", return_value="商品1"), \
+             patch.object(dedupe, "claim_card_slot",
+                          side_effect=pipeline.DetailBudgetExhausted("预算耗尽")), \
              patch.object(browser_pw, "_capture_card") as capture:
             with self.assertRaises(pipeline.DetailBudgetExhausted):
                 browser_pw.crawl_store_by_click(
-                    page, shop, self._cfg(max_pages_per_shop=1), human, db=db, round_id=1,
+                    page, shop, self._cfg(max_pages_per_shop=1), human,
+                    db=self.db, round_id=round_id,
                 )
 
         capture.assert_not_called()
+
+    def test_click_same_day_skip_gives_the_slot_back(self):
+        """点开卡片才发现今天已观测过：这是同日跳过，不该消耗详情预算。"""
+        round_id = self.db.start_or_resume()
+        shop = Shop("A01", "店铺A", "https://shop.example/")
+        self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        url11 = "https://detail.1688.com/offer/11.html"
+        self.db.submit_inventory_snapshot(
+            round_id=round_id, shop_key=shop.key, shop_url=shop.url, shop_name=shop.name,
+            offer_id="11", product_url=url11, list_title="商品1", detail_title="商品1",
+            main_image_url=None,
+            sku_rows=[{"sku_id": "s1", "sku_name": "标准", "sku_price": 1.0, "sku_stock": 5}],
+            collected_at=utcnow(), attempt=1,
+        )
+        page = MagicMock()
+        locator = MagicMock()
+        locator.count.return_value = 1
+        page.locator.return_value = locator
+        detail_page = MagicMock()
+        detail_page.url = url11
+        popup = MagicMock()
+        cfg = self._cfg(max_pages_per_shop=1, max_detail_opportunities_per_round=1)
+
+        with patch.object(browser_pw, "_wait_cards", return_value=True), \
+             patch.object(browser_pw, "_scroll_cards_until_stable", return_value=1), \
+             patch.object(browser_pw, "intervention_kind", return_value=None), \
+             patch.object(browser_pw, "_click_text_in_frames", return_value=False), \
+             patch.object(browser_pw, "_read_card_title", return_value=""), \
+             patch.object(browser_pw, "_click_one_product",
+                          return_value=(detail_page, popup)), \
+             patch.object(browser_pw, "parse_detail_html") as parse:
+            browser_pw.crawl_store_by_click(
+                page, shop, cfg, MagicMock(), db=self.db, round_id=round_id,
+            )
+
+        self.assertEqual(self.db.detail_opportunity_total(round_id), 0, "同日跳过不消耗详情预算")
+        parse.assert_not_called()   # 同日跳过的商品不再解析一次详情
 
     def test_ingest_detail_binds_card_opportunity_to_known_offer(self):
         """卡片机会在学到商品编号后绑定过去，补采重试不再重复占预算。"""
         round_id = self.db.start_or_resume()
         shop = Shop("A01", "店铺A", "https://shop.example/")
         self.db.add_shop(round_id, shop.key, shop.url, shop.name)
-        self.assertTrue(self.db.claim_detail_opportunity(
-            round_id, shop.key, "card:p1:i0", budget_limit=1,
-        ).granted)
+        dedupe.claim_card_slot(self.db, round_id, shop.key, "card:p1:i0", 1)
 
         detail_page = MagicMock()
         detail_page.url = "https://detail.1688.com/offer/22.html"
@@ -285,10 +319,8 @@ class P1Tests(unittest.TestCase):
                 "page=1&idx=0", card_ref="card:p1:i0",
             )
 
-        grant = self.db.claim_detail_opportunity(round_id, shop.key, "22", budget_limit=1)
-        self.assertTrue(grant.granted)
-        self.assertTrue(grant.reused, "卡片机会应已绑定到商品编号")
-        self.assertEqual(self.db.detail_budget_used(round_id), 1)
+        dedupe.claim_offer_slot(self.db, round_id, shop.key, "22", 1)   # 不抛即复用成功
+        self.assertEqual(self.db.detail_opportunity_total(round_id), 1)
 
     def _seed_same_name_failed_offer(self):
         """商品 11 今日已完整观测；同名商品 22 只有失败记录。返回 22 的待补采行。"""
@@ -363,7 +395,7 @@ class P1Tests(unittest.TestCase):
         )
         self.db.mark_failure(round_id, shop.key, "11", 1, "解析失败")
         self.db.mark_failure(round_id, shop.key, "22", 1, "解析失败")
-        cfg = self._cfg(max_detail_pages_per_round=1)
+        cfg = self._cfg(max_detail_opportunities_per_round=1)
 
         with patch.object(browser_pw, "capture_detail",
                           return_value=self._detail_payload()) as capture:
@@ -373,7 +405,7 @@ class P1Tests(unittest.TestCase):
                 )
 
         self.assertEqual(capture.call_count, 1, "预算耗尽后不再访问详情")
-        self.assertEqual(self.db.detail_budget_used(round_id), 1)
+        self.assertEqual(self.db.detail_opportunity_total(round_id), 1)
 
     def test_detail_budget_exhaustion_finishes_round_with_terminal_note(self):
         db_path = Path(self.tmp.name) / "budget-terminal.db"
@@ -394,6 +426,36 @@ class P1Tests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_budget_exhaustion_keeps_the_listing_progress(self):
+        """预算在抓榜单途中用尽：已发现的商品要落库，店铺保持未完成。"""
+        round_id = self.db.start_or_resume()
+        shop = Shop("A01", "店铺A", "https://shop.example/")
+        self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        partial = [(1, "11", "https://detail.1688.com/offer/11.html", "商品1", "")]
+
+        with patch.object(
+            browser_pw, "crawl_store_by_click",
+            side_effect=pipeline.DetailBudgetExhausted(
+                pipeline.DETAIL_BUDGET_NOTE, partial_offers=partial, pages_read=2,
+            ),
+        ):
+            with self.assertRaises(pipeline.DetailBudgetExhausted):
+                pipeline._run_listing_pw(
+                    self.db, self._cfg(), round_id, [shop], MagicMock(),
+                )
+
+        offers = self.db.conn.execute(
+            "SELECT offer_id FROM shop_offers WHERE round_id=? AND shop_key=?",
+            (round_id, shop.key),
+        ).fetchall()
+        self.assertEqual([row["offer_id"] for row in offers], ["11"], "已发现商品要保存")
+        round_row = self.db.conn.execute(
+            "SELECT list_status, offer_count FROM shop_rounds WHERE round_id=? AND shop_key=?",
+            (round_id, shop.key),
+        ).fetchone()
+        self.assertEqual(round_row["offer_count"], 1)
+        self.assertNotEqual(round_row["list_status"], "完成", "榜单没跑完，不能记成完整榜单")
+
     def test_dp_detail_phase_stops_when_budget_exhausted(self):
         round_id = self.db.start_or_resume()
         shop = Shop("A01", "店铺A", "https://shop.example/")
@@ -406,7 +468,7 @@ class P1Tests(unittest.TestCase):
         )
         self.db.mark_failure(round_id, shop.key, "11", 1, "解析失败")
         self.db.mark_failure(round_id, shop.key, "22", 1, "解析失败")
-        cfg = self._cfg(max_detail_pages_per_round=1)
+        cfg = self._cfg(max_detail_opportunities_per_round=1)
 
         with patch.object(pipeline, "capture_detail_payload",
                           return_value=self._detail_payload()) as capture:
@@ -414,7 +476,7 @@ class P1Tests(unittest.TestCase):
                 pipeline._run_detail_phase(self.db, cfg, round_id, MagicMock())
 
         self.assertEqual(capture.call_count, 1, "drission 详情阶段也应停在同一上限")
-        self.assertEqual(self.db.detail_budget_used(round_id), 1)
+        self.assertEqual(self.db.detail_opportunity_total(round_id), 1)
 
     def test_skip_does_not_consume_detail_budget(self):
         """当日已完整观测的商品只跳过，不占用详情预算。"""
@@ -435,13 +497,13 @@ class P1Tests(unittest.TestCase):
         offer = self.db.conn.execute(
             "SELECT * FROM shop_offers WHERE round_id=? AND offer_id='11'", (round_id,)
         ).fetchone()
-        cfg = self._cfg(max_detail_pages_per_round=1)
+        cfg = self._cfg(max_detail_opportunities_per_round=1)
 
         with patch.object(browser_pw, "capture_detail") as capture:
             pipeline._capture_one_pw(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
 
         capture.assert_not_called()
-        self.assertEqual(self.db.detail_budget_used(round_id), 0, "跳过不消耗详情预算")
+        self.assertEqual(self.db.detail_opportunity_total(round_id), 0, "跳过不消耗详情预算")
 
     def test_retry_shares_attempt_budget_with_first_visit(self):
         """初次访问已用掉的尝试次数要从补采的额度里扣掉。"""
@@ -506,8 +568,7 @@ class P1Tests(unittest.TestCase):
         locator.count.return_value = 1
         page.locator.return_value = locator
         human = MagicMock()
-        db = MagicMock()
-        db.inventory_exists_by_name.return_value = False
+        round_id = self.db.start_or_resume()
         shop = Shop("A01", "店铺A", "https://shop.example/")
         titles = iter(["唯一商品", "重复商品", "重复商品", "重复商品", "重复商品"])
         scroll_counts = iter([1, 2, 2])
@@ -525,7 +586,7 @@ class P1Tests(unittest.TestCase):
              patch.object(browser_pw, "_capture_card", side_effect=capture):
             offers, pages = browser_pw.crawl_store_by_click(
                 page, shop, self._cfg(max_pages_per_shop=2), human,
-                db=db, round_id=1,
+                db=self.db, round_id=round_id,
             )
 
         self.assertEqual((len(offers), pages), (5, 2))

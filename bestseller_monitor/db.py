@@ -119,7 +119,7 @@ CREATE TABLE IF NOT EXISTS detail_opportunities (
     round_id INTEGER NOT NULL,
     shop_key TEXT NOT NULL,
     identity TEXT NOT NULL,
-    attempts INTEGER NOT NULL DEFAULT 0,
+    offer_id TEXT,
     created_at TEXT NOT NULL,
     PRIMARY KEY (round_id, shop_key, identity)
 );
@@ -207,7 +207,17 @@ class DayBoundaryReached(RuntimeError):
 
 
 class DetailBudgetExhausted(RuntimeError):
-    """本轮详情预算已用尽但仍有待处理商品；轮次进入终态，剩余留待下一轮。"""
+    """本轮详情预算已用尽但仍有待处理商品；轮次进入终态，剩余留待下一轮。
+
+    若预算是在抓榜单的过程中用尽，抛出方把已发现的商品放进 partial_offers，
+    调用方就能先保存进度再结束本轮。
+    """
+
+    def __init__(self, note: str = DETAIL_BUDGET_NOTE, *, partial_offers=None,
+                 pages_read: int = 0) -> None:
+        super().__init__(note)
+        self.partial_offers = list(partial_offers or [])
+        self.pages_read = pages_read
 
 
 @dataclass(frozen=True)
@@ -215,20 +225,6 @@ class SnapshotCommitResult:
     """已提交的库存快照结果；停止信号不表示事务失败。"""
 
     stop_round: bool = False
-
-
-@dataclass(frozen=True)
-class DetailGrant:
-    """一次详情机会申请的结果。
-
-    未获批时 budget_exhausted 表示轮次详情预算已用尽；reused 表示这次申请
-    只是复用同一商品已消耗的机会（重试），不额外占用预算。
-    """
-
-    granted: bool
-    reused: bool = False
-    budget_exhausted: bool = False
-    attempts: int = 0
 
 
 def past_day_cutoff(iso_utc: str | None = None) -> bool:
@@ -309,6 +305,11 @@ def connect(db_path: Path) -> sqlite3.Connection:
     # 兼容旧库：轮次记录的详情预算上限（NULL 表示尚未绑定，首次申请时写入）
     try:
         conn.execute("ALTER TABLE rounds ADD COLUMN detail_budget_limit INTEGER")
+    except sqlite3.OperationalError:
+        pass
+    # 兼容旧库：详情机会记录上绑定的商品编号（旧库残留的 attempts 列不再使用）
+    try:
+        conn.execute("ALTER TABLE detail_opportunities ADD COLUMN offer_id TEXT")
     except sqlite3.OperationalError:
         pass
     try:
@@ -456,6 +457,7 @@ class Database:
         pages_read: int,
         *,
         confirmed_empty: bool = False,
+        complete: bool = True,
     ) -> None:
         if not offers and not confirmed_empty:
             raise ValueError("未确认的空榜单不能标记为完成")
@@ -470,9 +472,10 @@ class Database:
             rows,
         )
         self.conn.execute(
-            "UPDATE shop_rounds SET list_status='完成', list_pages_read=?, offer_count=?, list_note=NULL "
+            "UPDATE shop_rounds SET list_status=?, list_pages_read=?, offer_count=?, list_note=? "
             "WHERE round_id=? AND shop_key=?",
-            (pages_read, len(rows), round_id, shop_key),
+            ("完成" if complete else "待处理", pages_read, len(rows),
+             None if complete else "详情预算耗尽，榜单未跑完", round_id, shop_key),
         )
         self.conn.commit()
         log.info("店铺 %s 榜单入库 %s 个商品（读了 %s 页）", shop_key, len(rows), pages_read)
@@ -515,13 +518,65 @@ class Database:
         sql += "        ORDER BY so.id"
         yield from self.conn.execute(sql, params)
 
-    def detail_budget_used(self, round_id: int) -> int:
-        """本轮已申请的详情机会数（同一商品的重试只算一次）。"""
+    def detail_opportunities(self, round_id: int, shop_key: str) -> list[sqlite3.Row]:
+        """该店铺本轮已占用的详情机会：identity 是申请时的标识，offer_id 是绑定到的商品。"""
+        cur = self.conn.execute(
+            "SELECT identity, offer_id FROM detail_opportunities "
+            "WHERE round_id=? AND shop_key=? ORDER BY identity",
+            (round_id, shop_key),
+        )
+        return cur.fetchall()
+
+    def detail_opportunity_total(self, round_id: int) -> int:
+        """本轮已占用的详情机会总数（重试复用同一次机会）。"""
         row = self.conn.execute(
             "SELECT COUNT(*) AS c FROM detail_opportunities WHERE round_id=?",
             (round_id,),
         ).fetchone()
         return int(row["c"])
+
+    def detail_budget_limit(self, round_id: int, default_limit: int) -> int:
+        """本轮详情预算上限；首次读取时把配置写进轮次，续跑沿用，配置变化不再放宽。"""
+        row = self.conn.execute(
+            "SELECT detail_budget_limit FROM rounds WHERE id=?", (round_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"轮次不存在：{round_id}")
+        limit = row["detail_budget_limit"]
+        if limit is None:
+            limit = int(default_limit)
+            self.conn.execute(
+                "UPDATE rounds SET detail_budget_limit=? WHERE id=?", (limit, round_id),
+            )
+            self.conn.commit()
+        return int(limit)
+
+    def add_detail_opportunity(self, round_id: int, shop_key: str, identity: str) -> None:
+        """占用一次详情机会；同一标识重复申请由主键忽略。"""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO detail_opportunities(round_id, shop_key, identity, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (round_id, shop_key, identity, utcnow()),
+        )
+        self.conn.commit()
+
+    def bind_detail_opportunity(self, round_id: int, shop_key: str, identity: str,
+                                offer_id: str) -> None:
+        """把一次详情机会记录到它最终打开的商品编号上。"""
+        self.conn.execute(
+            "UPDATE detail_opportunities SET offer_id=? WHERE round_id=? AND shop_key=? "
+            "AND identity=?",
+            (offer_id, round_id, shop_key, identity),
+        )
+        self.conn.commit()
+
+    def remove_detail_opportunity(self, round_id: int, shop_key: str, identity: str) -> None:
+        """退还一次详情机会（同日跳过不消耗预算）。"""
+        self.conn.execute(
+            "DELETE FROM detail_opportunities WHERE round_id=? AND shop_key=? AND identity=?",
+            (round_id, shop_key, identity),
+        )
+        self.conn.commit()
 
     def detail_attempts_used(self, round_id: int, shop_key: str, offer_id: str) -> int:
         """本轮该商品已经用掉的详情尝试次数（初次访问与补采共享同一份额度）。"""
@@ -531,98 +586,6 @@ class Database:
             (round_id, shop_key, offer_id),
         ).fetchone()
         return int(row["a"])
-
-    def claim_detail_opportunity(
-        self, round_id: int, shop_key: str, identity: str, budget_limit: int,
-    ) -> DetailGrant:
-        """申请一次详情机会；同一轮、同一店铺、同一标识只消耗一次预算。
-
-        重复申请视作重试，返回 reused=True 且不占用新预算。轮次首次申请时记录
-        预算上限，之后续跑沿用该上限，配置变化不会放宽已开始的轮次。
-        identity 通常是商品编号；点击式列表在打开卡片前用卡片位置代替，
-        得知编号后再通过 bind_detail_opportunity 绑定过去。
-        """
-        try:
-            self.conn.execute("BEGIN")
-            row = self.conn.execute(
-                "SELECT attempts FROM detail_opportunities "
-                "WHERE round_id=? AND shop_key=? AND identity=?",
-                (round_id, shop_key, identity),
-            ).fetchone()
-            if row is not None:
-                self.conn.commit()
-                return DetailGrant(granted=True, reused=True, attempts=int(row["attempts"]))
-
-            round_row = self.conn.execute(
-                "SELECT detail_budget_limit FROM rounds WHERE id=?", (round_id,)
-            ).fetchone()
-            if round_row is None:
-                raise ValueError(f"轮次不存在：{round_id}")
-            limit = round_row["detail_budget_limit"]
-            if limit is None:
-                limit = int(budget_limit)
-                self.conn.execute(
-                    "UPDATE rounds SET detail_budget_limit=? WHERE id=?", (limit, round_id),
-                )
-            if self.detail_budget_used(round_id) >= int(limit):
-                self.conn.commit()
-                return DetailGrant(granted=False, budget_exhausted=True)
-
-            self.conn.execute(
-                "INSERT INTO detail_opportunities(round_id, shop_key, identity, attempts, "
-                "created_at) VALUES (?, ?, ?, 0, ?)",
-                (round_id, shop_key, identity, utcnow()),
-            )
-            self.conn.commit()
-            return DetailGrant(granted=True)
-        except Exception:
-            self.conn.rollback()
-            raise
-
-    def bind_detail_opportunity(self, round_id: int, shop_key: str, card_ref: str,
-                                offer_id: str) -> None:
-        """把按列表卡片申请的详情机会绑定到已知商品编号。
-
-        绑定后，同一商品在补采路径上的重试会复用这次机会，而不是再占一份预算。
-        若该商品本轮已经持有机会，则合并两者的尝试次数并删掉卡片那一份。
-        """
-        if not card_ref or not offer_id or card_ref == offer_id:
-            return
-        try:
-            self.conn.execute("BEGIN")
-            card = self.conn.execute(
-                "SELECT attempts FROM detail_opportunities "
-                "WHERE round_id=? AND shop_key=? AND identity=?",
-                (round_id, shop_key, card_ref),
-            ).fetchone()
-            if card is not None:
-                offer = self.conn.execute(
-                    "SELECT attempts FROM detail_opportunities "
-                    "WHERE round_id=? AND shop_key=? AND identity=?",
-                    (round_id, shop_key, offer_id),
-                ).fetchone()
-                if offer is None:
-                    self.conn.execute(
-                        "UPDATE detail_opportunities SET identity=? "
-                        "WHERE round_id=? AND shop_key=? AND identity=?",
-                        (offer_id, round_id, shop_key, card_ref),
-                    )
-                else:
-                    self.conn.execute(
-                        "UPDATE detail_opportunities SET attempts=? WHERE round_id=? "
-                        "AND shop_key=? AND identity=?",
-                        (max(int(card["attempts"]), int(offer["attempts"])),
-                         round_id, shop_key, offer_id),
-                    )
-                    self.conn.execute(
-                        "DELETE FROM detail_opportunities WHERE round_id=? AND shop_key=? "
-                        "AND identity=?",
-                        (round_id, shop_key, card_ref),
-                    )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
 
     def mark_failure(
         self,

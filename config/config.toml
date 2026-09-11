@@ -1,8 +1,8 @@
 [run]
 # 每个店铺最多翻几页商品列表
 max_pages_per_shop = 30
-# 单轮详情页总数上限（跨店重复采集也计入）
-max_detail_pages_per_round = 1000
+# 单轮详情预算（允许进入详情的商品机会数，跨店累计；同一商品重试只算一次）
+max_detail_opportunities_per_round = 1000
 # 单个商品详情最多尝试次数
 max_attempts_per_page = 2
 # 失败率超过该比例时整轮暂停等人工决策

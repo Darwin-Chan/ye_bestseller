@@ -174,11 +174,24 @@ def _run_pending_detail_phase(db: Database, cfg: Config, round_id: int, capture)
     human = Humanizer(cfg)
     offers = _pending_detail_offers(db, round_id, cfg)
     log.info("详情阶段：待处理商品 %s 个", len(offers))
+    processed = _capture_pending_offers(
+        db, cfg, human, round_id, offers,
+        lambda offer: capture(db, cfg, human, round_id, offer),
+    )
+    log.info("详情阶段结束：本轮处理 %s 个商品", processed)
+
+
+def _capture_pending_offers(db: Database, cfg: Config, human: Humanizer, round_id: int,
+                            offers, capture) -> int:
+    """逐个补采；需要中止本轮的中断原样抛出，其余异常记为失败后继续。
+
+    兜底失败记录接着本轮的尝试额度编号，初次访问和补采共用同一份额度。
+    """
     processed = 0
     for offer in offers:
         processed += 1
         try:
-            capture(db, cfg, human, round_id, offer)
+            capture(offer)
         except (RoundPauseRequired, DayBoundaryReached, DetailBudgetExhausted):
             raise
         except Exception as exc:  # 兜底：异常也记录失败，不中断整轮
@@ -190,7 +203,7 @@ def _run_pending_detail_phase(db: Database, cfg: Config, round_id: int, capture)
             )
         if processed % cfg.batch_size == 0:
             human.before_batch_rest()
-    log.info("详情阶段结束：本轮处理 %s 个商品", processed)
+    return processed
 
 
 def _capture_offer_detail(db: Database, cfg: Config, human: Humanizer, round_id: int, offer,
@@ -225,8 +238,8 @@ def _capture_offer_detail(db: Database, cfg: Config, human: Humanizer, round_id:
         return
 
     # 同日跳过不消耗预算；只有真正要进入详情的商品才申请机会。
-    dedupe.claim_detail_slot(db, round_id, shop_key, offer_id,
-                             cfg.max_detail_pages_per_round)
+    dedupe.claim_offer_slot(db, round_id, shop_key, offer_id,
+                            cfg.max_detail_opportunities_per_round)
 
     for attempt in range(next_attempt_no, max_attempts + 1):
         try:
@@ -378,11 +391,28 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
         except RoundDenyExceeded as exc:
             log.error("整轮 deny 超过阈值，中止本轮：%s", exc)
             raise
+        except DetailBudgetExhausted as exc:
+            _save_partial_listing(db, round_id, shop, exc)
+            raise
         except ListingLoadFailed as exc:
             _record_listing_failure(db, cfg, round_id, shop, exc)
             continue
         _retry_shop_pending_pw(db, cfg, round_id, shop, page, human, emit=emit)
     log.info("榜单阶段完成")
+
+
+def _save_partial_listing(db: Database, round_id: int, shop: Shop,
+                          exc: DetailBudgetExhausted) -> None:
+    """详情预算在抓榜单途中用尽：先把已发现的商品落库，再结束本轮。
+
+    榜单没跑完，因此店铺保持未完成状态，不会被当成完整榜单。
+    """
+    if not exc.partial_offers:
+        return
+    db.save_shop_offers(round_id, shop.key, shop.url, shop.name,
+                        exc.partial_offers, exc.pages_read, complete=False)
+    log.warning("店铺 %s 榜单未跑完（详情预算耗尽），已保存 %s 个已发现商品",
+                shop.key, len(exc.partial_offers))
 
 
 def _retry_shop_pending_pw(db: Database, cfg: Config, round_id: int, shop: Shop, page,
@@ -392,22 +422,10 @@ def _retry_shop_pending_pw(db: Database, cfg: Config, round_id: int, shop: Shop,
     if not offers:
         return
     log.info("店铺 %s 榜单完成后立即补抓 %s 个失败商品", shop.key, len(offers))
-    processed = 0
-    for offer in offers:
-        processed += 1
-        try:
-            _capture_one_pw(db, cfg, human, round_id, offer, page, emit=emit)
-        except (RoundPauseRequired, DayBoundaryReached, DetailBudgetExhausted):
-            raise
-        except Exception as exc:
-            log.exception("详情抓取意外失败：%s", offer["product_url"])
-            db.mark_failure(
-                round_id, offer["shop_key"], offer["offer_id"],
-                dedupe.next_attempt(db, round_id, offer["shop_key"], offer["offer_id"]),
-                str(exc),
-            )
-        if processed % cfg.batch_size == 0:
-            human.before_batch_rest()
+    _capture_pending_offers(
+        db, cfg, human, round_id, offers,
+        lambda offer: _capture_one_pw(db, cfg, human, round_id, offer, page, emit=emit),
+    )
 
 
 def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, offer, page,
