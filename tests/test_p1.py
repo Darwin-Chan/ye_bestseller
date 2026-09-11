@@ -464,11 +464,13 @@ class P1Tests(unittest.TestCase):
         ).fetchall()
         self.assertEqual([row["offer_id"] for row in offers], ["11"], "已发现商品要保存")
         round_row = self.db.conn.execute(
-            "SELECT list_status, offer_count FROM shop_rounds WHERE round_id=? AND shop_key=?",
+            "SELECT list_status, offer_count, list_note FROM shop_rounds "
+            "WHERE round_id=? AND shop_key=?",
             (round_id, shop.key),
         ).fetchone()
         self.assertEqual(round_row["offer_count"], 1)
         self.assertNotEqual(round_row["list_status"], "完成", "榜单没跑完，不能记成完整榜单")
+        self.assertIn("详情预算耗尽", round_row["list_note"], "中断原因要留在店铺备注里")
 
     def test_dp_detail_phase_stops_when_budget_exhausted(self):
         round_id = self.db.start_or_resume()

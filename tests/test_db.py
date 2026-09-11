@@ -26,6 +26,124 @@ class DbTests(unittest.TestCase):
     def _add_shop(self, round_id):
         self.db.add_shop(round_id, "A01", "https://a.example/", "店铺A")
 
+    def _remember(self, round_id, offer):
+        self.db.remember_shop_offer(
+            round_id, "A01", "https://a.example/", "店铺A", offer,
+        )
+
+    def test_remembering_the_same_offer_twice_keeps_one_row_and_one_count(self):
+        """中断时已发现的商品立刻落榜单行：重复发现不新增行、不重复计数。"""
+        rid = self.db.start_or_resume()
+        self._add_shop(rid)
+        offer = (1, "11", "https://detail.1688.com/offer/11.html", "商品11", "")
+
+        self._remember(rid, offer)
+        self._remember(rid, offer)
+
+        rows = self.conn.execute(
+            "SELECT offer_id FROM shop_offers WHERE round_id=? AND shop_key='A01'",
+            (rid,),
+        ).fetchall()
+        self.assertEqual([row["offer_id"] for row in rows], ["11"])
+        count = self.conn.execute(
+            "SELECT offer_count FROM shop_rounds WHERE round_id=? AND shop_key='A01'",
+            (rid,),
+        ).fetchone()["offer_count"]
+        self.assertEqual(count, 1, "已发现商品数按商品编号计，不重复计数")
+
+    def test_complete_listing_replaces_earlier_discoveries_and_keeps_order(self):
+        """完整榜单是权威列表：覆盖增量发现的行，rank 反映传入顺序。"""
+        rid = self.db.start_or_resume()
+        self._add_shop(rid)
+        self._remember(rid, (1, "11", "https://detail.1688.com/offer/11.html", "商品11", ""))
+        self._remember(rid, (2, "22", "https://detail.1688.com/offer/22.html", "商品22", ""))
+
+        self.db.save_shop_offers(
+            rid, "A01", "https://a.example/", "店铺A",
+            [(1, "22", "https://detail.1688.com/offer/22.html", "商品22", ""),
+             (2, "33", "https://detail.1688.com/offer/33.html", "商品33", "")],
+            1,
+        )
+
+        rows = self.conn.execute(
+            "SELECT offer_id, rank FROM shop_offers WHERE round_id=? AND shop_key='A01' "
+            "ORDER BY rank",
+            (rid,),
+        ).fetchall()
+        self.assertEqual([(row["offer_id"], row["rank"]) for row in rows], [("22", 1), ("33", 2)])
+        shop = self.conn.execute(
+            "SELECT list_status, offer_count FROM shop_rounds WHERE round_id=? AND shop_key='A01'",
+            (rid,),
+        ).fetchone()
+        self.assertEqual(shop["list_status"], "完成")
+        self.assertEqual(shop["offer_count"], 2)
+
+    def test_partial_listing_only_adds_and_keeps_earlier_discoveries(self):
+        """残缺榜单只增不减：续跑再次中断，先前发现的商品不能被抹掉。"""
+        rid = self.db.start_or_resume()
+        self._add_shop(rid)
+        self._remember(rid, (1, "11", "https://detail.1688.com/offer/11.html", "商品11", ""))
+        self._remember(rid, (2, "22", "https://detail.1688.com/offer/22.html", "商品22", ""))
+
+        self.db.save_shop_offers(
+            rid, "A01", "https://a.example/", "店铺A",
+            [(1, "33", "https://detail.1688.com/offer/33.html", "商品33", "")],
+            2, complete=False,
+        )
+
+        rows = self.conn.execute(
+            "SELECT offer_id FROM shop_offers WHERE round_id=? AND shop_key='A01' ORDER BY offer_id",
+            (rid,),
+        ).fetchall()
+        self.assertEqual([row["offer_id"] for row in rows], ["11", "22", "33"])
+        shop = self.conn.execute(
+            "SELECT list_status, offer_count FROM shop_rounds WHERE round_id=? AND shop_key='A01'",
+            (rid,),
+        ).fetchone()
+        self.assertNotEqual(shop["list_status"], "完成", "榜单没跑完，不能记成完整榜单")
+        self.assertEqual(shop["offer_count"], 3, "已发现商品数包含先前发现的行")
+
+    def test_incomplete_listing_note_comes_from_the_caller(self):
+        """中断原因由调用方给出：数据层不再写死某一种中断原因的文案。"""
+        rid = self.db.start_or_resume()
+        self._add_shop(rid)
+
+        self.db.save_shop_offers(
+            rid, "A01", "https://a.example/", "店铺A",
+            [(1, "33", "https://detail.1688.com/offer/33.html", "商品33", "")],
+            2, complete=False, note="榜单 deny 超过阈值：店铺 A01 10 分钟内 deny≥7",
+        )
+
+        note = self.conn.execute(
+            "SELECT list_note FROM shop_rounds WHERE round_id=? AND shop_key='A01'", (rid,)
+        ).fetchone()["list_note"]
+        self.assertEqual(note, "榜单 deny 超过阈值：店铺 A01 10 分钟内 deny≥7")
+
+    def test_remembering_tolerates_pre_existing_duplicate_rows(self):
+        """不新增唯一约束：既有库里同商品多行时仍能继续写入，不需要人工迁移。"""
+        rid = self.db.start_or_resume()
+        self._add_shop(rid)
+        self.conn.executemany(
+            "INSERT INTO shop_offers(round_id, shop_key, shop_url, shop_name, rank, offer_id, "
+            "product_url, list_title, list_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(rid, "A01", "https://a.example/", "店铺A", rank, "11",
+              "https://detail.1688.com/offer/11.html", "商品11", "")
+             for rank in (1, 2)],
+        )
+        self.conn.commit()
+
+        self._remember(rid, (1, "11", "https://detail.1688.com/offer/11.html", "商品11", ""))
+        self._remember(rid, (2, "22", "https://detail.1688.com/offer/22.html", "商品22", ""))
+
+        rows = self.conn.execute(
+            "SELECT COUNT(*) FROM shop_offers WHERE round_id=? AND shop_key='A01'", (rid,)
+        ).fetchone()[0]
+        self.assertEqual(rows, 3, "历史重复行保留，新商品才新增行")
+        count = self.conn.execute(
+            "SELECT offer_count FROM shop_rounds WHERE round_id=? AND shop_key='A01'", (rid,)
+        ).fetchone()["offer_count"]
+        self.assertEqual(count, 2, "已发现商品数按不同商品编号计")
+
     def test_submit_inventory_snapshot_persists_complete_result(self):
         rid = self.db.start_or_resume()
         self._add_shop(rid)

@@ -482,7 +482,8 @@ def _save_partial_listing(db: Database, round_id: int, shop: Shop,
     if not exc.partial_offers:
         return
     db.save_shop_offers(round_id, shop.key, shop.url, shop.name,
-                        exc.partial_offers, exc.pages_read, complete=False)
+                        exc.partial_offers, exc.pages_read, complete=False,
+                        note="详情预算耗尽，榜单未跑完")
     log.warning("店铺 %s 榜单未跑完（详情预算耗尽），已保存 %s 个已发现商品",
                 shop.key, len(exc.partial_offers))
 
