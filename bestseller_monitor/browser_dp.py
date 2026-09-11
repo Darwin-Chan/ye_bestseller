@@ -10,7 +10,7 @@ import time
 from .config import Config, Shop, effective_pages_limit
 from .delay import Humanizer
 from .detail import parse_detail_html
-from . import sound
+from . import pagination, sound
 from .guard import (
     InterventionTimeout,
     SLIDER_MARKERS,
@@ -251,6 +251,7 @@ def crawl_shop_listing(
                 wait_for_human(page, kind, cfg.human_pause_minutes)
                 time.sleep(2)
         try:
+            before = pagination.drission_list_identity(page)   # 翻页前的列表身份
             nxt = page.ele("text:下一页", timeout=4)
             if not nxt:
                 log.info("店铺 %s 无下一页，提前结束", shop.key)
@@ -260,6 +261,13 @@ def crawl_shop_listing(
         except Exception:
             log.info("店铺 %s 翻页结束", shop.key)
             break
+        if not pagination.wait_for_drission_change(page, before, f"店铺 {shop.key} 第 {pages_read + 1} 页"):
+            # 点了「下一页」但列表没换：旧页商品还在，再读只会重复旧页、漏掉新页（IS-36）。
+            raise ListingLoadFailed(
+                f"翻页后未确认新一页加载（已读 {pages_read} 页）：{shop.url}"
+                f"（current_url={getattr(page, 'url', '')}）",
+                html=_page_html(page),
+            )
     if not offers:
         raise ListingLoadFailed(
             f"店铺列表未解析到商品：{shop.url}（current_url={getattr(page, 'url', '')}）",

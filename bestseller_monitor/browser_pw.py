@@ -13,7 +13,7 @@ import time
 
 from playwright.sync_api import Error as PlaywrightError
 
-from . import browser_proc, dedupe, rounds
+from . import browser_proc, dedupe, pagination, rounds
 from .config import Config, Shop, effective_pages_limit
 from .db import DayBoundaryReached, DetailBudgetExhausted, utcnow, cst_date
 from .delay import Humanizer
@@ -71,6 +71,16 @@ def _wait_cards(page, min_count: int = 1, timeout_sec: float = _WAIT_UI_SEC,
     return _wait_until(page, describe,
                        lambda: page.locator(_PRODUCT_IMG_SEL).count() >= min_count,
                        timeout_sec)
+
+
+def _list_identity(page) -> tuple:
+    """翻页前后对比用的列表身份（商品卡片序列）：见 pagination.list_identity()。"""
+    return pagination.list_identity(page)
+
+
+def _wait_for_list_change(page, before: tuple, describe: str, timeout_sec: float) -> bool:
+    """等翻页后的列表相对翻页前的身份发生变化：见 pagination.wait_for_list_change()。"""
+    return pagination.wait_for_list_change(page, before, describe, timeout_sec)
 
 
 def _scroll_cards_until_stable(page, describe: str = "滚动加载新卡片") -> int:
@@ -521,6 +531,7 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
         if pages_read >= max_pages:
             break
         human.before_action()   # 翻页/加载更多前的拟人化延迟
+        before = _list_identity(page)   # 翻页前的列表身份，用来确认新页真的换了
         advanced = _click_text_in_frames(page, "下一页")
         if not advanced:
             advanced = _click_text_in_frames(page, "加载更多")
@@ -528,6 +539,11 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
             log.info("店铺 %s 第 %s 页后无下一页/加载更多，提前结束", shop.key, pages_read)
             break
         page.wait_for_load_state("domcontentloaded", timeout=cfg.timeout_ms)
+        if not _wait_for_list_change(page, before, f"店铺 {shop.key} 第 {pages_read + 1} 页",
+                                     _WAIT_NEXT_SEC):
+            # 点了翻页但列表没换：旧页卡片还在，再读一遍只会重复旧页、漏掉新页（IS-36）。
+            raise _listing_load_failed(
+                page, f"翻页后未确认新一页加载（已读 {pages_read} 页）：{shop.url}")
         _wait_cards(page, min_count=1, timeout_sec=_WAIT_NEXT_SEC,
                     describe="翻页后商品卡片")   # 条件等待，替代固定 2s
 
@@ -568,6 +584,7 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
             if rpg >= rescue_last_page:
                 break
             human.before_action()
+            before = _list_identity(page)   # 同上：补抓翻页也要确认换了页
             advanced = _click_text_in_frames(page, "下一页")
             if not advanced:
                 advanced = _click_text_in_frames(page, "加载更多")
@@ -575,6 +592,10 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                 log.info("店铺 %s 补抓在第 %s 页后无下一页，提前结束", shop.key, rpg)
                 break
             page.wait_for_load_state("domcontentloaded", timeout=cfg.timeout_ms)
+            if not _wait_for_list_change(page, before, f"店铺 {shop.key} 补抓第 {rpg + 1} 页",
+                                         _WAIT_NEXT_SEC):
+                raise _listing_load_failed(
+                    page, f"补抓翻页后未确认新一页加载（已读 {rpg} 页）：{shop.url}")
             _wait_cards(page, min_count=1, timeout_sec=_WAIT_NEXT_SEC,
                         describe="补抓翻页后商品卡片")
     if not offers:

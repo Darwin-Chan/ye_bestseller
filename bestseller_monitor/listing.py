@@ -10,6 +10,7 @@ from .config import Config, Shop, effective_pages_limit
 from .delay import Humanizer
 from .guard import detect, wait_for_human
 from .parse import extract_offer_links
+from . import pagination
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +68,13 @@ def save_raw_listing_page(cfg: Config, round_id: int, shop_key: str, html: str) 
     path = d / f"listing_{safe_key}.html"
     path.write_text(html, encoding="utf-8")
     return path
+
+
+def _page_html(page) -> str:
+    try:
+        return page.content()
+    except Exception:
+        return ""
 
 
 def crawl_shop_listing(
@@ -135,20 +143,24 @@ def crawl_shop_listing(
         if not _next_page_available(page):
             log.info("店铺 %s 已无下一页，提前结束（共 %s 页）", shop.key, pages_read)
             break
+        before = pagination.list_identity(page)   # 翻页前的列表身份，用来确认新页真的换了
         try:
             page.get_by_text("下一页", exact=True).first.click(timeout=cfg.timeout_ms)
             page.wait_for_load_state("domcontentloaded", timeout=cfg.timeout_ms)
         except Exception as exc:
             log.warning("点击下一页失败：%s", exc)
             break
+        if not pagination.wait_for_list_change(page, before, f"店铺 {shop.key} 第 {pages_read + 1} 页"):
+            # 点了「下一页」但列表没换：旧页商品还在，再读只会重复旧页、漏掉新页（IS-36）。
+            raise ListingLoadFailed(
+                f"翻页后未确认新一页加载（已读 {pages_read} 页）：{shop.url}"
+                f"（current_url={getattr(page, 'url', '')}）",
+                html=_page_html(page),
+            )
 
     if not offers:
-        try:
-            html = page.content()
-        except Exception:
-            html = ""
         raise ListingLoadFailed(
             f"店铺列表未解析到商品：{shop.url}（current_url={getattr(page, 'url', '')}）",
-            html=html,
+            html=_page_html(page),
         )
     return offers, pages_read
