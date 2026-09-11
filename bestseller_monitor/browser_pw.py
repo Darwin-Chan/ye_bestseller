@@ -13,7 +13,7 @@ import time
 
 from playwright.sync_api import Error as PlaywrightError
 
-from . import dedupe
+from . import browser_proc, dedupe
 from .config import Config, Shop
 from .db import DayBoundaryReached, DetailBudgetExhausted, utcnow, cst_date
 from .delay import Humanizer
@@ -28,8 +28,10 @@ from .guard import (
 
 log = logging.getLogger(__name__)
 
-# 记录本次由 open_session 启动的浏览器进程，收尾只结束它，绝不波及用户其它 Edge 窗口。
+# 记录本次由 open_session 启动的浏览器进程与调试端口：
+# 收尾只结束本任务启动的浏览器，绝不波及用户其它 Edge 窗口。
 _launched_proc = None
+_launched_port = None
 
 # 兼容旧私有名/旧名（本文件内部与诊断工具仍引用）
 _body_text = body_text
@@ -115,7 +117,7 @@ def _listing_load_failed(page, reason: str) -> ListingLoadFailed:
 
 
 def open_session(cfg: Config):
-    global _launched_proc
+    global _launched_proc, _launched_port
     from playwright.sync_api import sync_playwright
 
     edge = cfg.chrome_path or r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
@@ -131,6 +133,7 @@ def open_session(cfg: Config):
         ])
         log.info("已用普通进程启动浏览器（调试端口 %s，PID %s）。", cfg.attach_port, proc.pid)
     _launched_proc = proc
+    _launched_port = cfg.attach_port
 
     pw = sync_playwright().start()
     # 用「能连上调试端口」作为浏览器就绪条件，替代固定 8 秒（超时兜底）
@@ -156,8 +159,26 @@ def open_session(cfg: Config):
     return pw, br, page, ctx
 
 
+def cdp_browser_pid(br) -> int | None:
+    """问 CDP 要真正在跑的那个 browser 进程 PID；取不到返回 None。"""
+    if br is None:
+        return None
+    try:
+        session = br.new_browser_cdp_session()
+        info = session.send("SystemInfo.getProcessInfo")
+    except Exception as exc:  # noqa: BLE001
+        log.debug("通过 CDP 查询浏览器进程失败：%s", exc)
+        return None
+    for proc in info.get("processInfo", []):
+        if proc.get("type") == "browser" and proc.get("id"):
+            return int(proc["id"])
+    return None
+
+
 def close_session(pw, br) -> None:
-    global _launched_proc
+    global _launched_proc, _launched_port
+    # 先问 CDP，再断开：交接场景里这个 PID 才是真正在跑的浏览器。
+    browser_pid = cdp_browser_pid(br)
     try:
         br.close()
     except Exception:
@@ -166,15 +187,19 @@ def close_session(pw, br) -> None:
         pw.stop()
     except Exception:
         pass
-    # 只关闭本次启动的那个浏览器进程树，避免 taskkill /IM msedge.exe 强杀用户的其它 Edge。
     proc = _launched_proc
+    port = _launched_port
     _launched_proc = None
-    if proc is not None and proc.poll() is None:
-        try:
-            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
-            log.info("已关闭本次启动的浏览器进程（PID %s）。", proc.pid)
-        except Exception as exc:
-            log.debug("关闭浏览器进程失败：%s", exc)
+    _launched_port = None
+    if proc is None:
+        log.info("本次未启动浏览器（接管既有实例），跳过关闭。")
+        return
+    own_pid = proc.pid if proc.poll() is None else None
+    if own_pid is None:
+        log.warning("本次启动的浏览器进程（PID %s）已退出：同一 profile 已有实例时会交接给旧实例；"
+                    "改按调试端口 %s 的归属关闭。", proc.pid, port)
+    browser_proc.close_browser(port, launched_by_us=True,
+                               browser_pid=browser_pid, own_pid=own_pid)
 
 
 class ShopDenyExceeded(Exception):

@@ -5,10 +5,13 @@
   - GUI 读 data/bestseller.db 展示“今日/各店”数据，并每约 2 秒轮询数据库刷新过程页。
   - “暂停”＝终止子进程，轮次保留为“进行中”（可续跑）。
   - “中止（放弃）”＝终止子进程 + 把轮次标记为“已放弃”（数据保留、不再续跑、下次开新轮）。
+  - “暂停/中止”后连带收尾本任务启动的浏览器（start_browser=true 时），避免残留 Edge（IS-43）。
   - 依赖：本机已登录 Edge + Playwright 环境；exe 不内嵌抓取与浏览器。
 """
 from __future__ import annotations
 
+import logging
+import logging.handlers
 import os
 import shutil
 import sqlite3
@@ -46,8 +49,29 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from bestseller_monitor.config import Config, load_shops  # noqa: E402
 from bestseller_monitor.db import Database, cst_date, DAY_BOUNDARY_NOTE  # noqa: E402
+from bestseller_monitor import browser_proc  # noqa: E402
 
 CST = timezone(timedelta(hours=8))
+
+# 暂停/中止后收尾浏览器：抓取进程被强杀时端口可能还没监听，短暂重试几次（IS-43）。
+_BROWSER_CLOSE_RETRY_SEC = 3.0
+_BROWSER_CLOSE_RETRY_INTERVAL = 0.7
+
+
+def _configure_gui_logging(cfg) -> logging.Handler:
+    """GUI 自己的动作也留日志——暂停/中止后的浏览器收尾否则事后无据可查（IS-43）。"""
+    logs_dir = Path(getattr(cfg, "logs_dir", PROJECT_ROOT / "logs"))
+    try:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    handler = logging.handlers.RotatingFileHandler(
+        logs_dir / "gui.log", maxBytes=1_000_000, backupCount=2, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
+    return handler
 
 
 def _fmt_hhmm(iso_utc: str | None) -> str:
@@ -382,6 +406,7 @@ class Api:
         with self._lock:
             self.user_paused = True
             self._kill_proc()
+            self._kill_browser()
             if self._run_start_ts is not None:
                 self._elapsed_base += time.time() - self._run_start_ts
                 self._run_start_ts = None
@@ -391,6 +416,7 @@ class Api:
         with self._lock:
             self.user_paused = False
             self._kill_proc()
+            self._kill_browser()
             if self.round_id is not None:
                 conn = self._open_conn()
                 try:
@@ -406,6 +432,17 @@ class Api:
                 self.proc.terminate()
             except OSError:
                 pass
+
+    def _kill_browser(self):
+        """收尾本任务启动的浏览器：抓取进程被强杀时不会执行它的 finally（IS-43）。"""
+        if not getattr(self.cfg, "start_browser", True):
+            return  # start_browser=false：接管用户自己的浏览器，不动它
+        deadline = time.time() + _BROWSER_CLOSE_RETRY_SEC
+        while True:
+            pid = browser_proc.close_browser(self.cfg.attach_port, launched_by_us=True)
+            if pid is not None or time.time() >= deadline:
+                return pid
+            time.sleep(_BROWSER_CLOSE_RETRY_INTERVAL)
 
     # ---------- 结果页 ----------
     def get_result(self) -> dict:
@@ -553,6 +590,7 @@ def _default_window_height() -> int:
 
 def main():
     api = Api()
+    _configure_gui_logging(api.cfg)
     here = Path(getattr(sys, "_MEIPASS", PROJECT_ROOT))
     ui_path = here / "docs" / "ui_live.html"
     if not ui_path.exists():
