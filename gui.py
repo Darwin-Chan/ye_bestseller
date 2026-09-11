@@ -587,8 +587,8 @@ class Api:
                 conn.close()
 
 
-# 默认窗口高度：设计基准 1128 × 1.2 ≈ 1354；屏幕放不下时收缩到可用区域内。
-_PREFERRED_HEIGHT = 1354
+# 默认窗口高度：设计基准 1128 先 +20% 再 -20% ≈ 1083；屏幕放不下时收缩到可用区域内。
+_PREFERRED_HEIGHT = 1083
 _MIN_HEIGHT = 720
 _SCREEN_MARGIN = 60
 _SPI_GETWORKAREA = 0x0030

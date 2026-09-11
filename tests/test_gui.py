@@ -20,7 +20,7 @@ from helpers import new_round
 class GuiWindowHeightTests(unittest.TestCase):
     def test_uses_preferred_height_on_tall_screen(self):
         with patch("gui._screen_work_height", return_value=2160):
-            self.assertEqual(gui._default_window_height(), 1354)
+            self.assertEqual(gui._default_window_height(), 1083)
 
     def test_shrinks_to_fit_short_screen(self):
         with patch("gui._screen_work_height", return_value=1000):
@@ -28,7 +28,7 @@ class GuiWindowHeightTests(unittest.TestCase):
 
     def test_falls_back_to_preferred_height_without_screen_info(self):
         with patch("gui._screen_work_height", return_value=None):
-            self.assertEqual(gui._default_window_height(), 1354)
+            self.assertEqual(gui._default_window_height(), 1083)
 
     def test_stays_at_min_height_on_tiny_screen(self):
         with patch("gui._screen_work_height", return_value=600):
