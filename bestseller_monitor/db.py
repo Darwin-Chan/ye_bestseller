@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
+from .parse import DEFAULT_SKU_ID
+
 log = logging.getLogger(__name__)
 
 SCHEMA = """
@@ -711,6 +713,10 @@ class Database:
                 offer_id, product_url, detail_name or None, image_url or None,
             )
             self._upsert_skus(normalized)
+            self._clear_other_granularity(
+                round_id, shop_key, offer_id, cst_date(collected_at),
+                offer_level=all(row["sku_id"] == DEFAULT_SKU_ID for row in normalized),
+            )
             for row in normalized:
                 self.conn.execute(
                     "DELETE FROM snapshots WHERE round_id=? AND shop_key=? "
@@ -732,6 +738,36 @@ class Database:
             self.conn.rollback()
             raise
         return SnapshotCommitResult(stop_round=past_day_cutoff())
+
+    def _clear_other_granularity(self, round_id: int, shop_key: str, offer_id: str,
+                                 day: str, *, offer_level: bool) -> None:
+        """商品在单规格与多规格之间切换时，清掉当日的相反粒度记录。
+
+        offer_level 为真表示本次是商品级观测（单规格商品的一条默认行），要清掉当日
+        SKU 级记录；反之清掉默认行。更早日期的历史观测保留，因为差分基准只取同一
+        SKU，不会跨粒度比较。
+        """
+        if offer_level:
+            self.conn.execute(
+                "DELETE FROM snapshots WHERE round_id=? AND shop_key=? AND offer_id=? "
+                "AND page_status='成功' AND sku_id IS NOT NULL AND sku_id<>?",
+                (round_id, shop_key, offer_id, DEFAULT_SKU_ID),
+            )
+            self.conn.execute(
+                "DELETE FROM inventory WHERE shop_key=? AND offer_id=? AND date=? "
+                "AND sku_id<>?",
+                (shop_key, offer_id, day, DEFAULT_SKU_ID),
+            )
+            return
+        self.conn.execute(
+            "DELETE FROM snapshots WHERE round_id=? AND shop_key=? AND offer_id=? "
+            "AND page_status='成功' AND sku_id=?",
+            (round_id, shop_key, offer_id, DEFAULT_SKU_ID),
+        )
+        self.conn.execute(
+            "DELETE FROM inventory WHERE shop_key=? AND offer_id=? AND date=? AND sku_id=?",
+            (shop_key, offer_id, day, DEFAULT_SKU_ID),
+        )
 
     def _upsert_skus(self, rows: list[dict]) -> None:
         now = utcnow()

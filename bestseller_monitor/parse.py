@@ -127,49 +127,17 @@ def extract_sku_rows(html_text: str) -> list[dict]:
     return rows
 
 
-SKU_MAP_RE = re.compile(r'"skuInfoMap"\s*:\s*(\{)')
+# 单规格商品的内部 SKU 标识：平台不分配 SKU 编号，整件商品记一条默认行。
+DEFAULT_SKU_ID = "default"
+DEFAULT_SKU_NAME = "默认(单规格)"
 
-_DEFAULT_PRICE_PATS = (
-    r'"price"\s*:\s*"?(\d+(?:\.\d+)?)',
-    r'"discountPrice"\s*:\s*"?(\d+(?:\.\d+)?)',
-    r'"salePrice"\s*:\s*"?(\d+(?:\.\d+)?)',
-    r'"minPrice"\s*:\s*"?(\d+(?:\.\d+)?)',
-)
-# 只认明确的“可售库存”字段，避免把 orderAmount/起订量 误当库存
-_DEFAULT_STOCK_PATS = (
-    r'"canBookCount"\s*:\s*"?(\d+)',
-    r'"availableStock"\s*:\s*"?(\d+)',
-    r'"quantity"\s*:\s*"?(\d+)',
-    r'"inventory"\s*:\s*"?(\d+)',
-)
+_SKU_MAP_EMPTY_RE = re.compile(r'"skuInfoMap"\s*:\s*\[\s*\]')
+_IS_SKU_OFFER_RE = re.compile(r'"isSkuOffer"\s*:\s*(true|false)', re.I)
 
 
-def _extract_default_sku(html_text: str) -> list[dict]:
-    """单规格/无 skuInfoMap 时，从商品级字段取一条默认价格/库存。"""
-    price = None
-    stock = None
-    for pat in _DEFAULT_PRICE_PATS:
-        m = re.search(pat, html_text, re.I)
-        if m:
-            price = parse_price(m.group(1))
-            break
-    for pat in _DEFAULT_STOCK_PATS:
-        m = re.search(pat, html_text, re.I)
-        if m:
-            stock = parse_stock(m.group(1))
-            break
-    if stock is None:
-        return []
-    return [{
-        "sku_id": "default",
-        "sku_name": "默认(单规格)",
-        "sku_price": price,
-        "sku_stock": stock,
-    }]
-
-
-def _extract_sku_map_json(html_text: str) -> dict | None:
-    m = SKU_MAP_RE.search(html_text)
+def _extract_json_object(html_text: str, key: str) -> dict | None:
+    """取出页面内嵌 JSON 中 key 对应的对象；缺失、非对象或解析失败都返回 None。"""
+    m = re.search(r'"%s"\s*:\s*(\{)' % re.escape(key), html_text)
     if not m:
         return None
     body = html_text[m.start(1):]
@@ -188,6 +156,57 @@ def _extract_sku_map_json(html_text: str) -> dict | None:
     except Exception:
         return None
     return obj if isinstance(obj, dict) else None
+
+
+def is_single_spec_offer(html_text: str) -> bool:
+    """页面是否表明这是不使用 SKU 交易的单规格商品。
+
+    判定要求平台标记 isSkuOffer=false 且页面显式给出空的 skuInfoMap；
+    skuTradeSupported=false 只作佐证。明细键完全缺失不算单规格——那属于页面
+    结构变化，由上层记失败并留档。
+    """
+    m = _IS_SKU_OFFER_RE.search(html_text)
+    if m is None or m.group(1).lower() != "false":
+        return False
+    return _SKU_MAP_EMPTY_RE.search(html_text) is not None
+
+
+def _single_spec_price(trade_model: dict) -> float | None:
+    """单规格商品的价格：优先商品级到手价，再退到当前区间价的首档。"""
+    price = parse_price(trade_model.get("priceDisplay"))
+    if price is not None:
+        return price
+    price_model = trade_model.get("offerPriceModel")
+    if isinstance(price_model, dict):
+        current = price_model.get("currentPrices")
+        if isinstance(current, list) and current and isinstance(current[0], dict):
+            return parse_price(current[0].get("price"))
+    return None
+
+
+def _extract_default_sku(html_text: str) -> list[dict]:
+    """单规格商品：整件商品按一条默认 SKU 行记录。
+
+    库存取商品级可售量 canBookedAmount（不取 canBookedAmountOriginal），价格取
+    商品级到手价，口径与多规格 SKU 取 discountPrice 一致。缺可售量时返回空表，
+    由上层按不完整库存观测记失败，不写空库存的成功行。
+    """
+    if not is_single_spec_offer(html_text):
+        return []
+    trade_model = _extract_json_object(html_text, "tradeModel") or {}
+    stock = parse_stock(trade_model.get("canBookedAmount"))
+    if stock is None:
+        return []
+    return [{
+        "sku_id": DEFAULT_SKU_ID,
+        "sku_name": DEFAULT_SKU_NAME,
+        "sku_price": _single_spec_price(trade_model),
+        "sku_stock": stock,
+    }]
+
+
+def _extract_sku_map_json(html_text: str) -> dict | None:
+    return _extract_json_object(html_text, "skuInfoMap")
 
 
 def extract_skus_from_html(html_text: str) -> list[dict]:

@@ -437,6 +437,68 @@ class DbTests(unittest.TestCase):
         self.assertFalse(self.db.inventory_exists_by_name("A", "厨房清洁膏", "2026-09-05"))
         self.assertIsNone(self.db.find_offer_id_by_name("A", "厨房清洁膏", "2026-09-05"))
 
+    def _submit_offer(self, round_id, collected_at, sku_rows):
+        self.db.submit_inventory_snapshot(
+            round_id=round_id,
+            shop_key="A01",
+            shop_url="https://a.example/",
+            shop_name="店铺A",
+            offer_id="11",
+            product_url="https://detail.1688.com/offer/11.html",
+            list_title="商品",
+            detail_title="商品详情",
+            main_image_url=None,
+            sku_rows=sku_rows,
+            collected_at=collected_at,
+            attempt=1,
+        )
+
+    def _same_day_rows(self):
+        snapshots = [
+            r[0] for r in self.conn.execute(
+                "SELECT sku_id FROM snapshots WHERE shop_key='A01' AND offer_id='11' "
+                "AND page_status='成功' ORDER BY sku_id"
+            )
+        ]
+        inventory = [
+            tuple(r) for r in self.conn.execute(
+                "SELECT sku_id, stock FROM inventory WHERE shop_key='A01' AND offer_id='11' "
+                "AND date='2026-09-05' ORDER BY sku_id"
+            )
+        ]
+        return snapshots, inventory
+
+    def test_single_spec_submit_replaces_sku_level_rows_for_same_day(self):
+        rid = self.db.start_or_resume()
+        self._add_shop(rid)
+        self._submit_offer(rid, "2026-09-05T02:00:00+00:00", [
+            {"sku_id": "a", "sku_name": "小号", "sku_price": 1.0, "sku_stock": 100},
+            {"sku_id": "b", "sku_name": "大号", "sku_price": 2.0, "sku_stock": 200},
+        ])
+
+        self._submit_offer(rid, "2026-09-05T03:00:00+00:00", [
+            {"sku_id": "default", "sku_name": "默认(单规格)", "sku_price": 1.0, "sku_stock": 300},
+        ])
+
+        snapshots, inventory = self._same_day_rows()
+        self.assertEqual(snapshots, ["default"])
+        self.assertEqual(inventory, [("default", 300)])
+
+    def test_sku_level_submit_replaces_single_spec_rows_for_same_day(self):
+        rid = self.db.start_or_resume()
+        self._add_shop(rid)
+        self._submit_offer(rid, "2026-09-05T02:00:00+00:00", [
+            {"sku_id": "default", "sku_name": "默认(单规格)", "sku_price": 1.0, "sku_stock": 300},
+        ])
+
+        self._submit_offer(rid, "2026-09-05T03:00:00+00:00", [
+            {"sku_id": "a", "sku_name": "小号", "sku_price": 1.0, "sku_stock": 100},
+        ])
+
+        snapshots, inventory = self._same_day_rows()
+        self.assertEqual(snapshots, ["a"])
+        self.assertEqual(inventory, [("a", 100)])
+
     def test_failure_with_explicit_metadata_is_recorded_before_listing_write(self):
         rid = self.db.start_or_resume()
         self.db.mark_failure(

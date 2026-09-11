@@ -78,11 +78,51 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(rows[0]["sku_price"], 0.0)
         self.assertEqual(rows[0]["sku_stock"], 0)
 
-    def test_single_spec_default_sku(self):
-        # skuInfoMap 为空数组且仅有价格：没有明确库存时不得作为成功 SKU 返回。
+    def test_empty_sku_map_without_offer_signal_is_not_single_spec(self):
+        # 空 skuInfoMap 但缺 isSkuOffer 标记：不按单规格处理，也不得用 price/amount 兜底。
         html = '<script>var x={"skuModel":{"skuInfoMap":[],"skuPriceScale":"0.02"},"price":"0.02","amount":1};</script>'
         rows = extract_skus_from_html(html)
-        self.assertEqual(rows, [])  # amount 不做库存，避免误判
+        self.assertEqual(rows, [])
+
+    def test_single_spec_offer_yields_one_default_sku_row(self):
+        # 平台不使用 SKU 交易：整件商品按一条默认 SKU 行记录，库存取商品级可售量。
+        html = (
+            '<script>var x={"global":{"model":{'
+            '"offerSign":{"isSkuOffer":false,"isPreSell":false},'
+            '"skuModel":{"skuInfoMap":[],"skuPriceScale":"0.05"},'
+            '"tradeModel":{"canBookedAmount":2119641,"canBookedAmountOriginal":999999,'
+            '"priceDisplay":"0.05","originalPriceDisplay":"0.48"}}}};</script>'
+        )
+        rows = extract_skus_from_html(html)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["sku_id"], "default")
+        self.assertEqual(rows[0]["sku_name"], "默认(单规格)")
+        self.assertEqual(rows[0]["sku_stock"], 2119641)
+        self.assertEqual(rows[0]["sku_price"], 0.05)
+
+    def test_page_without_single_spec_signal_is_not_single_spec(self):
+        # 没有 isSkuOffer / skuInfoMap 标记的页面属于结构变化，不能被商品级字段兜底成成功。
+        html = '<script>var x={"price":"0.02","quantity":5,"amount":1};</script>'
+        self.assertEqual(extract_skus_from_html(html), [])
+
+    def test_single_spec_without_bookable_amount_is_not_success(self):
+        # 单规格但缺商品级可售量：按不完整库存观测处理，不写空库存的成功行。
+        html = (
+            '<script>var x={"offerSign":{"isSkuOffer":false},'
+            '"skuModel":{"skuInfoMap":[]},'
+            '"tradeModel":{"priceDisplay":"0.02"}};</script>'
+        )
+        self.assertEqual(extract_skus_from_html(html), [])
+
+    def test_multi_sku_offer_is_unaffected(self):
+        html = (
+            '<script>var x={"offerSign":{"isSkuOffer":true},"skuModel":{"skuInfoMap":{'
+            '"小号":{"skuId":111,"discountPrice":"0.18","canBookCount":648651,"specAttrs":"小号"},'
+            '"大号":{"skuId":222,"discountPrice":"0.21","canBookCount":10,"specAttrs":"大号"}}}};</script>'
+        )
+        rows = extract_skus_from_html(html)
+        self.assertEqual([r["sku_id"] for r in rows], ["111", "222"])
+        self.assertEqual([r["sku_stock"] for r in rows], [648651, 10])
 
 
 if __name__ == "__main__":
