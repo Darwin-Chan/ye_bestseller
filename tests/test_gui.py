@@ -5,7 +5,7 @@ from threading import RLock
 from unittest.mock import MagicMock, patch
 
 import gui
-from bestseller_monitor.db import Database, connect
+from bestseller_monitor.db import Database, connect, DETAIL_BUDGET_NOTE
 from gui import Api
 
 
@@ -28,6 +28,27 @@ class GuiWindowHeightTests(unittest.TestCase):
 
 
 class GuiResultTests(unittest.TestCase):
+    def test_detail_budget_exhausted_reports_its_own_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.db")
+            try:
+                db = Database(conn)
+                round_id = db.start_or_resume()
+                db.finish_round(round_id, status="详情预算耗尽", note=DETAIL_BUDGET_NOTE)
+                api = Api.__new__(Api)
+                api._lock = RLock()
+                api.round_id = round_id
+                api._open_conn = lambda: conn
+
+                result = api.get_result()
+
+                self.assertEqual(result["status"], "详情预算耗尽")
+                self.assertEqual(result["tag"], "预算耗尽")
+                self.assertIn("详情预算", result["note"])
+                self.assertNotIn("deny", result["note"])
+            finally:
+                conn.close()
+
     def test_resumable_interruption_uses_current_elapsed_time(self):
         with tempfile.TemporaryDirectory() as tmp:
             conn = connect(Path(tmp) / "test.db")

@@ -4,9 +4,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_pw, pipeline
+from bestseller_monitor import browser_dp, browser_pw, pipeline
 from bestseller_monitor.config import Shop
-from bestseller_monitor.db import Database, connect, DayBoundaryReached, DAY_BOUNDARY_NOTE
+from bestseller_monitor.db import (
+    Database,
+    connect,
+    utcnow,
+    DayBoundaryReached,
+    DAY_BOUNDARY_NOTE,
+)
+from bestseller_monitor.delay import Humanizer
 from bestseller_monitor.detail import DetailParseFailed, parse_detail_html
 from bestseller_monitor.guard import InterventionTimeout, RoundPauseRequired
 from bestseller_monitor.listing import ListingLoadFailed
@@ -228,6 +235,259 @@ class P1Tests(unittest.TestCase):
         human.before_detail.assert_not_called()
         capture.assert_not_called()
         db.mark_skipped.assert_called_once()
+
+    def test_click_path_stops_when_detail_budget_exhausted(self):
+        """点击式列表也必须遵守单轮详情预算。"""
+        page = MagicMock()
+        locator = MagicMock()
+        locator.count.return_value = 1
+        page.locator.return_value = locator
+        human = MagicMock()
+        db = MagicMock()
+        db.inventory_exists_by_name.return_value = False
+        db.claim_detail_opportunity.return_value = SimpleNamespace(
+            granted=False, budget_exhausted=True, reused=False,
+        )
+        shop = Shop("A01", "店铺A", "https://shop.example/")
+
+        with patch.object(browser_pw, "_wait_cards", return_value=True), \
+             patch.object(browser_pw, "_scroll_cards_until_stable", return_value=1), \
+             patch.object(browser_pw, "intervention_kind", return_value=None), \
+             patch.object(browser_pw, "_click_text_in_frames", return_value=False), \
+             patch.object(browser_pw, "_read_card_title", return_value="商品1"), \
+             patch.object(browser_pw, "_capture_card") as capture:
+            with self.assertRaises(pipeline.DetailBudgetExhausted):
+                browser_pw.crawl_store_by_click(
+                    page, shop, self._cfg(max_pages_per_shop=1), human, db=db, round_id=1,
+                )
+
+        capture.assert_not_called()
+
+    def test_ingest_detail_binds_card_opportunity_to_known_offer(self):
+        """卡片机会在学到商品编号后绑定过去，补采重试不再重复占预算。"""
+        round_id = self.db.start_or_resume()
+        shop = Shop("A01", "店铺A", "https://shop.example/")
+        self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        self.assertTrue(self.db.claim_detail_opportunity(
+            round_id, shop.key, "card:p1:i0", budget_limit=1,
+        ).granted)
+
+        detail_page = MagicMock()
+        detail_page.url = "https://detail.1688.com/offer/22.html"
+        detail_page.content.return_value = "<html></html>"
+        offers, seen = [], set()
+        cfg = self._cfg()
+        with patch.object(browser_pw, "parse_detail_html",
+                          return_value=self._detail_payload()):
+            browser_pw._ingest_detail(
+                MagicMock(), detail_page, MagicMock(), "厨房清洁膏", cfg, [False],
+                MagicMock(), lambda *a, **k: None, self.db, round_id, shop, offers, seen,
+                "page=1&idx=0", card_ref="card:p1:i0",
+            )
+
+        grant = self.db.claim_detail_opportunity(round_id, shop.key, "22", budget_limit=1)
+        self.assertTrue(grant.granted)
+        self.assertTrue(grant.reused, "卡片机会应已绑定到商品编号")
+        self.assertEqual(self.db.detail_budget_used(round_id), 1)
+
+    def _seed_same_name_failed_offer(self):
+        """商品 11 今日已完整观测；同名商品 22 只有失败记录。返回 22 的待补采行。"""
+        round_id = self.db.start_or_resume()
+        shop = Shop("A01", "店铺A", "https://shop.example/")
+        self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        url11 = "https://detail.1688.com/offer/11.html"
+        url22 = "https://detail.1688.com/offer/22.html"
+        self.db.save_shop_offers(
+            round_id, shop.key, shop.url, shop.name,
+            [(1, "11", url11, "厨房清洁膏", ""), (2, "22", url22, "厨房清洁膏", "")],
+            1,
+        )
+        self.db.submit_inventory_snapshot(
+            round_id=round_id, shop_key=shop.key, shop_url=shop.url, shop_name=shop.name,
+            offer_id="11", product_url=url11, list_title="厨房清洁膏",
+            detail_title="厨房清洁膏", main_image_url=None,
+            sku_rows=[{"sku_id": "s1", "sku_name": "标准", "sku_price": 9.9, "sku_stock": 200}],
+            collected_at=utcnow(), attempt=1,
+        )
+        self.db.mark_failure(round_id, shop.key, "22", 1, "解析失败")
+        offer = next(
+            row for row in self.db.pending_offers(round_id, max_attempts=2)
+            if row["offer_id"] == "22"
+        )
+        return round_id, offer
+
+    @staticmethod
+    def _detail_payload():
+        return {
+            "product_name": "厨房清洁膏",
+            "rows": [{"sku_id": "s2", "sku_name": "标准", "sku_price": 9.9, "sku_stock": 150}],
+            "html": "",
+        }
+
+    def test_same_name_inventory_does_not_block_failed_offer_detail(self):
+        round_id, offer = self._seed_same_name_failed_offer()
+        cfg = self._cfg()
+        with patch.object(browser_pw, "capture_detail",
+                          return_value=self._detail_payload()) as capture:
+            pipeline._capture_one_pw(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
+
+        self.assertEqual(capture.call_count, 1, "同名库存不应阻止已知 offer_id 的补采")
+
+    def test_same_name_inventory_does_not_block_drission_detail(self):
+        round_id, offer = self._seed_same_name_failed_offer()
+        cfg = self._cfg()
+        with patch.object(pipeline, "capture_detail_payload",
+                          return_value=self._detail_payload()) as capture:
+            pipeline._capture_one(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
+
+        self.assertEqual(capture.call_count, 1, "同名库存不应阻止已知 offer_id 的补采")
+
+    def test_same_name_inventory_does_not_block_drission_page_detail(self):
+        round_id, offer = self._seed_same_name_failed_offer()
+        cfg = self._cfg()
+        with patch.object(browser_dp, "capture_detail_payload",
+                          return_value=self._detail_payload()) as capture:
+            pipeline._capture_one_dp(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
+
+        self.assertEqual(capture.call_count, 1, "同名库存不应阻止已知 offer_id 的补采")
+
+    def test_retry_stops_and_signals_when_detail_budget_exhausted(self):
+        round_id = self.db.start_or_resume()
+        shop = Shop("A01", "店铺A", "https://shop.example/")
+        self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        self.db.save_shop_offers(
+            round_id, shop.key, shop.url, shop.name,
+            [(1, "11", "https://detail.1688.com/offer/11.html", "商品1", ""),
+             (2, "22", "https://detail.1688.com/offer/22.html", "商品2", "")],
+            1,
+        )
+        self.db.mark_failure(round_id, shop.key, "11", 1, "解析失败")
+        self.db.mark_failure(round_id, shop.key, "22", 1, "解析失败")
+        cfg = self._cfg(max_detail_pages_per_round=1)
+
+        with patch.object(browser_pw, "capture_detail",
+                          return_value=self._detail_payload()) as capture:
+            with self.assertRaises(pipeline.DetailBudgetExhausted):
+                pipeline._retry_shop_pending_pw(
+                    self.db, cfg, round_id, shop, MagicMock(), Humanizer(cfg),
+                )
+
+        self.assertEqual(capture.call_count, 1, "预算耗尽后不再访问详情")
+        self.assertEqual(self.db.detail_budget_used(round_id), 1)
+
+    def test_detail_budget_exhaustion_finishes_round_with_terminal_note(self):
+        db_path = Path(self.tmp.name) / "budget-terminal.db"
+        cfg = self._cfg(db_file=db_path, driver="pw_cdp", ensure_dirs=MagicMock())
+        with patch.object(pipeline, "_run_pwcdp_round",
+                          side_effect=pipeline.DetailBudgetExhausted("预算耗尽")):
+            pipeline.run_round(cfg, [Shop("A01", "店铺A", "https://shop.example/")])
+
+        conn = connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT status, phase, finished_at, note FROM rounds ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            self.assertEqual(row["status"], "详情预算耗尽")
+            self.assertEqual(row["phase"], "done")
+            self.assertIsNotNone(row["finished_at"])
+            self.assertEqual(row["note"], pipeline.DETAIL_BUDGET_NOTE)
+        finally:
+            conn.close()
+
+    def test_dp_detail_phase_stops_when_budget_exhausted(self):
+        round_id = self.db.start_or_resume()
+        shop = Shop("A01", "店铺A", "https://shop.example/")
+        self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        self.db.save_shop_offers(
+            round_id, shop.key, shop.url, shop.name,
+            [(1, "11", "https://detail.1688.com/offer/11.html", "商品1", ""),
+             (2, "22", "https://detail.1688.com/offer/22.html", "商品2", "")],
+            1,
+        )
+        self.db.mark_failure(round_id, shop.key, "11", 1, "解析失败")
+        self.db.mark_failure(round_id, shop.key, "22", 1, "解析失败")
+        cfg = self._cfg(max_detail_pages_per_round=1)
+
+        with patch.object(pipeline, "capture_detail_payload",
+                          return_value=self._detail_payload()) as capture:
+            with self.assertRaises(pipeline.DetailBudgetExhausted):
+                pipeline._run_detail_phase(self.db, cfg, round_id, MagicMock())
+
+        self.assertEqual(capture.call_count, 1, "drission 详情阶段也应停在同一上限")
+        self.assertEqual(self.db.detail_budget_used(round_id), 1)
+
+    def test_skip_does_not_consume_detail_budget(self):
+        """当日已完整观测的商品只跳过，不占用详情预算。"""
+        round_id = self.db.start_or_resume()
+        shop = Shop("A01", "店铺A", "https://shop.example/")
+        self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        url11 = "https://detail.1688.com/offer/11.html"
+        self.db.save_shop_offers(
+            round_id, shop.key, shop.url, shop.name, [(1, "11", url11, "商品1", "")], 1,
+        )
+        self.db.submit_inventory_snapshot(
+            round_id=round_id, shop_key=shop.key, shop_url=shop.url, shop_name=shop.name,
+            offer_id="11", product_url=url11, list_title="商品1", detail_title="商品1",
+            main_image_url=None,
+            sku_rows=[{"sku_id": "s1", "sku_name": "标准", "sku_price": 1.0, "sku_stock": 5}],
+            collected_at=utcnow(), attempt=1,
+        )
+        offer = self.db.conn.execute(
+            "SELECT * FROM shop_offers WHERE round_id=? AND offer_id='11'", (round_id,)
+        ).fetchone()
+        cfg = self._cfg(max_detail_pages_per_round=1)
+
+        with patch.object(browser_pw, "capture_detail") as capture:
+            pipeline._capture_one_pw(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
+
+        capture.assert_not_called()
+        self.assertEqual(self.db.detail_budget_used(round_id), 0, "跳过不消耗详情预算")
+
+    def test_retry_shares_attempt_budget_with_first_visit(self):
+        """初次访问已用掉的尝试次数要从补采的额度里扣掉。"""
+        round_id, offer = self._seed_same_name_failed_offer()   # 商品 22 已有 attempt=1 的失败记录
+        cfg = self._cfg(max_attempts_per_page=2)
+
+        with patch.object(browser_pw, "capture_detail",
+                          return_value=self._detail_payload()) as capture:
+            pipeline._capture_one_pw(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
+
+        self.assertEqual(capture.call_count, 1)
+        row = self.db.conn.execute(
+            "SELECT MAX(attempt) AS a FROM snapshots WHERE round_id=? AND shop_key=? "
+            "AND offer_id='22'",
+            (round_id, offer["shop_key"]),
+        ).fetchone()
+        self.assertEqual(row["a"], 2, "补采应接着第 2 次尝试，而不是重新从 1 开始")
+
+    def test_retry_does_nothing_when_attempts_already_spent(self):
+        """尝试次数已在初次访问用尽时，补采不再访问详情。"""
+        round_id, offer = self._seed_same_name_failed_offer()
+        self.db.mark_failure(round_id, offer["shop_key"], "22", 2, "第二次也失败")
+        cfg = self._cfg(max_attempts_per_page=2)
+
+        with patch.object(browser_pw, "capture_detail") as capture:
+            pipeline._capture_one_pw(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
+
+        capture.assert_not_called()
+
+    def test_retry_fallback_failure_records_shared_attempt_number(self):
+        """兜底异常也要接着已用掉的尝试次数，而不是写回第 1 次。"""
+        round_id, offer = self._seed_same_name_failed_offer()   # 商品 22 已有 attempt=1
+        shop = Shop("A01", "店铺A", "https://shop.example/")
+        cfg = self._cfg()
+
+        with patch.object(pipeline, "_capture_one_pw", side_effect=RuntimeError("boom")):
+            pipeline._retry_shop_pending_pw(
+                self.db, cfg, round_id, shop, MagicMock(), Humanizer(cfg),
+            )
+
+        row = self.db.conn.execute(
+            "SELECT MAX(attempt) AS a FROM snapshots WHERE round_id=? AND shop_key=? "
+            "AND offer_id='22'",
+            (round_id, offer["shop_key"]),
+        ).fetchone()
+        self.assertEqual(row["a"], 2, "兜底失败也应记为第 2 次尝试")
 
     def test_scroll_stops_after_first_no_change_window(self):
         page = MagicMock()

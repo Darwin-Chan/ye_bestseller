@@ -10,7 +10,16 @@ from playwright.sync_api import sync_playwright
 from . import browser_dp, browser_pw
 from .browser_pw import DenyTracker, ShopDenyExceeded, RoundDenyExceeded
 from .config import Config, Shop
-from .db import Database, connect, utcnow, cst_date, DayBoundaryReached, DAY_BOUNDARY_NOTE
+from .db import (
+    Database,
+    connect,
+    utcnow,
+    cst_date,
+    DayBoundaryReached,
+    DetailBudgetExhausted,
+    DAY_BOUNDARY_NOTE,
+    DETAIL_BUDGET_NOTE,
+)
 from .delay import Humanizer
 from .detail import DetailParseFailed, capture_detail_payload, save_raw_page
 from .guard import RoundPauseRequired
@@ -74,6 +83,10 @@ def run_round(cfg: Config, shops: list[Shop]) -> None:
         db.finish_round(round_id, status="意外中止", note=DAY_BOUNDARY_NOTE)
         log.warning("轮次 #%s：%s", round_id, DAY_BOUNDARY_NOTE)
         print(f"\n>>> {DAY_BOUNDARY_NOTE}。\n")
+    except DetailBudgetExhausted:
+        db.finish_round(round_id, status="详情预算耗尽", note=DETAIL_BUDGET_NOTE)
+        log.warning("轮次 #%s：%s", round_id, DETAIL_BUDGET_NOTE)
+        print(f"\n>>> {DETAIL_BUDGET_NOTE}。\n")
     except RoundPauseRequired as exc:
         # 人工处理超时等情况：保留轮次状态，提示稍后续跑
         log.error("本轮暂停：%s", exc)
@@ -149,31 +162,48 @@ def _run_listing_dp(db: Database, cfg: Config, round_id: int, shops: list[Shop],
 
 
 def _run_detail_dp(db: Database, cfg: Config, round_id: int, page) -> None:
+    _run_pending_detail_phase(
+        db, cfg, round_id,
+        lambda d, c, h, r, o: _capture_one_dp(d, c, h, r, o, page),
+    )
+
+
+def _run_pending_detail_phase(db: Database, cfg: Config, round_id: int, capture) -> None:
+    """逐个处理待补采商品；取得一次详情的能力由各驱动的 capture 提供。"""
     db.set_phase(round_id, "detail")
     human = Humanizer(cfg)
     offers = _pending_detail_offers(db, round_id, cfg)
     log.info("详情阶段：待处理商品 %s 个", len(offers))
     processed = 0
-    cap = cfg.max_detail_pages_per_round
     for offer in offers:
-        if processed >= cap:
-            log.warning("已达单轮详情上限 %s，剩余留待下一轮。", cap)
-            break
         processed += 1
         try:
-            _capture_one_dp(db, cfg, human, round_id, offer, page)
-        except (RoundPauseRequired, DayBoundaryReached):
+            capture(db, cfg, human, round_id, offer)
+        except (RoundPauseRequired, DayBoundaryReached, DetailBudgetExhausted):
             raise
-        except Exception as exc:
+        except Exception as exc:  # 兜底：异常也记录失败，不中断整轮
             log.exception("详情抓取意外失败：%s", offer["product_url"])
-            db.mark_failure(round_id, offer["shop_key"], offer["offer_id"], 1, str(exc))
+            db.mark_failure(
+                round_id, offer["shop_key"], offer["offer_id"],
+                db.detail_attempts_used(round_id, offer["shop_key"], offer["offer_id"]) + 1,
+                str(exc),
+            )
         if processed % cfg.batch_size == 0:
             human.before_batch_rest()
     log.info("详情阶段结束：本轮处理 %s 个商品", processed)
 
 
-def _capture_one_dp(db: Database, cfg: Config, human: Humanizer, round_id: int, offer, page) -> None:
-    """DrissionPage 版单个详情抓取（带重试与数据库写入）。"""
+def _capture_offer_detail(db: Database, cfg: Config, human: Humanizer, round_id: int, offer,
+                          fetch, *, on_attempt_failed=None) -> None:
+    """同日去重与补采 module：一个商品的详情采集规则集中在这里。
+
+    - 同日去重按商品编号判断，跳过不消耗预算
+    - 初次访问与补采共享同一份尝试额度
+    - 进入详情前申请轮次详情预算，用尽则结束本轮
+    - 重试、失败记录与成功提交
+
+    fetch 是 adapter 边界，只负责取一次详情并返回 payload。
+    """
     shop_key = offer["shop_key"]
     offer_id = offer["offer_id"]
     product_url = offer["product_url"]
@@ -181,26 +211,35 @@ def _capture_one_dp(db: Database, cfg: Config, human: Humanizer, round_id: int, 
     shop_name = offer["shop_name"]
     max_attempts = cfg.max_attempts_per_page
 
-    day = cst_date()
-    if offer["list_title"] and db.inventory_exists_by_name(shop_key, offer["list_title"], day):
-        db.mark_skipped(round_id, shop_key, shop_url, shop_name, offer_id, product_url,
-                        offer["list_title"], note="今日已有同名库存，跳过")
-        log.info("店铺 %s 商品「%s」今日已有库存，跳过详情抓取", shop_key, offer["list_title"][:40])
-        return
-    if db.inventory_exists(shop_key, offer_id, day):
+    if db.inventory_exists(shop_key, offer_id, cst_date()):
         db.mark_skipped(round_id, shop_key, shop_url, shop_name, offer_id, product_url,
                         offer["list_title"])
         log.info("店铺 %s 商品 %s 今日已有库存，跳过详情抓取", shop_key, offer_id)
         return
 
-    for attempt in range(1, max_attempts + 1):
+    attempts_used = db.detail_attempts_used(round_id, shop_key, offer_id)
+    if attempts_used >= max_attempts:
+        log.info("店铺 %s 商品 %s 本轮尝试已用尽（%s/%s），不再补采",
+                 shop_key, offer_id, attempts_used, max_attempts)
+        return
+
+    # 同日跳过不消耗预算；只有真正要进入详情的商品才申请机会。
+    grant = db.claim_detail_opportunity(
+        round_id, shop_key, offer_id, cfg.max_detail_pages_per_round,
+    )
+    if not grant.granted:
+        raise DetailBudgetExhausted(DETAIL_BUDGET_NOTE)
+
+    for attempt in range(attempts_used + 1, max_attempts + 1):
         try:
-            payload = browser_dp.capture_detail_payload(page, product_url, cfg, human)
+            payload = fetch()
         except DetailParseFailed as exc:
             raw_path = save_raw_page(cfg, round_id, offer_id, exc.html) if exc.html else ""
             note = f"解析失败：{exc}；原始页面：{raw_path}"
             db.mark_failure(round_id, shop_key, offer_id, attempt, note)
             log.warning("第 %s 次解析失败：%s", attempt, note)
+            if on_attempt_failed is not None:
+                on_attempt_failed(note)
             if attempt < max_attempts:
                 human.sleep(human.retry_delay(attempt))
             continue
@@ -210,6 +249,8 @@ def _capture_one_dp(db: Database, cfg: Config, human: Humanizer, round_id: int, 
             note = f"访问异常：{exc}"
             db.mark_failure(round_id, shop_key, offer_id, attempt, note)
             log.warning("第 %s 次访问失败：%s", attempt, note)
+            if on_attempt_failed is not None:
+                on_attempt_failed(note)
             if attempt < max_attempts:
                 human.sleep(human.retry_delay(attempt))
             continue
@@ -231,11 +272,17 @@ def _capture_one_dp(db: Database, cfg: Config, human: Humanizer, round_id: int, 
         )
         if result.stop_round:
             raise DayBoundaryReached()
-        log.info(
-            "店铺 %s 商品 %s 抓取成功：%s 个 SKU（第 %s 次）",
-            shop_key, offer_id, len(payload["rows"]), attempt,
-        )
+        log.info("店铺 %s 商品 %s 抓取成功：%s 个 SKU（第 %s 次尝试）",
+                 shop_key, offer_id, len(payload["rows"]), attempt)
         return
+
+
+def _capture_one_dp(db: Database, cfg: Config, human: Humanizer, round_id: int, offer, page) -> None:
+    """DrissionPage 版单个详情抓取（带重试与数据库写入）。"""
+    def fetch():
+        return browser_dp.capture_detail_payload(page, offer["product_url"], cfg, human)
+
+    _capture_offer_detail(db, cfg, human, round_id, offer, fetch)
 
 
 def _run_listing_phase(db: Database, cfg: Config, round_id: int, shops: list[Shop], page) -> None:
@@ -257,96 +304,20 @@ def _run_listing_phase(db: Database, cfg: Config, round_id: int, shops: list[Sho
 
 
 def _run_detail_phase(db: Database, cfg: Config, round_id: int, page) -> None:
-    db.set_phase(round_id, "detail")
-    human = Humanizer(cfg)
-    offers = _pending_detail_offers(db, round_id, cfg)
-    log.info("详情阶段：待处理商品 %s 个", len(offers))
-
-    processed = 0
-    cap = cfg.max_detail_pages_per_round
-    for offer in offers:
-        if processed >= cap:
-            log.warning("已达单轮详情上限 %s，剩余商品留待下一轮。", cap)
-            break
-        processed += 1
-        try:
-            _capture_one(db, cfg, human, round_id, offer, page)
-        except (RoundPauseRequired, DayBoundaryReached):
-            raise
-        except Exception as exc:  # 兜底：异常也记录失败，不中断整轮
-            log.exception("详情抓取意外失败：%s", offer["product_url"])
-            db.mark_failure(round_id, offer["shop_key"], offer["offer_id"], 1, str(exc))
-        if processed % cfg.batch_size == 0:
-            human.before_batch_rest()
-    log.info("详情阶段结束：本轮处理 %s 个商品", processed)
+    _run_pending_detail_phase(
+        db, cfg, round_id,
+        lambda d, c, h, r, o: _capture_one(d, c, h, r, o, page),
+    )
 
 
 def _capture_one(
     db: Database, cfg: Config, human: Humanizer, round_id: int, offer, page,
 ) -> None:
     """带重试的单个详情抓取。"""
-    shop_key = offer["shop_key"]
-    offer_id = offer["offer_id"]
-    product_url = offer["product_url"]
-    shop_url = offer["shop_url"]
-    shop_name = offer["shop_name"]
-    max_attempts = cfg.max_attempts_per_page
+    def fetch():
+        return capture_detail_payload(page, offer["product_url"], cfg, human)
 
-    day = cst_date()
-    if offer["list_title"] and db.inventory_exists_by_name(shop_key, offer["list_title"], day):
-        db.mark_skipped(round_id, shop_key, shop_url, shop_name, offer_id, product_url,
-                        offer["list_title"], note="今日已有同名库存，跳过")
-        log.info("店铺 %s 商品「%s」今日已有库存，跳过详情抓取", shop_key, offer["list_title"][:40])
-        return
-    if db.inventory_exists(shop_key, offer_id, day):
-        db.mark_skipped(round_id, shop_key, shop_url, shop_name, offer_id, product_url,
-                        offer["list_title"])
-        log.info("店铺 %s 商品 %s 今日已有库存，跳过详情抓取", shop_key, offer_id)
-        return
-
-    for attempt in range(1, max_attempts + 1):
-        try:
-            payload = capture_detail_payload(page, product_url, cfg, human)
-        except DetailParseFailed as exc:
-            raw_path = save_raw_page(cfg, round_id, offer_id, exc.html) if exc.html else ""
-            note = f"解析失败：{exc}；原始页面：{raw_path}"
-            db.mark_failure(round_id, shop_key, offer_id, attempt, note)
-            log.warning("第 %s 次解析失败：%s", attempt, note)
-            if attempt < max_attempts:
-                human.sleep(human.retry_delay(attempt))
-            continue
-        except RoundPauseRequired:
-            raise
-        except Exception as exc:
-            note = f"访问异常：{exc}"
-            db.mark_failure(round_id, shop_key, offer_id, attempt, note)
-            log.warning("第 %s 次访问失败：%s", attempt, note)
-            if attempt < max_attempts:
-                human.sleep(human.retry_delay(attempt))
-            continue
-
-        img = extract_main_image(payload["html"])
-        result = db.submit_inventory_snapshot(
-            round_id=round_id,
-            shop_key=shop_key,
-            shop_url=shop_url,
-            shop_name=shop_name,
-            offer_id=offer_id,
-            product_url=product_url,
-            list_title=offer["list_title"],
-            detail_title=payload["product_name"],
-            main_image_url=img,
-            sku_rows=payload["rows"],
-            collected_at=utcnow(),
-            attempt=attempt,
-        )
-        if result.stop_round:
-            raise DayBoundaryReached()
-        log.info(
-            "店铺 %s 商品 %s 抓取成功：%s 个 SKU（第 %s 次尝试）",
-            shop_key, offer_id, len(payload["rows"]), attempt,
-        )
-        return
+    _capture_offer_detail(db, cfg, human, round_id, offer, fetch)
 
 
 def _finalize_round(db: Database, cfg: Config, round_id: int) -> None:
@@ -390,12 +361,10 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
     db.set_phase(round_id, "listing")
     done = db.completed_listing_keys(round_id)
     human = Humanizer(cfg)
-    detail_state = {"processed": 0, "cap": cfg.max_detail_pages_per_round}
     for shop in shops:
         if shop.key in done:
             log.info("店铺 %s 本轮已完成榜单，跳过列表", shop.key)
-            _retry_shop_pending_pw(db, cfg, round_id, shop, page, human, emit=emit,
-                                   state=detail_state)
+            _retry_shop_pending_pw(db, cfg, round_id, shop, page, human, emit=emit)
             continue
         try:
             offers, pages_read = browser_pw.crawl_store_by_click(
@@ -414,102 +383,47 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
         except ListingLoadFailed as exc:
             _record_listing_failure(db, cfg, round_id, shop, exc)
             continue
-        _retry_shop_pending_pw(db, cfg, round_id, shop, page, human, emit=emit,
-                               state=detail_state)
+        _retry_shop_pending_pw(db, cfg, round_id, shop, page, human, emit=emit)
     log.info("榜单阶段完成")
 
 
 def _retry_shop_pending_pw(db: Database, cfg: Config, round_id: int, shop: Shop, page,
-                           human: Humanizer, emit=None, state: dict | None = None) -> None:
+                           human: Humanizer, emit=None) -> None:
     """某店榜单保存完成后，立即补抓该店本轮尚未成功的商品，再进入下一家店。"""
     offers = _pending_detail_offers(db, round_id, cfg, shop_key=shop.key)
     if not offers:
         return
     log.info("店铺 %s 榜单完成后立即补抓 %s 个失败商品", shop.key, len(offers))
+    processed = 0
     for offer in offers:
-        if state is not None and state["processed"] >= state["cap"]:
-            log.warning("已达单轮详情上限 %s，剩余留待下一轮。", state["cap"])
-            break
-        if state is not None:
-            state["processed"] += 1
+        processed += 1
         try:
             _capture_one_pw(db, cfg, human, round_id, offer, page, emit=emit)
-        except (RoundPauseRequired, DayBoundaryReached):
+        except (RoundPauseRequired, DayBoundaryReached, DetailBudgetExhausted):
             raise
         except Exception as exc:
             log.exception("详情抓取意外失败：%s", offer["product_url"])
-            db.mark_failure(round_id, offer["shop_key"], offer["offer_id"], 1, str(exc))
-        if state is not None and state["processed"] % cfg.batch_size == 0:
+            db.mark_failure(
+                round_id, offer["shop_key"], offer["offer_id"],
+                db.detail_attempts_used(round_id, offer["shop_key"], offer["offer_id"]) + 1,
+                str(exc),
+            )
+        if processed % cfg.batch_size == 0:
             human.before_batch_rest()
 
 
 def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, offer, page,
                     emit=None) -> None:
-    shop_key = offer["shop_key"]
-    offer_id = offer["offer_id"]
-    product_url = offer["product_url"]
-    shop_url = offer["shop_url"]
-    shop_name = offer["shop_name"]
-    max_attempts = cfg.max_attempts_per_page
-
-    day = cst_date()
-    if offer["list_title"] and db.inventory_exists_by_name(shop_key, offer["list_title"], day):
-        db.mark_skipped(round_id, shop_key, shop_url, shop_name, offer_id, product_url,
-                        offer["list_title"], note="今日已有同名库存，跳过")
-        log.info("店铺 %s 商品「%s」今日已有库存，跳过详情抓取", shop_key, offer["list_title"][:40])
-        return
-    if db.inventory_exists(shop_key, offer_id, day):
-        db.mark_skipped(round_id, shop_key, shop_url, shop_name, offer_id, product_url,
-                        offer["list_title"])
-        log.info("店铺 %s 商品 %s 今日已有库存，跳过详情抓取", shop_key, offer_id)
-        return
-
     def emit_detail(event: str, **kw: object) -> None:
         if emit is not None:
-            emit(event, shop_key=shop_key, **kw)
+            emit(event, shop_key=offer["shop_key"], **kw)
 
-    for attempt in range(1, max_attempts + 1):
-        try:
-            payload = browser_pw.capture_detail(page, product_url, cfg, human, emit=emit_detail)
-        except DetailParseFailed as exc:
-            raw_path = save_raw_page(cfg, round_id, offer_id, exc.html) if exc.html else ""
-            note = f"解析失败：{exc}；原始页面：{raw_path}"
-            db.mark_failure(round_id, shop_key, offer_id, attempt, note)
-            emit_detail("detail_fail", offer_id=offer_id, phase="detail", note=note)
-            log.warning("第 %s 次解析失败：%s", attempt, note)
-            if attempt < max_attempts:
-                human.sleep(human.retry_delay(attempt))
-            continue
-        except RoundPauseRequired:
-            raise
-        except Exception as exc:
-            note = f"访问异常：{exc}"
-            db.mark_failure(round_id, shop_key, offer_id, attempt, note)
-            emit_detail("detail_fail", offer_id=offer_id, phase="detail", note=note)
-            log.warning("第 %s 次访问失败：%s", attempt, note)
-            if attempt < max_attempts:
-                human.sleep(human.retry_delay(attempt))
-            continue
+    def fetch():
+        return browser_pw.capture_detail(page, offer["product_url"], cfg, human,
+                                         emit=emit_detail)
 
-        img = extract_main_image(payload["html"])
-        result = db.submit_inventory_snapshot(
-            round_id=round_id,
-            shop_key=shop_key,
-            shop_url=shop_url,
-            shop_name=shop_name,
-            offer_id=offer_id,
-            product_url=product_url,
-            list_title=offer["list_title"],
-            detail_title=payload["product_name"],
-            main_image_url=img,
-            sku_rows=payload["rows"],
-            collected_at=utcnow(),
-            attempt=attempt,
-        )
-        if result.stop_round:
-            raise DayBoundaryReached()
-        log.info(
-            "店铺 %s 商品 %s 抓取成功：%s 个 SKU（第 %s 次）",
-            shop_key, offer_id, len(payload["rows"]), attempt,
-        )
-        return
+    def on_attempt_failed(note: str) -> None:
+        emit_detail("detail_fail", offer_id=offer["offer_id"], phase="detail", note=note)
+
+    _capture_offer_detail(db, cfg, human, round_id, offer, fetch,
+                          on_attempt_failed=on_attempt_failed)

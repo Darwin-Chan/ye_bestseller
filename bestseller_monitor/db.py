@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS rounds (
     finished_at TEXT,
     status TEXT NOT NULL DEFAULT '进行中',
     phase TEXT NOT NULL DEFAULT 'listing',
-    note TEXT
+    note TEXT,
+    detail_budget_limit INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS shops (
@@ -114,6 +115,15 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_round ON snapshots(round_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_key
     ON snapshots(shop_key, offer_id, sku_id, round_id);
 
+CREATE TABLE IF NOT EXISTS detail_opportunities (
+    round_id INTEGER NOT NULL,
+    shop_key TEXT NOT NULL,
+    identity TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (round_id, shop_key, identity)
+);
+
 CREATE TABLE IF NOT EXISTS event_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     round_id INTEGER NOT NULL,
@@ -189,10 +199,15 @@ def cst_date(iso_utc: str | None = None) -> str:
 
 DAY_CUTOFF = (23, 55)
 DAY_BOUNDARY_NOTE = "库存数据即将跨天，请0点后继续抓取"
+DETAIL_BUDGET_NOTE = "本轮详情预算已用尽，剩余商品留待下一轮"
 
 
 class DayBoundaryReached(RuntimeError):
     """库存数据即将跨天（北京时间 ≥ 23:55），当前轮次需中止，0 点后继续。"""
+
+
+class DetailBudgetExhausted(RuntimeError):
+    """本轮详情预算已用尽但仍有待处理商品；轮次进入终态，剩余留待下一轮。"""
 
 
 @dataclass(frozen=True)
@@ -200,6 +215,20 @@ class SnapshotCommitResult:
     """已提交的库存快照结果；停止信号不表示事务失败。"""
 
     stop_round: bool = False
+
+
+@dataclass(frozen=True)
+class DetailGrant:
+    """一次详情机会申请的结果。
+
+    未获批时 budget_exhausted 表示轮次详情预算已用尽；reused 表示这次申请
+    只是复用同一商品已消耗的机会（重试），不额外占用预算。
+    """
+
+    granted: bool
+    reused: bool = False
+    budget_exhausted: bool = False
+    attempts: int = 0
 
 
 def past_day_cutoff(iso_utc: str | None = None) -> bool:
@@ -275,6 +304,11 @@ def connect(db_path: Path) -> sqlite3.Connection:
         pass
     try:
         conn.execute("ALTER TABLE shop_rounds ADD COLUMN list_note TEXT")
+    except sqlite3.OperationalError:
+        pass
+    # 兼容旧库：轮次记录的详情预算上限（NULL 表示尚未绑定，首次申请时写入）
+    try:
+        conn.execute("ALTER TABLE rounds ADD COLUMN detail_budget_limit INTEGER")
     except sqlite3.OperationalError:
         pass
     try:
@@ -466,7 +500,7 @@ class Database:
           AND NOT EXISTS (
             SELECT 1 FROM snapshots s
             WHERE s.round_id = so.round_id AND s.shop_key = so.shop_key
-              AND s.offer_id = so.offer_id AND s.page_status = '成功'
+              AND s.offer_id = so.offer_id AND s.page_status IN ('成功', '跳过')
           )
           AND COALESCE((
             SELECT MAX(s2.attempt) FROM snapshots s2
@@ -480,6 +514,115 @@ class Database:
             params["shop_key"] = shop_key
         sql += "        ORDER BY so.id"
         yield from self.conn.execute(sql, params)
+
+    def detail_budget_used(self, round_id: int) -> int:
+        """本轮已申请的详情机会数（同一商品的重试只算一次）。"""
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS c FROM detail_opportunities WHERE round_id=?",
+            (round_id,),
+        ).fetchone()
+        return int(row["c"])
+
+    def detail_attempts_used(self, round_id: int, shop_key: str, offer_id: str) -> int:
+        """本轮该商品已经用掉的详情尝试次数（初次访问与补采共享同一份额度）。"""
+        row = self.conn.execute(
+            "SELECT COALESCE(MAX(attempt), 0) AS a FROM snapshots "
+            "WHERE round_id=? AND shop_key=? AND offer_id=?",
+            (round_id, shop_key, offer_id),
+        ).fetchone()
+        return int(row["a"])
+
+    def claim_detail_opportunity(
+        self, round_id: int, shop_key: str, identity: str, budget_limit: int,
+    ) -> DetailGrant:
+        """申请一次详情机会；同一轮、同一店铺、同一标识只消耗一次预算。
+
+        重复申请视作重试，返回 reused=True 且不占用新预算。轮次首次申请时记录
+        预算上限，之后续跑沿用该上限，配置变化不会放宽已开始的轮次。
+        identity 通常是商品编号；点击式列表在打开卡片前用卡片位置代替，
+        得知编号后再通过 bind_detail_opportunity 绑定过去。
+        """
+        try:
+            self.conn.execute("BEGIN")
+            row = self.conn.execute(
+                "SELECT attempts FROM detail_opportunities "
+                "WHERE round_id=? AND shop_key=? AND identity=?",
+                (round_id, shop_key, identity),
+            ).fetchone()
+            if row is not None:
+                self.conn.commit()
+                return DetailGrant(granted=True, reused=True, attempts=int(row["attempts"]))
+
+            round_row = self.conn.execute(
+                "SELECT detail_budget_limit FROM rounds WHERE id=?", (round_id,)
+            ).fetchone()
+            if round_row is None:
+                raise ValueError(f"轮次不存在：{round_id}")
+            limit = round_row["detail_budget_limit"]
+            if limit is None:
+                limit = int(budget_limit)
+                self.conn.execute(
+                    "UPDATE rounds SET detail_budget_limit=? WHERE id=?", (limit, round_id),
+                )
+            if self.detail_budget_used(round_id) >= int(limit):
+                self.conn.commit()
+                return DetailGrant(granted=False, budget_exhausted=True)
+
+            self.conn.execute(
+                "INSERT INTO detail_opportunities(round_id, shop_key, identity, attempts, "
+                "created_at) VALUES (?, ?, ?, 0, ?)",
+                (round_id, shop_key, identity, utcnow()),
+            )
+            self.conn.commit()
+            return DetailGrant(granted=True)
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def bind_detail_opportunity(self, round_id: int, shop_key: str, card_ref: str,
+                                offer_id: str) -> None:
+        """把按列表卡片申请的详情机会绑定到已知商品编号。
+
+        绑定后，同一商品在补采路径上的重试会复用这次机会，而不是再占一份预算。
+        若该商品本轮已经持有机会，则合并两者的尝试次数并删掉卡片那一份。
+        """
+        if not card_ref or not offer_id or card_ref == offer_id:
+            return
+        try:
+            self.conn.execute("BEGIN")
+            card = self.conn.execute(
+                "SELECT attempts FROM detail_opportunities "
+                "WHERE round_id=? AND shop_key=? AND identity=?",
+                (round_id, shop_key, card_ref),
+            ).fetchone()
+            if card is not None:
+                offer = self.conn.execute(
+                    "SELECT attempts FROM detail_opportunities "
+                    "WHERE round_id=? AND shop_key=? AND identity=?",
+                    (round_id, shop_key, offer_id),
+                ).fetchone()
+                if offer is None:
+                    self.conn.execute(
+                        "UPDATE detail_opportunities SET identity=? "
+                        "WHERE round_id=? AND shop_key=? AND identity=?",
+                        (offer_id, round_id, shop_key, card_ref),
+                    )
+                else:
+                    self.conn.execute(
+                        "UPDATE detail_opportunities SET attempts=? WHERE round_id=? "
+                        "AND shop_key=? AND identity=?",
+                        (max(int(card["attempts"]), int(offer["attempts"])),
+                         round_id, shop_key, offer_id),
+                    )
+                    self.conn.execute(
+                        "DELETE FROM detail_opportunities WHERE round_id=? AND shop_key=? "
+                        "AND identity=?",
+                        (round_id, shop_key, card_ref),
+                    )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def mark_failure(
         self,
@@ -713,10 +856,14 @@ class Database:
     def mark_skipped(self, round_id: int, shop_key: str, shop_url: str, shop_name: str,
                      offer_id: str, product_url: str, product_name: str | None = None,
                      note: str = "今日已有库存，跳过") -> None:
-        """为已跳过的商品写一条 page_status='成功' 的快照，使其不再被待处理且不计为失败。"""
+        """为已跳过的商品写一条 page_status='跳过' 的快照。
+
+        跳过表示「本轮不访问详情」，不是库存观测：它让商品不再被待处理，
+        但不会成为同日去重证据，也不算失败。
+        """
         existing = self.conn.execute(
             "SELECT 1 FROM snapshots WHERE round_id=? AND shop_key=? AND offer_id=? "
-            "AND page_status='成功' LIMIT 1",
+            "AND page_status IN ('成功', '跳过') LIMIT 1",
             (round_id, shop_key, offer_id),
         ).fetchone()
         if existing is not None:
@@ -724,7 +871,7 @@ class Database:
         self.conn.execute(
             "INSERT INTO snapshots(round_id, shop_key, shop_url, shop_name, offer_id, "
             "product_url, product_name, collected_at, page_status, attempt, detail_note) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, '成功', 1, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, '跳过', 1, ?)",
             (round_id, shop_key, shop_url, shop_name, offer_id, product_url,
              product_name, utcnow(), note),
         )
@@ -755,7 +902,8 @@ class Database:
 
     def failed_rows(self, round_id: int) -> list[sqlite3.Row]:
         cur = self.conn.execute(
-            "SELECT * FROM snapshots WHERE round_id=? AND page_status!='成功'", (round_id,)
+            "SELECT * FROM snapshots WHERE round_id=? AND page_status NOT IN ('成功', '跳过')",
+            (round_id,),
         )
         return cur.fetchall()
 
@@ -772,7 +920,7 @@ class Database:
             "WHERE so.round_id=? AND EXISTS ("
             "SELECT 1 FROM snapshots s WHERE s.round_id=so.round_id "
             "AND s.shop_key=so.shop_key AND s.offer_id=so.offer_id "
-            "AND s.page_status='成功') "
+            "AND s.page_status IN ('成功', '跳过')) "
             "GROUP BY so.shop_key, so.offer_id)",
             (round_id,),
         ).fetchone()["c"]

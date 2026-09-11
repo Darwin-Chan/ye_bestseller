@@ -595,7 +595,7 @@ class DbTests(unittest.TestCase):
         # 回归：cst_date() 应可不带参调用，返回北京时间当天
         self.assertRegex(cst_date(), r"^\d{4}-\d{2}-\d{2}$")
 
-    def test_mark_skipped_success_and_idempotent(self):
+    def test_skip_is_recorded_as_skip_not_success_and_idempotent(self):
         rid = self.db.start_or_resume()
         self.db.mark_skipped(
             rid, "A", "https://a.example/", "店铺A", "111",
@@ -606,7 +606,8 @@ class DbTests(unittest.TestCase):
             "WHERE round_id=? AND shop_key='A'", (rid,)
         ).fetchall()
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["page_status"], "成功")
+        # 跳过表示「本轮不访问详情」，不表示产生了库存观测
+        self.assertEqual(rows[0]["page_status"], "跳过")
         self.assertIn("跳过", rows[0]["detail_note"])
         # 重复调用不重复写入
         self.db.mark_skipped(
@@ -616,6 +617,126 @@ class DbTests(unittest.TestCase):
         self.assertEqual(self.db.conn.execute(
             "SELECT COUNT(*) FROM snapshots WHERE round_id=?", (rid,)
         ).fetchone()[0], 1)
+
+    def test_skipped_offer_counts_as_handled_and_is_not_a_failure(self):
+        rid = self.db.start_or_resume()
+        self.db.save_shop_offers(
+            rid, "A", "https://a.example/", "店铺A",
+            [(1, "111", "https://detail.1688.com/offer/111.html", "商品", "")], 1,
+        )
+        self.db.mark_skipped(
+            rid, "A", "https://a.example/", "店铺A", "111",
+            "https://detail.1688.com/offer/111.html", "商品",
+        )
+        # 跳过是已处理结果：计入成功、不算失败
+        self.assertEqual(self.db.offer_counts(rid), (1, 1))
+        self.assertEqual(self.db.failed_rows(rid), [])
+
+    def test_skip_is_not_inventory_evidence(self):
+        rid = self.db.start_or_resume()
+        self.db.mark_skipped(
+            rid, "A", "https://a.example/", "店铺A", "111",
+            "https://detail.1688.com/offer/111.html", "商品",
+        )
+        # 跳过不产生库存观测，不能成为同日去重证据
+        self.assertFalse(self.db.inventory_exists("A", "111", cst_date()))
+        self.assertFalse(self.db.inventory_exists_by_name("A", "商品", cst_date()))
+
+    def test_failed_observation_is_not_dedupe_evidence(self):
+        rid = self.db.start_or_resume()
+        self.db.save_shop_offers(
+            rid, "A", "https://a.example/", "店铺A",
+            [(1, "111", "https://detail.1688.com/offer/111.html", "商品", "")], 1,
+        )
+        self.db.mark_failure(rid, "A", "111", 1, "解析失败")
+        # 失败不产生库存观测，既不触发同日去重，也仍是待补采商品
+        self.assertFalse(self.db.inventory_exists("A", "111", cst_date()))
+        self.assertFalse(self.db.inventory_exists_by_name("A", "商品", cst_date()))
+        self.assertEqual(
+            [row["offer_id"] for row in self.db.pending_offers(rid, max_attempts=2)],
+            ["111"],
+        )
+
+    def test_detail_opportunity_claimed_once_per_offer_and_reused_on_retry(self):
+        rid = self.db.start_or_resume()
+        first = self.db.claim_detail_opportunity(rid, "A01", "111", budget_limit=2)
+        self.assertTrue(first.granted)
+        self.assertFalse(first.reused)
+
+        retry = self.db.claim_detail_opportunity(rid, "A01", "111", budget_limit=2)
+        self.assertTrue(retry.granted)
+        self.assertTrue(retry.reused, "同一商品的重试复用同一次详情机会")
+
+        # 重试不额外消耗预算：另一个商品仍能拿到机会
+        self.assertTrue(self.db.claim_detail_opportunity(rid, "A01", "222", budget_limit=2).granted)
+        self.assertEqual(self.db.detail_budget_used(rid), 2)
+
+    def test_detail_budget_exhaustion_denies_new_offer_but_allows_retry(self):
+        rid = self.db.start_or_resume()
+        self.assertTrue(self.db.claim_detail_opportunity(rid, "A01", "111", budget_limit=1).granted)
+
+        denied = self.db.claim_detail_opportunity(rid, "A01", "222", budget_limit=1)
+        self.assertFalse(denied.granted, "预算耗尽后不能再申请新的商品机会")
+        self.assertTrue(denied.budget_exhausted)
+        # 已申请过的商品只是重试，不该被预算耗尽挡住
+        self.assertTrue(self.db.claim_detail_opportunity(rid, "A01", "111", budget_limit=1).granted)
+
+    def test_detail_budget_limit_is_bound_to_round_not_to_later_config(self):
+        rid = self.db.start_or_resume()
+        self.assertTrue(self.db.claim_detail_opportunity(rid, "A01", "111", budget_limit=1).granted)
+
+        # 续跑时即使配置放宽，仍沿用轮次已记录的上限
+        denied = self.db.claim_detail_opportunity(rid, "A01", "222", budget_limit=5)
+        self.assertFalse(denied.granted, "预算上限绑定轮次，续跑不能被更宽的配置放宽")
+
+    def test_detail_opportunity_binds_card_to_known_offer(self):
+        # 点击式列表先用卡片位置占用一次机会，得知编号后绑定过去
+        rid = self.db.start_or_resume()
+        self.assertTrue(
+            self.db.claim_detail_opportunity(rid, "A01", "card:p1:i0", budget_limit=1).granted
+        )
+        self.db.bind_detail_opportunity(rid, "A01", "card:p1:i0", "22")
+        grant = self.db.claim_detail_opportunity(rid, "A01", "22", budget_limit=1)
+        self.assertTrue(grant.granted)
+        self.assertTrue(grant.reused, "已知编号后重试应复用卡片占用的同一次机会")
+        self.assertEqual(self.db.detail_budget_used(rid), 1)
+
+    def test_bind_opportunity_merges_when_offer_already_holds_one(self):
+        rid = self.db.start_or_resume()
+        self.assertTrue(
+            self.db.claim_detail_opportunity(rid, "A01", "33", budget_limit=5).granted
+        )
+        self.assertTrue(
+            self.db.claim_detail_opportunity(rid, "A01", "card:p2:i1", budget_limit=5).granted
+        )
+        self.assertEqual(self.db.detail_budget_used(rid), 2)
+
+        # 该商品已先申请过机会：绑定只做合并，不重复占预算
+        self.db.bind_detail_opportunity(rid, "A01", "card:p2:i1", "33")
+        self.assertEqual(self.db.detail_budget_used(rid), 1)
+
+    def test_connect_migrates_legacy_rounds_table_for_detail_budget(self):
+        # 模拟旧库：rounds 还没有 detail_budget_limit 列
+        old = Path(tempfile.gettempdir()) / f"bestseller_budget_{id(self)}.db"
+        raw = sqlite3.connect(str(old))
+        raw.execute(
+            "CREATE TABLE rounds (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "started_at TEXT NOT NULL, finished_at TEXT, "
+            "status TEXT NOT NULL DEFAULT '进行中', phase TEXT NOT NULL DEFAULT 'listing', note TEXT)"
+        )
+        raw.execute("INSERT INTO rounds(id, started_at) VALUES (1, '2026-09-04T00:00:00+00:00')")
+        raw.commit()
+        raw.close()
+
+        conn = connect(old)
+        try:
+            cols = [row[1] for row in conn.execute('PRAGMA table_info("rounds")').fetchall()]
+            self.assertIn("detail_budget_limit", cols)
+            grant = Database(conn).claim_detail_opportunity(1, "A01", "111", budget_limit=1)
+            self.assertTrue(grant.granted)
+        finally:
+            conn.close()
+            old.unlink(missing_ok=True)
 
     def test_find_offer_id_by_name_unique_vs_ambiguous(self):
         rid = self.db.start_or_resume()

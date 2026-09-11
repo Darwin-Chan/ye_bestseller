@@ -14,7 +14,13 @@ import time
 from playwright.sync_api import Error as PlaywrightError
 
 from .config import Config, Shop
-from .db import DayBoundaryReached, utcnow, cst_date
+from .db import (
+    DayBoundaryReached,
+    DetailBudgetExhausted,
+    DETAIL_BUDGET_NOTE,
+    utcnow,
+    cst_date,
+)
 from .delay import Humanizer
 from .detail import DetailParseFailed, parse_detail_html, save_raw_page
 from .parse import extract_main_image
@@ -368,6 +374,26 @@ def capture_detail(page, product_url: str, cfg: Config, human: Humanizer, emit=N
     return payload
 
 
+def _card_ref(page_no: int, idx: int) -> str:
+    """点击式列表里一张卡片的稳定标识（同一轮内可重复命中同一张卡片）。"""
+    return f"card:p{page_no}:i{idx}"
+
+
+def _claim_detail_slot(db, round_id, shop_key: str, card_ref: str, cfg: Config) -> None:
+    """向同日去重与补采 module 申请一次详情机会，预算耗尽时结束本轮。
+
+    点击式列表在打开卡片前还拿不到商品编号，因此这里用卡片位置作为机会标识；
+    同一轮里重复扫到同一张卡片只会复用机会，不重复占用预算。
+    """
+    if db is None or round_id is None:
+        return
+    grant = db.claim_detail_opportunity(
+        round_id, shop_key, card_ref, cfg.max_detail_pages_per_round,
+    )
+    if not grant.granted:
+        raise DetailBudgetExhausted(DETAIL_BUDGET_NOTE)
+
+
 def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                          db=None, round_id=None, emit=None, deny_tracker=None):
     """商品列表用「点击商品图进详情」的方式收集商品，绕开拿不到URL的问题。"""
@@ -450,6 +476,7 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                                         def_url, list_title, note="今日已有同名库存，跳过")
                     continue
             # 只有确认需要进入详情后才消耗详情间隔和长停顿预算。
+            _claim_detail_slot(db, round_id, shop.key, _card_ref(pages_read, i), cfg)
             human.before_detail()
             img = page.locator(_PRODUCT_IMG_SEL).nth(i)
             _capture_card(page, img, list_title, cfg, punished, on_response, se, db,
@@ -496,6 +523,7 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                 for i in range(n):
                     name = _read_card_title(page, i)
                     if name and name in ambiguous:
+                        _claim_detail_slot(db, round_id, shop.key, _card_ref(rpg, i), cfg)
                         human.before_detail()
                         se("product_open")
                         img = page.locator(_PRODUCT_IMG_SEL).nth(i)
@@ -647,12 +675,13 @@ def _capture_card(page, img, list_title, cfg, punished, on_response, se, db, rou
             _close_popup_or_back(detail_page, popup, page)
             return None
         return _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_response,
-                              se, db, round_id, shop, offers, seen, cnote)
+                              se, db, round_id, shop, offers, seen, cnote,
+                              card_ref=_card_ref(page_no, idx))
     return None
 
 
 def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_response, se, db,
-                   round_id, shop, offers, seen, cnote) -> str | None:
+                   round_id, shop, offers, seen, cnote, card_ref: str | None = None) -> str | None:
     """对非 deny 的详情弹窗做 offer_id 去重、读 SKU、入库；成功返回 offer_id。"""
     # IS-18：详情弹窗内的事件应记为 detail 阶段（传入的 se 默认标为 listing）
     _shop_emit = se
@@ -665,6 +694,9 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
         _close_popup_or_back(detail_page, popup, page)
         return None
     oid = m.group(1)
+    if db and round_id and card_ref:
+        # 编号已确定：把卡片占用的详情机会绑定到该商品，补采重试才能复用同一次机会。
+        db.bind_detail_opportunity(round_id, shop.key, card_ref, oid)
     se("popup_open", offer_id=oid)
     first_time = oid not in seen
     if first_time:
@@ -683,12 +715,14 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
         return oid
     stop_round = False
     if db and round_id and first_time:
+        # 初次访问与补采共享同一份尝试额度：本次是第几次尝试要接着已用掉的次数。
+        attempt = db.detail_attempts_used(round_id, shop.key, oid) + 1
         try:
             html = detail_page.content()
         except Exception as exc:
             note = f"详情页读取失败：{exc}"
             db.mark_failure(
-                round_id, shop.key, oid, 1, note,
+                round_id, shop.key, oid, attempt, note,
                 shop_url=shop.url, shop_name=shop.name, product_url=url,
                 product_name=list_title or None,
             )
@@ -705,7 +739,7 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
             raw_path = save_raw_page(cfg, round_id, oid, exc.html) if exc.html else ""
             note = f"解析失败：{exc}；原始页面：{raw_path}"
             db.mark_failure(
-                round_id, shop.key, oid, 1, note,
+                round_id, shop.key, oid, attempt, note,
                 shop_url=shop.url, shop_name=shop.name, product_url=url,
                 product_name=list_title or None,
             )
@@ -718,7 +752,7 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
             raw_path = save_raw_page(cfg, round_id, oid, html) if html else ""
             note = f"详情页解析异常：{exc}；原始页面：{raw_path}"
             db.mark_failure(
-                round_id, shop.key, oid, 1, note,
+                round_id, shop.key, oid, attempt, note,
                 shop_url=shop.url, shop_name=shop.name, product_url=url,
                 product_name=list_title or None,
             )
@@ -741,7 +775,7 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
             main_image_url=img_url,
             sku_rows=rows,
             collected_at=utcnow(),
-            attempt=1,
+            attempt=attempt,
         )
         se("click_ok", offer_id=oid, note=cnote + "&offer_id=" + oid + f"&sku={len(rows)}")
         stop_round = result.stop_round
