@@ -30,6 +30,7 @@ if REPO not in sys.path:
 from playwright.sync_api import sync_playwright
 
 from bestseller_monitor.config import Config, load_shops
+from bestseller_monitor.browser_pw import _PRODUCT_IMG_SEL
 
 EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 PORT = 9222
@@ -165,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
             time.sleep(1.2)
         except Exception:
             break
-        cur = page.locator("img.main-picture, img.hover-trigger").count()
+        cur = page.locator(_PRODUCT_IMG_SEL).count()
         if cur == prev:
             break
         prev = cur
@@ -181,10 +182,10 @@ def main(argv: list[str] | None = None) -> int:
     script_offer_ids = re.findall(r'offerId["\'\s:=]+(\d+)', script_text)
     script_offer_ids += re.findall(r'/(?:offer|item)/(\d+)', script_text)
 
-    img_sel_count = page.locator("img.main-picture, img.hover-trigger").count()
+    img_sel_count = page.locator(_PRODUCT_IMG_SEL).count()
     card_info = page.evaluate(
         """() => {
-          const imgs=[...document.querySelectorAll('img.main-picture, img.hover-trigger')];
+          const imgs=[...document.querySelectorAll('%s')];
           return imgs.slice(0,30).map(im=>{
             let a=im.closest('a');
             const chain=[]; let el=im;
@@ -220,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
               src:(im.currentSrc||im.src||'').slice(-80)
             };
           });
-        }"""
+        }""" % _PRODUCT_IMG_SEL
     )
     # 更稳的商品名提取：取“含销量/价格”那个容器 innerText 的首行
     named = page.evaluate(
@@ -339,7 +340,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  shop.data.get ordered offerId count={len(shop_ids)} first={shop_ids[:8]}")
     got_ids = []
     try:
-        cards = page.locator("img.main-picture, img.hover-trigger")
+        cards = page.locator(_PRODUCT_IMG_SEL)
         for i in range(min(3, cards.count())):
             card = cards.nth(i)
             oid = ""

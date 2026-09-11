@@ -209,7 +209,11 @@ class DenyTracker:
 
 
 _ANCHOR_SEL = "a[href*='/offer/'], a[href*='/item/']"
-_PRODUCT_IMG_SEL = "img.main-picture, img.hover-trigger"
+# 只认商品图。曾经把 img.hover-trigger 也算进来，但那是店铺头部的 48×48 图标
+# （imgextra/...-tps-48-48.png，渲染成 12×12，不在商品网格内），排在所有商品图
+# 之前，导致下标 0 恒为它、点击必然没有弹窗，还会让「等商品卡片出现」在商品图
+# 渲染前就提前通过。真实列表页 30 张商品图全部是 img.main-picture。
+_PRODUCT_IMG_SEL = "img.main-picture"
 
 
 def _frame_anchors(frame) -> list[dict]:
