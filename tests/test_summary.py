@@ -1,6 +1,9 @@
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from bestseller_monitor.db import Database, connect
 from tools import summary
@@ -29,6 +32,30 @@ class SummaryTests(unittest.TestCase):
                 self.assertEqual(counts["shop_offers"], 1)
             finally:
                 conn.close()
+
+    def test_summary_reports_round_only(self):
+        """摘要只报告轮次统计，不再查找已停用的导出文件。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "bestseller.db"
+            conn = connect(db_path)
+            try:
+                rid = Database(conn).start_or_resume()
+            finally:
+                conn.close()
+            export_dir = tmp_path / "output"
+            export_dir.mkdir()
+            (export_dir / "日报_20260101_000000.xlsx").write_bytes(b"")
+
+            buf = io.StringIO()
+            with patch.object(summary, "ROOT", tmp_path), \
+                    patch.object(summary, "DB", db_path), \
+                    contextlib.redirect_stdout(buf):
+                summary.main()
+
+            text = buf.getvalue()
+            self.assertIn(f"round={rid}", text)
+            self.assertNotIn("latest_excel", text)
 
 
 if __name__ == "__main__":

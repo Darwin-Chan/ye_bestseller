@@ -24,7 +24,6 @@ class Config:
     shop_csv: pathlib.Path
     db_file: pathlib.Path
     data_dir: pathlib.Path
-    output_dir: pathlib.Path
     logs_dir: pathlib.Path
     screenshot_dir: pathlib.Path
     raw_page_dir: pathlib.Path
@@ -79,14 +78,12 @@ class Config:
         run = raw["run"]
         human = raw["human"]
         browser = raw["browser"]
-        paths = raw["paths"]
 
         return cls(
             root=root,
             shop_csv=p("paths", "shop_csv"),
             db_file=p("paths", "db_file"),
             data_dir=p("paths", "data_dir"),
-            output_dir=p("paths", "output_dir"),
             logs_dir=p("paths", "logs_dir"),
             screenshot_dir=p("paths", "screenshot_dir"),
             raw_page_dir=p("paths", "raw_page_dir"),
@@ -134,8 +131,8 @@ class Config:
         return replace(self, **kwargs)
 
     def ensure_dirs(self) -> None:
-        for d in (self.data_dir, self.output_dir, self.logs_dir,
-                  self.screenshot_dir, self.raw_page_dir, self.profile_dir):
+        for d in (self.data_dir, self.logs_dir, self.screenshot_dir,
+                  self.raw_page_dir, self.profile_dir):
             d.mkdir(parents=True, exist_ok=True)
 
 

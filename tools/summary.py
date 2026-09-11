@@ -48,9 +48,6 @@ def main():
     print(f"round={rid} status={r['status']} shop_offers={counts['shop_offers']} "
           f"ok_offers={counts['ok_offers']} fail_offers={counts['fail_offers']} "
           f"sku_rows={counts['sku_rows']}")
-    ex = sorted((ROOT / "output").glob("日报_*.xlsx"), key=lambda p: p.stat().st_mtime)
-    if ex:
-        print("latest_excel:", ex[-1])
     con.close()
 
 
