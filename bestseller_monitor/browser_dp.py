@@ -7,7 +7,7 @@ import re
 import subprocess
 import time
 
-from .config import Config, Shop
+from .config import Config, Shop, effective_pages_limit
 from .delay import Humanizer
 from .detail import parse_detail_html
 from . import sound
@@ -210,7 +210,8 @@ def crawl_shop_listing(
     offers: list[tuple[int, str, str, str, str]] = []
     seen: set[str] = set()
     pages_read = 0
-    for _ in range(cfg.max_pages_per_shop):
+    max_pages = effective_pages_limit(shop, cfg)
+    for _ in range(max_pages):
         pages_read += 1
         human.before_list_page()
         kind = detect(page)
@@ -240,7 +241,7 @@ def crawl_shop_listing(
             offers.append((len(offers) + 1, oid, href, text, ""))
             added += 1
         log.info("店铺 %s 第 %s 页新增 %s，累计 %s", shop.key, pages_read, added, len(offers))
-        if pages_read >= cfg.max_pages_per_shop:
+        if pages_read >= max_pages:
             break
         if added == 0:
             # 首页无商品且可能触发了验证：再等一次并检测

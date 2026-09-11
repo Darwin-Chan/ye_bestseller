@@ -1,8 +1,9 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
-from bestseller_monitor.config import Config, load_shops
+from bestseller_monitor.config import Config, Shop, effective_pages_limit, load_shops
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -113,6 +114,27 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("openpyxl", names)
         self.assertIn("playwright", names)
         self.assertIn("drissionpage", names)
+
+    def test_effective_pages_limit_priority(self):
+        """翻页上限优先级：命令行覆盖 > 店铺配置 > 全局默认（IS-35）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Config.from_file(self._write_config(tmp), root=Path(tmp))  # 全局 3 页
+        configured = Shop("A01", "店一", "https://a.1688.com/", pages=9)
+        unconfigured = Shop("A02", "店二", "https://b.1688.com/")
+
+        self.assertIsNone(cfg.pages_per_shop_override, "没有命令行覆盖时不留标记")
+        self.assertEqual(effective_pages_limit(configured, cfg), 9, "店铺配置压过全局默认")
+        self.assertEqual(effective_pages_limit(unconfigured, cfg), 3, "没配 pages 落回全局默认")
+
+        overridden = cfg.replace(pages_per_shop_override=1)
+        self.assertEqual(effective_pages_limit(configured, overridden), 1, "命令行压过店铺配置")
+        self.assertEqual(effective_pages_limit(unconfigured, overridden), 1)
+        self.assertEqual(effective_pages_limit(None, overridden), 1)
+
+        # 测试与旧调用方常传 SimpleNamespace：没有该字段就按「没有命令行覆盖」处理
+        self.assertEqual(
+            effective_pages_limit(configured, SimpleNamespace(max_pages_per_shop=3)), 9,
+        )
 
 
 if __name__ == "__main__":

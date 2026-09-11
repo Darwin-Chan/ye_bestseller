@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from datetime import datetime, timedelta
+from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -257,6 +258,65 @@ class P1Tests(unittest.TestCase):
         human.before_detail.assert_not_called()
         capture.assert_not_called()
         db.mark_skipped.assert_called_once()
+
+    def _click_crawl_pages(self, shop: Shop, cfg):
+        """跑一次点击式列表抓取，返回 (读到的页数, 实际打开过详情的页号)。
+
+        翻页永远「有下一页」，所以读到的页数完全由翻页上限决定。
+        """
+        page = MagicMock()
+        locator = MagicMock()
+        locator.count.return_value = 1
+        page.locator.return_value = locator
+        seen_pages: list[int] = []
+        title_seq = count(1)
+
+        def fake_capture(page_, img, list_title, cfg_, punished, on_response, se,
+                         db, round_id, shop_, offers, seen, idx=0, page_no=1,
+                         human=None, deny_tracker=None):
+            seen_pages.append(page_no)
+            offers.append((len(offers) + 1, "1",
+                           "https://detail.1688.com/offer/1.html", list_title, ""))
+
+        with patch.object(browser_pw, "_wait_cards", return_value=True), \
+             patch.object(browser_pw, "_scroll_cards_until_stable", return_value=1), \
+             patch.object(browser_pw, "intervention_kind", return_value=None), \
+             patch.object(browser_pw, "_click_text_in_frames", return_value=True), \
+             patch.object(browser_pw, "_read_card_title",
+                          side_effect=lambda *_: f"商品{next(title_seq)}"), \
+             patch.object(browser_pw, "_capture_card", side_effect=fake_capture):
+            _offers, pages = browser_pw.crawl_store_by_click(page, shop, cfg, MagicMock())
+        return pages, seen_pages
+
+    def test_cli_pages_override_beats_shop_pages(self):
+        """命令行 --pages-per-shop 是显式覆盖：店铺 pages=3 时也只读一页（IS-35）。"""
+        shop = Shop("A01", "店铺A", "https://shop.example/", pages=3)
+        cfg = self._cfg(max_pages_per_shop=30, pages_per_shop_override=1)
+
+        pages, seen_pages = self._click_crawl_pages(shop, cfg)
+
+        self.assertEqual(pages, 1, "命令行覆盖为 1 页时不该按店铺的 3 页继续翻")
+        self.assertEqual(seen_pages, [1])
+
+    def test_shop_pages_limit_beats_global_default(self):
+        """没有命令行覆盖时，shops.csv 的 pages 优先于全局默认（IS-35）。"""
+        shop = Shop("A01", "店铺A", "https://shop.example/", pages=2)
+        cfg = self._cfg(max_pages_per_shop=30)
+
+        pages, seen_pages = self._click_crawl_pages(shop, cfg)
+
+        self.assertEqual(pages, 2)
+        self.assertEqual(seen_pages, [1, 2])
+
+    def test_global_default_used_when_shop_has_no_pages(self):
+        """店铺没配 pages 时才回落到全局默认（IS-35）。"""
+        shop = Shop("A01", "店铺A", "https://shop.example/")
+        cfg = self._cfg(max_pages_per_shop=2)
+
+        pages, seen_pages = self._click_crawl_pages(shop, cfg)
+
+        self.assertEqual(pages, 2)
+        self.assertEqual(seen_pages, [1, 2])
 
     def test_click_path_stops_when_detail_budget_exhausted(self):
         """点击式列表也必须遵守单轮详情预算。"""

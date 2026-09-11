@@ -62,6 +62,8 @@ class Config:
     read_delay_sec: tuple[float, float]
     retry_base_sec: float
     retry_jitter_sec: float
+    # 命令行显式指定的翻页上限（None = 没有显式覆盖）；优先级见 effective_pages_limit()
+    pages_per_shop_override: int | None = None
 
     @classmethod
     def from_file(cls, path: pathlib.Path, root: pathlib.Path | None = None) -> "Config":
@@ -145,6 +147,23 @@ class Shop:
     offer_list_url: str | None = None
     pages: int | None = None
     active: bool = True
+
+
+def effective_pages_limit(shop: Shop | None, cfg: Config) -> int:
+    """该店本轮实际翻页上限，三个来源按优先级取第一个有值的。
+
+    命令行显式覆盖（`--pages-per-shop`）> 店铺配置（shops.csv 的 `pages`）>
+    全局默认（config.toml 的 `max_pages_per_shop`）。
+
+    显式覆盖必须单独保留：只改 `max_pages_per_shop` 的话，店铺自己配了 pages
+    的店仍会按店铺值翻页，命令行的冒烟参数就失效（IS-35）。
+    """
+    override = getattr(cfg, "pages_per_shop_override", None)
+    if override is not None:
+        return int(override)
+    if shop is not None and shop.pages:
+        return int(shop.pages)
+    return int(cfg.max_pages_per_shop)
 
 
 def load_shops(path: pathlib.Path) -> list[Shop]:

@@ -38,17 +38,30 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
-    cfg = Config.from_file(args.config, root=ROOT)
+def apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
+    """把命令行参数应用到配置。
+
+    `--pages-per-shop` 是显式覆盖，要同时写进两个字段：`max_pages_per_shop`
+    是运行时快照与 GUI 展示用的有效值，`pages_per_shop_override` 是优先级判定
+    用的「命令行说过话」标记——少了后者，店铺自己配了 pages 的店会按店铺值翻页
+    （IS-35）。
+    """
     if args.shops:
         cfg = cfg.replace(shop_csv=args.shops)
     if args.pages_per_shop is not None:
-        cfg = cfg.replace(max_pages_per_shop=args.pages_per_shop)
+        cfg = cfg.replace(max_pages_per_shop=args.pages_per_shop,
+                          pages_per_shop_override=args.pages_per_shop)
     if args.max_detail is not None:
         cfg = cfg.replace(max_detail_opportunities_per_round=args.max_detail)
     if args.no_shuffle:
         cfg = cfg.replace(shuffle_within_shop=False)
+    return cfg
+
+
+def main() -> int:
+    args = parse_args()
+    cfg = Config.from_file(args.config, root=ROOT)
+    cfg = apply_overrides(cfg, args)
     limit_keys = None
     if args.limit_shops:
         limit_keys = {s.strip() for s in args.limit_shops.split(",") if s.strip()}

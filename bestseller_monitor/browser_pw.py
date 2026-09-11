@@ -14,7 +14,7 @@ import time
 from playwright.sync_api import Error as PlaywrightError
 
 from . import browser_proc, dedupe, rounds
-from .config import Config, Shop
+from .config import Config, Shop, effective_pages_limit
 from .db import DayBoundaryReached, DetailBudgetExhausted, utcnow, cst_date
 from .delay import Humanizer
 from .detail import DetailParseFailed, parse_detail_html, save_raw_page
@@ -432,7 +432,7 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                          db=None, round_id=None, emit=None, deny_tracker=None):
     """商品列表用「点击商品图进详情」的方式收集商品，绕开拿不到URL的问题。"""
     log.info("开始点击式抓取店铺 %s（%s）", shop.key, shop.url)
-    max_pages = int(shop.pages) if shop.pages else int(cfg.max_pages_per_shop)
+    max_pages = effective_pages_limit(shop, cfg)
     offers: list[tuple[int, str, str, str, str]] = []
     seen: set[str] = set()
     name_counter: dict[str, int] = {}

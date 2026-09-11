@@ -47,7 +47,7 @@ def _python_exe() -> str:
 PROJECT_ROOT = _project_root()
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from bestseller_monitor.config import Config, load_shops  # noqa: E402
+from bestseller_monitor.config import Config, effective_pages_limit, load_shops  # noqa: E402
 from bestseller_monitor.db import Database, connect, cst_date, utcnow  # noqa: E402
 from bestseller_monitor.rounds import (  # noqa: E402
     RoundRequest,
@@ -227,7 +227,7 @@ class Api:
                 (s.key, today),
             ).fetchone()["c"]
             # 该店实际翻页上限：店铺未单独配置时回落到全局默认（与抓取逻辑一致）
-            pages = s.pages or self.cfg.max_pages_per_shop
+            pages = effective_pages_limit(s, self.cfg)
             out.append({
                 "key": s.key,
                 "name": s.name,

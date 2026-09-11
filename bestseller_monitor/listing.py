@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Callable
 
-from .config import Config, Shop
+from .config import Config, Shop, effective_pages_limit
 from .delay import Humanizer
 from .guard import detect, wait_for_human
 from .parse import extract_offer_links
@@ -89,8 +89,9 @@ def crawl_shop_listing(
     offers: list[Offer] = []
     seen: set[str] = set()
     pages_read = 0
+    max_pages = effective_pages_limit(shop, cfg)
 
-    for _ in range(cfg.max_pages_per_shop):
+    for _ in range(max_pages):
         pages_read += 1
         human.before_list_page()
         kind = check_guard(page)
@@ -129,7 +130,7 @@ def crawl_shop_listing(
             added += 1
         log.info("店铺 %s 第 %s 页新增 %s 个商品，累计 %s 个", shop.key, pages_read, added, len(offers))
 
-        if pages_read >= cfg.max_pages_per_shop:
+        if pages_read >= max_pages:
             break
         if not _next_page_available(page):
             log.info("店铺 %s 已无下一页，提前结束（共 %s 页）", shop.key, pages_read)

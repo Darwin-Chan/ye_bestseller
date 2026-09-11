@@ -21,7 +21,7 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from bestseller_monitor.config import Config, load_shops
+from bestseller_monitor.config import Config, effective_pages_limit, load_shops
 from bestseller_monitor.db import Database, connect, cst_date
 from bestseller_monitor.delay import Humanizer
 from bestseller_monitor import browser_pw
@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
         time.sleep(4)
         browser_pw._click_text_in_frames(page, "销量")
         time.sleep(3)
-        max_pages = int(shop.pages) if shop.pages else int(cfg.max_pages_per_shop)
+        max_pages = effective_pages_limit(shop, cfg)
         mapping: dict[str, str] = {}
         for pg in range(1, max_pages + 1):
             human.before_list_page()
