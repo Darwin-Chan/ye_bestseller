@@ -30,7 +30,7 @@ def classify(html: str) -> str:
         first = rows[0] if rows else {}
         return ("单规格已解析" if first.get("sku_id") == DEFAULT_SKU_ID
                 and first.get("sku_stock") is not None else "单规格未解析")
-    return "多规格已解析" if rows else "多规格未解析"
+    return "多规格已解析" if rows else "有平台标记但未解析出 SKU"
 
 
 def main() -> int:
@@ -51,7 +51,8 @@ def main() -> int:
     for label in sorted(buckets):
         print(f"{label}: {len(buckets[label])}")
 
-    unresolved = buckets.get("单规格未解析", []) + buckets.get("多规格未解析", [])
+    unresolved = (buckets.get("单规格未解析", [])
+                  + buckets.get("有平台标记但未解析出 SKU", []))
     if unresolved:
         print("\n未按预期解析的页面：")
         for tag in unresolved:
