@@ -151,6 +151,27 @@ def finish(db: Database, round: Round, reason: TerminalReason, *,
                  shop_keys=round.shop_keys, reason=reason)
 
 
+def active_round(db: Database, run_date: str) -> Round | None:
+    """某一天进行中的轮次（若有）。"""
+    for row in _active_rounds(db):
+        if row.run_date == run_date:
+            return row
+    return None
+
+
+def scope_shops(db: Database, round_id: int) -> tuple[ShopScope, ...]:
+    """轮次自身的店铺范围（含名称与地址）。续跑以它为准，不看当前配置。"""
+    rows = db.conn.execute(
+        "SELECT shop_key, shop_url, shop_name FROM shop_rounds "
+        "WHERE round_id=? ORDER BY shop_key",
+        (round_id,),
+    ).fetchall()
+    return tuple(
+        ShopScope(key=row["shop_key"], url=row["shop_url"], name=row["shop_name"])
+        for row in rows
+    )
+
+
 def _active_rounds(db: Database) -> list[Round]:
     """进行中的轮次，新的在前。
 

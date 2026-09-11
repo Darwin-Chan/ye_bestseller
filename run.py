@@ -20,7 +20,8 @@ sys.path.insert(0, str(ROOT))
 
 from bestseller_monitor.config import Config, load_shops  # noqa: E402
 from bestseller_monitor.db import Database, connect  # noqa: E402
-from bestseller_monitor.pipeline import run_round  # noqa: E402
+from bestseller_monitor.pipeline import requested_round_shops, run_round  # noqa: E402
+from bestseller_monitor.rounds import ScopeMismatch  # noqa: E402
 from bestseller_monitor import sound  # noqa: E402
 
 
@@ -56,15 +57,15 @@ def main() -> int:
     _db = Database(connect(cfg.db_file))
     _db.upsert_shops(all_shops)
     _db.conn.close()
-    shops = [s for s in all_shops if s.active]
+    # 不带 --limit-shops 的裸运行是「开始或续跑」：今天已有进行中的轮次就按轮次
+    # 自身的范围续跑（续跑不得增删店铺），否则用配置里的有效店铺新建一轮。
+    shops = requested_round_shops(cfg, limit_keys)
     if not shops:
-        print("shops.csv 中没有有效店铺（active=1）。")
-        return 2
-    if limit_keys:
-        shops = [s for s in shops if s.key in limit_keys]
-        if not shops:
+        if limit_keys is not None:
             print("limit-shops 与 shops.csv 没有任何匹配。")
-            return 2
+        else:
+            print("shops.csv 中没有有效店铺（active=1）。")
+        return 2
 
     cfg.ensure_dirs()
     sound.configure(cfg.alarm_on_intervention)
@@ -77,7 +78,11 @@ def main() -> int:
         ],
     )
 
-    run_round(cfg, shops)
+    try:
+        run_round(cfg, shops)
+    except ScopeMismatch as exc:
+        print(f"\n>>> {exc}\n")
+        return 3
     return 0
 
 

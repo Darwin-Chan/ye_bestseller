@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import gui
 from bestseller_monitor import browser_proc
+from bestseller_monitor.config import Shop
 from bestseller_monitor.db import Database, connect, DETAIL_BUDGET_NOTE
 from gui import Api
 
@@ -139,6 +140,69 @@ class GuiLoggingTests(unittest.TestCase):
                 handler.close()
 
         self.assertIn("暂停后收尾浏览器", text)
+
+
+class GuiRoundScopeTests(unittest.TestCase):
+    """界面勾选店铺与命令行 --limit-shops 是同一套范围语义（工单 02）。"""
+
+    @staticmethod
+    def _api(db_path):
+        api = Api.__new__(Api)
+        api._lock = RLock()
+        api.proc = None
+        api.round_id = None
+        api.start_ts = None
+        api.user_paused = False
+        api._elapsed_base = 0.0
+        api._run_start_ts = None
+        api.shops = [
+            Shop("A01", "店铺A", "https://A01.example/"),
+            Shop("A02", "店铺B", "https://A02.example/"),
+        ]
+        # start_run 会关掉自己开的连接，所以每次都要给一条新的。
+        api._open_conn = lambda: connect(db_path)
+        return api
+
+    @staticmethod
+    def _scope(db_path, round_id):
+        conn = connect(db_path)
+        try:
+            return sorted(
+                row["shop_key"] for row in conn.execute(
+                    "SELECT shop_key FROM shop_rounds WHERE round_id=?", (round_id,)
+                )
+            )
+        finally:
+            conn.close()
+
+    def test_start_run_creates_round_with_checked_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "test.db"
+            api = self._api(db_path)
+
+            with patch.object(Api, "_spawn_crawler"):
+                result = api.start_run(["A02"])
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(self._scope(db_path, result["round_id"]), ["A02"])
+
+    def test_start_run_reports_scope_mismatch_instead_of_merging(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "test.db"
+            api = self._api(db_path)
+
+            with patch.object(Api, "_spawn_crawler"):
+                self.assertTrue(api.start_run(["A01"])["ok"])
+                result = api.start_run(["A02"])
+
+            self.assertFalse(result["ok"])
+            self.assertIn("范围", result["error"])
+            conn = connect(db_path)
+            try:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM rounds").fetchone()[0], 1)
+                self.assertEqual(self._scope(db_path, api.round_id), ["A01"])
+            finally:
+                conn.close()
 
 
 if __name__ == "__main__":

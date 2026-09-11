@@ -49,6 +49,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from bestseller_monitor.config import Config, load_shops  # noqa: E402
 from bestseller_monitor.db import Database, cst_date, DAY_BOUNDARY_NOTE  # noqa: E402
+from bestseller_monitor.rounds import RoundRequest, ScopeMismatch, ShopScope  # noqa: E402
+from bestseller_monitor import rounds  # noqa: E402
 from bestseller_monitor import browser_proc  # noqa: E402
 
 CST = timezone(timedelta(hours=8))
@@ -358,8 +360,23 @@ class Api:
                 return {"ok": False, "error": "已有抓取任务在运行，请先暂停或中止。"}
             conn = self._open_conn()
             try:
-                db = Database(conn)
-                rid = db.start_or_resume()
+                # 勾选的店铺就是本次的范围请求；今天已有轮次但范围不同会被拒绝，
+                # 而不是把新店铺并进进行中的那一轮。
+                by_key = {shop.key: shop for shop in self.shops}
+                missing = [key for key in keys if key not in by_key]
+                if missing:
+                    return {"ok": False, "error": "勾选的店铺已不在配置中：" + "、".join(missing)}
+                request = RoundRequest(
+                    run_date=self._today(),
+                    shops=tuple(
+                        ShopScope(by_key[key].key, by_key[key].url, by_key[key].name)
+                        for key in keys
+                    ),
+                )
+                try:
+                    rid = rounds.open(Database(conn), request).round.id
+                except ScopeMismatch as exc:
+                    return {"ok": False, "error": str(exc)}
             finally:
                 conn.close()
             self.round_id = rid

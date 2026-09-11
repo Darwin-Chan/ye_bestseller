@@ -7,9 +7,9 @@ from collections import defaultdict
 
 from playwright.sync_api import sync_playwright
 
-from . import browser_dp, browser_pw, dedupe
+from . import browser_dp, browser_pw, dedupe, rounds
 from .browser_pw import DenyTracker, ShopDenyExceeded, RoundDenyExceeded
-from .config import Config, Shop
+from .config import Config, Shop, load_shops
 from .db import (
     Database,
     connect,
@@ -24,14 +24,56 @@ from .delay import Humanizer
 from .detail import DetailParseFailed, capture_detail_payload, save_raw_page
 from .guard import RoundPauseRequired
 from .parse import extract_main_image
+from .rounds import RoundRequest, ShopScope
 from .listing import ListingLoadFailed, crawl_shop_listing, save_raw_listing_page
 
 log = logging.getLogger(__name__)
 
 
-def _ensure_db_shops(db: Database, round_id: int, shops: list[Shop]) -> None:
-    for shop in shops:
-        db.add_shop(round_id, shop.key, shop.url, shop.name)
+def round_shops(db: Database, round_id: int, cfg: Config) -> list[Shop]:
+    """轮次自身的店铺范围，作为本次处理的店铺列表。
+
+    续跑不得增删店铺，所以范围永远取自轮次：配置里已经没有的店铺照样按轮次
+    记录的名称与地址跑完，配置只用来补翻页上限这类运行时参数。
+    """
+    configured: dict[str, Shop] = {}
+    shop_csv = getattr(cfg, "shop_csv", None)
+    if shop_csv:
+        configured = {shop.key: shop for shop in load_shops(shop_csv)}
+    shops: list[Shop] = []
+    for scope in rounds.scope_shops(db, round_id):
+        known = configured.get(scope.key)
+        shops.append(Shop(
+            key=scope.key,
+            name=scope.name,
+            url=scope.url,
+            home_url=known.home_url if known else None,
+            offer_list_url=known.offer_list_url if known else None,
+            pages=known.pages if known else None,
+        ))
+    return shops
+
+
+def requested_round_shops(cfg: Config, limit_keys: set[str] | None = None) -> list[Shop]:
+    """本次调用要用的店铺范围。
+
+    limit_keys 给出时是明确的范围请求（命令行 `--limit-shops` 或界面勾选）：
+    与今天进行中的轮次不一致就由 open() 拒绝。
+    为 None 表示「开始或续跑」：今天已有进行中的轮次就按轮次自身的范围续跑，
+    否则用配置里的有效店铺。
+    """
+    all_shops = [shop for shop in load_shops(cfg.shop_csv) if shop.active]
+    if limit_keys is not None:
+        return [shop for shop in all_shops if shop.key in limit_keys]
+    conn = connect(cfg.db_file)
+    try:
+        db = Database(conn)
+        active = rounds.active_round(db, cst_date())
+        if active is not None:
+            return round_shops(db, active.id, cfg)
+    finally:
+        conn.close()
+    return all_shops
 
 
 def _pending_detail_offers(db: Database, round_id: int, cfg: Config,
@@ -59,19 +101,40 @@ def _record_listing_failure(
 
 
 def run_round(cfg: Config, shops: list[Shop]) -> None:
+    """开始或续跑一轮。
+
+    shops 是本次调用请求的店铺范围：今天已有进行中的轮次时范围必须一致，否则
+    open() 拒绝；跨日则由 open() 先给旧轮按跨天中止收尾再新建。真正交给驱动的
+    处理列表永远取自轮次自身，续跑不会因为配置变化而增删店铺。
+    """
     cfg.ensure_dirs()
     conn = connect(cfg.db_file)
     db = Database(conn)
-    round_id = db.start_or_resume()
-    _ensure_db_shops(db, round_id, shops)
-
     try:
+        request = RoundRequest(
+            run_date=cst_date(),
+            shops=tuple(ShopScope(shop.key, shop.url, shop.name) for shop in shops),
+        )
+        opened = rounds.open(db, request)
+        round_id = opened.round.id
+        log.info(
+            "%s轮次 #%s（%s，%s 家店）",
+            "新建" if opened.created else "续跑", round_id, request.run_date,
+            len(opened.round.shop_keys),
+        )
+        if opened.superseded:
+            stale = "、".join(f"#{row.id}" for row in opened.superseded)
+            note = f"上一轮（{stale}）已跨天，按跨天中止收尾；本轮新建 #{round_id}"
+            log.warning("%s", note)
+            print(f"\n>>> {note}。\n")
+        work_shops = round_shops(db, round_id, cfg)
+
         if cfg.driver == "pw_cdp":
-            _run_pwcdp_round(db, cfg, round_id, shops)
+            _run_pwcdp_round(db, cfg, round_id, work_shops)
         elif cfg.driver == "drission":
-            _run_dp_round(db, cfg, round_id, shops)
+            _run_dp_round(db, cfg, round_id, work_shops)
         else:
-            _run_pw_round(db, cfg, round_id, shops)
+            _run_pw_round(db, cfg, round_id, work_shops)
         _finalize_round(db, cfg, round_id)
     except RoundDenyExceeded as exc:
         # 整轮 deny 超限是终态：数据保留，但本轮不可续跑，只能新开一轮。
