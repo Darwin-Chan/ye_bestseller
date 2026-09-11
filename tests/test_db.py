@@ -384,8 +384,9 @@ class DbTests(unittest.TestCase):
         # 同一天、同一店铺范围才复用同一轮次。
         rid2 = new_round(self.db, ("A01", "https://a.example/", "店铺A"))
         self.assertEqual(rid, rid2)
-        remaining = self.db.shops_to_list(rid2)
-        self.assertEqual(len(remaining), 0)  # 已完成店铺不会被重置
+        self.assertEqual(
+            self.db.completed_listing_keys(rid2), {"A01"},  # 已完成店铺不会被重置
+        )
 
     def test_pending_offers_and_attempts(self):
         rid = new_round(self.db)

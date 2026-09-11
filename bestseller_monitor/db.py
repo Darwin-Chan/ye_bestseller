@@ -402,14 +402,13 @@ class Database:
         self.conn.execute("UPDATE rounds SET phase=? WHERE id=?", (phase, round_id))
         self.conn.commit()
 
-    def shops_to_list(self, round_id: int) -> list[sqlite3.Row]:
-        """返回本店未完成列表抓取的店铺（由调用方与 shops.csv 对照）。"""
-        cur = self.conn.execute(
-            "SELECT * FROM shop_rounds WHERE round_id=? AND list_status!='完成'", (round_id,)
-        )
-        return cur.fetchall()
-
     def completed_listing_keys(self, round_id: int) -> set[str]:
+        """本轮榜单已完成的店铺编号：三条驱动路径靠它决定续跑时跳过谁。
+
+        榜单阶段只问「谁已完成」然后跳过已完成的那家，不拿未完成店铺集合
+        反向筛出已完成项——后者永远筛不出东西，是 IS-33 的成因。
+        未完成集合另见 incomplete_listings()，它服务于轮次收尾。
+        """
         cur = self.conn.execute(
             "SELECT shop_key FROM shop_rounds WHERE round_id=? AND list_status='完成'",
             (round_id,),
