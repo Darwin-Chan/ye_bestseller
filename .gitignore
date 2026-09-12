@@ -35,6 +35,7 @@ profiles/
 *.xlsx
 config/shops.csv
 
-# 本地 Agent 配置与工单草稿（不上传）
+# 本地 Agent 配置、工单草稿与子代理交接目录（不上传）
 .codex/
 .scratch/
+work/
