@@ -38,13 +38,6 @@ class InstanceLock:
         self._released = True
         _kernel32().CloseHandle(self._handle)
 
-    def __enter__(self) -> "InstanceLock":
-        return self
-
-    def __exit__(self, *_exc) -> bool:
-        self.release()
-        return False
-
 
 def acquire(name: str) -> InstanceLock | None:
     """抢一把锁；已经有持有者时返回 None（不等待）。"""
@@ -75,6 +68,23 @@ def is_held(name: str) -> bool:
     return ctypes.get_last_error() != _ERROR_FILE_NOT_FOUND
 
 
+_KERNEL32 = None
+
+
 def _kernel32():
-    # use_last_error=True 才有 ctypes.get_last_error() 可读；ctypes.windll 那份不带。
-    return ctypes.WinDLL("kernel32", use_last_error=True)
+    """kernel32（带 last-error）。第一次调用时加载并声明类型。
+
+    use_last_error=True 才有 ctypes.get_last_error() 可读（ctypes.windll 那份不带）；
+    句柄是 64 位指针，不声明 restype 会被默认的 c_int 截断。
+    """
+    global _KERNEL32
+    if _KERNEL32 is None:
+        lib = ctypes.WinDLL("kernel32", use_last_error=True)
+        lib.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+        lib.CreateMutexW.restype = ctypes.c_void_p
+        lib.OpenMutexW.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_wchar_p]
+        lib.OpenMutexW.restype = ctypes.c_void_p
+        lib.CloseHandle.argtypes = [ctypes.c_void_p]
+        lib.CloseHandle.restype = ctypes.c_int
+        _KERNEL32 = lib
+    return _KERNEL32

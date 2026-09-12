@@ -378,7 +378,7 @@ class GuiSingleInstanceTests(unittest.TestCase):
         self.assertIn("已经打开", notify.call_args.args[0])
 
     def test_closing_warns_that_the_crawler_keeps_running(self):
-        api = SimpleNamespace(crawler_running=lambda: True)
+        api = SimpleNamespace(any_crawler_running=lambda: True)
         with patch.object(gui, "_notify") as notify:
             allowed = gui._warn_crawler_keeps_running(api)
 
@@ -386,12 +386,14 @@ class GuiSingleInstanceTests(unittest.TestCase):
         self.assertIn("继续", notify.call_args.args[0])
 
     def test_closing_says_nothing_when_nothing_is_running(self):
-        api = SimpleNamespace(crawler_running=lambda: False)
-        with patch.object(gui, "_notify") as notify:
+        api = SimpleNamespace(any_crawler_running=lambda: False)
+        with patch.object(gui, "_notify") as notify, \
+                self.assertLogs("gui", level="INFO") as logged:
             allowed = gui._warn_crawler_keeps_running(api)
 
         self.assertTrue(allowed)
         notify.assert_not_called()
+        self.assertIn("没有采集在跑", "\n".join(logged.output), "关窗动作要留底")
 
 
 class GuiCrawlerMutexTests(unittest.TestCase):

@@ -121,7 +121,8 @@ def run_round(cfg: Config, shops: list[Shop]) -> None:
     处理列表永远取自轮次自身，续跑不会因为配置变化而增删店铺。
 
     「同一时刻至多一个采集进程」在这里守着：界面与命令行共用同一把会话锁，
-    抢不到的那一方抛 CrawlerAlreadyRunning，连数据库都不碰。
+    抢不到的那一方抛 CrawlerAlreadyRunning，不建轮次、不写快照（命令行入口在读配置
+    时会顺手同步一次 shops 表，那不是采集数据）。
     """
     lock = single_instance.acquire(single_instance.CRAWLER_LOCK)
     if lock is None:

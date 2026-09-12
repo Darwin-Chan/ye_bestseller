@@ -72,6 +72,9 @@ _MB_SETFOREGROUND = 0x10000
 _MB_TOPMOST = 0x40000
 _SW_RESTORE = 9
 
+# 「已经有采集在跑」的拒绝文案：三个入口共用一句，免得改了半处。
+_BUSY_ERROR = "已有抓取任务在运行，请先暂停或中止。"
+
 
 def _configure_gui_logging(cfg=None) -> logging.Handler:
     """GUI 自己的动作也留日志——暂停/中止后的浏览器收尾否则事后无据可查（IS-43）。
@@ -262,11 +265,11 @@ class Api:
                     "SELECT COUNT(*) c FROM inventory WHERE date=?", (today,)
                 ).fetchone()["c"]
                 db = Database(conn)
-                running = self.running_crawler(conn)
+                running = self.crawler_identity(conn)
                 current = rounds.active_round(db, today)
                 stale = None if current is not None else rounds.active_round(db)
                 if running is not None:
-                    hint = self._running_crawler_hint(running)
+                    hint = self._crawler_hint(running)
                 elif current is not None:
                     hint = (f"轮次 #{current.id} 正在进行（{current.run_date}），"
                             "点「开始抓取」会按它的店铺范围续跑。")
@@ -399,14 +402,14 @@ class Api:
             "running": False,
             "manually_paused": False,
             "has_round": False,
-            "start_error": "已有采集进程在运行：本次启动被拒绝了，等它跑完或先中止它。",
+            "start_error": "已有采集进程在运行：本次启动被拒绝了，等它跑完再试。",
         }
 
     def _own_crawler_alive(self) -> bool:
         """本界面拉起的采集子进程还活着吗。"""
         return self.proc is not None and self.proc.poll() is None
 
-    def crawler_running(self) -> bool:
+    def any_crawler_running(self) -> bool:
         """有采集进程在跑吗：会话锁是权威判据，自己的子进程兜住刚拉起那一小段窗口。
 
         与「轮次是否进行中」是两件事：暂停后的轮次仍在进行中，但已经没有采集进程。
@@ -415,7 +418,7 @@ class Api:
             return True
         return single_instance.is_held(single_instance.CRAWLER_LOCK)
 
-    def running_crawler(self, conn) -> dict | None:
+    def crawler_identity(self, conn) -> dict | None:
         """正在跑的采集进程身份；没有就返回 None。
 
         锁不在而身份行还在，就是被强杀留下的残留——顺手清掉，免得启动页报一个
@@ -423,7 +426,7 @@ class Api:
         """
         db = Database(conn)
         row = db.crawler_process()
-        if not self.crawler_running():
+        if not self.any_crawler_running():
             if row is not None:
                 db.clear_crawler_process()
             return None
@@ -437,7 +440,7 @@ class Api:
         }
 
     @staticmethod
-    def _running_crawler_hint(running: dict) -> str:
+    def _crawler_hint(running: dict) -> str:
         """启动页在「已经有采集在跑」时说什么：谁在跑，以及点开始会被拒。"""
         parts = [
             f"轮次 #{running['round_id']}" if running.get("round_id") is not None else None,
@@ -445,7 +448,7 @@ class Api:
             f"{_fmt_hhmm(running['started_at'])} 起" if running.get("started_at") else None,
         ]
         who = "，".join(part for part in parts if part) or "身份未知"
-        return f"采集进程正在跑（{who}）：同一时刻只能有一个，等它跑完或先中止它。"
+        return f"采集进程正在跑（{who}）：同一时刻只能有一个，现在点开始会被拒绝。"
 
     def _spawn_crawler(self, keys: list[str] | None = None):
         """拉起采集子进程；keys 为空表示「开始或续跑」，范围由子进程按轮次决定。"""
@@ -465,8 +468,6 @@ class Api:
 
     def start_run(self, keys: list[str]) -> dict:
         with self._lock:
-            if self.proc is not None and self.proc.poll() is None:
-                return {"ok": False, "error": "已有抓取任务在运行，请先暂停或中止。"}
             by_key = {shop.key: shop for shop in self.shops}
             missing = [key for key in keys if key not in by_key]
             if missing:
@@ -482,8 +483,8 @@ class Api:
             try:
                 # 有采集进程在跑就不许再起一个：界面与命令行共用同一把会话锁，
                 # 判据是环境事实，不是「本界面记不记得自己拉过子进程」。
-                if self.running_crawler(conn) is not None:
-                    return {"ok": False, "error": "已有抓取任务在运行，请先暂停或中止。"}
+                if self.crawler_identity(conn) is not None:
+                    return {"ok": False, "error": _BUSY_ERROR}
                 # 只读地问一句会不会被拒：今天已有轮次但范围不同就给出可读理由。
                 # 轮次本身由采集子进程创建，启动失败不会留下空的「进行中」轮次。
                 rounds.check_scope(Database(conn), request)
@@ -505,8 +506,8 @@ class Api:
     def resume_run(self) -> dict:
         """在“过程”页暂停后点击“继续”：重新拉起抓取，续跑本轮未完成店铺，并停留在过程页。"""
         with self._lock:
-            if self.crawler_running():
-                return {"ok": False, "error": "已有抓取任务在运行，请先暂停或中止。"}
+            if self.any_crawler_running():
+                return {"ok": False, "error": _BUSY_ERROR}
             conn = self._open_conn()
             try:
                 db = Database(conn)
@@ -716,6 +717,12 @@ def _focus_existing_window(title: str) -> bool:
         return False
     try:
         user32 = ctypes.WinDLL("user32", use_last_error=True)
+        # 句柄是 64 位指针：不声明类型的话默认 c_int，会把 HWND 截断成错的窗口。
+        user32.FindWindowW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        user32.FindWindowW.restype = ctypes.c_void_p
+        user32.IsIconic.argtypes = [ctypes.c_void_p]
+        user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
         handle = user32.FindWindowW(None, title)
         if not handle:
             return False
@@ -737,7 +744,8 @@ def _announce_already_open() -> None:
 
 def _warn_crawler_keeps_running(api) -> bool:
     """关窗时如果采集还在跑，如实告知；返回 True 表示照常关闭。"""
-    if not api.crawler_running():
+    if not api.any_crawler_running():
+        log.info("关闭界面：没有采集在跑。")
         return True
     log.info("关闭界面：采集仍在后台继续，重新打开界面可以看到进度并中止它。")
     _notify("采集仍在后台继续。\n\n重新打开界面可以看到进度并中止它。",
