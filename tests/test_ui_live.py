@@ -36,6 +36,10 @@ window.pywebview = { platform: "edgechromium", api: {
   get_run: async () => {
     window.__calls.push("get_run");
     if (window.__fail === "get_run") throw boom("get_run");
+    if (window.__startError) {
+      return {running: false, manually_paused: false, has_round: false,
+              start_error: window.__startError};
+    }
     return {running: false, manually_paused: false, has_round: false};
   },
   get_result: async () => {
@@ -74,13 +78,16 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
             cls.browser.close()
             cls._pw.stop()
 
-    def open_page(self, fail_on: str | None = None, message: str | None = None):
-        """加载真实页面，注入一个会按需抛错的 pywebview 桥。"""
+    def open_page(self, fail_on: str | None = None, message: str | None = None,
+                  start_error: str | None = None):
+        """加载真实页面，注入一个会按需抛错、按需拒绝启动的 pywebview 桥。"""
         page = self.browser.new_page(viewport={"width": 1100, "height": 1000})
         if fail_on:
             page.add_init_script(f"window.__fail = {fail_on!r};")
         if message:
             page.add_init_script(f"window.__failMessage = {message!r};")
+        if start_error:
+            page.add_init_script(f"window.__startError = {start_error!r};")
         page.add_init_script(MOCK_API)
         page.goto(HTML_URI)
         return page
@@ -156,6 +163,18 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
             page.wait_for_selector("#rows input", timeout=5000)
             self.assertFalse(page.is_visible(ERROR_BOX))
             self.assertEqual(page.eval_on_selector_all("#rows input", "els => els.length"), 2)
+        finally:
+            page.close()
+
+    def test_a_refused_start_shows_the_reason_instead_of_the_result_page(self):
+        """子进程被「已有采集在跑」拒绝：页面要说原因，别假装这一轮跑完了（工单 02）。"""
+        page = self.open_page(start_error="已有采集进程在运行：本次启动被拒绝了")
+        try:
+            page.click("#startBtn")
+            page.wait_for_selector(ERROR_BOX, state="visible", timeout=5000)
+
+            self.assertIn("已有采集进程在运行", page.inner_text(ERROR_BOX))
+            self.assertEqual(self.active_tab(page), "开始", "被拒绝时不该停在结果页")
         finally:
             page.close()
 

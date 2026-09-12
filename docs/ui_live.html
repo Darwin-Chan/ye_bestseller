@@ -198,9 +198,13 @@
   // 看得见，而且下一次成功调用会自动把提示收起来（IS-37）。
   function showApiError(name, err) {
     const detail = (err && err.message) ? err.message : String(err);
+    showNotice("界面调用 " + name + " 失败：" + detail
+      + "。可重试；若反复失败，请把 logs/gui.log 和这一步的操作一起报给维护者。");
+  }
+
+  function showNotice(text) {
     const box = $("apiError");
-    box.textContent = "界面调用 " + name + " 失败：" + detail
-      + "。可重试；若反复失败，请把 logs/gui.log 和这一步的操作一起报给维护者。";
+    box.textContent = text;
     box.style.display = "block";
   }
 
@@ -231,7 +235,8 @@
   function switchTab(name) {
     updateSteps(name);
     document.querySelectorAll(".panel").forEach(p => p.classList.toggle("active", p.id === "panel-" + name));
-    if (name === "start") refreshStart();
+    // 切到开始页会顺手刷新；把这件事的完成时机交回调用方，好让「刷新后要说的话」不被刷新收掉。
+    return name === "start" ? refreshStart() : Promise.resolve();
   }
 
   function fmtDur(sec) {
@@ -306,6 +311,13 @@
   async function tickRun() {
     const d = await callApi("get_run");
     if (!d) return;
+    if (d.start_error) {
+      // 采集子进程被「已有采集在跑」拒绝：说清原因，别把这次启动当成一轮跑完。
+      stopPolling();
+      await switchTab("start");    // 等开始页刷新完再贴提示，否则会被刷新收起来
+      showNotice(d.start_error);
+      return;
+    }
     if (d.has_round) {
       $("rDone").textContent = d.done_count + " / " + d.total_count;
       $("rElapsed").textContent = fmtDur(d.elapsed_sec);

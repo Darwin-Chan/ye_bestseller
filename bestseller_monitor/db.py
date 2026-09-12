@@ -154,6 +154,14 @@ CREATE TABLE IF NOT EXISTS run_params (
     captured_at TEXT NOT NULL,
     config_json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS crawler_process (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    pid INTEGER NOT NULL,
+    round_id INTEGER,
+    started_at TEXT NOT NULL,
+    note TEXT
+);
 """
 
 
@@ -433,6 +441,27 @@ class Database:
             "shop_name=excluded.shop_name, shop_url=excluded.shop_url, last_seen_at=excluded.last_seen_at",
             [(s.key, s.name, s.url, now, now) for s in shops],
         )
+        self.conn.commit()
+
+    def record_crawler_process(self, pid: int, round_id: int | None, note: str | None = None) -> None:
+        """登记正在跑的采集进程（单行）。
+
+        这行只服务于「界面显示谁在跑、能不能中止它」；是不是真的有进程在跑，
+        以会话锁为准（见 single_instance）。被强杀的进程会留下这行，读到的人负责清。
+        """
+        self.conn.execute(
+            "INSERT OR REPLACE INTO crawler_process(id, pid, round_id, started_at, note) "
+            "VALUES (1, ?, ?, ?, ?)",
+            (int(pid), round_id, utcnow(), note),
+        )
+        self.conn.commit()
+
+    def crawler_process(self):
+        """正在跑的采集进程身份；没有登记时返回 None。"""
+        return self.conn.execute("SELECT * FROM crawler_process WHERE id=1").fetchone()
+
+    def clear_crawler_process(self) -> None:
+        self.conn.execute("DELETE FROM crawler_process WHERE id=1")
         self.conn.commit()
 
     def _upsert_offer_row(

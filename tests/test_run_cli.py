@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import sys
 import tempfile
 import unittest
@@ -12,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import run
+from bestseller_monitor import single_instance
 from bestseller_monitor.config import Config, Shop, effective_pages_limit
 
 
@@ -92,6 +95,34 @@ class RunCliTests(unittest.TestCase):
         self.assertEqual(cfg.max_detail_opportunities_per_round, 20)
         self.assertFalse(cfg.shuffle_within_shop)
         self.assertIsNone(cfg.pages_per_shop_override, "别的参数不该动页数覆盖")
+
+
+class RunCliBusyTests(unittest.TestCase):
+    """抢不到采集锁：命令行给可读原因 + 专用退出码，界面靠这个码提示原因（工单 02）。"""
+
+    def test_busy_crawler_reports_a_readable_reason_and_its_own_exit_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cfg_path = tmp_path / "config.toml"
+            cfg_path.write_text(MINIMAL_CONFIG, encoding="utf-8")
+            (tmp_path / "shops.csv").write_text(
+                "shop_key,shop_name,shop_url,pages,active,offer_list_url\n"
+                "A01,店一,https://a.1688.com/,3,1,\n",
+                encoding="utf-8",
+            )
+            out = io.StringIO()
+            busy = run.CrawlerAlreadyRunning("已有采集进程在运行：同一时刻只能跑一轮")
+
+            with patch.object(run, "ROOT", tmp_path), \
+                    patch.object(sys, "argv", ["run.py", "--config", str(cfg_path)]), \
+                    patch.object(run.logging, "basicConfig"), \
+                    patch.object(run.logging.handlers, "RotatingFileHandler"), \
+                    patch.object(run, "run_round", side_effect=busy):
+                with contextlib.redirect_stdout(out):
+                    code = run.main()
+
+        self.assertEqual(code, single_instance.CRAWLER_BUSY_EXIT_CODE)
+        self.assertIn("已有采集进程在运行", out.getvalue(), "命令行要给出可读原因")
 
 
 if __name__ == "__main__":

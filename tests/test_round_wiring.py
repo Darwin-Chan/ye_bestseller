@@ -9,6 +9,7 @@ from bestseller_monitor import pipeline, rounds
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import CST, Database, connect, cst_date
 from bestseller_monitor.rounds import RoundRequest, ScopeMismatch, ShopScope
+from helpers import isolated_locks
 
 SHOP_CSV_HEADER = "shop_key,shop_name,shop_url,pages,active,offer_list_url"
 
@@ -51,7 +52,7 @@ class RoundScopeWiringTests(unittest.TestCase):
 
     def _run(self, shops, cfg=None):
         cfg = cfg or self._cfg()
-        with patch.object(pipeline, "_run_pwcdp_round") as driver:
+        with isolated_locks(), patch.object(pipeline, "_run_pwcdp_round") as driver:
             pipeline.run_round(cfg, shops)
         return driver
 

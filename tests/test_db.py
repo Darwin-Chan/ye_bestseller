@@ -867,5 +867,44 @@ class DbTests(unittest.TestCase):
         old.unlink(missing_ok=True)
 
 
+class CrawlerIdentityTests(unittest.TestCase):
+    """采集进程的身份行：同一时刻至多一行，进程走了就该清掉（工单 02）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = connect(Path(self.tmp.name) / "test.db")
+        self.db = Database(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _row_count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM crawler_process").fetchone()[0]
+
+    def test_nothing_is_recorded_before_a_crawler_starts(self):
+        self.assertIsNone(self.db.crawler_process())
+
+    def test_recording_twice_keeps_one_row_with_the_latest_pid(self):
+        rid = new_round(self.db)
+        self.db.record_crawler_process(pid=4101, round_id=rid, note="run.py")
+        self.db.record_crawler_process(pid=4102, round_id=rid, note="run.py")
+
+        row = self.db.crawler_process()
+        self.assertEqual(row["pid"], 4102)
+        self.assertEqual(row["round_id"], rid)
+        self.assertEqual(self._row_count(), 1)
+        self.assertTrue(row["started_at"], "身份行要记下起点，界面才能显示")
+
+    def test_clearing_removes_the_identity(self):
+        rid = new_round(self.db)
+        self.db.record_crawler_process(pid=4101, round_id=rid)
+
+        self.db.clear_crawler_process()
+
+        self.assertIsNone(self.db.crawler_process())
+        self.assertEqual(self._row_count(), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

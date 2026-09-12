@@ -9,12 +9,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import gui
-from bestseller_monitor import browser_proc, rounds
+from bestseller_monitor import browser_proc, rounds, single_instance
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import CST, Database, connect, cst_date, DETAIL_BUDGET_NOTE
 from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
 from gui import Api
-from helpers import new_round
+from helpers import isolated_locks, new_round
 
 
 class GuiWindowHeightTests(unittest.TestCase):
@@ -184,8 +184,9 @@ class GuiLoggingTests(unittest.TestCase):
 class GuiRoundScopeTests(unittest.TestCase):
     """界面勾选店铺与命令行 --limit-shops 是同一套范围语义（工单 02）。"""
 
-    @staticmethod
-    def _api(db_path):
+    def _api(self, db_path):
+        # 锁名字按用例隔离：本机正在跑的界面/采集不该让这些用例莫名其妙地被拒。
+        self.enterContext(isolated_locks())
         api = Api.__new__(Api)
         api._lock = RLock()
         api.proc = None
@@ -322,6 +323,167 @@ class GuiRoundScopeTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(result["round_id"], rid)
             spawn.assert_called_once_with()
+
+
+class _FakeWindow:
+    """pywebview 窗口的最小替身：只为拿到关窗回调。"""
+
+    def __init__(self):
+        self.closing_handlers = []
+
+    @property
+    def events(self):
+        return SimpleNamespace(closing=self)
+
+    def __iadd__(self, handler):
+        self.closing_handlers.append(handler)
+        return self
+
+
+class GuiSingleInstanceTests(unittest.TestCase):
+    """界面单实例：已经开着一个时不再建第二个窗口（工单 01）。"""
+
+    def test_second_launch_does_not_open_a_window(self):
+        with patch.object(single_instance, "acquire", return_value=None) as acquire, \
+                patch.object(gui, "Api"), \
+                patch.object(gui.webview, "create_window") as create, \
+                patch.object(gui, "_announce_already_open") as announce:
+            code = gui.main()
+
+        acquire.assert_called_once_with(single_instance.GUI_LOCK)
+        create.assert_not_called()
+        announce.assert_called_once_with()
+        self.assertEqual(code, 0, "第二个实例要安静退出，别让启动壳弹错误框")
+
+    def test_first_launch_holds_the_interface_lock_and_releases_it(self):
+        lock = MagicMock()
+        window = _FakeWindow()
+        with patch.object(single_instance, "acquire", return_value=lock), \
+                patch.object(gui, "Api"), \
+                patch.object(gui, "_configure_gui_logging"), \
+                patch.object(gui.webview, "create_window", return_value=window), \
+                patch.object(gui.webview, "start"):
+            code = gui.main()
+
+        self.assertEqual(code, 0)
+        lock.release.assert_called_once_with()
+        self.assertEqual(len(window.closing_handlers), 1, "关窗要接上告知回调")
+
+    def test_already_open_notice_points_at_the_existing_window(self):
+        with patch.object(gui, "_focus_existing_window", return_value=False) as focus, \
+                patch.object(gui, "_notify") as notify:
+            gui._announce_already_open()
+
+        focus.assert_called_once_with(gui.WINDOW_TITLE)
+        self.assertIn("已经打开", notify.call_args.args[0])
+
+    def test_closing_warns_that_the_crawler_keeps_running(self):
+        api = SimpleNamespace(crawler_running=lambda: True)
+        with patch.object(gui, "_notify") as notify:
+            allowed = gui._warn_crawler_keeps_running(api)
+
+        self.assertTrue(allowed, "告知归告知，关窗不该被阻断")
+        self.assertIn("继续", notify.call_args.args[0])
+
+    def test_closing_says_nothing_when_nothing_is_running(self):
+        api = SimpleNamespace(crawler_running=lambda: False)
+        with patch.object(gui, "_notify") as notify:
+            allowed = gui._warn_crawler_keeps_running(api)
+
+        self.assertTrue(allowed)
+        notify.assert_not_called()
+
+
+class GuiCrawlerMutexTests(unittest.TestCase):
+    """界面与命令行共用一把采集锁：别处有采集在跑时，这里不许再起一个（工单 02）。"""
+
+    def _api(self, db_path):
+        self.enterContext(isolated_locks())
+        api = Api.__new__(Api)
+        api._lock = RLock()
+        api.proc = None
+        api.round_id = None
+        api.start_ts = None
+        api.user_paused = False
+        api._elapsed_base = 0.0
+        api._run_start_ts = None
+        api.shops = [Shop("A01", "店铺A", "https://A01.example/")]
+        api.cfg = SimpleNamespace(max_pages_per_shop=3)
+        api._open_conn = lambda: connect(db_path)
+        return api
+
+    @staticmethod
+    def _identity_row(db_path):
+        conn = connect(db_path)
+        try:
+            row = conn.execute("SELECT * FROM crawler_process WHERE id=1").fetchone()
+            return dict(row) if row is not None else None
+        finally:
+            conn.close()
+
+    def test_start_run_is_refused_while_another_crawler_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            api = self._api(Path(tmp) / "test.db")
+            holding = single_instance.acquire(single_instance.CRAWLER_LOCK)
+            try:
+                with patch.object(Api, "_spawn_crawler") as spawn:
+                    result = api.start_run(["A01"])
+            finally:
+                holding.release()
+
+            self.assertFalse(result["ok"])
+            self.assertIn("已有抓取任务在运行", result["error"])
+            spawn.assert_not_called()
+
+    def test_start_page_names_the_running_crawler(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "test.db"
+            api = self._api(db_path)
+            conn = connect(db_path)
+            try:
+                rid = new_round(Database(conn))
+                Database(conn).record_crawler_process(pid=4321, round_id=rid, note="run.py")
+            finally:
+                conn.close()
+
+            holding = single_instance.acquire(single_instance.CRAWLER_LOCK)
+            try:
+                hint = api.get_start()["start_hint"]
+            finally:
+                holding.release()
+
+            self.assertIn(f"#{rid}", hint, "要说清跑的是哪一轮")
+            self.assertIn("4321", hint, "要说清是哪个进程")
+
+    def test_a_stale_identity_row_is_ignored_and_cleaned(self):
+        """被强杀的采集会留下身份行：锁不在就不该报「有任务在跑」，顺手清掉。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "test.db"
+            api = self._api(db_path)
+            conn = connect(db_path)
+            try:
+                rid = new_round(Database(conn))
+                Database(conn).record_crawler_process(pid=4321, round_id=rid, note="run.py")
+            finally:
+                conn.close()
+
+            hint = api.get_start()["start_hint"]
+
+            self.assertNotIn("4321", hint)
+            self.assertNotIn("采集进程正在跑", hint)
+            self.assertIsNone(self._identity_row(db_path), "残留身份行要清掉")
+
+    def test_a_refused_child_reports_its_reason_instead_of_a_result_page(self):
+        api = Api.__new__(Api)
+        api._lock = RLock()
+        api.proc = SimpleNamespace(poll=lambda: single_instance.CRAWLER_BUSY_EXIT_CODE)
+        api.round_id = None
+        api.user_paused = False
+
+        data = api.get_run()
+
+        self.assertFalse(data["has_round"], "被拒绝的启动不是一轮结束")
+        self.assertIn("已有采集进程在运行", data["start_error"])
 
 
 class GuiConnectionTests(unittest.TestCase):

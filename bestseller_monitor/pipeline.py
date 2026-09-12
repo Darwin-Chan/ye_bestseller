@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
+import sys
 from collections import defaultdict
+from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-from . import browser_dp, browser_pw, dedupe, rounds
+from . import browser_dp, browser_pw, dedupe, rounds, single_instance
 from .browser_pw import DenyTracker, ShopDenyExceeded, RoundDenyExceeded
 from .config import Config, Shop, load_shops
 from .db import (
@@ -106,13 +109,33 @@ def _record_incomplete_listing(db: Database, round_id: int, shop: Shop, note: st
     log.warning("店铺 %s 榜单未完成（已发现商品保留）：%s", shop.key, note)
 
 
+class CrawlerAlreadyRunning(RuntimeError):
+    """已有采集进程在跑：同一时刻至多一个，由会话锁保证（见 single_instance）。"""
+
+
 def run_round(cfg: Config, shops: list[Shop]) -> None:
     """开始或续跑一轮。
 
     shops 是本次调用请求的店铺范围：今天已有进行中的轮次时范围必须一致，否则
     open() 拒绝；跨日则由 open() 先给旧轮按跨天中止收尾再新建。真正交给驱动的
     处理列表永远取自轮次自身，续跑不会因为配置变化而增删店铺。
+
+    「同一时刻至多一个采集进程」在这里守着：界面与命令行共用同一把会话锁，
+    抢不到的那一方抛 CrawlerAlreadyRunning，连数据库都不碰。
     """
+    lock = single_instance.acquire(single_instance.CRAWLER_LOCK)
+    if lock is None:
+        raise CrawlerAlreadyRunning(
+            "已有采集进程在运行：同一时刻只能跑一轮，等它结束或在界面里中止它。"
+        )
+    try:
+        _run_round_locked(cfg, shops)
+    finally:
+        lock.release()
+
+
+def _run_round_locked(cfg: Config, shops: list[Shop]) -> None:
+    """拿到采集锁之后真正干活的部分。"""
     cfg.ensure_dirs()
     conn = connect(cfg.db_file)
     db = Database(conn)
@@ -123,6 +146,8 @@ def run_round(cfg: Config, shops: list[Shop]) -> None:
         )
         opened = rounds.open(db, request)
         round_id = opened.round.id
+        # 身份行只给界面看「谁在跑」；是不是真的还有进程在跑以会话锁为准。
+        db.record_crawler_process(pid=os.getpid(), round_id=round_id, note=_command_note())
         log.info(
             "%s轮次 #%s（%s，%s 家店）",
             "新建" if opened.created else "续跑", round_id, request.run_date,
@@ -162,7 +187,13 @@ def run_round(cfg: Config, shops: list[Shop]) -> None:
         log.error("本轮暂停：%s", exc)
         print(f"\n>>> 本轮已暂停（可再次运行续跑）：{exc}\n")
     finally:
+        db.clear_crawler_process()
         conn.close()
+
+
+def _command_note() -> str:
+    """身份行里的命令行摘要：跨会话看见它时，能认出这是谁起的进程。"""
+    return " ".join([Path(sys.argv[0]).name, *sys.argv[1:]])[:200]
 
 
 def _run_pw_round(db: Database, cfg: Config, round_id: int, shops: list[Shop]) -> None:

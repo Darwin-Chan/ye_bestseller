@@ -21,7 +21,7 @@ from bestseller_monitor.detail import DetailParseFailed, parse_detail_html
 from bestseller_monitor.guard import InterventionTimeout, RoundPauseRequired
 from bestseller_monitor.listing import ListingLoadFailed
 from bestseller_monitor.rounds import RoundRequest, ShopScope
-from helpers import new_round
+from helpers import isolated_locks, new_round
 from tools import check_orphans
 
 
@@ -174,7 +174,7 @@ class P1Tests(unittest.TestCase):
         )
         exc = browser_pw.RoundDenyExceeded("整轮 10 分钟内 deny≥10")
 
-        with patch.object(pipeline, "_run_pwcdp_round", side_effect=exc):
+        with isolated_locks(), patch.object(pipeline, "_run_pwcdp_round", side_effect=exc):
             pipeline.run_round(cfg, [Shop("A01", "店铺A", "https://shop.example/")])
 
         conn = connect(db_path)
@@ -198,7 +198,8 @@ class P1Tests(unittest.TestCase):
             driver="pw_cdp",
             ensure_dirs=MagicMock(),
         )
-        with patch.object(pipeline, "_run_pwcdp_round", side_effect=DayBoundaryReached()):
+        with isolated_locks(), patch.object(pipeline, "_run_pwcdp_round",
+                                            side_effect=DayBoundaryReached()):
             pipeline.run_round(cfg, [Shop("A01", "店铺A", "https://shop.example/")])
 
         conn = connect(db_path)
@@ -492,8 +493,9 @@ class P1Tests(unittest.TestCase):
     def test_detail_budget_exhaustion_finishes_round_with_terminal_note(self):
         db_path = Path(self.tmp.name) / "budget-terminal.db"
         cfg = self._cfg(db_file=db_path, driver="pw_cdp", ensure_dirs=MagicMock())
-        with patch.object(pipeline, "_run_pwcdp_round",
-                          side_effect=pipeline.DetailBudgetExhausted("预算耗尽")):
+        with isolated_locks(), patch.object(
+                pipeline, "_run_pwcdp_round",
+                side_effect=pipeline.DetailBudgetExhausted("预算耗尽")):
             pipeline.run_round(cfg, [Shop("A01", "店铺A", "https://shop.example/")])
 
         conn = connect(db_path)

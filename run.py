@@ -20,9 +20,13 @@ sys.path.insert(0, str(ROOT))
 
 from bestseller_monitor.config import Config, load_shops  # noqa: E402
 from bestseller_monitor.db import Database, connect  # noqa: E402
-from bestseller_monitor.pipeline import requested_round_shops, run_round  # noqa: E402
+from bestseller_monitor.pipeline import (  # noqa: E402
+    CrawlerAlreadyRunning,
+    requested_round_shops,
+    run_round,
+)
 from bestseller_monitor.rounds import ScopeMismatch  # noqa: E402
-from bestseller_monitor import sound  # noqa: E402
+from bestseller_monitor import single_instance, sound  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -93,6 +97,11 @@ def main() -> int:
 
     try:
         run_round(cfg, shops)
+    except CrawlerAlreadyRunning as exc:
+        # 同一时刻至多一个采集进程：抢不到锁就说清楚，并用一个只表示这件事的退出码，
+        # 界面据此提示原因（launcher 与调用方不会把它当成一轮正常结束）。
+        print(f"\n>>> {exc}\n")
+        return single_instance.CRAWLER_BUSY_EXIT_CODE
     except ScopeMismatch as exc:
         print(f"\n>>> {exc}\n")
         return 3

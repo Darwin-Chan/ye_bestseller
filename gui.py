@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import ctypes
 import logging
 import logging.handlers
 import os
@@ -34,6 +35,7 @@ from bestseller_monitor.rounds import (
 )
 from bestseller_monitor import rounds
 from bestseller_monitor import browser_proc
+from bestseller_monitor import single_instance
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -56,13 +58,27 @@ def _crawler_python(exe: str | None = None) -> str:
 
 CST = timezone(timedelta(hours=8))
 
+WINDOW_TITLE = "1688 畅销品监控 · 每日库存抓取"
+
+log = logging.getLogger(__name__)
+
 # 暂停/中止后收尾浏览器：抓取进程被强杀时端口可能还没监听，短暂重试几次（IS-43）。
 _BROWSER_CLOSE_RETRY_SEC = 3.0
 _BROWSER_CLOSE_RETRY_INTERVAL = 0.7
 
+# 一句提示的 MessageBox 旗标：信息图标 + 抢到前台 + 置顶。
+_MB_ICONINFORMATION = 0x40
+_MB_SETFOREGROUND = 0x10000
+_MB_TOPMOST = 0x40000
+_SW_RESTORE = 9
 
-def _configure_gui_logging(cfg) -> logging.Handler:
-    """GUI 自己的动作也留日志——暂停/中止后的浏览器收尾否则事后无据可查（IS-43）。"""
+
+def _configure_gui_logging(cfg=None) -> logging.Handler:
+    """GUI 自己的动作也留日志——暂停/中止后的浏览器收尾否则事后无据可查（IS-43）。
+
+    不传 cfg 时写项目默认的 `logs/`：第二个实例在构造 Api 之前就被劝退了，
+    但「这次启动为什么没开窗口」同样要留底。
+    """
     logs_dir = Path(getattr(cfg, "logs_dir", PROJECT_ROOT / "logs"))
     try:
         logs_dir.mkdir(parents=True, exist_ok=True)
@@ -246,9 +262,12 @@ class Api:
                     "SELECT COUNT(*) c FROM inventory WHERE date=?", (today,)
                 ).fetchone()["c"]
                 db = Database(conn)
+                running = self.running_crawler(conn)
                 current = rounds.active_round(db, today)
                 stale = None if current is not None else rounds.active_round(db)
-                if current is not None:
+                if running is not None:
+                    hint = self._running_crawler_hint(running)
+                elif current is not None:
                     hint = (f"轮次 #{current.id} 正在进行（{current.run_date}），"
                             "点「开始抓取」会按它的店铺范围续跑。")
                 elif stale is not None:
@@ -299,7 +318,10 @@ class Api:
 
     def get_run(self) -> dict:
         with self._lock:
-            running = self.proc is not None and self.proc.poll() is None
+            if (self.proc is not None
+                    and self.proc.poll() == single_instance.CRAWLER_BUSY_EXIT_CODE):
+                return self._refused_start()
+            running = self._own_crawler_alive()
             conn = self._open_conn()
             try:
                 active = rounds.active_round(Database(conn), self._today())
@@ -370,6 +392,61 @@ class Api:
                 conn.close()
 
     # ---------- 控制 ----------
+    @staticmethod
+    def _refused_start() -> dict:
+        """子进程因为「已有采集在跑」被拒绝：说清原因，别把它当成一轮跑完。"""
+        return {
+            "running": False,
+            "manually_paused": False,
+            "has_round": False,
+            "start_error": "已有采集进程在运行：本次启动被拒绝了，等它跑完或先中止它。",
+        }
+
+    def _own_crawler_alive(self) -> bool:
+        """本界面拉起的采集子进程还活着吗。"""
+        return self.proc is not None and self.proc.poll() is None
+
+    def crawler_running(self) -> bool:
+        """有采集进程在跑吗：会话锁是权威判据，自己的子进程兜住刚拉起那一小段窗口。
+
+        与「轮次是否进行中」是两件事：暂停后的轮次仍在进行中，但已经没有采集进程。
+        """
+        if self._own_crawler_alive():
+            return True
+        return single_instance.is_held(single_instance.CRAWLER_LOCK)
+
+    def running_crawler(self, conn) -> dict | None:
+        """正在跑的采集进程身份；没有就返回 None。
+
+        锁不在而身份行还在，就是被强杀留下的残留——顺手清掉，免得启动页报一个
+        早就不存在的进程。
+        """
+        db = Database(conn)
+        row = db.crawler_process()
+        if not self.crawler_running():
+            if row is not None:
+                db.clear_crawler_process()
+            return None
+        if row is not None:
+            return dict(row)
+        return {
+            "pid": self.proc.pid if self._own_crawler_alive() else None,
+            "round_id": self.round_id,
+            "started_at": None,
+            "note": None,
+        }
+
+    @staticmethod
+    def _running_crawler_hint(running: dict) -> str:
+        """启动页在「已经有采集在跑」时说什么：谁在跑，以及点开始会被拒。"""
+        parts = [
+            f"轮次 #{running['round_id']}" if running.get("round_id") is not None else None,
+            f"PID {running['pid']}" if running.get("pid") else None,
+            f"{_fmt_hhmm(running['started_at'])} 起" if running.get("started_at") else None,
+        ]
+        who = "，".join(part for part in parts if part) or "身份未知"
+        return f"采集进程正在跑（{who}）：同一时刻只能有一个，等它跑完或先中止它。"
+
     def _spawn_crawler(self, keys: list[str] | None = None):
         """拉起采集子进程；keys 为空表示「开始或续跑」，范围由子进程按轮次决定。"""
         cmd = [_crawler_python(), str(PROJECT_ROOT / "run.py")]
@@ -403,6 +480,10 @@ class Api:
             )
             conn = self._open_conn()
             try:
+                # 有采集进程在跑就不许再起一个：界面与命令行共用同一把会话锁，
+                # 判据是环境事实，不是「本界面记不记得自己拉过子进程」。
+                if self.running_crawler(conn) is not None:
+                    return {"ok": False, "error": "已有抓取任务在运行，请先暂停或中止。"}
                 # 只读地问一句会不会被拒：今天已有轮次但范围不同就给出可读理由。
                 # 轮次本身由采集子进程创建，启动失败不会留下空的「进行中」轮次。
                 rounds.check_scope(Database(conn), request)
@@ -424,8 +505,8 @@ class Api:
     def resume_run(self) -> dict:
         """在“过程”页暂停后点击“继续”：重新拉起抓取，续跑本轮未完成店铺，并停留在过程页。"""
         with self._lock:
-            if self.proc is not None and self.proc.poll() is None:
-                return {"ok": False, "error": "抓取已在运行，无需继续。"}
+            if self.crawler_running():
+                return {"ok": False, "error": "已有抓取任务在运行，请先暂停或中止。"}
             conn = self._open_conn()
             try:
                 db = Database(conn)
@@ -595,7 +676,6 @@ def _screen_work_height() -> int | None:
     if os.name != "nt":
         return None
     try:
-        import ctypes
         from ctypes import wintypes
 
         rect = wintypes.RECT()
@@ -614,20 +694,86 @@ def _default_window_height() -> int:
     return max(_MIN_HEIGHT, min(_PREFERRED_HEIGHT, avail - _SCREEN_MARGIN))
 
 
-def main():
-    api = Api()
-    _configure_gui_logging(api.cfg)
-    html = (PROJECT_ROOT / "docs" / "ui_live.html").read_text(encoding="utf-8")
-    webview.create_window(
-        "1688 畅销品监控 · 每日库存抓取",
-        html=html,
-        js_api=api,
-        width=1120,
-        height=_default_window_height(),
-        min_size=(960, 720),
-    )
-    webview.start(debug=False)
+def _notify(text: str, title: str = "1688 畅销品监控") -> None:
+    """一句给人看的提示；弹不出来也只落日志，不算错。
+
+    与 gui_launcher 里那份刻意分开写：启动壳不能 import 项目代码（它要能独立打包）。
+    `BESTSELLER_NO_DIALOG=1` 只落日志不弹窗，与启动壳同一约定，供自动化验证用。
+    """
+    log.info(text)
+    if os.name != "nt" or (os.environ.get("BESTSELLER_NO_DIALOG") or "").strip() == "1":
+        return
+    try:
+        ctypes.windll.user32.MessageBoxW(
+            None, text, title, _MB_ICONINFORMATION | _MB_SETFOREGROUND | _MB_TOPMOST)
+    except OSError as exc:  # noqa: BLE001
+        log.warning("弹窗失败（%s）：%s", exc, text)
+
+
+def _focus_existing_window(title: str) -> bool:
+    """按标题把已有窗口叫到前面；做不到就返回 False（调用方只提示，不报错）。"""
+    if os.name != "nt":
+        return False
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        handle = user32.FindWindowW(None, title)
+        if not handle:
+            return False
+        if user32.IsIconic(handle):
+            user32.ShowWindow(handle, _SW_RESTORE)
+        return bool(user32.SetForegroundWindow(handle))
+    except OSError as exc:  # noqa: BLE001
+        log.debug("前置已有窗口失败：%s", exc)
+        return False
+
+
+def _announce_already_open() -> None:
+    """第二个实例不建窗口：告诉用户界面已经开着，并尽量把那个窗口叫到前面。"""
+    log.info("界面已经打开，本次启动不建立第二个窗口。")
+    if not _focus_existing_window(WINDOW_TITLE):
+        log.info("没能把已有窗口前置，只做提示。")
+    _notify("界面已经打开，请看已打开的那个窗口。")
+
+
+def _warn_crawler_keeps_running(api) -> bool:
+    """关窗时如果采集还在跑，如实告知；返回 True 表示照常关闭。"""
+    if not api.crawler_running():
+        return True
+    log.info("关闭界面：采集仍在后台继续，重新打开界面可以看到进度并中止它。")
+    _notify("采集仍在后台继续。\n\n重新打开界面可以看到进度并中止它。",
+            title="1688 畅销品监控 · 采集继续运行")
+    return True
+
+
+def main() -> int:
+    """界面入口：同一时刻只有一个界面窗口。
+
+    抢不到界面锁就提示已有窗口并**退出 0**——退出码 0 让 gui_launcher 保持安静，
+    因此这一条不需要重新打包 exe（ADR-0007 的「改界面不用重打包」得以保留）。
+    """
+    lock = single_instance.acquire(single_instance.GUI_LOCK)
+    if lock is None:
+        _configure_gui_logging()
+        _announce_already_open()
+        return 0
+    try:
+        api = Api()
+        _configure_gui_logging(api.cfg)
+        html = (PROJECT_ROOT / "docs" / "ui_live.html").read_text(encoding="utf-8")
+        window = webview.create_window(
+            WINDOW_TITLE,
+            html=html,
+            js_api=api,
+            width=1120,
+            height=_default_window_height(),
+            min_size=(960, 720),
+        )
+        window.events.closing += lambda: _warn_crawler_keeps_running(api)
+        webview.start(debug=False)
+    finally:
+        lock.release()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
