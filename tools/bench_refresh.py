@@ -8,8 +8,8 @@
   - --legacy：缺唯一索引的老库上，那次整表去重要多久（只在补索引时付一次）。
 
 用法：
-  python tools/is38_bench.py
-  python tools/is38_bench.py --shops 12 --rows-per-shop 25000 --repeats 3 --legacy
+  python tools/bench_refresh.py
+  python tools/bench_refresh.py --shops 12 --rows-per-shop 25000 --repeats 3 --legacy
 """
 from __future__ import annotations
 
