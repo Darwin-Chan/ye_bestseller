@@ -1,19 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
-
-datas = [('docs/ui_live.html', 'docs')]
+# 启动壳的打包配置：exe 里不放项目代码（IS-52 / ADR-0007）。
+# 它只负责推导项目根、找本机 python、拉起 <项目根>\gui.py；界面与采集都来自源码目录，
+# 所以这里既不带 webview / pythonnet，也不带 docs 与 bestseller_monitor。
+datas = []
 binaries = []
-hiddenimports = ['webview.platforms.edgechromium']
-tmp_ret = collect_all('webview')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('pythonnet')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('clr_loader')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+hiddenimports = []
 
 
 a = Analysis(
-    ['gui.py'],
+    ['gui_launcher.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,

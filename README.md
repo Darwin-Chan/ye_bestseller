@@ -11,6 +11,8 @@ python -m pip install -r requirements.txt
 python -m playwright install chromium
 ```
 
+- 界面依赖 `pywebview`（在 `requirements.txt` 里），Windows 上走 Edge WebView2 后端，需要本机有 WebView2 运行时（Win10/11 随 Edge 自带）。
+
 ## 配置
 
 - 复制 `config/shops.example.csv` 为 `config/shops.csv`，填入真实店铺 key/名称/URL。
@@ -44,6 +46,23 @@ python run.py --pages-per-shop 2 --max-detail 20 --limit-shops A01
 - 出现滑块/登录墙时程序会暂停等待人工处理。
 - 中断后可再次运行续跑；每轮只有完整完成后才参与库存差分。
 - 结果写入 `F:/AI/bestseller_runtime/data/bestseller.db`；解析失败的原始页面存 `F:/AI/bestseller_runtime/data/raw_pages/round_<轮次>/`；不再自动生成 CSV/Excel。运行数据已移出工作区（路径见 `config/config.toml`）。
+
+## 打包与运行形态
+
+双击的 `dist\bestseller_gui.exe` 是一个**启动壳**，不是自带代码的程序（决定见 [ADR-0007](docs/adr/0007-gui-exe-is-a-shell.md)）：
+
+- exe 里不含项目代码，它只推导项目根、找到本机 python、拉起 `<项目根>\gui.py`；
+- 界面 `gui.py`、页面 `docs/ui_live.html`、采集包 `bestseller_monitor`、`run.py` 全部来自源码目录，改这些文件**不需要重新打包**；
+- 项目根按 exe 位置推导（`dist` 的上一级），所以 exe 必须待在 `<项目根>\dist\`；可用环境变量 `BESTSELLER_PROJECT` 显式指定；
+- 找不到 python、缺 pywebview、界面启动即崩这类失败会弹窗说明，并在 `<项目根>\logs\gui_launcher.log` 留底（自动化验证时设 `BESTSELLER_NO_DIALOG=1`，只落日志不弹窗；`--check --check-report <路径>` 可只做推导与校验并写出 JSON 报告）。
+
+重新打包：
+
+```bash
+python tools/build_gui_exe.py
+```
+
+脚本会顺带断言产物里没有项目代码（`bestseller_monitor` / `gui`）。
 
 ## 校准说明
 

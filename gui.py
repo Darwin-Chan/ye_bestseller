@@ -1,4 +1,4 @@
-"""1688 畅销品监控 · GUI 启动器/进度/结果（pywebview + PyInstaller 单文件 exe）。
+"""1688 畅销品监控 · GUI 启动器/进度/结果（pywebview）。
 
 行为约定：
   - GUI 只做启动器/监控，抓取仍由本机 `python run.py --limit-shops=...` 子进程执行。
@@ -6,14 +6,14 @@
   - “暂停”＝终止子进程，轮次保留为“进行中”（可续跑）。
   - “中止（放弃）”＝终止子进程 + 把轮次标记为“已放弃”（数据保留、不再续跑、下次开新轮）。
   - “暂停/中止”后连带收尾本任务启动的浏览器（start_browser=true 时），避免残留 Edge（IS-43）。
-  - 依赖：本机已登录 Edge + Playwright 环境；exe 不内嵌抓取与浏览器。
+  - 依赖：本机已登录 Edge + Playwright + pywebview 环境；打包的 exe 只是启动壳，
+    界面与采集都来自源码目录（见 ADR-0007），所以改本文件不需要重新打包。
 """
 from __future__ import annotations
 
 import logging
 import logging.handlers
 import os
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -24,39 +24,35 @@ from pathlib import Path
 
 import webview
 
-
-def _is_frozen() -> bool:
-    return bool(getattr(sys, "frozen", False))
-
-
-def _project_root() -> Path:
-    if _is_frozen():
-        return Path(os.environ.get("BESTSELLER_PROJECT", r"F:/AI/projects/bestseller"))
-    return Path(__file__).resolve().parent
-
-
-def _python_exe() -> str:
-    if not _is_frozen():
-        return sys.executable
-    for cand in (os.environ.get("BESTSELLER_PYTHON"), shutil.which("python"), shutil.which("python3")):
-        if cand:
-            return cand
-    return "python"
-
-
-PROJECT_ROOT = _project_root()
-sys.path.insert(0, str(PROJECT_ROOT))
-
-from bestseller_monitor.config import Config, effective_pages_limit, load_shops  # noqa: E402
-from bestseller_monitor.db import Database, connect, cst_date, utcnow  # noqa: E402
-from bestseller_monitor.rounds import (  # noqa: E402
+from bestseller_monitor.config import Config, effective_pages_limit, load_shops
+from bestseller_monitor.db import Database, connect, cst_date, utcnow
+from bestseller_monitor.rounds import (
     RoundRequest,
     ScopeMismatch,
     ShopScope,
     TerminalReason,
 )
-from bestseller_monitor import rounds  # noqa: E402
-from bestseller_monitor import browser_proc  # noqa: E402
+from bestseller_monitor import rounds
+from bestseller_monitor import browser_proc
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def _crawler_python(exe: str | None = None) -> str:
+    """采集子进程用的解释器。
+
+    界面可能由 `pythonw` 拉起（壳优先选它，免得弹控制台窗口），采集子进程仍用带控制台的
+    `python.exe`：采集本来就靠 CREATE_NO_WINDOW 静默，不该顺手再换一种解释器。
+    """
+    exe = exe or sys.executable
+    path = Path(exe)
+    if path.stem.lower() == "pythonw":
+        console = path.with_name("python.exe")
+        if console.is_file():
+            return str(console)
+    return exe
+
 
 CST = timezone(timedelta(hours=8))
 
@@ -376,7 +372,7 @@ class Api:
     # ---------- 控制 ----------
     def _spawn_crawler(self, keys: list[str] | None = None):
         """拉起采集子进程；keys 为空表示「开始或续跑」，范围由子进程按轮次决定。"""
-        cmd = [_python_exe(), str(PROJECT_ROOT / "run.py")]
+        cmd = [_crawler_python(), str(PROJECT_ROOT / "run.py")]
         limit = ",".join(k for k in (keys or []) if k)
         if limit:
             cmd += ["--limit-shops", limit]
@@ -621,11 +617,7 @@ def _default_window_height() -> int:
 def main():
     api = Api()
     _configure_gui_logging(api.cfg)
-    here = Path(getattr(sys, "_MEIPASS", PROJECT_ROOT))
-    ui_path = here / "docs" / "ui_live.html"
-    if not ui_path.exists():
-        ui_path = PROJECT_ROOT / "docs" / "ui_live.html"
-    html = ui_path.read_text(encoding="utf-8")
+    html = (PROJECT_ROOT / "docs" / "ui_live.html").read_text(encoding="utf-8")
     webview.create_window(
         "1688 畅销品监控 · 每日库存抓取",
         html=html,

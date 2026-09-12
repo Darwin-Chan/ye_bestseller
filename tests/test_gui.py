@@ -35,6 +35,30 @@ class GuiWindowHeightTests(unittest.TestCase):
             self.assertEqual(gui._default_window_height(), 720)
 
 
+class GuiCrawlerPythonTests(unittest.TestCase):
+    """界面由 pythonw 拉起时，采集子进程仍要用带控制台的 python（IS-52 / ADR-0007）。"""
+
+    def test_swaps_pythonw_for_the_python_beside_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pythonw = Path(tmp) / "pythonw.exe"
+            pythonw.write_bytes(b"")
+            console = Path(tmp) / "python.exe"
+            console.write_bytes(b"")
+
+            self.assertEqual(gui._crawler_python(str(pythonw)), str(console))
+
+    def test_keeps_the_interpreter_when_no_console_twin_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pythonw = Path(tmp) / "pythonw.exe"
+            pythonw.write_bytes(b"")
+
+            self.assertEqual(gui._crawler_python(str(pythonw)), str(pythonw))
+
+    def test_plain_python_is_left_alone(self):
+        self.assertEqual(
+            gui._crawler_python(r"D:\Python\python.exe"), r"D:\Python\python.exe")
+
+
 class GuiResultTests(unittest.TestCase):
     def test_detail_budget_exhausted_reports_its_own_reason(self):
         with tempfile.TemporaryDirectory() as tmp:
