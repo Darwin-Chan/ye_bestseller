@@ -4,9 +4,11 @@
   - GUI 只做启动器/监控，抓取仍由本机 `python run.py --limit-shops=...` 子进程执行。
   - GUI 读 data/bestseller.db 展示“今日/各店”数据；过程页上一次刷新回来之后才排下一次
     （节拍约 2 秒），慢查询不会把请求堆起来，暂停/中止也不必排在它们后面（IS-38）。
-  - “暂停”＝终止子进程，轮次保留为“进行中”（可续跑）。
-  - “中止（放弃）”＝终止子进程 + 把轮次标记为“已放弃”（数据保留、不再续跑、下次开新轮）。
-  - “暂停/中止”后连带收尾本任务启动的浏览器（start_browser=true 时），避免残留 Edge（IS-43）。
+  - “暂停”＝写下停止请求，轮次保留为“进行中”（可续跑）。
+  - “中止（放弃）”＝先把轮次标记为“已放弃”，再停止进程（数据保留、不再续跑、下次开新轮）。
+  - 两者都先请求协作停止：采集进程在检查点上自己收尾（关浏览器、清身份行、释放采集锁）。
+    窗口内没停下（8 秒；收到回执后 10 秒）才强制结束并连带收尾本任务启动的浏览器
+    （ADR-0009；归属判定见 IS-43）。
   - 依赖：本机已登录 Edge + Playwright + pywebview 环境；打包的 exe 只是启动壳，
     界面与采集都来自源码目录（见 ADR-0007），所以改本文件不需要重新打包。
 """
@@ -37,6 +39,7 @@ from bestseller_monitor.rounds import (
 from bestseller_monitor import rounds
 from bestseller_monitor import browser_proc
 from bestseller_monitor import single_instance
+from bestseller_monitor import stop_request
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -66,6 +69,16 @@ log = logging.getLogger(__name__)
 # 暂停/中止后收尾浏览器：抓取进程被强杀时端口可能还没监听，短暂重试几次（IS-43）。
 _BROWSER_CLOSE_RETRY_SEC = 3.0
 _BROWSER_CLOSE_RETRY_INTERVAL = 0.7
+
+# 协作停止的窗口（ADR-0009）：请求发出后 8 秒还没停下就强制结束；采集进程回执之后
+# 再给 10 秒，让它把浏览器会话关干净。这一跳由轮询驱动，关掉界面就没有兜底了。
+_STOP_GRACE_SEC = 8.0
+_STOP_ACK_GRACE_SEC = 10.0
+
+# 停止的种类。「暂停」写进 stop_requests 的 kind；「中止」不用请求行——轮次终态
+# 本身就是停止信号，这里只是一个内存里的标记（ADR-0009）。
+_STOP_PAUSE = stop_request.PAUSE
+_STOP_ABORT = "abort"
 
 # 一句提示的 MessageBox 旗标：信息图标 + 抢到前台 + 置顶。
 _MB_ICONINFORMATION = 0x40
@@ -177,6 +190,10 @@ def _duration_seconds(started_at: str | None, finished_at: str | None) -> float 
 class Api:
     """暴露给 pywebview 前端的方法。返回 JSON 可序列化的基本类型。"""
 
+    # 正在进行的停止（ADR-0009）在 __init__ 里赋值；类级默认让测试夹具可以用
+    # Api.__new__ 造半个实例只测某一个入口（见 tests/test_gui.py）。
+    _stop: dict | None = None
+
     def __init__(self):
         self.cfg = Config.from_file(PROJECT_ROOT / "config" / "config.toml", root=PROJECT_ROOT)
         self.shops = [s for s in load_shops(self.cfg.shop_csv) if s.active]
@@ -187,6 +204,8 @@ class Api:
         self.user_paused = False
         self._elapsed_base = 0.0
         self._run_start_ts: float | None = None
+        # 正在进行的停止：{"kind", "target", "deadline", "acked", "round_id"}（ADR-0009）
+        self._stop: dict | None = None
 
     # ---------- 基础 ----------
     def _open_conn(self) -> sqlite3.Connection:
@@ -258,6 +277,7 @@ class Api:
         with self._lock:
             conn = self._open_conn()
             try:
+                self._enforce_stop_deadline(conn)
                 today = self._today()
                 ov_products = conn.execute(
                     "SELECT COUNT(DISTINCT offer_id) c FROM inventory WHERE date=?", (today,)
@@ -289,6 +309,7 @@ class Api:
                     "total_shops": len(self.shops),
                     "start_hint": hint,
                     "crawler": running,
+                    "stopping": self._stop_state(conn),
                 }
             finally:
                 conn.close()
@@ -329,9 +350,12 @@ class Api:
             running = self._own_crawler_alive()
             conn = self._open_conn()
             try:
+                self._enforce_stop_deadline(conn)
+                stopping = self._stop_state(conn)
                 active = rounds.active_round(Database(conn), self._today())
                 if active is None:
-                    return {"running": running, "manually_paused": self.user_paused, "has_round": False}
+                    return {"running": running, "manually_paused": self.user_paused,
+                            "has_round": False, "stopping": stopping}
                 rid = active.id
                 # 轮次由采集子进程创建，界面在这里随轮询认领它。
                 self.round_id = rid
@@ -381,6 +405,7 @@ class Api:
                 return {
                     "running": running,
                     "manually_paused": self.user_paused,
+                    "stopping": stopping,
                     "has_round": True,
                     "round_id": rid,
                     "started_hhmm": _fmt_hhmm(started_at),
@@ -488,6 +513,9 @@ class Api:
                 # 判据是环境事实，不是「本界面记不记得自己拉过子进程」。
                 if self.crawler_identity(conn) is not None:
                     return {"ok": False, "error": _BUSY_ERROR}
+                # 上一次停止的残留不该影响这一轮：请求按进程认领，这里顺手清干净。
+                Database(conn).clear_stop_request()
+                self._stop = None
                 # 只读地问一句会不会被拒：今天已有轮次但范围不同就给出可读理由。
                 # 轮次本身由采集子进程创建，启动失败不会留下空的「进行中」轮次。
                 rounds.check_scope(Database(conn), request)
@@ -514,6 +542,9 @@ class Api:
             conn = self._open_conn()
             try:
                 db = Database(conn)
+                # 同上：本界面记着的停止状态到此为止，新起的采集进程不该受它影响。
+                db.clear_stop_request()
+                self._stop = None
                 current = rounds.active_round(db, self._today())
                 if current is None:
                     stale = rounds.active_round(db)
@@ -544,43 +575,69 @@ class Api:
             return {"ok": True, "round_id": rid}
 
     def pause_run(self) -> dict:
+        """暂停：写下停止请求，采集进程在下一个检查点自己停下（ADR-0009）。
+
+        这一跳不阻塞、也不杀进程：请求写完就返回，倒计时与超时兜底交给轮询。
+        """
         with self._lock:
             self.user_paused = True
-            self._kill_proc()
-            self._kill_browser()
             if self._run_start_ts is not None:
                 self._elapsed_base += time.time() - self._run_start_ts
                 self._run_start_ts = None
-            return {"ok": True}
-
-    def abort_run(self) -> dict:
-        """中止：先让采集进程停下，再把轮次收尾为「人工放弃」。
-
-        停的可能是本界面拉起的子进程，也可能是别处起的（命令行、上一次界面留下的）——
-        顺序必须是先停进程、再写终态：反过来会撞上「不同终态不得覆盖」，那一轮就收不了尾。
-        """
-        with self._lock:
-            self.user_paused = False
-            self._kill_proc()
-            self._kill_browser()
-            if self.round_id is None and not self.any_crawler_running():
-                return {"ok": True}  # 没起过任务、也没有采集在跑：不必连库
             conn = self._open_conn()
             try:
                 db = Database(conn)
+                if not self._own_crawler_alive():
+                    db.clear_stop_request()   # 没在跑：顺手清掉上一条残留
+                    return {"ok": True}
+                target = self._stop_target(conn)
+                if target is None:
+                    # 身份行还没登记（子进程刚拉起的那一小段）：退回强制结束，
+                    # 此时它连浏览器都还没起，不会留下孤儿。
+                    log.info("暂停：拿不到采集进程身份，直接结束子进程。")
+                    self._kill_proc()
+                    self._kill_browser()
+                    return {"ok": True}
+                db.request_stop(round_id=self.round_id, kind=_STOP_PAUSE,
+                                target_pid=target["pid"],
+                                target_started_at=target["started_at"])
+                self._begin_stop(_STOP_PAUSE, target, self.round_id)
+                log.info("暂停：已写下停止请求（目标 PID %s），等它自己停下。", target["pid"])
+                return {"ok": True, "stopping": self._stop_state(conn)}
+            finally:
+                conn.close()
+
+    def abort_run(self) -> dict:
+        """中止：先把轮次收尾为「人工放弃」，再等采集进程自己停下（ADR-0009）。
+
+        顺序是「先写终态、再停止进程」：终态本身就是停止信号，采集进程在下一个
+        检查点自己收尾（关浏览器、清身份行、释放采集锁）；先杀进程反而让这条通道
+        永远走不到，事后也没人知道它停在哪一步。窗口内没停下才强杀。
+        停的可能是本界面拉起的子进程，也可能是别处起的（命令行、上一次界面留下的）。
+        """
+        with self._lock:
+            self.user_paused = False
+            conn = self._open_conn()
+            try:
+                db = Database(conn)
+                # 中止压过暂停：留下的暂停请求会让采集进程把这次停止说成「暂停」。
+                db.clear_stop_request()
                 identity = self.crawler_identity(conn)
-                self._stop_crawler_process(identity)
+                if self.round_id is None and identity is None:
+                    self._stop = None
+                    return {"ok": True}  # 没起过任务、也没有采集在跑：不必连库
                 rid = self._round_to_abandon(db, identity)
                 if rid is not None:
                     rounds.finish_if_open(db, rounds.load(db, rid), TerminalReason.ABANDONED,
                                           note="GUI 人工中止（放弃）")
-                # 身份行只在进程真的走了之后才清：停不掉时留着它，下次还知道是谁在跑，
-                # 也还能再试一次。锁在不在是权威判据（进程没了，内核就把锁放了）。
-                if not self.any_crawler_running():
-                    db.clear_crawler_process()
+                if identity is None:
+                    self._stop = None
+                    return {"ok": True, "round_id": rid}   # 采集进程已经不在了
+                self._begin_stop(_STOP_ABORT, self._stop_target(conn), rid)
+                log.info("中止：轮次 #%s 已收尾为人工放弃，等采集进程自己停下。", rid)
+                return {"ok": True, "round_id": rid, "stopping": self._stop_state(conn)}
             finally:
                 conn.close()
-            return {"ok": True, "round_id": rid}
 
     def _round_to_abandon(self, db, identity: dict | None) -> int | None:
         """该收尾哪一轮：身份行里正在跑的 > 本界面记着的 > 今天进行中的。
@@ -636,16 +693,100 @@ class Api:
                 return pid
             time.sleep(_BROWSER_CLOSE_RETRY_INTERVAL)
 
+    # ---------- 停止：先请求，超时才强杀（ADR-0009） ----------
+    @staticmethod
+    def _stop_target(conn) -> dict | None:
+        """这次停止针对哪个进程：库里那条身份行（谁在跑由它说话）。
+
+        目标身份是 (PID, 启动时刻)，采集进程只认领对得上自己的请求——拿不到它
+        就退化成没有回执的窗口，到点强杀。
+        """
+        row = conn.execute("SELECT pid, started_at FROM crawler_process WHERE id=1").fetchone()
+        if row is None or not row["pid"] or not row["started_at"]:
+            return None
+        return {"pid": int(row["pid"]), "started_at": row["started_at"]}
+
+    def _begin_stop(self, kind: str, target: dict | None, round_id: int | None) -> None:
+        """记下「正在停止」，到点由轮询兜底（不新增后台线程，也不挡住取数链）。"""
+        self._stop = {
+            "kind": kind,
+            "target": target,
+            "round_id": round_id,
+            "deadline": time.time() + _STOP_GRACE_SEC,
+            "acked": False,
+        }
+
+    def _stop_state(self, conn) -> str | None:
+        """给界面看的停止阶段：没有停止在进行时是 None。"""
+        if self._stop is None:
+            return None
+        return "closing" if self._stop["acked"] else "stopping"
+
+    def _enforce_stop_deadline(self, conn) -> None:
+        """停止窗口到点还没停下就强制结束；已经停下就把状态收干净。
+
+        由三个取数入口的轮询驱动（IS-38 同一条链），所以关掉界面之后就没有这一半，
+        只剩采集进程自己读停止请求那一半——见 ADR-0009 的代价一节。
+        """
+        stop = self._stop
+        if stop is None:
+            return
+        db = Database(conn)
+        self._note_stop_ack(db, stop)
+        if not self.any_crawler_running():
+            log.info("采集进程已停下（%s）。", stop["kind"])
+            db.clear_stop_request()
+            self._stop = None
+            return
+        if time.time() < stop["deadline"]:
+            return
+        self._force_stop(conn, db, stop)
+
+    @staticmethod
+    def _note_stop_ack(db, stop: dict) -> None:
+        """采集进程回执了就放宽窗口：它在收尾，而不是没响应。"""
+        if stop["acked"] or stop["target"] is None:
+            return
+        request = db.stop_request()
+        if request is None:
+            return
+        if (int(request["target_pid"]) != stop["target"]["pid"]
+                or request["target_started_at"] != stop["target"]["started_at"]):
+            return
+        if request["ack_at"]:
+            stop["acked"] = True
+            stop["deadline"] = time.time() + _STOP_ACK_GRACE_SEC
+            log.info("采集进程已回执停止请求，再等 %.0f 秒收尾。", _STOP_ACK_GRACE_SEC)
+
+    def _force_stop(self, conn, db, stop: dict) -> None:
+        """强制停止：强杀进程 → 按归属收尾浏览器 → 清停止请求 → 收尾状态。"""
+        log.warning("停止窗口内没停下（%s），强制结束采集进程。", stop["kind"])
+        self._kill_proc()
+        identity = self.crawler_identity(conn)
+        if stop["kind"] == _STOP_ABORT and identity is not None:
+            # 中止要停的可能是别处起的采集：按身份行里的 PID 停，镜像名先核过。
+            self._stop_crawler_process(identity)
+        self._kill_browser()
+        if self.any_crawler_running():
+            # 强杀没落到实处：请求留着，采集进程在下一个检查点仍会自己停下。
+            log.warning("强制结束之后采集进程仍在跑，停止请求留在库里等它自己认领。")
+        else:
+            db.clear_crawler_process()
+            db.clear_stop_request()
+        self._stop = None
+
     # ---------- 结果页 ----------
     def get_result(self) -> dict:
         with self._lock:
             conn = self._open_conn()
             try:
+                self._enforce_stop_deadline(conn)
+                stopping = self._stop_state(conn)
                 db = Database(conn)
                 run = (rounds.load(db, self.round_id) if self.round_id is not None
                        else rounds.latest(db, finished=True))
                 if run is None:
-                    return {"has_round": False}
+                    return {"has_round": False, "stopping": stopping}
                 rid = run.id
                 dur = _duration_seconds(run.started_at, run.finished_at)
                 if dur is None and rid == self.round_id:
@@ -693,6 +834,7 @@ class Api:
                 return {
                     "has_round": True,
                     "round_id": rid,
+                    "stopping": stopping,
                     "reason": run.reason.value if run.reason is not None else None,
                     "started_hhmm": _fmt_hhmm(run.started_at),
                     "finished_hhmm": _fmt_hhmm(run.finished_at),

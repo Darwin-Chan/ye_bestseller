@@ -168,6 +168,17 @@ CREATE TABLE IF NOT EXISTS crawler_process (
     started_at TEXT NOT NULL,
     note TEXT
 );
+
+CREATE TABLE IF NOT EXISTS stop_requests (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    round_id INTEGER,
+    kind TEXT NOT NULL,
+    target_pid INTEGER NOT NULL,
+    target_started_at TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    ack_at TEXT,
+    note TEXT
+);
 """
 
 # 同一轮、店铺、商品和 SKU 至多一条成功快照：靠唯一索引保证（见 connect() 的迁移）。
@@ -475,18 +486,22 @@ class Database:
         )
         self.conn.commit()
 
-    def record_crawler_process(self, pid: int, round_id: int | None, note: str | None = None) -> None:
-        """登记正在跑的采集进程（单行）。
+    def record_crawler_process(self, pid: int, round_id: int | None,
+                               note: str | None = None) -> str:
+        """登记正在跑的采集进程（单行），返回这行的启动时刻。
 
         这行只服务于「界面显示谁在跑、能不能中止它」；是不是真的有进程在跑，
         以会话锁为准（见 single_instance）。被强杀的进程会留下这行，读到的人负责清。
+        停止请求按 (pid, 启动时刻) 认领（ADR-0009），所以调用方要留住这个时刻。
         """
+        started_at = utcnow()
         self.conn.execute(
             "INSERT OR REPLACE INTO crawler_process(id, pid, round_id, started_at, note) "
             "VALUES (1, ?, ?, ?, ?)",
-            (int(pid), round_id, utcnow(), note),
+            (int(pid), round_id, started_at, note),
         )
         self.conn.commit()
+        return started_at
 
     def crawler_process(self):
         """正在跑的采集进程身份；没有登记时返回 None。"""
@@ -495,6 +510,50 @@ class Database:
     def clear_crawler_process(self) -> None:
         self.conn.execute("DELETE FROM crawler_process WHERE id=1")
         self.conn.commit()
+
+    def request_stop(self, *, round_id: int | None, kind: str, target_pid: int,
+                     target_started_at: str, note: str | None = None) -> None:
+        """写一条停止请求（单行）：只对目标进程有效。
+
+        后写的覆盖先写的——同一时刻至多一个采集进程，所以表里留一行就够。
+        """
+        self.conn.execute(
+            "INSERT OR REPLACE INTO stop_requests"
+            "(id, round_id, kind, target_pid, target_started_at, requested_at, ack_at, note) "
+            "VALUES (1, ?, ?, ?, ?, ?, NULL, ?)",
+            (round_id, kind, int(target_pid), target_started_at, utcnow(), note),
+        )
+        self.conn.commit()
+
+    def stop_request(self):
+        """当前挂着的停止请求；没有就返回 None。"""
+        return self.conn.execute("SELECT * FROM stop_requests WHERE id=1").fetchone()
+
+    def ack_stop_request(self, *, target_pid: int, target_started_at: str) -> bool:
+        """回执：采集进程收到请求了。只回执给对得上的那一行，返回是否真的写进去。
+
+        只有第一次回执算数，界面据此起算「正在收尾」的窗口。
+        """
+        cur = self.conn.execute(
+            "UPDATE stop_requests SET ack_at=? WHERE id=1 AND target_pid=? "
+            "AND target_started_at=? AND ack_at IS NULL",
+            (utcnow(), int(target_pid), target_started_at),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def clear_stop_request(self, *, target_pid: int | None = None,
+                           target_started_at: str | None = None) -> int:
+        """删掉停止请求；给了目标就只删指向它的那条。返回删掉的行数。"""
+        if target_pid is None:
+            cur = self.conn.execute("DELETE FROM stop_requests WHERE id=1")
+        else:
+            cur = self.conn.execute(
+                "DELETE FROM stop_requests WHERE id=1 AND target_pid=? AND target_started_at=?",
+                (int(target_pid), target_started_at),
+            )
+        self.conn.commit()
+        return cur.rowcount
 
     def _upsert_offer_row(
         self,

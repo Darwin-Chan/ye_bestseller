@@ -10,6 +10,7 @@ import logging
 import time
 
 from . import sound
+from . import stop_request
 
 log = logging.getLogger(__name__)
 
@@ -133,11 +134,16 @@ def deny_resolved(page) -> bool:
 
 def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | None = None,
                         confirm_sec: float = 2.0) -> None:
-    """需要人工介入时：先过确认窗口过滤瞬时报错信号，再持续响铃直到解决。"""
+    """需要人工介入时：先过确认窗口过滤瞬时报错信号，再持续响铃直到解决。
+
+    每一轮都问一次「该不该停」（ADR-0009）：这时用户最可能去按界面上的暂停，
+    而最长可等 human_pause_minutes 分钟，不打断就会把停止拖成十分钟。
+    """
     vtype_name = verification_type or "slider"
     # 确认窗口：短暂出现又自行消失的信号（如 tmd/x5sec 上报）不算真正的人工介入
     confirm_deadline = time.time() + max(0.0, confirm_sec)
     while time.time() < confirm_deadline:
+        stop_request.check()
         if resolved(page):
             log.debug("人工介入信号瞬时就消失，判定为误报，忽略")
             return
@@ -159,6 +165,7 @@ def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | 
     appear_ts = time.time()
     deadline = time.time() + minutes * 60
     while True:
+        stop_request.check()
         if resolved(page):
             if emit:
                 emit("verification_solved", kind="verification", verification_type=vtype_name,

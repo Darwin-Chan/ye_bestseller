@@ -18,6 +18,7 @@ from .db import (
     DayBoundaryReached,
     utcnow,
 )
+from . import stop_request
 
 _ROUND_COLUMNS = "id, run_date, terminal_reason, started_at, finished_at"
 
@@ -233,10 +234,13 @@ def load(db: Database, round_id: int) -> Round:
 def ensure_workable(db: Database, round_id: int, now) -> None:
     """开始一件新的采集工作之前问一次轮次；该停就抛 DayBoundaryReached。
 
-    判据本身是 Round.stops_work()，这里只是给只有轮次编号的调用方一个入口。
+    两层判据，顺序固定：轮次自己的（已终态、跨日、过截止线）优先——它更权威，
+    而且中止正是靠终态通知采集进程的；轮次还允许干活时，再看有没有指向本进程的
+    停止请求（暂停）。长睡眠上的切片问的也是这一个入口，见 `stop_request.check()`。
     """
     if load(db, round_id).stops_work(now):
         raise DayBoundaryReached()
+    stop_request.consume(db)
 
 
 def scope_shops(db: Database, round_id: int) -> tuple[ShopScope, ...]:

@@ -114,13 +114,19 @@ class GuiResultTests(unittest.TestCase):
         self.assertEqual(gui._terminal_text(None), ("进行中", "本轮仍在进行；未抓取店铺见下方。"))
 
 
-class GuiBrowserCleanupTests(unittest.TestCase):
-    """暂停 / 中止后收尾本任务启动的浏览器：抓取进程被强杀不会执行它的 finally（IS-43）。"""
+class GuiStopRequestTests(unittest.TestCase):
+    """暂停／中止都先请求协作停止，窗口内没停下才强杀（ADR-0009）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.db_path = Path(self.tmp.name) / "test.db"
+        # 锁名字按用例隔离：这些用例要看「有没有采集在跑」，那是机器级锁——本机真跑着
+        # 界面/采集时，用例会莫名其妙地连库、撞上「已有任务在运行」。
+        self.enterContext(isolated_locks())
+        self.api = self._api()
 
     def _api(self, start_browser=True, attach_port=9222):
-        # 锁名字按用例隔离：中止要看「有没有采集在跑」，那是机器级锁——本机真跑着
-        # 界面/采集时，这些用例会莫名其妙地连库、撞上「已有任务在运行」。
-        self.enterContext(isolated_locks())
         api = Api.__new__(Api)
         api._lock = RLock()
         api.proc = None
@@ -128,42 +134,153 @@ class GuiBrowserCleanupTests(unittest.TestCase):
         api.user_paused = False
         api._elapsed_base = 0.0
         api._run_start_ts = None
-        api.cfg = SimpleNamespace(start_browser=start_browser, attach_port=attach_port)
+        api._stop = None
+        api.shops = [Shop("A01", "店铺A", "https://A01.example/")]
+        api.cfg = SimpleNamespace(max_pages_per_shop=3, start_browser=start_browser,
+                                  attach_port=attach_port)
+        api._open_conn = lambda: connect(self.db_path)
         return api
 
-    def test_pause_closes_browser_launched_by_the_task(self):
-        api = self._api()
+    def _running_crawler(self, pid: int = 6104) -> tuple[int, str]:
+        """造出「本界面拉起的采集进程在跑」：占住会话锁 + 身份行 + 活着的子进程句柄。"""
+        conn = connect(self.db_path)
+        try:
+            db = Database(conn)
+            rid = new_round(db, "A01")
+            started_at = db.record_crawler_process(pid=pid, round_id=rid, note="run.py")
+        finally:
+            conn.close()
+        self.lock = single_instance.acquire(single_instance.CRAWLER_LOCK)
+        self.addCleanup(self.lock.release)
+        proc = MagicMock()
+        proc.poll.return_value = None
+        self.api.proc = proc
+        self.api.round_id = rid
+        return rid, started_at
+
+    def _dies(self):
+        """「强杀」真的生效：内核释放会话锁，子进程变成已退出。"""
+        def kill():
+            self.lock.release()
+            self.api.proc.poll.return_value = 1
+        return kill
+
+    def _request_row(self):
+        conn = connect(self.db_path)
+        try:
+            row = conn.execute("SELECT * FROM stop_requests WHERE id=1").fetchone()
+            return dict(row) if row is not None else None
+        finally:
+            conn.close()
+
+    def _acknowledge(self) -> None:
+        conn = connect(self.db_path)
+        try:
+            db = Database(conn)
+            request = db.stop_request()
+            db.ack_stop_request(target_pid=request["target_pid"],
+                                target_started_at=request["target_started_at"])
+        finally:
+            conn.close()
+
+    def test_pause_writes_a_stop_request_instead_of_killing(self):
+        rid, started_at = self._running_crawler()
+
         with patch.object(Api, "_kill_proc") as kill_proc, \
+                patch.object(browser_proc, "close_browser") as close:
+            result = self.api.pause_run()
+
+        kill_proc.assert_not_called()
+        close.assert_not_called()
+        self.assertEqual(result["stopping"], "stopping")
+        request = self._request_row()
+        self.assertEqual(request["kind"], "pause")
+        self.assertEqual(request["round_id"], rid)
+        self.assertEqual(request["target_pid"], 6104)
+        self.assertEqual(request["target_started_at"], started_at,
+                         "目标身份是 (PID, 启动时刻)：新起的进程不该被旧请求影响")
+        self.assertIsNone(request["ack_at"], "还没人认领")
+        self.assertTrue(self.api.user_paused)
+
+    def test_pause_deadline_forces_the_stop_and_closes_the_browser(self):
+        self._running_crawler()
+
+        with patch.object(Api, "_kill_proc", side_effect=self._dies()) as kill_proc, \
                 patch.object(browser_proc, "close_browser", return_value=6104) as close:
-            api.pause_run()
+            self.api.pause_run()
+            self.api._stop["deadline"] = time.time() - 1
+            self.api.get_run()      # 轮询驱动兜底，不新增后台线程
 
         kill_proc.assert_called_once_with()
         close.assert_called_once_with(9222, launched_by_us=True)
+        self.assertIsNone(self.api._stop)
+        self.assertIsNone(self._request_row(), "停下之后不该留着停止请求")
 
-    def test_abort_closes_browser_launched_by_the_task(self):
-        api = self._api()
-        with patch.object(Api, "_kill_proc"), \
-                patch.object(browser_proc, "close_browser", return_value=6104) as close:
-            api.abort_run()
+    def test_pause_acknowledgement_widens_the_window_and_reports_closing(self):
+        self._running_crawler()
 
-        close.assert_called_once_with(9222, launched_by_us=True)
+        with patch.object(Api, "_kill_proc") as kill_proc, \
+                patch.object(browser_proc, "close_browser"):
+            self.api.pause_run()
+            self._acknowledge()
+            self.api._stop["deadline"] = time.time() - 1   # 原窗口已经到点
+            data = self.api.get_run()
+
+        kill_proc.assert_not_called()
+        self.assertEqual(data["stopping"], "closing", "回执之后是在收尾，不是在等响应")
 
     def test_pause_keeps_user_browser_when_attaching(self):
-        api = self._api(start_browser=False)
-        with patch.object(Api, "_kill_proc"), \
+        self.api = self._api(start_browser=False)
+        self._running_crawler()
+
+        with patch.object(Api, "_kill_proc", side_effect=self._dies()), \
                 patch.object(browser_proc, "close_browser") as close:
-            api.pause_run()
+            self.api.pause_run()
+            self.api._stop["deadline"] = time.time() - 1
+            self.api.get_run()
 
         close.assert_not_called()
 
+    def test_pause_without_an_identity_ends_the_process_directly(self):
+        """子进程刚拉起、身份行还没登记：没有可认领的目标，只能直接结束它。"""
+        proc = MagicMock()
+        proc.poll.return_value = None
+        self.api.proc = proc
+
+        with patch.object(Api, "_kill_proc") as kill_proc, \
+                patch.object(browser_proc, "close_browser", return_value=1) as close:
+            result = self.api.pause_run()
+
+        kill_proc.assert_called_once_with()
+        close.assert_called_once_with(9222, launched_by_us=True)
+        self.assertIsNone(self._request_row())
+        self.assertNotIn("stopping", result)
+
+    def test_starting_again_clears_a_leftover_stop_request(self):
+        rid, started_at = self._running_crawler()
+        self.api.proc = None
+        self.lock.release()          # 采集进程已经走了，只剩表里那条请求
+        conn = connect(self.db_path)
+        try:
+            Database(conn).request_stop(round_id=rid, kind=gui._STOP_PAUSE,
+                                        target_pid=6104, target_started_at=started_at)
+        finally:
+            conn.close()
+
+        with patch.object(Api, "_spawn_crawler"):
+            result = self.api.start_run(["A01"])
+
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertIsNone(self._request_row())
+        self.assertIsNone(self.api._stop)
+
     def test_browser_cleanup_waits_for_a_browser_that_starts_late(self):
         """刚启动就被暂停时端口还没监听，收尾要短暂重试。"""
-        api = self._api()
         with patch.object(gui, "_BROWSER_CLOSE_RETRY_SEC", 5.0), \
                 patch.object(gui.time, "sleep") as sleep, \
                 patch.object(browser_proc, "close_browser",
                              side_effect=[None, 4242]) as close:
-            pid = api._kill_browser()
+            pid = self.api._kill_browser()
 
         self.assertEqual(pid, 4242)
         self.assertEqual(close.call_count, 2)
@@ -504,6 +621,7 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         self.api.proc = None
         self.api.round_id = None
         self.api.user_paused = False
+        self.api._stop = None
         self.api.shops = [Shop("A01", "店铺A", "https://A01.example/")]
         # start_browser=False：中止只收尾采集进程，不去动用户的浏览器（那一路由 IS-43 的测试盯）。
         self.api.cfg = SimpleNamespace(max_pages_per_shop=3, start_browser=False)
@@ -543,7 +661,7 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_abort_stops_the_process_before_writing_the_terminal_state(self):
+    def test_abort_writes_the_terminal_state_and_then_stops_the_process(self):
         rid = self._running_crawler()
         seen = {}
 
@@ -556,10 +674,17 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         with patch.object(browser_proc, "process_image_name", return_value="python.exe"), \
                 patch.object(browser_proc, "terminate_process_tree", side_effect=kill):
             result = self.api.abort_run()
+            self.assertEqual(self._row("terminal_reason"), "ABANDONED",
+                             "先写终态：它本身就是停止信号（ADR-0009）")
+            self.assertEqual(seen, {}, "窗口还没到，不许先杀")
+            self.api._stop["deadline"] = time.time() - 1
+            self.api.get_start()      # 轮询驱动兜底
 
         self.assertTrue(result["ok"])
+        self.assertEqual(result["stopping"], "stopping")
         self.assertEqual(seen["pid"], 4321, "停下来的是身份行里那个进程")
-        self.assertIsNone(seen["reason_at_kill_time"], "顺序：先停进程，再写终态")
+        self.assertEqual(seen["reason_at_kill_time"], "ABANDONED",
+                         "强杀发生在终态写好之后")
         self.assertEqual(self._row("terminal_reason"), "ABANDONED")
         self.assertEqual(self._row("note"), "GUI 人工中止（放弃）")
         self.assertIsNone(self._row("pid", "crawler_process"), "身份行要清掉")
@@ -571,6 +696,8 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         with patch.object(browser_proc, "process_image_name", return_value=""), \
                 patch.object(browser_proc, "terminate_process_tree") as kill:
             result = self.api.abort_run()
+            self.api._stop["deadline"] = time.time() - 1
+            self.api.get_start()
 
         self.assertTrue(result["ok"])
         kill.assert_not_called()
@@ -583,6 +710,8 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         with patch.object(browser_proc, "process_image_name", return_value=""), \
                 patch.object(browser_proc, "terminate_process_tree") as kill:
             self.api.abort_run()
+            self.api._stop["deadline"] = time.time() - 1
+            self.api.get_start()
 
         kill.assert_not_called()
         self.assertEqual(self._row("pid", "crawler_process"), 4321,
@@ -595,6 +724,8 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         with patch.object(browser_proc, "process_image_name", return_value="msedge.exe"), \
                 patch.object(browser_proc, "terminate_process_tree") as kill:
             result = self.api.abort_run()
+            self.api._stop["deadline"] = time.time() - 1
+            self.api.get_start()
 
         self.assertTrue(result["ok"])
         kill.assert_not_called()

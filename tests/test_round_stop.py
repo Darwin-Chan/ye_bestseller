@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -5,9 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_pw, pipeline, rounds
+from bestseller_monitor import browser_pw, pipeline, rounds, stop_request
 from bestseller_monitor.config import Shop
-from bestseller_monitor.db import CST, Database, DayBoundaryReached, connect
+from bestseller_monitor.db import CST, Database, DayBoundaryReached, connect, cst_date
 from bestseller_monitor.rounds import RoundRequest, ShopScope
 
 
@@ -26,6 +27,7 @@ class RoundStopRuleTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.conn = connect(Path(self.tmp.name) / "test.db")
         self.db = Database(self.conn)
+        self.addCleanup(stop_request.uninstall)
 
     def tearDown(self):
         self.conn.close()
@@ -156,3 +158,79 @@ class RoundStopRuleTests(unittest.TestCase):
                 )
 
         click.assert_not_called()
+
+    def _request_pause(self, round_id: int) -> None:
+        """模拟界面那一跳：按身份行里的目标进程写一条暂停请求（ADR-0009）。"""
+        identity = self.db.crawler_process()
+        started_at = (identity["started_at"] if identity is not None
+                      else self.db.record_crawler_process(
+                          pid=os.getpid(), round_id=round_id, note="test"))
+        self.db.request_stop(round_id=round_id, kind=stop_request.PAUSE,
+                             target_pid=os.getpid(), target_started_at=started_at)
+
+    def test_click_path_stops_when_the_interface_asks_for_a_pause(self):
+        """暂停与跨天走同一条检查点，但抛的是停止请求：轮次保持进行中、可续跑。"""
+        run = self._open(cst_date(), "A01")
+        shop = Shop("A01", "店铺A01", "https://A01.example/")
+        self._request_pause(run.id)
+
+        with patch.object(browser_pw, "_click_one_product") as click:
+            with self.assertRaises(stop_request.StopRequested):
+                browser_pw._capture_card(
+                    MagicMock(), MagicMock(), "商品", self._cfg(), [False], MagicMock(),
+                    MagicMock(), self.db, run.id, shop, [], set(),
+                )
+
+        click.assert_not_called()
+        self.assertIsNotNone(self.db.stop_request()["ack_at"], "认领时回执")
+
+    def test_pause_marks_the_shop_it_interrupted(self):
+        """停在一家店的中途：这家店记为未完成，原因写「用户暂停」而不是人工介入。"""
+        run = self._open(cst_date(), "A01")
+        shop = Shop("A01", "店铺A01", "https://A01.example/")
+
+        def crawl(*_args, **_kwargs):
+            self._request_pause(run.id)                      # 界面那一跳
+            rounds.ensure_workable(self.db, run.id, cst_date())   # 采集进程的检查点
+
+        with patch.object(pipeline, "crawl_shop_listing", side_effect=crawl):
+            with self.assertRaises(stop_request.StopRequested):
+                pipeline._run_listing_phase(self.db, self._cfg(), run.id, [shop], MagicMock())
+
+        row = self.conn.execute(
+            "SELECT list_status, list_note FROM shop_rounds WHERE round_id=?", (run.id,)
+        ).fetchone()
+        self.assertEqual(row["list_status"], "失败")
+        self.assertEqual(row["list_note"], pipeline.PAUSE_BY_USER_NOTE)
+
+    def test_pause_between_details_does_not_record_a_failure(self):
+        """暂停不是详情失败：异常要原样上抛，不许记成一次失败尝试。"""
+        run = self._open(cst_date(), "A01")
+        offers = [self._offer()]
+
+        def capture(_offer):
+            self._request_pause(run.id)
+            pipeline._capture_offer_detail(self.db, self._cfg(), MagicMock(), run.id,
+                                           _offer, MagicMock())
+
+        with self.assertRaises(stop_request.StopRequested):
+            pipeline._capture_pending_offers(self.db, self._cfg(), MagicMock(), run.id,
+                                             offers, capture)
+
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0], 0,
+            "暂停不该留下失败记录")
+
+    def test_pause_inside_a_detail_fetch_is_not_recorded_as_a_failure(self):
+        """暂停落在长睡眠的切片里（fetch 途中）：同样要原样上抛，不许当成访问异常。"""
+        run = self._open(cst_date(), "A01")
+
+        with self.assertRaises(stop_request.StopRequested):
+            pipeline._capture_offer_detail(
+                self.db, self._cfg(), MagicMock(), run.id, self._offer(),
+                MagicMock(side_effect=stop_request.StopRequested("停")),
+            )
+
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0], 0,
+            "暂停不该留下失败记录")

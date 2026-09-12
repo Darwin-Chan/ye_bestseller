@@ -120,6 +120,7 @@
       <div class="muted" style="margin:10px 0 0" id="rProgressLine">正在启动…</div>
       <div class="bar"><i id="rBar" style="width:0%"></i></div>
       <div class="banner warn" id="rPaused" style="display:none">已暂停（轮次保留为「进行中」，点「继续」接着抓取本轮剩余任务）。</div>
+      <div class="banner warn" id="rStopping" style="display:none">正在停止采集进程…</div>
     </div>
     <div class="card">
       <b id="rDoneTitle">已完成店铺（0）</b>
@@ -140,6 +141,7 @@
 
   <!-- 结果 -->
   <div class="panel" id="panel-result">
+    <div class="banner warn" id="resStopping" style="display:none">正在停止采集进程…</div>
     <div class="card">
       <div style="display:flex;gap:20px;align-items:stretch">
         <div style="flex:1">
@@ -196,6 +198,8 @@
   let POLL_MS = 2000;
   let pollTimer = null;
   let polling = false;
+  // 停止途中结果页也要接着问（中止已经写完终态，采集进程可能还在收尾）。
+  let resStopTimer = null;
   // 串起取数：同一时刻至多一条在途刷新（IS-38）。
   let tickChain = Promise.resolve();
 
@@ -290,6 +294,7 @@
     $("abortForeignBtn").textContent = crawler && crawler.round_id
       ? "中止正在跑的这一轮 #" + crawler.round_id + "（放弃）"
       : "中止正在跑的这一轮（放弃）";
+    $("abortForeignBtn").disabled = !!d.stopping;
     $("crawlerActions").style.display = crawler ? "block" : "none";
 
     const total = d.total_shops;
@@ -374,10 +379,17 @@
       ).join("") || `<tr><td colspan="5" class="muted">还没有完成的店铺</td></tr>`;
       $("rTodoTitle").textContent = "未完成店铺（" + d.todo.length + "）";
       $("rTodoPills").innerHTML = d.todo.map(s => `<span class="pill a">${s.key}</span>`).join("");
-      $("rPaused").style.display = d.manually_paused ? "block" : "none";
-      // 暂停态显示“继续”，运行态显示“暂停”
-      $("resumeBtn").style.display = d.manually_paused ? "" : "none";
-      $("pauseBtn").style.display = d.manually_paused ? "none" : "";
+      // 正在停止（ADR-0009）：先请求、采集进程在检查点自己收尾，窗口到点才强杀。
+      const stopping = d.stopping || null;
+      $("rStopping").style.display = stopping ? "block" : "none";
+      $("rStopping").textContent = stopping === "closing"
+        ? "正在收尾：采集进程在关掉自己启动的浏览器…"
+        : "正在停止采集进程…（最多 8 秒，超时会强制结束）";
+      $("rPaused").style.display = (!stopping && d.manually_paused) ? "block" : "none";
+      // 暂停态显示“继续”，运行态显示“暂停”；停止途中两个都不给点。
+      $("resumeBtn").style.display = (!stopping && d.manually_paused) ? "" : "none";
+      $("pauseBtn").style.display = (!stopping && !d.manually_paused) ? "" : "none";
+      $("abortBtn").disabled = !!stopping;
     } else {
       $("rProgressLine").textContent = d.running ? "抓取进程正在启动…" : "本轮已结束，正在加载结果…";
     }
@@ -423,6 +435,24 @@
     ).join("") || `<tr><td colspan="5" class="muted">没有已抓取的店铺</td></tr>`;
     $("resTodoTitle").textContent = "未抓取店铺（" + d.todo.length + "）";
     $("resTodoPills").innerHTML = d.todo.map(s => `<span class="pill a">${s.key}</span>`).join("");
+    // 中止写完终态就回结果页，采集进程可能还在收尾：接着问，直到它真的走了。
+    const stopping = d.stopping || null;
+    $("resStopping").style.display = stopping ? "block" : "none";
+    $("resStopping").textContent = stopping === "closing"
+      ? "正在收尾：采集进程在关掉自己启动的浏览器…"
+      : "正在停止采集进程…（最多 8 秒，超时会强制结束）";
+    if (stopping) {
+      if (!resStopTimer) resStopTimer = setTimeout(refreshResultStopping, POLL_MS);
+    } else if (resStopTimer) {
+      clearTimeout(resStopTimer);
+      resStopTimer = null;
+    }
+  }
+
+  async function refreshResultStopping() {
+    resStopTimer = null;
+    const res = await queued(() => callApi("get_result"));
+    if (res && res.has_round) renderResult(res);
   }
 
   async function showResultIfExists() {

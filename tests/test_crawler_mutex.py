@@ -8,9 +8,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import pipeline, rounds, single_instance
+from bestseller_monitor import pipeline, rounds, single_instance, stop_request
 from bestseller_monitor.config import Shop
-from bestseller_monitor.db import Database, DayBoundaryReached, connect
+from bestseller_monitor.db import Database, DayBoundaryReached, connect, utcnow
 from bestseller_monitor.rounds import TerminalReason
 from helpers import isolated_locks
 
@@ -132,6 +132,51 @@ class CrawlerMutexTests(unittest.TestCase):
         text = "\n".join(logged.output) + out.getvalue()
         self.assertNotIn("库存数据即将跨天", text, "迟到停下不等于跨天")
         self.assertIn("ABANDONED", text, "要说清本轮已经是别的原因收的尾")
+
+    def _stop_request_row(self):
+        conn = connect(self.db_path)
+        try:
+            return conn.execute("SELECT * FROM stop_requests WHERE id=1").fetchone()
+        finally:
+            conn.close()
+
+    def _request_pause(self, round_id: int) -> None:
+        """模拟界面那一跳：按身份行里的目标进程写一条暂停请求（ADR-0009）。"""
+        conn = connect(self.db_path)
+        try:
+            db = Database(conn)
+            identity = db.crawler_process()
+            db.request_stop(round_id=round_id, kind=stop_request.PAUSE,
+                            target_pid=identity["pid"],
+                            target_started_at=identity["started_at"])
+        finally:
+            conn.close()
+
+    def test_a_stop_request_stops_the_round_without_a_terminal_state(self):
+        """界面按暂停：采集进程在检查点自己停下，轮次保持进行中、可以续跑。"""
+        seen = {}
+
+        def driver(db, _cfg, round_id, _shops):
+            self._request_pause(round_id)
+            try:
+                rounds.ensure_workable(db, round_id, utcnow())   # 采集进程的下一个检查点
+            except stop_request.StopRequested:
+                seen.update(dict(self._stop_request_row() or {}))
+                raise
+
+        out = io.StringIO()
+        with isolated_locks():
+            with patch.object(pipeline, "_run_pwcdp_round", side_effect=driver), \
+                    contextlib.redirect_stdout(out):
+                pipeline.run_round(self.cfg, SHOPS)
+
+            self.assertFalse(single_instance.is_held(single_instance.CRAWLER_LOCK),
+                             "停下之后要放锁，否则续跑起不来")
+
+        self.assertIn("本轮已暂停", out.getvalue())
+        self.assertIsNotNone(seen["ack_at"], "认领时回执，界面据此放宽窗口")
+        self.assertIsNone(self._stop_request_row(), "退出时把消费过的请求删掉")
+        self.assertIsNone(self._terminal()[0], "暂停不是终态：这一轮还能续跑")
 
 if __name__ == "__main__":
     unittest.main()

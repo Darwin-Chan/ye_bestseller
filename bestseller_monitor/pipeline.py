@@ -10,7 +10,7 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-from . import browser_dp, browser_pw, dedupe, rounds, single_instance
+from . import browser_dp, browser_pw, dedupe, rounds, single_instance, stop_request
 from .browser_pw import DenyTracker, ShopDenyExceeded, RoundDenyExceeded
 from .config import Config, Shop, load_shops
 from .db import (
@@ -28,9 +28,13 @@ from .detail import DetailParseFailed, capture_detail_payload, save_raw_page
 from .guard import RoundPauseRequired
 from .parse import extract_main_image
 from .rounds import Round, RoundRequest, ShopScope, TerminalReason
+from .stop_request import StopRequested
 from .listing import ListingLoadFailed, crawl_shop_listing, save_raw_listing_page
 
 log = logging.getLogger(__name__)
+
+# 用户按暂停打断某家店时，这家店的失败原因。人工介入超时另有文案，不许混用（ADR-0009）。
+PAUSE_BY_USER_NOTE = "用户在界面暂停，本店未完成"
 
 
 def round_shops(db: Database, round_id: int, cfg: Config) -> list[Shop]:
@@ -140,6 +144,7 @@ def _run_round_locked(cfg: Config, shops: list[Shop]) -> None:
     cfg.ensure_dirs()
     conn = connect(cfg.db_file)
     db = Database(conn)
+    started_at: str | None = None
     try:
         request = RoundRequest(
             run_date=cst_date(),
@@ -148,7 +153,10 @@ def _run_round_locked(cfg: Config, shops: list[Shop]) -> None:
         opened = rounds.open(db, request)
         round_id = opened.round.id
         # 身份行只给界面看「谁在跑」；是不是真的还有进程在跑以会话锁为准。
-        db.record_crawler_process(pid=os.getpid(), round_id=round_id, note=_command_note())
+        started_at = db.record_crawler_process(pid=os.getpid(), round_id=round_id,
+                                               note=_command_note())
+        # 长睡眠的切片问的就是这一句：轮次还允许干活吗（ADR-0009）。
+        stop_request.install(lambda: rounds.ensure_workable(db, round_id, utcnow()))
         log.info(
             "%s轮次 #%s（%s，%s 家店）",
             "新建" if opened.created else "续跑", round_id, request.run_date,
@@ -168,6 +176,10 @@ def _run_round_locked(cfg: Config, shops: list[Shop]) -> None:
         else:
             _run_pw_round(db, cfg, round_id, work_shops)
         _finalize_round(db, cfg, opened.round)
+    except StopRequested:
+        # 界面按了暂停：轮次保持进行中，已抓数据保留，可再次运行续跑。
+        log.info("收到界面暂停请求：本轮停在检查点，已抓数据保留、可续跑。")
+        print("\n>>> 本轮已暂停（可再次运行续跑）。\n")
     except RoundDenyExceeded as exc:
         # 整轮 deny 超限是终态：数据保留，但本轮不可续跑，只能新开一轮。
         note = f"本轮因整轮 deny 超过阈值而意外中止：{exc}；已抓取数据已保留，不可续跑"
@@ -198,7 +210,10 @@ def _run_round_locked(cfg: Config, shops: list[Shop]) -> None:
         log.error("本轮暂停：%s", exc)
         print(f"\n>>> 本轮已暂停（可再次运行续跑）：{exc}\n")
     finally:
+        stop_request.uninstall()
         db.clear_crawler_process()
+        # 消费过的停止请求只对这一个进程有效，走到这里就把它删掉（ADR-0009）。
+        db.clear_stop_request(target_pid=os.getpid(), target_started_at=started_at)
         conn.close()
 
 
@@ -284,6 +299,9 @@ def _run_listing_dp(db: Database, cfg: Config, round_id: int, shops: list[Shop],
             db.save_shop_offers(round_id, shop.key, shop.url, shop.name, offers, pages_read)
         except ListingLoadFailed as exc:
             _record_listing_failure(db, cfg, round_id, shop, exc)
+        except StopRequested:
+            _record_incomplete_listing(db, round_id, shop, PAUSE_BY_USER_NOTE)
+            raise
     log.info("店铺阶段完成（含逐店即时补抓）")
 
 
@@ -318,7 +336,7 @@ def _capture_pending_offers(db: Database, cfg: Config, human: Humanizer, round_i
         processed += 1
         try:
             capture(offer)
-        except (RoundPauseRequired, DayBoundaryReached, DetailBudgetExhausted):
+        except (StopRequested, RoundPauseRequired, DayBoundaryReached, DetailBudgetExhausted):
             raise
         except Exception as exc:  # 兜底：异常也记录失败，不中断整轮
             log.exception("详情抓取意外失败：%s", offer["product_url"])
@@ -383,7 +401,9 @@ def _capture_offer_detail(db: Database, cfg: Config, human: Humanizer, round_id:
             if attempt < max_attempts:
                 human.sleep(human.retry_delay(attempt))
             continue
-        except RoundPauseRequired:
+        except (StopRequested, RoundPauseRequired, DayBoundaryReached, DetailBudgetExhausted):
+            # 停止判定（暂停／跨天／预算）不是「访问异常」：原样上抛，别记成一次失败尝试。
+            # 长睡眠的切片会在 fetch 途中抛出来，这一层是它唯一的兜底。
             raise
         except Exception as exc:
             note = f"访问异常：{exc}"
@@ -442,6 +462,9 @@ def _run_listing_phase(db: Database, cfg: Config, round_id: int, shops: list[Sho
             )
         except ListingLoadFailed as exc:
             _record_listing_failure(db, cfg, round_id, shop, exc)
+        except StopRequested:
+            _record_incomplete_listing(db, round_id, shop, PAUSE_BY_USER_NOTE)
+            raise
     log.info("榜单阶段完成")
 
 
@@ -540,6 +563,10 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
         except RoundPauseRequired as exc:
             # 人工验证等不到结果：轮次保持可续跑，这家店要如实记为未完成。
             _record_incomplete_listing(db, round_id, shop, f"人工介入未完成：{exc}")
+            raise
+        except StopRequested:
+            # 用户在界面按了暂停：轮次同样保持可续跑，但原因不许写成人工介入。
+            _record_incomplete_listing(db, round_id, shop, PAUSE_BY_USER_NOTE)
             raise
         except ListingLoadFailed as exc:
             _record_listing_failure(db, cfg, round_id, shop, exc)

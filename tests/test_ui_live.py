@@ -344,5 +344,129 @@ class UiLivePollingTests(unittest.TestCase):
             page.close()
 
 
+# 停止途中：界面要如实说明在等什么，并且停止途中不许再点（ADR-0009）。
+STOP_MOCK_API = r"""
+window.__calls = [];
+window.__stopping = null;
+window.__paused = false;
+window.__result = {has_round: false};
+window.pywebview = { platform: "edgechromium", api: {
+  get_start: async () => {
+    window.__calls.push("get_start");
+    return {
+      ov: {products: 0, skus: 0},
+      summary: {started: false, rounds: 0, text: ""},
+      shops: [{key: "A01", name: "店铺A", products: 0, skus: 0, pages: 1,
+               default_checked: true}],
+      total_shops: 1, start_hint: "采集进程正在跑", crawler: {round_id: 7, pid: 4321},
+      stopping: window.__stopping,
+    };
+  },
+  get_run: async () => {
+    window.__calls.push("get_run");
+    return {
+      running: true, manually_paused: window.__paused, stopping: window.__stopping,
+      has_round: true,
+      round_id: 7, started_hhmm: "10:00", elapsed_sec: 5, deny: 0, done_count: 0,
+      total_count: 1, progress: 0, current_shop: "A01", done: [],
+      todo: [{key: "A01", name: "店铺A"}],
+    };
+  },
+  get_result: async () => {
+    window.__calls.push("get_result");
+    return window.__result;
+  },
+  start_run: async () => ({ok: true}),
+  pause_run: async () => {
+    window.__paused = true; window.__stopping = "stopping";
+    return {ok: true, stopping: "stopping"};
+  },
+  resume_run: async () => ({ok: true}),
+  abort_run: async () => { window.__calls.push("abort_run"); return {ok: true}; },
+}};
+"""
+
+
+class UiLiveStoppingTests(unittest.TestCase):
+    """按下暂停之后：横幅说明在等什么，停止途中不给再点（ADR-0009）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._pw = sync_playwright().start()
+        try:
+            cls.browser = cls._pw.chromium.launch(channel="msedge", headless=True)
+        except Exception as exc:  # noqa: BLE001
+            cls._pw.stop()
+            cls._pw = None
+            raise unittest.SkipTest(f"没有可用的 Edge/Playwright 浏览器：{exc}")
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._pw is not None:
+            cls.browser.close()
+            cls._pw.stop()
+
+    def open_page(self):
+        page = self.browser.new_page(viewport={"width": 1100, "height": 1000})
+        page.add_init_script(STOP_MOCK_API)
+        page.goto(HTML_URI)
+        return page
+
+    def start_a_run(self, page):
+        page.click("#startBtn")
+        page.wait_for_selector('.step.active[data-tab="run"]', timeout=5000)
+
+    def test_pause_shows_what_it_is_waiting_for_and_locks_the_buttons(self):
+        page = self.open_page()
+        try:
+            self.start_a_run(page)
+            page.click("#pauseBtn")
+
+            page.wait_for_selector("#rStopping", state="visible", timeout=5000)
+            self.assertIn("正在停止", page.inner_text("#rStopping"))
+            self.assertFalse(page.is_visible("#rPaused"), "停止途中不该说「已暂停」")
+            self.assertFalse(page.is_visible("#pauseBtn"))
+            self.assertFalse(page.is_visible("#resumeBtn"))
+            self.assertTrue(page.eval_on_selector("#abortBtn", "el => el.disabled"))
+
+            # 采集进程回执之后：同一块横幅变成「正在收尾」，而不是从零重来
+            page.evaluate("() => { window.__stopping = 'closing'; }")
+            page.evaluate("() => tickRun()")
+            page.wait_for_function(
+                "() => document.getElementById('rStopping').textContent.includes('收尾')",
+                timeout=5000)
+        finally:
+            page.close()
+
+    def test_result_page_keeps_asking_until_the_crawler_is_gone(self):
+        """中止写完终态就回结果页，但采集进程可能还在收尾：接着问，直到它真的走了。"""
+        page = self.open_page()
+        try:
+            page.evaluate("""() => {
+              window.__result = {has_round: true, round_id: 7, reason: "ABANDONED",
+                started_hhmm: "10:00", finished_hhmm: "10:05", duration_text: "5 分",
+                deny: 0, done_count: 0, total_count: 1, products_total: 0, skus_total: 0,
+                done: [], todo: [{key: "A01", name: "店铺A"}],
+                tag: "人工中止", note: "本轮由人工中止（放弃），已抓取数据已保留。",
+                stopping: "stopping"};
+              renderResult(window.__result); switchTab("result");
+            }""")
+
+            page.wait_for_selector("#resStopping", state="visible", timeout=5000)
+            self.assertIn("正在停止", page.inner_text("#resStopping"))
+            before = page.evaluate("window.__calls.filter(c => c === 'get_result').length")
+
+            page.evaluate("""() => { window.__result = Object.assign({}, window.__result,
+              {stopping: null}); }""")
+            page.wait_for_function(
+                "() => document.getElementById('resStopping').style.display === 'none'",
+                timeout=8000)
+            self.assertGreater(page.evaluate(
+                "window.__calls.filter(c => c === 'get_result').length"), before,
+                "结果页要自己接着问，不能停在这一屏")
+        finally:
+            page.close()
+
+
 if __name__ == "__main__":
     unittest.main()
