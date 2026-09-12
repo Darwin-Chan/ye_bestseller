@@ -174,7 +174,7 @@ def finish_if_open(db: Database, round: Round, reason: TerminalReason, *,
         return finish(db, round, reason, note=note, now=now)
     except RoundAlreadyFinished:
         current = load(db, round.id)
-        log.info("轮次 #%s 已经是 %s（可能已被人工中止），迟到的收尾（%s）不覆盖。",
+        log.info("轮次 #%s 已经是 %s，迟到的收尾（%s）不覆盖。",
                  current.id, _reason_text(current.reason), _reason_text(reason))
         return current
 

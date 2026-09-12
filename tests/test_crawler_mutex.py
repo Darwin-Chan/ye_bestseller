@@ -1,5 +1,7 @@
 """采集进程互斥：同一时刻至多一个，界面与命令行共用同一把锁（工单 02）。"""
 import os
+import io
+import contextlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -113,6 +115,23 @@ class CrawlerMutexTests(unittest.TestCase):
                 pipeline.run_round(self.cfg, SHOPS)
 
         self.assertEqual(self._terminal(), ("ABANDONED", "GUI 人工中止（放弃）"))
+
+    def test_a_late_stop_does_not_claim_the_original_reason(self):
+        """被人工中止的采集到检查点停下：日志与输出不该说成「跨天中止」。"""
+        def abandon_then_stop(_db, _cfg, round_id, _shops):
+            self._abandon(round_id)
+            raise DayBoundaryReached()
+
+        out = io.StringIO()
+        with isolated_locks():
+            with patch.object(pipeline, "_run_pwcdp_round", side_effect=abandon_then_stop), \
+                    self.assertLogs("bestseller_monitor.pipeline", level="INFO") as logged, \
+                    contextlib.redirect_stdout(out):
+                pipeline.run_round(self.cfg, SHOPS)
+
+        text = "\n".join(logged.output) + out.getvalue()
+        self.assertNotIn("库存数据即将跨天", text, "迟到停下不等于跨天")
+        self.assertIn("ABANDONED", text, "要说清本轮已经是别的原因收的尾")
 
 if __name__ == "__main__":
     unittest.main()

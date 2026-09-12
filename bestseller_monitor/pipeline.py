@@ -171,19 +171,28 @@ def _run_round_locked(cfg: Config, shops: list[Shop]) -> None:
     except RoundDenyExceeded as exc:
         # 整轮 deny 超限是终态：数据保留，但本轮不可续跑，只能新开一轮。
         note = f"本轮因整轮 deny 超过阈值而意外中止：{exc}；已抓取数据已保留，不可续跑"
-        rounds.finish_if_open(db, opened.round, TerminalReason.DENY_EXCEEDED, note=note)
-        log.error("本轮意外中止：%s", note)
-        print(f"\n>>> {note}，请启动新的抓取轮次。\n")
+        settled = rounds.finish_if_open(db, opened.round, TerminalReason.DENY_EXCEEDED, note=note)
+        if settled.reason is TerminalReason.DENY_EXCEEDED:
+            log.error("本轮意外中止：%s", note)
+            print(f"\n>>> {note}，请启动新的抓取轮次。\n")
+        else:
+            _report_late_stop(settled, TerminalReason.DENY_EXCEEDED)
     except DayBoundaryReached:
-        rounds.finish_if_open(db, opened.round, TerminalReason.DAY_BOUNDARY,
-                              note=DAY_BOUNDARY_NOTE)
-        log.warning("轮次 #%s：%s", round_id, DAY_BOUNDARY_NOTE)
-        print(f"\n>>> {DAY_BOUNDARY_NOTE}。\n")
+        settled = rounds.finish_if_open(db, opened.round, TerminalReason.DAY_BOUNDARY,
+                                        note=DAY_BOUNDARY_NOTE)
+        if settled.reason is TerminalReason.DAY_BOUNDARY:
+            log.warning("轮次 #%s：%s", round_id, DAY_BOUNDARY_NOTE)
+            print(f"\n>>> {DAY_BOUNDARY_NOTE}。\n")
+        else:
+            _report_late_stop(settled, TerminalReason.DAY_BOUNDARY)
     except DetailBudgetExhausted:
-        rounds.finish_if_open(db, opened.round, TerminalReason.DETAIL_BUDGET_EXHAUSTED,
-                              note=DETAIL_BUDGET_NOTE)
-        log.warning("轮次 #%s：%s", round_id, DETAIL_BUDGET_NOTE)
-        print(f"\n>>> {DETAIL_BUDGET_NOTE}。\n")
+        settled = rounds.finish_if_open(db, opened.round, TerminalReason.DETAIL_BUDGET_EXHAUSTED,
+                                        note=DETAIL_BUDGET_NOTE)
+        if settled.reason is TerminalReason.DETAIL_BUDGET_EXHAUSTED:
+            log.warning("轮次 #%s：%s", round_id, DETAIL_BUDGET_NOTE)
+            print(f"\n>>> {DETAIL_BUDGET_NOTE}。\n")
+        else:
+            _report_late_stop(settled, TerminalReason.DETAIL_BUDGET_EXHAUSTED)
     except RoundPauseRequired as exc:
         # 人工处理超时等情况：保留轮次状态，提示稍后续跑
         log.error("本轮暂停：%s", exc)
@@ -196,6 +205,18 @@ def _run_round_locked(cfg: Config, shops: list[Shop]) -> None:
 def _command_note() -> str:
     """身份行里的命令行摘要：跨会话看见它时，能认出这是谁起的进程。"""
     return " ".join([Path(sys.argv[0]).name, *sys.argv[1:]])[:200]
+
+
+def _report_late_stop(settled: Round, reason: TerminalReason) -> None:
+    """这一轮早就被别处收掉了：如实说，别把本次的停止原因当成它的原因。
+
+    典型情形：命令行起的采集还在跑，用户在界面里把那一轮人工中止了；采集进程要到
+    下一个检查点才停下，那时它以为自己是「跨天中止」，其实这一轮早有终态了。
+    """
+    log.info("轮次 #%s 已经是 %s，本次的停止原因（%s）不改写它的终态。",
+             settled.id, settled.reason.value, reason.value)
+    print(f"\n>>> 轮次 #{settled.id} 已经是 {settled.reason.value}，"
+          "本次停止不改写它的终态。\n")
 
 
 def _run_pw_round(db: Database, cfg: Config, round_id: int, shops: list[Shop]) -> None:
@@ -455,13 +476,19 @@ def _finalize_round(db: Database, cfg: Config, run: Round) -> None:
     if attempted and fail_rate > cfg.fail_rate_limit:
         note = (f"失败率 {fail_rate:.1%} 超过阈值 {cfg.fail_rate_limit:.0%}"
                 f"（快照失败 {total - succeeded}，点击未得商品 {click_fail}），需人工决策")
-        rounds.finish_if_open(db, run, TerminalReason.FAIL_RATE_EXCEEDED, note=note)
-        log.warning("轮次 #%s：%s", round_id, note)
-        print(f"\n>>> {note}。请检查数据库 data/bestseller.db 中的结果后再决定。\n")
+        settled = rounds.finish_if_open(db, run, TerminalReason.FAIL_RATE_EXCEEDED, note=note)
+        if settled.reason is TerminalReason.FAIL_RATE_EXCEEDED:
+            log.warning("轮次 #%s：%s", round_id, note)
+            print(f"\n>>> {note}。请检查数据库 data/bestseller.db 中的结果后再决定。\n")
+        else:
+            _report_late_stop(settled, TerminalReason.FAIL_RATE_EXCEEDED)
     else:
-        rounds.finish_if_open(db, run, TerminalReason.COMPLETED)
-        log.info("轮次 #%s 完成（尝试 %s，成功 %s，点击未得商品 %s）",
-                 round_id, attempted, succeeded, click_fail)
+        settled = rounds.finish_if_open(db, run, TerminalReason.COMPLETED)
+        if settled.reason is TerminalReason.COMPLETED:
+            log.info("轮次 #%s 完成（尝试 %s，成功 %s，点击未得商品 %s）",
+                     round_id, attempted, succeeded, click_fail)
+        else:
+            _report_late_stop(settled, TerminalReason.COMPLETED)
     db.commit()
 
 

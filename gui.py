@@ -573,17 +573,25 @@ class Api:
                 if rid is not None:
                     rounds.finish_if_open(db, rounds.load(db, rid), TerminalReason.ABANDONED,
                                           note="GUI 人工中止（放弃）")
-                db.clear_crawler_process()
+                # 身份行只在进程真的走了之后才清：停不掉时留着它，下次还知道是谁在跑，
+                # 也还能再试一次。锁在不在是权威判据（进程没了，内核就把锁放了）。
+                if not self.any_crawler_running():
+                    db.clear_crawler_process()
             finally:
                 conn.close()
             return {"ok": True, "round_id": rid}
 
     def _round_to_abandon(self, db, identity: dict | None) -> int | None:
-        """该收尾哪一轮：本界面认领过的 > 身份行里的 > 今天进行中的。"""
-        if self.round_id is not None:
-            return self.round_id
+        """该收尾哪一轮：身份行里正在跑的 > 本界面记着的 > 今天进行中的。
+
+        身份行优先，是因为界面记着的编号不会随轮次结束清零：那条路跑完一轮之后，
+        别处又起了一轮的话，按旧编号收尾就会「杀了新进程、却把终态写给旧轮次」，
+        真正在跑的那一轮于是永远留在「进行中」。
+        """
         if identity is not None and identity.get("round_id") is not None:
             return identity["round_id"]
+        if self.round_id is not None:
+            return self.round_id
         current = rounds.active_round(db, self._today())
         return current.id if current is not None else None
 

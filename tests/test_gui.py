@@ -521,6 +521,15 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         self.addCleanup(self.lock.release)
         return rid
 
+    def _terminal_of(self, round_id: int):
+        conn = connect(self.db_path)
+        try:
+            row = conn.execute("SELECT terminal_reason FROM rounds WHERE id=?",
+                               (round_id,)).fetchone()
+            return row[0] if row is not None else None
+        finally:
+            conn.close()
+
     def _row(self, column: str, table: str = "rounds"):
         conn = connect(self.db_path)
         try:
@@ -537,6 +546,7 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         def kill(pid):
             seen["reason_at_kill_time"] = self._row("terminal_reason")
             seen["pid"] = pid
+            self.lock.release()   # 进程被杀掉 → 内核释放会话锁
             return True
 
         with patch.object(browser_proc, "process_image_name", return_value="python.exe"), \
@@ -561,6 +571,18 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         kill.assert_not_called()
         self.assertEqual(self._row("terminal_reason"), "ABANDONED")
+
+    def test_abort_keeps_the_identity_while_the_crawler_may_still_be_alive(self):
+        """停不掉（拿不到可用 PID）时身份行要留着：下次还得知道是谁在跑。"""
+        self._running_crawler()
+
+        with patch.object(browser_proc, "process_image_name", return_value=""), \
+                patch.object(browser_proc, "terminate_process_tree") as kill:
+            self.api.abort_run()
+
+        kill.assert_not_called()
+        self.assertEqual(self._row("pid", "crawler_process"), 4321,
+                         "进程可能还在跑，身份行不能先清掉")
 
     def test_abort_never_kills_a_pid_that_is_no_longer_our_crawler(self):
         """PID 会被系统回收：镜像名不是 python 就不许动它。"""
@@ -598,6 +620,27 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
 
         self.assertEqual(start["crawler"]["pid"], 4321)
         self.assertEqual(start["crawler"]["round_id"], rid)
+
+    def test_abort_prefers_the_round_that_is_actually_running(self):
+        """界面记着的轮次可能早就结束了：中止要收尾正在跑的那一轮，不能按旧编号写。"""
+        conn = connect(self.db_path)
+        try:
+            db = Database(conn)
+            old = new_round(db)
+            rounds.finish(db, rounds.load(db, old), TerminalReason.COMPLETED)
+        finally:
+            conn.close()
+        self.api.round_id = old                 # 界面还记着已经完结的那一轮
+        running = self._running_crawler()       # 别处正在跑的是另一轮
+
+        with patch.object(browser_proc, "process_image_name", return_value="python.exe"), \
+                patch.object(browser_proc, "terminate_process_tree", return_value=True):
+            self.api.abort_run()
+
+        self.assertNotEqual(running, old)
+        self.assertEqual(self._terminal_of(running), "ABANDONED",
+                         "正在跑的那一轮才该被收尾")
+        self.assertEqual(self._terminal_of(old), "COMPLETED", "已经完结的轮次不许改写")
 
     def test_start_page_has_no_abort_entry_when_nothing_runs(self):
         start = self.api.get_start()
