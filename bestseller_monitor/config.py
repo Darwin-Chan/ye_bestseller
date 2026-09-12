@@ -20,7 +20,7 @@ def _tuple2(name: str, v: object) -> tuple[float, float]:
 
 # 唯一的采集驱动：Playwright 连接接管 + 点击式列表（ADR-0010）。
 # 这个配置键保留作过渡闸——老配置里写着别的驱动时要报错，而不是静默换一条路跑。
-ONLY_DRIVER = "pw_cpd"
+ONLY_DRIVER = "pw_cdp"
 
 
 def _driver(v: object) -> str:
@@ -101,7 +101,7 @@ class Config:
             raw_page_dir=p("paths", "raw_page_dir"),
             user_data_path=p("browser", "user_data_path"),
             chrome_path=str(browser.get("chrome_path", "")),
-            driver=_driver(browser.get("driver", ONLY_DRIVER)),
+            driver=_driver(browser.get("driver")),
             start_browser=bool(browser.get("start_browser", True)),
             attach_port=int(browser.get("attach_port", 9222)),
             timeout_ms=int(browser["timeout_ms"]),

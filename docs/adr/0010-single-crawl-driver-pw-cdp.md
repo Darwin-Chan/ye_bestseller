@@ -20,7 +20,7 @@
 ## 决策
 
 - **只留一条驱动路径**：删除 `_run_pw_round`、`_run_dp_round` 与 `browser_dp.py` 整套、`listing.crawl_shop_listing`、`detail.capture_detail_payload`、`pipeline` 顶部的 `sync_playwright` import、`pagination` 的 drission 版列表身份与等待、`guard` 的「兼容旧接口」段、`browser_pw.crawl_store_listing`。榜单阶段的失败异常与原始页存档留在 `listing.py`，模块文档改写为它现在真正做的事。
-- **`driver` 键保留作过渡闸**：只接受 `pw_cdp`；写了别的值（`drission`、`playwright`、拼错的值）一律**启动即报错**并说明该驱动已下线。缺键按 `pw_cpd` 处理——缺键不会说谎，不给它加必填门槛。校验放在配置加载处，与其它非法配置值同一处收口；分发点因此不再有 `else` 分支。
+- **`driver` 键保留作过渡闸**：只接受 `pw_cdp`；写了别的值（`drission`、`playwright`、拼错的值）一律**启动即报错**并说明该驱动已下线。缺键按 `pw_cdp` 处理——缺键不会说谎，不给它加必填门槛。校验放在配置加载处，与其它非法配置值同一处收口；分发点因此不再有 `else` 分支。
 - **配置与依赖一起收尾**：删 `headless`、`slow_mo_ms`、`browser_channel`、`profile_dir`、`use_system_profile` 五个只被旧路径读的键；目录名统一到 `user_data_path`（`ensure_dirs` 建它，README 改指它）。`DrissionPage` 从 `requirements.txt` 删除，测试用的 CSS 引擎 `lxml` + `cssselect` 改为显式声明的测试依赖——商品卡选择器那张验证网要留着。
 - **唯一入口补一个装配级测试**：用假的 `open_session` / `close_session` 覆盖 `_run_pwcdp_round`——打开会话、榜单阶段拿到 `emit` 与 `deny_tracker`、榜单阶段异常时仍然收尾。删路径之后它是整轮采集的唯一入口，而今天的测试全部把它 patch 掉、函数体一行没跑过。
 - **口径同步**：README 的「普通进程启动 + DrissionPage 接管」改为 Playwright 经调试端口接管（描述的是真实实现）；PRD 里 `slow_mo_ms` 的说明删除；CONTEXT.md 补「驱动」词条与一条对应规则。

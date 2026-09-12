@@ -177,7 +177,7 @@ class PwCdpRoundAssemblyTests(unittest.TestCase):
         """record_params() 要的键与 deny 窗口都给全，其余字段这一层用不到。"""
         return SimpleNamespace(
             db_file=self.db_path,
-            driver="pw_cpd",
+            driver="pw_cdp",
             deny_window_minutes=10,
             detail_delay_sec=(0.0, 0.0),
             list_delay_sec=(0.0, 0.0),

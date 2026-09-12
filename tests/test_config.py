@@ -90,13 +90,19 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Config.from_file(self._write_config(tmp), root=Path(tmp))
 
-            self.assertEqual(cfg.driver, "pw_cpd")
+            self.assertEqual(cfg.driver, "pw_cdp")
 
     def test_config_accepts_the_click_driver(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = Config.from_file(self._write_config_with_driver(tmp, "pw_cpd"), root=Path(tmp))
+            cfg = Config.from_file(self._write_config_with_driver(tmp, "pw_cdp"), root=Path(tmp))
 
-            self.assertEqual(cfg.driver, "pw_cpd")
+            self.assertEqual(cfg.driver, "pw_cdp")
+
+    def test_shipped_config_passes_its_own_validation(self):
+        """出厂配置必须被自己的校验接受——合法驱动值只在代码里声明一处（IS-23 审查发现）。"""
+        cfg = Config.from_file(ROOT / "config" / "config.toml", root=ROOT)
+
+        self.assertEqual(cfg.driver, "pw_cdp")
 
     def test_config_rejects_a_retired_driver(self):
         """配置里写着已下线的驱动就报错，不静默换一条路径跑（IS-23 / ADR-0010）。"""
@@ -106,7 +112,7 @@ class ConfigTests(unittest.TestCase):
 
             message = str(ctx.exception)
             self.assertIn("drission", message)
-            self.assertIn("pw_cpd", message)
+            self.assertIn("pw_cdp", message)
 
     def test_config_without_export_dir_still_loads(self):
         """同步导出链已删除，配置里不再有导出目录这个概念。"""

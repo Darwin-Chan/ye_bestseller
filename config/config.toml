@@ -43,7 +43,7 @@ retry_jitter_sec = 2.0
 
 [browser]
 # 采集驱动只有一条（Playwright 连接接管 + 点击式列表，见 ADR-0010）。
-# 这里只接受 pw_cpd；写了别的值（含已下线的 drission / playwright）启动即报错。
+# 这里只接受 pw_cdp；写了别的值（含已下线的 drission / playwright）启动即报错。
 driver = "pw_cdp"
 # 统一使用实际登录过的用户数据目录（用普通进程拉起浏览器时就是它）
 user_data_path = "F:/AI/bestseller_runtime/profiles/account1_edge"
