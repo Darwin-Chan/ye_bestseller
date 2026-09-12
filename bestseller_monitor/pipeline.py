@@ -36,6 +36,10 @@ log = logging.getLogger(__name__)
 # 用户按暂停打断某家店时，这家店的失败原因。人工介入超时另有文案，不许混用（ADR-0009）。
 PAUSE_BY_USER_NOTE = "用户在界面暂停，本店未完成"
 
+# 「该不该继续」这一族异常：不是采集失败，处理方式一律是原样上抛（ADR-0009）。
+STOP_EXCEPTIONS = (StopRequested, RoundPauseRequired, DayBoundaryReached,
+                   DetailBudgetExhausted)
+
 
 def round_shops(db: Database, round_id: int, cfg: Config) -> list[Shop]:
     """轮次自身的店铺范围，作为本次处理的店铺列表。
@@ -336,7 +340,7 @@ def _capture_pending_offers(db: Database, cfg: Config, human: Humanizer, round_i
         processed += 1
         try:
             capture(offer)
-        except (StopRequested, RoundPauseRequired, DayBoundaryReached, DetailBudgetExhausted):
+        except STOP_EXCEPTIONS:
             raise
         except Exception as exc:  # 兜底：异常也记录失败，不中断整轮
             log.exception("详情抓取意外失败：%s", offer["product_url"])
@@ -401,7 +405,7 @@ def _capture_offer_detail(db: Database, cfg: Config, human: Humanizer, round_id:
             if attempt < max_attempts:
                 human.sleep(human.retry_delay(attempt))
             continue
-        except (StopRequested, RoundPauseRequired, DayBoundaryReached, DetailBudgetExhausted):
+        except STOP_EXCEPTIONS:
             # 停止判定（暂停／跨天／预算）不是「访问异常」：原样上抛，别记成一次失败尝试。
             # 长睡眠的切片会在 fetch 途中抛出来，这一层是它唯一的兜底。
             raise

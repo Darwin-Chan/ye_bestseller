@@ -275,6 +275,13 @@
     return (sec / 60).toFixed(1) + " 分";
   }
 
+  // 停止途中要说的话只写一遍：过程页与结果页共用，窗口秒数由后端给（ADR-0009）。
+  function stoppingText(d) {
+    if (d.stopping === "closing") return "正在收尾：采集进程在关掉自己启动的浏览器…";
+    const wait = d.stop_grace_sec ? "最多 " + Math.round(d.stop_grace_sec) + " 秒，" : "";
+    return "正在停止采集进程…（" + wait + "超时会强制结束）";
+  }
+
   // ---------- 开始页 ----------
   function refreshStart() { return queued(loadStart); }
 
@@ -382,9 +389,7 @@
       // 正在停止（ADR-0009）：先请求、采集进程在检查点自己收尾，窗口到点才强杀。
       const stopping = d.stopping || null;
       $("rStopping").style.display = stopping ? "block" : "none";
-      $("rStopping").textContent = stopping === "closing"
-        ? "正在收尾：采集进程在关掉自己启动的浏览器…"
-        : "正在停止采集进程…（最多 8 秒，超时会强制结束）";
+      if (stopping) $("rStopping").textContent = stoppingText(d);
       $("rPaused").style.display = (!stopping && d.manually_paused) ? "block" : "none";
       // 暂停态显示“继续”，运行态显示“暂停”；停止途中两个都不给点。
       $("resumeBtn").style.display = (!stopping && d.manually_paused) ? "" : "none";
@@ -438,9 +443,7 @@
     // 中止写完终态就回结果页，采集进程可能还在收尾：接着问，直到它真的走了。
     const stopping = d.stopping || null;
     $("resStopping").style.display = stopping ? "block" : "none";
-    $("resStopping").textContent = stopping === "closing"
-      ? "正在收尾：采集进程在关掉自己启动的浏览器…"
-      : "正在停止采集进程…（最多 8 秒，超时会强制结束）";
+    if (stopping) $("resStopping").textContent = stoppingText(d);
     if (stopping) {
       if (!resStopTimer) resStopTimer = setTimeout(refreshResultStopping, POLL_MS);
     } else if (resStopTimer) {

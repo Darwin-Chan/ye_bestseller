@@ -72,6 +72,7 @@ class GuiResultTests(unittest.TestCase):
                               TerminalReason.DETAIL_BUDGET_EXHAUSTED, note=DETAIL_BUDGET_NOTE)
                 api = Api.__new__(Api)
                 api._lock = RLock()
+                api._stop = None
                 api.round_id = round_id
                 api._open_conn = lambda: conn
 
@@ -91,6 +92,7 @@ class GuiResultTests(unittest.TestCase):
                 round_id = new_round(Database(conn))
                 api = Api.__new__(Api)
                 api._lock = RLock()
+                api._stop = None
                 api.round_id = round_id
                 api._current_elapsed = MagicMock(return_value=125.0)
                 api._open_conn = lambda: conn
@@ -256,7 +258,8 @@ class GuiStopRequestTests(unittest.TestCase):
         self.assertIsNone(self._request_row())
         self.assertNotIn("stopping", result)
 
-    def test_starting_again_clears_a_leftover_stop_request(self):
+    def test_a_leftover_stop_request_does_not_bite_the_next_run(self):
+        """旧请求只对写它时那个进程有效：新起的一轮不该被它停掉，也不必专门清它。"""
         rid, started_at = self._running_crawler()
         self.api.proc = None
         self.lock.release()          # 采集进程已经走了，只剩表里那条请求
@@ -266,13 +269,15 @@ class GuiStopRequestTests(unittest.TestCase):
                                         target_pid=6104, target_started_at=started_at)
         finally:
             conn.close()
+        self.api._stop = None
 
         with patch.object(Api, "_spawn_crawler"):
             result = self.api.start_run(["A01"])
 
         self.assertTrue(result["ok"], result.get("error"))
-        self.assertIsNone(self._request_row())
-        self.assertIsNone(self.api._stop)
+        self.assertIsNone(self.api._stop, "新的一轮不该继承上一次的停止状态")
+        self.assertIsNotNone(self._request_row(),
+                             "惰性请求可以留着：认领按目标进程匹配，撞不上新进程")
 
     def test_browser_cleanup_waits_for_a_browser_that_starts_late(self):
         """刚启动就被暂停时端口还没监听，收尾要短暂重试。"""
@@ -310,6 +315,7 @@ class GuiRoundScopeTests(unittest.TestCase):
         self.enterContext(isolated_locks())
         api = Api.__new__(Api)
         api._lock = RLock()
+        api._stop = None
         api.proc = None
         api.round_id = None
         api.start_ts = None
@@ -524,6 +530,7 @@ class GuiCrawlerMutexTests(unittest.TestCase):
         self.enterContext(isolated_locks())
         api = Api.__new__(Api)
         api._lock = RLock()
+        api._stop = None
         api.proc = None
         api.round_id = None
         api.start_ts = None
@@ -599,6 +606,7 @@ class GuiCrawlerMutexTests(unittest.TestCase):
     def test_a_refused_child_reports_its_reason_instead_of_a_result_page(self):
         api = Api.__new__(Api)
         api._lock = RLock()
+        api._stop = None
         api.proc = SimpleNamespace(poll=lambda: single_instance.CRAWLER_BUSY_EXIT_CODE)
         api.round_id = None
         api.user_paused = False
@@ -807,6 +815,7 @@ class GuiConnectionTests(unittest.TestCase):
             self._legacy_db(db_path)
             api = Api.__new__(Api)
             api._lock = RLock()
+            api._stop = None
             api.proc = None
             api.round_id = None
             api.user_paused = False
@@ -859,6 +868,7 @@ class GuiRefreshCostTests(unittest.TestCase):
 
             api = Api.__new__(Api)
             api._lock = RLock()
+            api._stop = None
             api.proc = None
             api.round_id = None
             api.user_paused = False

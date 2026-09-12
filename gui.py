@@ -190,10 +190,6 @@ def _duration_seconds(started_at: str | None, finished_at: str | None) -> float 
 class Api:
     """暴露给 pywebview 前端的方法。返回 JSON 可序列化的基本类型。"""
 
-    # 正在进行的停止（ADR-0009）在 __init__ 里赋值；类级默认让测试夹具可以用
-    # Api.__new__ 造半个实例只测某一个入口（见 tests/test_gui.py）。
-    _stop: dict | None = None
-
     def __init__(self):
         self.cfg = Config.from_file(PROJECT_ROOT / "config" / "config.toml", root=PROJECT_ROOT)
         self.shops = [s for s in load_shops(self.cfg.shop_csv) if s.active]
@@ -309,7 +305,8 @@ class Api:
                     "total_shops": len(self.shops),
                     "start_hint": hint,
                     "crawler": running,
-                    "stopping": self._stop_state(conn),
+                    "stopping": self._stop_state(),
+                    "stop_grace_sec": _STOP_GRACE_SEC,
                 }
             finally:
                 conn.close()
@@ -351,11 +348,12 @@ class Api:
             conn = self._open_conn()
             try:
                 self._enforce_stop_deadline(conn)
-                stopping = self._stop_state(conn)
+                stopping = self._stop_state()
                 active = rounds.active_round(Database(conn), self._today())
                 if active is None:
                     return {"running": running, "manually_paused": self.user_paused,
-                            "has_round": False, "stopping": stopping}
+                            "has_round": False, "stopping": stopping,
+                            "stop_grace_sec": _STOP_GRACE_SEC}
                 rid = active.id
                 # 轮次由采集子进程创建，界面在这里随轮询认领它。
                 self.round_id = rid
@@ -406,6 +404,7 @@ class Api:
                     "running": running,
                     "manually_paused": self.user_paused,
                     "stopping": stopping,
+                    "stop_grace_sec": _STOP_GRACE_SEC,
                     "has_round": True,
                     "round_id": rid,
                     "started_hhmm": _fmt_hhmm(started_at),
@@ -513,9 +512,6 @@ class Api:
                 # 判据是环境事实，不是「本界面记不记得自己拉过子进程」。
                 if self.crawler_identity(conn) is not None:
                     return {"ok": False, "error": _BUSY_ERROR}
-                # 上一次停止的残留不该影响这一轮：请求按进程认领，这里顺手清干净。
-                Database(conn).clear_stop_request()
-                self._stop = None
                 # 只读地问一句会不会被拒：今天已有轮次但范围不同就给出可读理由。
                 # 轮次本身由采集子进程创建，启动失败不会留下空的「进行中」轮次。
                 rounds.check_scope(Database(conn), request)
@@ -542,9 +538,6 @@ class Api:
             conn = self._open_conn()
             try:
                 db = Database(conn)
-                # 同上：本界面记着的停止状态到此为止，新起的采集进程不该受它影响。
-                db.clear_stop_request()
-                self._stop = None
                 current = rounds.active_round(db, self._today())
                 if current is None:
                     stale = rounds.active_round(db)
@@ -588,8 +581,7 @@ class Api:
             try:
                 db = Database(conn)
                 if not self._own_crawler_alive():
-                    db.clear_stop_request()   # 没在跑：顺手清掉上一条残留
-                    return {"ok": True}
+                    return {"ok": True}   # 本界面没有在跑的采集进程，没什么可暂停的
                 target = self._stop_target(conn)
                 if target is None:
                     # 身份行还没登记（子进程刚拉起的那一小段）：退回强制结束，
@@ -603,7 +595,7 @@ class Api:
                                 target_started_at=target["started_at"])
                 self._begin_stop(_STOP_PAUSE, target, self.round_id)
                 log.info("暂停：已写下停止请求（目标 PID %s），等它自己停下。", target["pid"])
-                return {"ok": True, "stopping": self._stop_state(conn)}
+                return {"ok": True, "stopping": self._stop_state()}
             finally:
                 conn.close()
 
@@ -620,7 +612,8 @@ class Api:
             conn = self._open_conn()
             try:
                 db = Database(conn)
-                # 中止压过暂停：留下的暂停请求会让采集进程把这次停止说成「暂停」。
+                # 这一处清理不是卫生，是语义：中止压过暂停——留下的暂停请求会让
+                # 采集进程把这次停止认领成「暂停」，日志与店铺备注就写错了原因。
                 db.clear_stop_request()
                 identity = self.crawler_identity(conn)
                 if self.round_id is None and identity is None:
@@ -635,7 +628,7 @@ class Api:
                     return {"ok": True, "round_id": rid}   # 采集进程已经不在了
                 self._begin_stop(_STOP_ABORT, self._stop_target(conn), rid)
                 log.info("中止：轮次 #%s 已收尾为人工放弃，等采集进程自己停下。", rid)
-                return {"ok": True, "round_id": rid, "stopping": self._stop_state(conn)}
+                return {"ok": True, "round_id": rid, "stopping": self._stop_state()}
             finally:
                 conn.close()
 
@@ -716,7 +709,7 @@ class Api:
             "acked": False,
         }
 
-    def _stop_state(self, conn) -> str | None:
+    def _stop_state(self) -> str | None:
         """给界面看的停止阶段：没有停止在进行时是 None。"""
         if self._stop is None:
             return None
@@ -781,12 +774,13 @@ class Api:
             conn = self._open_conn()
             try:
                 self._enforce_stop_deadline(conn)
-                stopping = self._stop_state(conn)
+                stopping = self._stop_state()
                 db = Database(conn)
                 run = (rounds.load(db, self.round_id) if self.round_id is not None
                        else rounds.latest(db, finished=True))
                 if run is None:
-                    return {"has_round": False, "stopping": stopping}
+                    return {"has_round": False, "stopping": stopping,
+                            "stop_grace_sec": _STOP_GRACE_SEC}
                 rid = run.id
                 dur = _duration_seconds(run.started_at, run.finished_at)
                 if dur is None and rid == self.round_id:
@@ -835,6 +829,7 @@ class Api:
                     "has_round": True,
                     "round_id": rid,
                     "stopping": stopping,
+                    "stop_grace_sec": _STOP_GRACE_SEC,
                     "reason": run.reason.value if run.reason is not None else None,
                     "started_hhmm": _fmt_hhmm(run.started_at),
                     "finished_hhmm": _fmt_hhmm(run.finished_at),

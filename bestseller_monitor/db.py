@@ -492,9 +492,10 @@ class Database:
 
         这行只服务于「界面显示谁在跑、能不能中止它」；是不是真的有进程在跑，
         以会话锁为准（见 single_instance）。被强杀的进程会留下这行，读到的人负责清。
-        停止请求按 (pid, 启动时刻) 认领（ADR-0009），所以调用方要留住这个时刻。
+        停止请求按 (pid, 启动时刻) 认领（ADR-0009），所以调用方要留住这个时刻：
+        精度取到微秒，好让「PID 被复用」也撞不上同一次运行。
         """
-        started_at = utcnow()
+        started_at = utcnow_us()
         self.conn.execute(
             "INSERT OR REPLACE INTO crawler_process(id, pid, round_id, started_at, note) "
             "VALUES (1, ?, ?, ?, ?)",

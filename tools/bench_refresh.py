@@ -52,6 +52,7 @@ def refresh_api(db_file: Path):
 
     api = Api.__new__(Api)
     api._lock = RLock()
+    api._stop = None            # 基准对象没有停止在跑（见 gui.Api 的停止状态，ADR-0009）
     api.proc = None
     api.round_id = None
     api.user_paused = False
