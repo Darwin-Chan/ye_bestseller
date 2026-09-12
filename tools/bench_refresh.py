@@ -1,4 +1,4 @@
-"""IS-38 基准：界面每次刷新要付多少时间（连接迁移 + 每店指标聚合）。
+"""界面刷新基准：每次刷新要付多少时间（连接迁移 + 每店指标聚合）。工单 IS-38。
 
 界面每约 2 秒刷新一次，所以这里的每一毫秒都是「每 2 秒付一次」的成本。脚本建自己的
 临时库（不碰 F:/AI/bestseller_runtime 下的真机数据），分别量三件事：
@@ -36,7 +36,24 @@ except Exception:  # noqa: BLE001
 from bestseller_monitor.db import Database, SNAPSHOT_SUCCESS_INDEX, connect  # noqa: E402
 from bestseller_monitor import rounds  # noqa: E402
 from bestseller_monitor.rounds import RoundRequest, ShopScope  # noqa: E402
-from gui import Api  # noqa: E402
+
+
+def refresh_api(db_file: Path):
+    """给基准一个真界面对象：量的是 `get_run()` 本身，不是复刻它的 SQL。
+
+    `gui` 只在用到时才导入——它拖着 pywebview 那一套，别的 tools 不依赖。
+    """
+    from gui import Api
+
+    api = Api.__new__(Api)
+    api._lock = RLock()
+    api.proc = None
+    api.round_id = None
+    api.user_paused = False
+    api._elapsed_base = 0.0
+    api._run_start_ts = None
+    api.cfg = SimpleNamespace(db_file=db_file)
+    return api
 
 
 def build_dataset(conn: sqlite3.Connection, shops: int, rows_per_shop: int,
@@ -102,14 +119,7 @@ def measure(*, shops: int, rows_per_shop: int, repeats: int, legacy: bool = Fals
 
         connect_sec = _best(open_close, repeats)
 
-        api = Api.__new__(Api)
-        api._lock = RLock()
-        api.proc = None
-        api.round_id = None
-        api.user_paused = False
-        api._elapsed_base = 0.0
-        api._run_start_ts = None
-        api.cfg = SimpleNamespace(db_file=path)
+        api = refresh_api(path)
         run = api.get_run()
         refresh_sec = _best(api.get_run, repeats)
 

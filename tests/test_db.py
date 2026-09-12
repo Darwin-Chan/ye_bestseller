@@ -10,7 +10,7 @@ from bestseller_monitor.db import (
     connect,
     cst_date,
 )
-from helpers import new_round
+from helpers import SNAPSHOT_DEDUPE_MARK, new_round, traced_connections
 from bestseller_monitor.parse import DEFAULT_SKU_ID, DEFAULT_SKU_NAME
 
 
@@ -875,8 +875,6 @@ class SnapshotDedupeMigrationTests(unittest.TestCase):
     60 万行 0.218 秒，随快照总量线性增长。
     """
 
-    DEDUPE_MARK = "DELETE FROM snapshots"
-
     def _legacy_db(self, tmp: str) -> Path:
         """造一个「同一成功快照有重复行、还没有唯一索引」的老库。"""
         path = Path(tmp) / "legacy-duplicates.db"
@@ -897,16 +895,9 @@ class SnapshotDedupeMigrationTests(unittest.TestCase):
         return path
 
     def _open_traced(self, path: Path) -> tuple[sqlite3.Connection, list[str]]:
-        """开库并记下这条连接上执行过的语句——迁移跑在 connect() 里，只能这样看。"""
+        """开库并记下这条连接上执行过的语句。"""
         seen: list[str] = []
-        real_connect = sqlite3.connect
-
-        def traced(*args, **kwargs):
-            conn = real_connect(*args, **kwargs)
-            conn.set_trace_callback(seen.append)
-            return conn
-
-        with patch("sqlite3.connect", traced):
+        with traced_connections(seen):
             conn = connect(path)
         return conn, seen
 
@@ -918,7 +909,7 @@ class SnapshotDedupeMigrationTests(unittest.TestCase):
             conn, seen = self._open_traced(self._legacy_db(tmp))
             try:
                 self.assertTrue(
-                    self._statements_like(seen, self.DEDUPE_MARK),
+                    self._statements_like(seen, SNAPSHOT_DEDUPE_MARK),
                     "缺索引的老库要靠这次去重才建得起唯一索引",
                 )
                 self.assertEqual(conn.execute(
@@ -936,7 +927,7 @@ class SnapshotDedupeMigrationTests(unittest.TestCase):
             conn, seen = self._open_traced(path)
             try:
                 self.assertEqual(
-                    self._statements_like(seen, self.DEDUPE_MARK), [],
+                    self._statements_like(seen, SNAPSHOT_DEDUPE_MARK), [],
                     "唯一索引已在，重复行不可能写进来：这次开库不该再扫整表",
                 )
                 indexes = [row[1] for row in conn.execute("PRAGMA index_list('snapshots')")]

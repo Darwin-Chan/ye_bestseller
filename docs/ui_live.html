@@ -192,11 +192,12 @@
 <script>
   let api = null;
   let hasStartedRun = false;
-  // 刷新节拍（毫秒）：默认 2 秒；用例把它调小来验证防重入（IS-38）。
+  // 轮询节拍（毫秒）：两次刷新之间的间隔，默认 2 秒；用例把它调小来验证防重入（IS-38）。
   let POLL_MS = 2000;
   let pollTimer = null;
   let polling = false;
-  let tickChain = Promise.resolve();   // 串起刷新：同一时刻只有一条在跑（IS-38）
+  // 串起取数：同一时刻至多一条在途刷新（IS-38）。
+  let tickChain = Promise.resolve();
 
   const $ = id => document.getElementById(id);
 
@@ -240,10 +241,21 @@
     });
   }
   function switchTab(name) {
+    showTab(name);
+    // 切到开始页会顺手刷新；取数走同一条链（IS-38），把完成时机交回调用方，
+    // 好让「刷新后要说的话」不被刷新收掉。
+    return name === "start" ? refreshStart() : Promise.resolve();
+  }
+  function showTab(name) {
     updateSteps(name);
     document.querySelectorAll(".panel").forEach(p => p.classList.toggle("active", p.id === "panel-" + name));
-    // 切到开始页会顺手刷新；把这件事的完成时机交回调用方，好让「刷新后要说的话」不被刷新收掉。
-    return name === "start" ? refreshStart() : Promise.resolve();
+  }
+
+  // 取数排队：轮询、手动刷新、切回开始页、中止后的结果页都排进同一条链，
+  // 所以同一时刻至多一条在途刷新（IS-38）。task 一律是「取一次数」的函数。
+  function queued(task) {
+    tickChain = tickChain.then(task, task);
+    return tickChain;
   }
 
   function fmtDur(sec) {
@@ -260,7 +272,9 @@
   }
 
   // ---------- 开始页 ----------
-  async function refreshStart() {
+  function refreshStart() { return queued(loadStart); }
+
+  async function loadStart() {
     const d = await callApi("get_start");
     if (!d) return;
     $("stProducts").textContent = d.ov.products.toLocaleString();
@@ -327,8 +341,7 @@
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
   }
   function tickRun() {
-    tickChain = tickChain.then(runTick, runTick);
-    return tickChain;
+    return queued(refreshOnce);
   }
   function scheduleNextTick() {
     if (!polling) return;
@@ -336,14 +349,15 @@
     pollTimer = setTimeout(() => { pollTimer = null; tickRun(); }, POLL_MS);
   }
 
-  async function runTick() {
+  async function refreshOnce() {
     const d = await callApi("get_run");
     // 失败也照常排下一次：轮询不能因为一次查询失败就停，成功的那次会把提示收起来。
     if (!d) { scheduleNextTick(); return; }
     if (d.start_error) {
       // 采集子进程被「已有采集在跑」拒绝：说清原因，别把这次启动当成一轮跑完。
       stopPolling();
-      await switchTab("start");    // 等开始页刷新完再贴提示，否则会被刷新收起来
+      showTab("start");
+      await loadStart();   // 已经在链上，直接取；等刷新完再贴提示，否则会被刷新收起来
       showNotice(d.start_error);
       return;
     }
@@ -371,6 +385,7 @@
     // 结束判定：子进程结束且非暂停 -> 看结果
     if (!d.running && !d.manually_paused && hasStartedRun) {
       stopPolling();
+      // 已经在链上：这里直接取，不能再排队，否则等的是自己。
       const res = await callApi("get_result");
       if (res && res.has_round) { renderResult(res); switchTab("result"); }
       return;
@@ -390,7 +405,7 @@
   async function doAbort() {
     await callApi("abort_run");
     stopPolling();
-    const res = await callApi("get_result");
+    const res = await queued(() => callApi("get_result"));
     if (res && res.has_round) { renderResult(res); switchTab("result"); }
   }
 
@@ -411,7 +426,7 @@
   }
 
   async function showResultIfExists() {
-    const res = await callApi("get_result");
+    const res = await queued(() => callApi("get_result"));
     if (res && res.has_round) renderResult(res);
   }
 

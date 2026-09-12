@@ -322,6 +322,27 @@ class UiLivePollingTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_switching_back_to_the_start_page_also_waits_for_the_refresh_in_flight(self):
+        """切页签也是手动刷新：在途那条没回来之前，开始页的取数要排队（CONTEXT：在途刷新至多一条）。"""
+        page = self.open_page()
+        try:
+            page.evaluate("window.__gate = true")
+            self.start_a_run(page)
+            self.assertEqual(self.calls_of(page, "get_start"), 1, "开页面时已经取过一次")
+
+            # 取数要排队时 switchTab() 返回的 promise 会挂到在途那条之后，这里不等它，
+            # 只要求「页签切过去了、取数没开第二条」。
+            page.evaluate("() => { switchTab('start'); }")
+            page.wait_for_timeout(200)
+
+            self.assertEqual(self.calls_of(page, "get_start"), 1,
+                             "在途刷新还没回来，切页签不该再开一条取数")
+            page.evaluate("window.__release()")
+            page.wait_for_function(
+                "window.__calls.filter(c => c === 'get_start').length === 2", timeout=5000)
+        finally:
+            page.close()
+
 
 if __name__ == "__main__":
     unittest.main()

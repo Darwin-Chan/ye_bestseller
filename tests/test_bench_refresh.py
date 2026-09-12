@@ -1,18 +1,18 @@
-"""IS-38 基准脚本：建得出合成大盘库，量得出刷新成本。"""
+"""界面刷新基准脚本：建得出合成大盘库，量得出刷新成本（工单 IS-38）。"""
 import tempfile
 import unittest
 from pathlib import Path
 
 from bestseller_monitor.db import Database, connect
-from tools import is38_bench
+from tools import bench_refresh
 
 
-class Is38BenchTests(unittest.TestCase):
+class RefreshBenchTests(unittest.TestCase):
     def test_builds_a_finished_round_with_the_requested_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             conn = connect(Path(tmp) / "bench.db")
             try:
-                rid, rows = is38_bench.build_dataset(conn, shops=2, rows_per_shop=30)
+                rid, rows = bench_refresh.build_dataset(conn, shops=2, rows_per_shop=30)
 
                 self.assertEqual(rows, 60)
                 self.assertEqual(conn.execute(
@@ -25,7 +25,7 @@ class Is38BenchTests(unittest.TestCase):
                     "SELECT COUNT(*) FROM shop_rounds WHERE round_id=? AND list_status='完成'",
                     (rid,),
                 ).fetchone()[0]
-                self.assertEqual(done, 2, "合成库要让 12 家店的指标查询真的跑起来")
+                self.assertEqual(done, 2, "合成库要按「已完成」建，指标查询才真的会跑")
                 self.assertEqual(
                     [row[0] for row in conn.execute(
                         "SELECT DISTINCT shop_key FROM shop_rounds WHERE round_id=? "
@@ -36,7 +36,7 @@ class Is38BenchTests(unittest.TestCase):
                 conn.close()
 
     def test_measure_reports_refresh_and_legacy_costs(self):
-        report = is38_bench.measure(shops=2, rows_per_shop=200, repeats=1, legacy=True)
+        report = bench_refresh.measure(shops=2, rows_per_shop=200, repeats=1, legacy=True)
 
         self.assertEqual(report["shops"], 2)
         self.assertEqual(report["rows"], 400)
