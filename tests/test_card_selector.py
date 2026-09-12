@@ -4,7 +4,7 @@
 渲染成 12×12，不在商品网格内），它排在所有商品图之前。选择器一旦把它算进来，
 下标 0 就不是商品卡，点击它不会弹出详情页，每一页都会记一次点击失败。
 
-这里用真实 CSS 引擎（lxml + cssselect，随 DrissionPage 一起安装）对 DOM 片段求值，
+这里用真实 CSS 引擎（lxml + cssselect，在 requirements.txt 里显式声明）对 DOM 片段求值，
 断言选择器只命中商品图——不需要浏览器。
 """
 import unittest

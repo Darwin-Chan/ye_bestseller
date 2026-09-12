@@ -18,6 +18,21 @@ def _tuple2(name: str, v: object) -> tuple[float, float]:
     return (a, b)
 
 
+# 唯一的采集驱动：Playwright 连接接管 + 点击式列表（ADR-0010）。
+# 这个配置键保留作过渡闸——老配置里写着别的驱动时要报错，而不是静默换一条路跑。
+ONLY_DRIVER = "pw_cpd"
+
+
+def _driver(v: object) -> str:
+    driver = str(v or ONLY_DRIVER)
+    if driver != ONLY_DRIVER:
+        raise ValueError(
+            f"配置 browser.driver = {driver!r} 已下线：现在只有 {ONLY_DRIVER} 一条采集路径"
+            f"（见 ADR-0010）。改写这行或删掉它，否则它只会在启动时报这一句，不会生效。"
+        )
+    return driver
+
+
 @dataclass
 class Config:
     root: pathlib.Path
@@ -27,16 +42,11 @@ class Config:
     logs_dir: pathlib.Path
     screenshot_dir: pathlib.Path
     raw_page_dir: pathlib.Path
-    profile_dir: pathlib.Path
     user_data_path: pathlib.Path
     chrome_path: str
-    driver: str
-    use_system_profile: bool
+    driver: str  # 唯一采集驱动，只接受 ONLY_DRIVER（见 ADR-0010）
     start_browser: bool
     attach_port: int
-    browser_channel: str
-    headless: bool
-    slow_mo_ms: int
     timeout_ms: int
     base_url: str
     human_pause_minutes: int
@@ -89,16 +99,11 @@ class Config:
             logs_dir=p("paths", "logs_dir"),
             screenshot_dir=p("paths", "screenshot_dir"),
             raw_page_dir=p("paths", "raw_page_dir"),
-            profile_dir=p("browser", "profile_dir"),
             user_data_path=p("browser", "user_data_path"),
             chrome_path=str(browser.get("chrome_path", "")),
-            driver=str(browser.get("driver", "drission")),
-            use_system_profile=bool(browser.get("use_system_profile", False)),
+            driver=_driver(browser.get("driver", ONLY_DRIVER)),
             start_browser=bool(browser.get("start_browser", True)),
             attach_port=int(browser.get("attach_port", 9222)),
-            browser_channel=str(browser.get("channel", "msedge")),
-            headless=bool(browser["headless"]),
-            slow_mo_ms=int(browser["slow_mo_ms"]),
             timeout_ms=int(browser["timeout_ms"]),
             base_url=str(browser.get("base_url", "https://www.1688.com/")),
             human_pause_minutes=int(run["human_pause_minutes"]),
@@ -134,7 +139,7 @@ class Config:
 
     def ensure_dirs(self) -> None:
         for d in (self.data_dir, self.logs_dir, self.screenshot_dir,
-                  self.raw_page_dir, self.profile_dir):
+                  self.raw_page_dir, self.user_data_path):
             d.mkdir(parents=True, exist_ok=True)
 
 

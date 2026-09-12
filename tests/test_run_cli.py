@@ -40,10 +40,7 @@ retry_base_sec = 0.0
 retry_jitter_sec = 0.0
 
 [browser]
-profile_dir = "profile"
 user_data_path = "profile"
-headless = false
-slow_mo_ms = 0
 timeout_ms = 1000
 
 [paths]

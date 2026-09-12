@@ -9,12 +9,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_dp, browser_pw, listing, pagination
+from bestseller_monitor import browser_pw, pagination
 from bestseller_monitor.config import Shop
 from bestseller_monitor.listing import ListingLoadFailed
-
-P1_ANCHORS = [{"href": "https://detail.1688.com/offer/11.html", "text": "商品1"}]
-P2_ANCHORS = [{"href": "https://detail.1688.com/offer/22.html", "text": "商品2"}]
 
 
 def _cfg(**overrides):
@@ -67,19 +64,6 @@ class IdentityTests(unittest.TestCase):
         page.frames = [main, broken, sub]
 
         self.assertEqual(pagination.list_identity(page), ("card-a", "card-b"))
-
-    def test_drission_identity_keeps_only_product_links(self):
-        good = MagicMock()
-        good.attr.return_value = "https://detail.1688.com/offer/11.html"
-        bad = MagicMock()
-        bad.attr.side_effect = RuntimeError("anchor detached")
-        other = MagicMock()
-        other.attr.return_value = "https://shop.example/help.htm"
-        page = MagicMock()
-        page.eles.return_value = [good, bad, other]
-
-        self.assertEqual(pagination.drission_list_identity(page),
-                         ("https://detail.1688.com/offer/11.html",))
 
     def test_wait_for_change_sees_a_late_update(self):
         # 异步更新延迟：前两次轮询还是旧列表，第三次才换过来。
@@ -164,137 +148,6 @@ class ClickPathPaginationTests(unittest.TestCase):
         self._crawl(identities=_sequences([()]))
 
         self.assertEqual(self.opened, [1, 2])
-
-
-class PlaywrightDirectPathTests(unittest.TestCase):
-    """playwright 直驱路径（listing.crawl_shop_listing）的翻页等待。"""
-
-    def setUp(self):
-        self.shop = Shop("A01", "店铺A", "https://shop.example/")
-
-    def _crawl(self, *, page_anchors, identities):
-        page = MagicMock()
-        page.evaluate.side_effect = _sequences(page_anchors)
-        with patch.object(pagination, "_POLL_SEC", 0.0), \
-             patch.object(pagination, "LIST_CHANGE_TIMEOUT_SEC", 0.05), \
-             patch.object(pagination, "list_identity", side_effect=identities), \
-             patch.object(listing, "_try_click_sales_sort", return_value=False), \
-             patch.object(listing, "_next_page_available", return_value=True):
-            return listing.crawl_shop_listing(
-                page, self.shop, _cfg(), MagicMock(), check_guard=lambda _p: None), page
-
-    def test_next_page_is_read_only_after_the_list_changes(self):
-        (offers, pages), page = self._crawl(
-            page_anchors=[P1_ANCHORS, P2_ANCHORS],
-            identities=_sequences([("p1",), ("p1",), ("p2",)]))
-
-        self.assertEqual([offer[1] for offer in offers], ["11", "22"])
-        self.assertEqual(pages, 2)
-        self.assertEqual(page.evaluate.call_count, 2)
-
-    def test_unchanged_list_fails_and_does_not_read_the_stale_page_again(self):
-        page = MagicMock()
-        page.evaluate.side_effect = _sequences([P1_ANCHORS, P2_ANCHORS])
-        with patch.object(pagination, "_POLL_SEC", 0.0), \
-             patch.object(pagination, "LIST_CHANGE_TIMEOUT_SEC", 0.05), \
-             patch.object(pagination, "list_identity", side_effect=_sequences([("p1",)])), \
-             patch.object(listing, "_try_click_sales_sort", return_value=False), \
-             patch.object(listing, "_next_page_available", return_value=True):
-            with self.assertRaises(ListingLoadFailed) as ctx:
-                listing.crawl_shop_listing(
-                    page, self.shop, _cfg(), MagicMock(), check_guard=lambda _p: None)
-
-        self.assertIn("翻页后未确认新一页加载", str(ctx.exception))
-        self.assertEqual(page.evaluate.call_count, 1, "旧页商品不会被当成第二页再读一遍")
-
-
-class _FakeAnchor:
-    def __init__(self, href):
-        self._href = href
-        self.text = ""
-
-    def attr(self, name):
-        return self._href if name == "href" else ""
-
-
-class _FakeButton:
-    def __init__(self, page, *, advance=False):
-        self._page = page
-        self._advance = advance
-
-    def click(self):
-        if self._advance:
-            self._page.advance()
-
-
-class _FakeDrissionPage:
-    """只实现 crawl_shop_listing 用到的 DrissionPage 接口。"""
-
-    def __init__(self, pages: list[list[str]], *, next_button: bool = True):
-        self.pages = pages
-        self.index = 0
-        self.next_button = next_button
-        self.url = "https://shop.example/page/offerlist.htm"
-
-    def get(self, url):
-        self.url = url
-
-    @property
-    def wait(self):
-        return self
-
-    def load_start(self):
-        return None
-
-    def eles(self, _selector):
-        return [_FakeAnchor(href) for href in self.pages[self.index]]
-
-    def ele(self, selector, timeout=None):
-        if "下一页" in selector:
-            return _FakeButton(self, advance=True) if self.next_button else None
-        return _FakeButton(self)
-
-    def advance(self):
-        # 停在最后一页：按钮还在，但列表不再变化（真实站点上加载失败就是这样）
-        if self.index + 1 < len(self.pages):
-            self.index += 1
-
-    @property
-    def html(self):
-        return "<html></html>"
-
-
-class DrissionPathTests(unittest.TestCase):
-    """DrissionPage 驱动路径（browser_dp.crawl_shop_listing）的翻页等待。"""
-
-    def setUp(self):
-        self.shop = Shop("A01", "店铺A", "https://shop.example/")
-
-    def _crawl(self, page):
-        with patch.object(pagination, "_POLL_SEC", 0.0), \
-             patch.object(pagination, "LIST_CHANGE_TIMEOUT_SEC", 0.05), \
-             patch.object(browser_dp, "detect", return_value=None), \
-             patch.object(browser_dp.time, "sleep", lambda *_a: None):
-            return browser_dp.crawl_shop_listing(page, self.shop, _cfg(), MagicMock())
-
-    def test_next_page_is_read_after_the_list_changes(self):
-        page = _FakeDrissionPage([
-            ["https://detail.1688.com/offer/11.html"],
-            ["https://detail.1688.com/offer/22.html"],
-        ])
-
-        offers, pages = self._crawl(page)
-
-        self.assertEqual([offer[1] for offer in offers], ["11", "22"])
-        self.assertEqual(pages, 2)
-
-    def test_unchanged_list_fails_instead_of_rereading_the_old_page(self):
-        page = _FakeDrissionPage([["https://detail.1688.com/offer/11.html"]])
-
-        with self.assertRaises(ListingLoadFailed) as ctx:
-            self._crawl(page)
-
-        self.assertIn("翻页后未确认新一页加载", str(ctx.exception))
 
 
 if __name__ == "__main__":

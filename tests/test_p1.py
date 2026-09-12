@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_dp, browser_pw, dedupe, pipeline, rounds
+from bestseller_monitor import browser_pw, dedupe, pipeline, rounds
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import (
     CST,
@@ -101,9 +101,9 @@ class P1Tests(unittest.TestCase):
             "product_name": "详情标题",
             "rows": [{"sku_id": "red", "sku_name": "红色", "sku_price": 10, "sku_stock": 3}],
         }
-        with patch.object(pipeline, "capture_detail_payload", return_value=payload), \
+        with patch.object(browser_pw, "capture_detail", return_value=payload), \
              patch.object(pipeline, "extract_main_image", return_value=None):
-            pipeline._capture_one(
+            pipeline._capture_one_pw(
                 self.db, self._cfg(), MagicMock(), round_id, offer, MagicMock(),
             )
 
@@ -448,24 +448,6 @@ class P1Tests(unittest.TestCase):
 
         self.assertEqual(capture.call_count, 1, "同名库存不应阻止已知 offer_id 的补采")
 
-    def test_same_name_inventory_does_not_block_drission_detail(self):
-        round_id, offer = self._seed_same_name_failed_offer()
-        cfg = self._cfg()
-        with patch.object(pipeline, "capture_detail_payload",
-                          return_value=self._detail_payload()) as capture:
-            pipeline._capture_one(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
-
-        self.assertEqual(capture.call_count, 1, "同名库存不应阻止已知 offer_id 的补采")
-
-    def test_same_name_inventory_does_not_block_drission_page_detail(self):
-        round_id, offer = self._seed_same_name_failed_offer()
-        cfg = self._cfg()
-        with patch.object(browser_dp, "capture_detail_payload",
-                          return_value=self._detail_payload()) as capture:
-            pipeline._capture_one_dp(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
-
-        self.assertEqual(capture.call_count, 1, "同名库存不应阻止已知 offer_id 的补采")
-
     def test_retry_stops_and_signals_when_detail_budget_exhausted(self):
         round_id = new_round(self.db)
         shop = Shop("A01", "店铺A", "https://shop.example/")
@@ -547,28 +529,6 @@ class P1Tests(unittest.TestCase):
         self.assertEqual(round_row["list_status"], "失败", "尝试过但没拿到完整榜单")
         self.assertEqual(round_row["list_note"], pipeline.DETAIL_BUDGET_NOTE,
                          "中断原因要留在店铺备注里")
-
-    def test_dp_detail_phase_stops_when_budget_exhausted(self):
-        round_id = new_round(self.db)
-        shop = Shop("A01", "店铺A", "https://shop.example/")
-        self.db.add_shop(round_id, shop.key, shop.url, shop.name)
-        self.db.save_shop_offers(
-            round_id, shop.key, shop.url, shop.name,
-            [(1, "11", "https://detail.1688.com/offer/11.html", "商品1", ""),
-             (2, "22", "https://detail.1688.com/offer/22.html", "商品2", "")],
-            1,
-        )
-        self.db.mark_failure(round_id, shop.key, "11", 1, "解析失败")
-        self.db.mark_failure(round_id, shop.key, "22", 1, "解析失败")
-        cfg = self._cfg(max_detail_opportunities_per_round=1)
-
-        with patch.object(pipeline, "capture_detail_payload",
-                          return_value=self._detail_payload()) as capture:
-            with self.assertRaises(pipeline.DetailBudgetExhausted):
-                pipeline._run_detail_phase(self.db, cfg, round_id, MagicMock())
-
-        self.assertEqual(capture.call_count, 1, "drission 详情阶段也应停在同一上限")
-        self.assertEqual(self.db.detail_opportunity_total(round_id), 1)
 
     def test_skip_does_not_consume_detail_budget(self):
         """当日已完整观测的商品只跳过，不占用详情预算。"""

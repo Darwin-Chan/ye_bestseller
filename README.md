@@ -35,13 +35,13 @@ python run.py --pages-per-shop 2 --max-detail 20 --limit-shops A01
 - 店铺模式：按 `config/shops.csv` 里的店铺翻页抓榜单（`shop_url` 为店铺首页，
   `offer_list_url` 可显式指定商品列表页 URL，留空则自动拼 `/page/offerlist.htm`）。
 
-浏览器采用“普通进程启动 + DrissionPage 接管”方式（见 `config/config.toml` 的
+浏览器采用“普通进程启动 + Playwright 经调试端口接管”方式（见 `config/config.toml` 的
 `start_browser` / `attach_port`），避免被判定为受控会话。价格/库存从页面内嵌 JSON
 `skuInfoMap` 解析（见 `bestseller_monitor/parse.py`）。
 
 运行说明：
 
-- 必须使用真实登录过的浏览器 profile（`config/config.toml` 的 `profile_dir`，现为 `F:/AI/bestseller_runtime/profiles/account1_edge`），首次请运行
+- 必须使用真实登录过的浏览器 profile（`config/config.toml` 的 `user_data_path`，现为 `F:/AI/bestseller_runtime/profiles/account1_edge`），首次请运行
   `python login_chrome.py` 扫码登录一次。
 - 出现滑块/登录墙时程序会暂停等待人工处理。
 - 中断后可再次运行续跑；库存差分按日期口径计算（当前日期库存 − 最近一个更早日期的库存），已放弃或中断轮写入的数据照常参与。

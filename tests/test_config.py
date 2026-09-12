@@ -31,10 +31,7 @@ retry_base_sec = 0.0
 retry_jitter_sec = 0.0
 
 [browser]
-profile_dir = "profile"
 user_data_path = "profile"
-headless = false
-slow_mo_ms = 0
 timeout_ms = 1000
 
 [paths]
@@ -80,6 +77,37 @@ class ConfigTests(unittest.TestCase):
         path.write_text(MINIMAL_CONFIG, encoding="utf-8")
         return path
 
+    @staticmethod
+    def _write_config_with_driver(tmp: str, value: str) -> Path:
+        """在同一份最小配置里加一行 driver，其余键保持不动。"""
+        text = MINIMAL_CONFIG.replace("[browser]\n", f'[browser]\ndriver = "{value}"\n', 1)
+        path = Path(tmp) / "config.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_config_without_driver_key_uses_the_click_driver(self):
+        """driver 缺键不说谎，按唯一的驱动跑（IS-23 / ADR-0010）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Config.from_file(self._write_config(tmp), root=Path(tmp))
+
+            self.assertEqual(cfg.driver, "pw_cpd")
+
+    def test_config_accepts_the_click_driver(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Config.from_file(self._write_config_with_driver(tmp, "pw_cpd"), root=Path(tmp))
+
+            self.assertEqual(cfg.driver, "pw_cpd")
+
+    def test_config_rejects_a_retired_driver(self):
+        """配置里写着已下线的驱动就报错，不静默换一条路径跑（IS-23 / ADR-0010）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError) as ctx:
+                Config.from_file(self._write_config_with_driver(tmp, "drission"), root=Path(tmp))
+
+            message = str(ctx.exception)
+            self.assertIn("drission", message)
+            self.assertIn("pw_cpd", message)
+
     def test_config_without_export_dir_still_loads(self):
         """同步导出链已删除，配置里不再有导出目录这个概念。"""
         with tempfile.TemporaryDirectory() as tmp:
@@ -102,8 +130,8 @@ class ConfigTests(unittest.TestCase):
                 {"data", "logs", "screenshots", "raw_pages", "profile"},
             )
 
-    def test_export_dependency_removed_from_requirements(self):
-        """导出库不再属于运行依赖，其余依赖保持不变。"""
+    def test_requirements_list_the_engines_we_actually_use(self):
+        """导出库和已下线的驱动都不在依赖里；测试用的 CSS 引擎显式声明。"""
         lines = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
         names = {
             line.split(">=")[0].split("==")[0].strip().lower()
@@ -112,8 +140,11 @@ class ConfigTests(unittest.TestCase):
         }
 
         self.assertNotIn("openpyxl", names)
+        self.assertNotIn("drissionpage", names, "DrissionPage 那条路径已删除（IS-23 / ADR-0010）")
         self.assertIn("playwright", names)
-        self.assertIn("drissionpage", names)
+        self.assertIn("pywebview", names)
+        self.assertIn("lxml", names)
+        self.assertIn("cssselect", names)
 
     def test_effective_pages_limit_priority(self):
         """翻页上限优先级：命令行覆盖 > 店铺配置 > 全局默认（IS-35）。"""

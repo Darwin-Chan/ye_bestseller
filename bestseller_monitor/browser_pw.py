@@ -1,7 +1,7 @@
-"""Playwright 连接接管驱动：会话可信 + 可稳定拦截接口。
+"""采集驱动：Playwright 连接用普通进程拉起的浏览器（connect_over_cdp）。
 
-与 browser_dp 的区别：这里用 Playwright 连接已启动的浏览器(connect_over_cdp)，
-新建标签页后 network 事件可靠，能拦截 getShopOfferList / mtop 等 XHR。
+浏览器被平台当成「人启动」的，新建标签页后 network 事件可靠，能拦截
+getShopOfferList / mtop 等 XHR。这里是唯一的采集路径（ADR-0010）。
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from .parse import extract_main_image
 from .listing import ListingLoadFailed
 from .guard import (
     RoundPauseRequired,
-    body_text, captcha_visible, detect, intervention_kind,
+    body_text, captcha_visible, intervention_kind,
     is_deny_url, is_login_url, is_punish_url, resolved, vtype, wait_for_resolution,
 )
 
@@ -243,38 +243,11 @@ class DenyTracker:
         return len(self.events)
 
 
-_ANCHOR_SEL = "a[href*='/offer/'], a[href*='/item/']"
 # 只认商品图。曾经把 img.hover-trigger 也算进来，但那是店铺头部的 48×48 图标
 # （imgextra/...-tps-48-48.png，渲染成 12×12，不在商品网格内），排在所有商品图
 # 之前，导致下标 0 恒为它、点击必然没有弹窗，还会让「等商品卡片出现」在商品图
 # 渲染前就提前通过。真实列表页 30 张商品图全部是 img.main-picture。
 _PRODUCT_IMG_SEL = "img.main-picture"
-
-
-def _frame_anchors(frame) -> list[dict]:
-    try:
-        return frame.evaluate(
-            """() => Array.from(document.querySelectorAll('%s'))
-               .map(e => ({href: e.href, text: (e.innerText || '').trim().slice(0,240)}))""" % _ANCHOR_SEL
-        )
-    except Exception:
-        return []
-
-
-def _extract_anchors(page) -> list[dict]:
-    out: list[dict] = []
-    try:
-        out += page.eval_on_selector_all(
-            _ANCHOR_SEL,
-            "els => els.map(e => ({href: e.href, text: (e.innerText || '').trim().slice(0,240)}))",
-        )
-    except Exception:
-        pass
-    for fr in page.frames:
-        if fr == page.main_frame:
-            continue
-        out += _frame_anchors(fr)
-    return out
 
 
 def _click_text_in_frames(page, label: str) -> bool:
@@ -295,100 +268,6 @@ def _click_text_in_frames(page, label: str) -> bool:
         except Exception:
             continue
     return False
-
-
-def crawl_store_listing(page, shop: Shop, cfg: Config, human: Humanizer):
-    """店铺商品列表：销量排序 + 最多 N 页。返回 (offers, pages)。"""
-    log.info("开始抓取店铺 %s（%s）", shop.key, shop.url)
-    offers: list[tuple[int, str, str, str, str]] = []
-    seen: set[str] = set()
-    captured_oids: set[str] = set()
-    punished = [False]
-    pages_read = 0
-
-    def on_response(resp):
-        try:
-            if resp.request.resource_type not in ("xhr", "fetch"):
-                return
-            url = resp.url.lower()
-            if _is_punish_url(url):
-                punished[0] = True
-            text = resp.text()
-            body_oids = re.findall(r"/offer/(\d+)\.html", text)
-            body_oids += re.findall(r'["\']offerId["\']\s*:\s*(\d+)', text)
-            body_oids += re.findall(r'offerId["\':=\s]+(\d+)', text)
-            for oid in body_oids:
-                if oid not in captured_oids:
-                    captured_oids.add(oid)
-        except Exception:
-            pass
-
-    page.on("response", on_response)
-
-    page.goto(shop.url, wait_until="domcontentloaded")
-    time.sleep(4)
-
-    if _click_text_in_frames(page, "销量"):
-        time.sleep(3)
-        log.info("已点击「销量」排序")
-
-    # 仅当捕捉到真实验证信号才进入介入流程（持续响铃直到解决）
-    kind = intervention_kind(page, punished[0])
-    if kind:
-        wait_for_resolution(page, cfg.human_pause_minutes,
-                            confirm_sec=cfg.intervention_confirmation_sec)
-        try:
-            page.reload(wait_until="domcontentloaded")
-            time.sleep(4)
-        except Exception as exc:
-            log.warning("刷新失败：%s", exc)
-    else:
-        time.sleep(5)  # 无验证：给一点时间让商品加载
-        if not _extract_anchors(page):
-            try:
-                page.mouse.wheel(0, 2000)
-            except Exception:
-                pass
-            time.sleep(3)
-
-    while pages_read < cfg.max_pages_per_shop:
-        pages_read += 1
-        human.before_list_page()
-        time.sleep(1)
-        kind = intervention_kind(page, punished[0])
-        if kind:
-            wait_for_resolution(page, cfg.human_pause_minutes,
-                                confirm_sec=cfg.intervention_confirmation_sec)
-
-        added = 0
-        for item in _extract_anchors(page):
-            href = item.get("href") or ""
-            m = re.search(r"/(?:offer|item)/(\d+)\.html", href)
-            if not m:
-                continue
-            oid = m.group(1)
-            if oid in seen:
-                continue
-            seen.add(oid)
-            offers.append((len(offers) + 1, oid, href, item.get("text") or "", ""))
-            added += 1
-        # 接口兜底：把拦截到的 offerId 也补进来（无法拿标题时给空）
-        for oid in list(captured_oids):
-            if oid not in seen:
-                seen.add(oid)
-                offers.append((len(offers) + 1, oid, f"https://detail.1688.com/offer/{oid}.html", "", ""))
-                added += 1
-        log.info("店铺 %s 第 %s 页新增 %s，累计 %s", shop.key, pages_read, added, len(offers))
-
-        if pages_read >= cfg.max_pages_per_shop:
-            break
-        if not _click_text_in_frames(page, "下一页"):
-            log.info("店铺 %s 无下一页，提前结束", shop.key)
-            break
-        page.wait_for_load_state("domcontentloaded", timeout=cfg.timeout_ms)
-        time.sleep(2)
-
-    return offers, pages_read
 
 
 def capture_detail(page, product_url: str, cfg: Config, human: Humanizer, emit=None) -> dict:

@@ -5,11 +5,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import pipeline, rounds
+from bestseller_monitor import browser_pw, pipeline, rounds
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import CST, Database, connect, cst_date
 from bestseller_monitor.rounds import RoundRequest, ScopeMismatch, ShopScope
-from helpers import isolated_locks
+from helpers import isolated_locks, new_round
 
 SHOP_CSV_HEADER = "shop_key,shop_name,shop_url,pages,active,offer_list_url"
 
@@ -153,3 +153,79 @@ class RoundScopeWiringTests(unittest.TestCase):
         shops = pipeline.requested_round_shops(self._cfg(), {"A02"})
 
         self.assertEqual([shop.key for shop in shops], ["A02"])
+
+
+class PwCdpRoundAssemblyTests(unittest.TestCase):
+    """IS-23 / ADR-0010：删掉旧的直连路径之后，这是整轮采集唯一的装配入口。
+
+    会话的打开与收尾、事件埋点与 deny 追踪都从这一处挂到轮次上，
+    所以这几件事在这里锁住，而不是散在已经不存在的旧路径里。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tmp.name) / "test.db"
+        self.db = Database(connect(self.db_path))
+        self.round_id = new_round(self.db, "A01")
+        self.shops = [Shop("A01", "店铺A01", "https://A01.example/")]
+
+    def tearDown(self):
+        self.db.conn.close()
+        self.tmp.cleanup()
+
+    def _cfg(self):
+        """record_params() 要的键与 deny 窗口都给全，其余字段这一层用不到。"""
+        return SimpleNamespace(
+            db_file=self.db_path,
+            driver="pw_cpd",
+            deny_window_minutes=10,
+            detail_delay_sec=(0.0, 0.0),
+            list_delay_sec=(0.0, 0.0),
+            long_pause_interval=(1, 1),
+            long_pause_sec=(0.0, 0.0),
+            batch_size=1,
+            batch_rest_sec=(0.0, 0.0),
+            action_delay_sec=(0.0, 0.0),
+            read_delay_sec=(0.0, 0.0),
+            retry_base_sec=0.0,
+            retry_jitter_sec=0.0,
+            max_pages_per_shop=3,
+            human_pause_minutes=1,
+            alarm_on_intervention=False,
+        )
+
+    def _run(self, listing):
+        session = ("pw", "br", "page", "ctx")
+        with patch.object(browser_pw, "open_session", return_value=session) as opened, \
+                patch.object(browser_pw, "close_session") as closed, \
+                patch.object(pipeline, "_run_listing_pw", side_effect=listing):
+            pipeline._run_pwcdp_round(self.db, self._cfg(), self.round_id, self.shops)
+        return opened, closed
+
+    def test_session_is_closed_even_when_the_listing_phase_fails(self):
+        session = ("pw", "br", "page", "ctx")
+        with patch.object(browser_pw, "open_session", return_value=session), \
+                patch.object(browser_pw, "close_session") as closed, \
+                patch.object(pipeline, "_run_listing_pw", side_effect=RuntimeError("榜单炸了")):
+            with self.assertRaises(RuntimeError):
+                pipeline._run_pwcdp_round(self.db, self._cfg(), self.round_id, self.shops)
+
+        self.assertEqual(closed.call_args.args, session[:2], "异常也不能漏掉浏览器收尾")
+
+    def test_listing_phase_records_events_and_deny_tracking_for_this_round(self):
+        captured = {}
+
+        def fake_listing(db, cfg, round_id, shops, page, emit=None, deny_tracker=None):
+            captured["deny_tracker"] = deny_tracker
+            emit("click_deny", shop_key="A01", phase="listing")
+
+        self._run(fake_listing)
+
+        events = [tuple(row) for row in self.db.conn.execute(
+            "SELECT round_id, event, shop_key FROM event_log"
+        )]
+        self.assertEqual(events, [(self.round_id, "click_deny", "A01")],
+                         "埋点要落在本轮的事件表里，界面过程页读的就是它")
+        self.assertIsInstance(captured["deny_tracker"], browser_pw.DenyTracker)
+        params = self.db.conn.execute("SELECT COUNT(*) c FROM run_params").fetchone()["c"]
+        self.assertEqual(params, 1, "本轮生效的参数要留档")

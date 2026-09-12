@@ -8,9 +8,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
-
-from . import browser_dp, browser_pw, dedupe, rounds, single_instance, stop_request
+from . import browser_pw, dedupe, rounds, single_instance, stop_request
 from .browser_pw import DenyTracker, ShopDenyExceeded, RoundDenyExceeded
 from .config import Config, Shop, load_shops
 from .db import (
@@ -24,12 +22,12 @@ from .db import (
     DETAIL_BUDGET_NOTE,
 )
 from .delay import Humanizer
-from .detail import DetailParseFailed, capture_detail_payload, save_raw_page
+from .detail import DetailParseFailed, save_raw_page
 from .guard import RoundPauseRequired
 from .parse import extract_main_image
 from .rounds import Round, RoundRequest, ShopScope, TerminalReason
 from .stop_request import StopRequested
-from .listing import ListingLoadFailed, crawl_shop_listing, save_raw_listing_page
+from .listing import ListingLoadFailed, save_raw_listing_page
 
 log = logging.getLogger(__name__)
 
@@ -173,12 +171,8 @@ def _run_round_locked(cfg: Config, shops: list[Shop]) -> None:
             print(f"\n>>> {note}。\n")
         work_shops = round_shops(db, round_id, cfg)
 
-        if cfg.driver == "pw_cdp":
-            _run_pwcdp_round(db, cfg, round_id, work_shops)
-        elif cfg.driver == "drission":
-            _run_dp_round(db, cfg, round_id, work_shops)
-        else:
-            _run_pw_round(db, cfg, round_id, work_shops)
+        # 采集驱动只有一条；别的值在配置加载处就被拦住（ADR-0010），这里不再有分支。
+        _run_pwcdp_round(db, cfg, round_id, work_shops)
         _finalize_round(db, cfg, opened.round)
     except StopRequested:
         # 界面按了暂停：轮次保持进行中，已抓数据保留，可再次运行续跑。
@@ -236,97 +230,6 @@ def _report_late_stop(settled: Round, reason: TerminalReason) -> None:
              settled.id, settled.reason.value, reason.value)
     print(f"\n>>> 轮次 #{settled.id} 已经是 {settled.reason.value}，"
           "本次停止不改写它的终态。\n")
-
-
-def _run_pw_round(db: Database, cfg: Config, round_id: int, shops: list[Shop]) -> None:
-    with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            user_data_dir=str(cfg.profile_dir),
-            channel=cfg.browser_channel,
-            headless=cfg.headless,
-            slow_mo=cfg.slow_mo_ms,
-            locale="zh-CN",
-            timezone_id="Asia/Shanghai",
-            viewport={"width": 1440, "height": 900},
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-infobars",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-features=AutomationControlled,IsolateOrigins,site-per-process",
-            ],
-            ignore_default_args=["--enable-automation"],
-        )
-        page = context.new_page()
-        page.set_default_timeout(cfg.timeout_ms)
-        page.add_init_script(
-            """
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN','zh','en']});
-            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-            Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
-            window.chrome = window.chrome || { runtime: {} };
-            """
-        )
-        try:
-            _run_listing_phase(db, cfg, round_id, shops, page)
-            _run_detail_phase(db, cfg, round_id, page)
-        finally:
-            context.close()
-
-
-def _run_dp_round(db: Database, cfg: Config, round_id: int, shops: list[Shop]) -> None:
-    page = browser_dp.create_page(cfg)
-    try:
-        _run_listing_dp(db, cfg, round_id, shops, page)
-        _run_detail_dp(db, cfg, round_id, page)
-    finally:
-        try:
-            page.quit()
-        except Exception:
-            pass
-        browser_dp.stop_browser()
-
-
-def _run_listing_dp(db: Database, cfg: Config, round_id: int, shops: list[Shop], page) -> None:
-    db.set_phase(round_id, "listing")
-    done = db.completed_listing_keys(round_id)
-    human = Humanizer(cfg)
-    for shop in shops:
-        # 每家店开始之前先问轮次：跨天收尾发生在还没动这家店的干净点上。
-        rounds.ensure_workable(db, round_id, utcnow())
-        if shop.key in done:
-            log.info("店铺 %s 本轮已完成榜单，跳过", shop.key)
-            continue
-        try:
-            offers, pages_read = browser_dp.crawl_shop_listing(page, shop, cfg, human)
-            db.save_shop_offers(round_id, shop.key, shop.url, shop.name, offers, pages_read)
-        except ListingLoadFailed as exc:
-            _record_listing_failure(db, cfg, round_id, shop, exc)
-        except StopRequested:
-            _record_incomplete_listing(db, round_id, shop, PAUSE_BY_USER_NOTE)
-            raise
-    log.info("店铺阶段完成（含逐店即时补抓）")
-
-
-def _run_detail_dp(db: Database, cfg: Config, round_id: int, page) -> None:
-    _run_pending_detail_phase(
-        db, cfg, round_id,
-        lambda d, c, h, r, o: _capture_one_dp(d, c, h, r, o, page),
-    )
-
-
-def _run_pending_detail_phase(db: Database, cfg: Config, round_id: int, capture) -> None:
-    """逐个处理待补采商品；取得一次详情的能力由各驱动的 capture 提供。"""
-    db.set_phase(round_id, "detail")
-    human = Humanizer(cfg)
-    offers = _pending_detail_offers(db, round_id, cfg)
-    log.info("详情阶段：待处理商品 %s 个", len(offers))
-    processed = _capture_pending_offers(
-        db, cfg, human, round_id, offers,
-        lambda offer: capture(db, cfg, human, round_id, offer),
-    )
-    log.info("详情阶段结束：本轮处理 %s 个商品", processed)
 
 
 def _capture_pending_offers(db: Database, cfg: Config, human: Humanizer, round_id: int,
@@ -439,54 +342,6 @@ def _capture_offer_detail(db: Database, cfg: Config, human: Humanizer, round_id:
         log.info("店铺 %s 商品 %s 抓取成功：%s 个 SKU（第 %s 次尝试）",
                  shop_key, offer_id, len(payload["rows"]), attempt)
         return
-
-
-def _capture_one_dp(db: Database, cfg: Config, human: Humanizer, round_id: int, offer, page) -> None:
-    """DrissionPage 版单个详情抓取（带重试与数据库写入）。"""
-    def fetch():
-        return browser_dp.capture_detail_payload(page, offer["product_url"], cfg, human)
-
-    _capture_offer_detail(db, cfg, human, round_id, offer, fetch)
-
-
-def _run_listing_phase(db: Database, cfg: Config, round_id: int, shops: list[Shop], page) -> None:
-    db.set_phase(round_id, "listing")
-    done = db.completed_listing_keys(round_id)
-    human = Humanizer(cfg)
-    for shop in shops:
-        # 每家店开始之前先问轮次：跨天收尾发生在还没动这家店的干净点上。
-        rounds.ensure_workable(db, round_id, utcnow())
-        if shop.key in done:
-            log.info("店铺 %s 本轮已完成榜单，跳过", shop.key)
-            continue
-        try:
-            offers, pages_read = crawl_shop_listing(page, shop, cfg, human)
-            db.save_shop_offers(
-                round_id, shop.key, shop.url, shop.name, offers, pages_read,
-            )
-        except ListingLoadFailed as exc:
-            _record_listing_failure(db, cfg, round_id, shop, exc)
-        except StopRequested:
-            _record_incomplete_listing(db, round_id, shop, PAUSE_BY_USER_NOTE)
-            raise
-    log.info("榜单阶段完成")
-
-
-def _run_detail_phase(db: Database, cfg: Config, round_id: int, page) -> None:
-    _run_pending_detail_phase(
-        db, cfg, round_id,
-        lambda d, c, h, r, o: _capture_one(d, c, h, r, o, page),
-    )
-
-
-def _capture_one(
-    db: Database, cfg: Config, human: Humanizer, round_id: int, offer, page,
-) -> None:
-    """带重试的单个详情抓取。"""
-    def fetch():
-        return capture_detail_payload(page, offer["product_url"], cfg, human)
-
-    _capture_offer_detail(db, cfg, human, round_id, offer, fetch)
 
 
 def _finalize_round(db: Database, cfg: Config, run: Round) -> None:

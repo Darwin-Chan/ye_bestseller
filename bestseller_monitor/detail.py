@@ -5,8 +5,6 @@ import logging
 from pathlib import Path
 
 from .config import Config
-from .delay import Humanizer
-from .guard import detect, wait_for_human
 from .parse import extract_skus_from_html, extract_title, is_single_spec_offer
 
 log = logging.getLogger(__name__)
@@ -36,17 +34,6 @@ def parse_detail_html(html: str, product_url: str) -> dict:
     if any(row.get("sku_stock") is None for row in rows):
         raise DetailParseFailed(f"详情页存在缺失库存的 SKU：{product_url}", html=html)
     return {"product_name": product_name, "html": html, "rows": rows}
-
-
-def capture_detail_payload(page, product_url: str, cfg: Config, human: Humanizer) -> dict:
-    """打开详情页并返回解析结果；解析失败抛出 DetailParseFailed。"""
-    page.goto(product_url, wait_until="domcontentloaded", timeout=cfg.timeout_ms)
-    human.after_load()
-    kind = detect(page)
-    if kind:
-        wait_for_human(page, kind, cfg.human_pause_minutes)
-    html = page.content()
-    return parse_detail_html(html, product_url)
 
 
 def save_raw_page(cfg: Config, round_id: int, offer_id: str, html: str) -> Path:

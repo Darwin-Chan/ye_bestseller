@@ -81,23 +81,6 @@ def list_identity(page) -> tuple[str, ...]:
     return tuple(out)
 
 
-def drission_list_identity(page) -> tuple[str, ...]:
-    """DrissionPage 版列表身份：商品链接（offer/item）序列，读不到返回空元组。"""
-    try:
-        anchors = page.eles("tag:a")
-    except Exception:
-        return ()
-    out: list[str] = []
-    for a in anchors:
-        try:
-            href = a.attr("href") or ""
-        except Exception:
-            continue
-        if "/offer/" in href or "/item/" in href:
-            out.append(str(href))
-    return tuple(out)
-
-
 def wait_for_change(observe, before: tuple, describe: str, timeout_sec: float) -> bool:
     """轮询 observe()，等到结果与 before 不同为止。
 
@@ -127,13 +110,6 @@ def wait_for_list_change(page, before: tuple, describe: str,
     timeout_sec 省略时取 LIST_CHANGE_TIMEOUT_SEC（调用时解析，方便按驱动调整）。
     """
     return wait_for_change(lambda: list_identity(page), before, describe,
-                           _resolve_timeout(timeout_sec))
-
-
-def wait_for_drission_change(page, before: tuple, describe: str,
-                             timeout_sec: float | None = None) -> bool:
-    """等 DrissionPage 列表相对翻页前的身份发生变化；详见 wait_for_change()。"""
-    return wait_for_change(lambda: drission_list_identity(page), before, describe,
                            _resolve_timeout(timeout_sec))
 
 

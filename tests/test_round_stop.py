@@ -136,9 +136,9 @@ class RoundStopRuleTests(unittest.TestCase):
         stale = self._open(_yesterday(), "A01")
         shop = Shop("A01", "店铺A01", "https://A01.example/")
 
-        with patch.object(pipeline, "crawl_shop_listing") as crawl:
+        with patch.object(browser_pw, "crawl_store_by_click") as crawl:
             with self.assertRaises(DayBoundaryReached):
-                pipeline._run_listing_phase(self.db, self._cfg(), stale.id, [shop], MagicMock())
+                pipeline._run_listing_pw(self.db, self._cfg(), stale.id, [shop], MagicMock())
 
         crawl.assert_not_called()
         row = self.conn.execute(
@@ -193,9 +193,9 @@ class RoundStopRuleTests(unittest.TestCase):
             self._request_pause(run.id)                      # 界面那一跳
             rounds.ensure_workable(self.db, run.id, cst_date())   # 采集进程的检查点
 
-        with patch.object(pipeline, "crawl_shop_listing", side_effect=crawl):
+        with patch.object(browser_pw, "crawl_store_by_click", side_effect=crawl):
             with self.assertRaises(stop_request.StopRequested):
-                pipeline._run_listing_phase(self.db, self._cfg(), run.id, [shop], MagicMock())
+                pipeline._run_listing_pw(self.db, self._cfg(), run.id, [shop], MagicMock())
 
         row = self.conn.execute(
             "SELECT list_status, list_note FROM shop_rounds WHERE round_id=?", (run.id,)

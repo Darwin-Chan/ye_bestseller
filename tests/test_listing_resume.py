@@ -1,11 +1,11 @@
-"""续跑只重新抓未完成店铺：三条保留驱动路径给出同一个答案。"""
+"""续跑只重新抓未完成店铺（IS-33）。"""
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_dp, browser_pw, pipeline
+from bestseller_monitor import browser_pw, pipeline
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import Database, connect
 from helpers import new_round
@@ -79,24 +79,6 @@ class ListingResumeTests(unittest.TestCase):
             (self.round_id,),
         )}
         self.assertEqual(statuses, {"A01": "完成", "A02": "完成"}, "未完成店铺这一轮被补完")
-
-    def test_playwright_direct_path_skips_the_completed_shop(self):
-        with patch.object(pipeline, "crawl_shop_listing",
-                          return_value=(UNFINISHED_OFFERS, 1)) as crawl:
-            pipeline._run_listing_phase(
-                self.db, _cfg(), self.round_id, self.shops, MagicMock(),
-            )
-
-        self._assert_only_the_unfinished_shop_was_crawled(crawl)
-
-    def test_drission_path_skips_the_completed_shop(self):
-        with patch.object(browser_dp, "crawl_shop_listing",
-                          return_value=(UNFINISHED_OFFERS, 1)) as crawl:
-            pipeline._run_listing_dp(
-                self.db, _cfg(), self.round_id, self.shops, MagicMock(),
-            )
-
-        self._assert_only_the_unfinished_shop_was_crawled(crawl)
 
     def test_cdp_click_path_skips_the_completed_shop(self):
         with patch.object(browser_pw, "crawl_store_by_click",

@@ -2,7 +2,7 @@
 
 目标：所有「是否滑块 / 是否登录墙 / 是否 deny 限流 / 是否真 punish 页」的判定，
 以及人工介入的「确认窗口 + 刷新兜底 + 持续响铃」等待逻辑，都收敛到本模块。
-browser_pw / browser_dp / listing / detail 调用同一套常量与判定，避免各处口径不一致。
+browser_pw 与各诊断工具调用同一套常量与判定，避免各处口径不一致。
 """
 from __future__ import annotations
 
@@ -176,12 +176,3 @@ def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | 
             raise InterventionTimeout("人工介入超时")
         sound.play_alarm(count=1)   # 每次约 1 秒，循环播放
         time.sleep(3)
-
-
-# ---------- 兼容旧接口（listing / detail / browser_dp 用） ----------
-def detect(page) -> str | None:
-    return intervention_kind(page)
-
-
-def wait_for_human(page, kind, minutes, confirm_sec: float = 2.0) -> None:
-    wait_for_resolution(page, minutes, verification_type=vtype(kind), confirm_sec=confirm_sec)
