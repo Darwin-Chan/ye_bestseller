@@ -867,6 +867,84 @@ class DbTests(unittest.TestCase):
         old.unlink(missing_ok=True)
 
 
+class SnapshotDedupeMigrationTests(unittest.TestCase):
+    """整表去重是给「还没有唯一索引的老库」准备的一次性迁移（IS-38）。
+
+    索引一旦在，重复行不可能再写进来。原先每开一次连接都把整表扫一遍，等于界面每次
+    刷新都付一遍全表成本：实测 6 万行 0.020 秒、15 万行 0.051 秒、30 万行 0.107 秒、
+    60 万行 0.218 秒，随快照总量线性增长。
+    """
+
+    DEDUPE_MARK = "DELETE FROM snapshots"
+
+    def _legacy_db(self, tmp: str) -> Path:
+        """造一个「同一成功快照有重复行、还没有唯一索引」的老库。"""
+        path = Path(tmp) / "legacy-duplicates.db"
+        raw = sqlite3.connect(path)
+        raw.executescript(SCHEMA)
+        raw.execute("INSERT INTO rounds(id, started_at) VALUES (1, '2026-09-04T00:00:00+00:00')")
+        raw.executemany(
+            "INSERT INTO snapshots(round_id, shop_key, shop_url, shop_name, offer_id, "
+            "product_url, product_name, sku_id, sku_name, sku_price, sku_stock, collected_at, "
+            "page_status, attempt) "
+            "VALUES (1, 'A01', 'https://a.example/', '店铺A', '111', 'https://detail/111', "
+            "'榜单标题', 'red', '红色', ?, ?, ?, '成功', ?)",
+            [(10, 10, "2026-09-04T02:00:00+00:00", 1),
+             (12, 2, "2026-09-04T03:00:00+00:00", 2)],
+        )
+        raw.commit()
+        raw.close()
+        return path
+
+    def _open_traced(self, path: Path) -> tuple[sqlite3.Connection, list[str]]:
+        """开库并记下这条连接上执行过的语句——迁移跑在 connect() 里，只能这样看。"""
+        seen: list[str] = []
+        real_connect = sqlite3.connect
+
+        def traced(*args, **kwargs):
+            conn = real_connect(*args, **kwargs)
+            conn.set_trace_callback(seen.append)
+            return conn
+
+        with patch("sqlite3.connect", traced):
+            conn = connect(path)
+        return conn, seen
+
+    def _statements_like(self, seen: list[str], mark: str) -> list[str]:
+        return [sql for sql in seen if mark in sql]
+
+    def test_first_open_of_a_legacy_database_dedupes_and_builds_the_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn, seen = self._open_traced(self._legacy_db(tmp))
+            try:
+                self.assertTrue(
+                    self._statements_like(seen, self.DEDUPE_MARK),
+                    "缺索引的老库要靠这次去重才建得起唯一索引",
+                )
+                self.assertEqual(conn.execute(
+                    "SELECT COUNT(*) FROM snapshots WHERE round_id=1 AND sku_id='red'"
+                ).fetchone()[0], 1)
+            finally:
+                conn.close()
+
+    def test_second_open_does_not_scan_the_snapshot_table_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._legacy_db(tmp)
+            conn, _ = self._open_traced(path)
+            conn.close()
+
+            conn, seen = self._open_traced(path)
+            try:
+                self.assertEqual(
+                    self._statements_like(seen, self.DEDUPE_MARK), [],
+                    "唯一索引已在，重复行不可能写进来：这次开库不该再扫整表",
+                )
+                indexes = [row[1] for row in conn.execute("PRAGMA index_list('snapshots')")]
+                self.assertIn("idx_snapshots_success_key", indexes, "闸门不能把索引本身也带掉")
+            finally:
+                conn.close()
+
+
 class CrawlerIdentityTests(unittest.TestCase):
     """采集进程的身份行：同一时刻至多一行，进程走了就该清掉（工单 02）。"""
 

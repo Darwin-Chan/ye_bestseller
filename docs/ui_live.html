@@ -191,8 +191,12 @@
 
 <script>
   let api = null;
-  let pollTimer = null;
   let hasStartedRun = false;
+  // 刷新节拍（毫秒）：默认 2 秒；用例把它调小来验证防重入（IS-38）。
+  let POLL_MS = 2000;
+  let pollTimer = null;
+  let polling = false;
+  let tickChain = Promise.resolve();   // 串起刷新：同一时刻只有一条在跑（IS-38）
 
   const $ = id => document.getElementById(id);
 
@@ -310,16 +314,32 @@
   }
 
   // ---------- 过程页 ----------
+  // 上一次刷新回来之后才排下一次（IS-38）：固定节拍碰上慢查询会把请求堆在控制锁上，
+  // 暂停/中止于是要排在它们后面。手动调用（暂停 / 继续 / 切页签）也走这条链：排在
+  // 在途那条之后，拿到的是暂停后的新数据，而不是复用暂停前的旧快照。
   function startPolling() {
     stopPolling();
-    pollTimer = setInterval(tickRun, 2000);
+    polling = true;
     tickRun();
   }
-  function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+  function stopPolling() {
+    polling = false;
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  }
+  function tickRun() {
+    tickChain = tickChain.then(runTick, runTick);
+    return tickChain;
+  }
+  function scheduleNextTick() {
+    if (!polling) return;
+    if (pollTimer) clearTimeout(pollTimer);
+    pollTimer = setTimeout(() => { pollTimer = null; tickRun(); }, POLL_MS);
+  }
 
-  async function tickRun() {
+  async function runTick() {
     const d = await callApi("get_run");
-    if (!d) return;
+    // 失败也照常排下一次：轮询不能因为一次查询失败就停，成功的那次会把提示收起来。
+    if (!d) { scheduleNextTick(); return; }
     if (d.start_error) {
       // 采集子进程被「已有采集在跑」拒绝：说清原因，别把这次启动当成一轮跑完。
       stopPolling();
@@ -353,7 +373,9 @@
       stopPolling();
       const res = await callApi("get_result");
       if (res && res.has_round) { renderResult(res); switchTab("result"); }
+      return;
     }
+    scheduleNextTick();
   }
 
   async function pauseRun() { await callApi("pause_run"); await tickRun(); }

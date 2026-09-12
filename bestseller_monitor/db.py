@@ -164,6 +164,35 @@ CREATE TABLE IF NOT EXISTS crawler_process (
 );
 """
 
+# 同一轮、店铺、商品和 SKU 至多一条成功快照：靠唯一索引保证（见 connect() 的迁移）。
+SNAPSHOT_SUCCESS_INDEX = "idx_snapshots_success_key"
+
+_SNAPSHOT_SUCCESS_INDEX_SQL = (
+    f"CREATE UNIQUE INDEX IF NOT EXISTS {SNAPSHOT_SUCCESS_INDEX} "
+    "ON snapshots(round_id, shop_key, offer_id, sku_id) "
+    "WHERE page_status='成功' AND sku_id IS NOT NULL"
+)
+
+# 给「索引还没建起来的老库」清掉重复行。整表扫描，只在缺索引时执行一次。
+_SNAPSHOT_DEDUPE_SQL = (
+    "DELETE FROM snapshots WHERE id IN ("
+    "SELECT older.id FROM snapshots older "
+    "JOIN snapshots newer ON newer.round_id=older.round_id "
+    "AND newer.shop_key=older.shop_key AND newer.offer_id=older.offer_id "
+    "AND newer.sku_id=older.sku_id AND newer.page_status='成功' "
+    "AND newer.sku_id IS NOT NULL AND newer.id > older.id "
+    "WHERE older.page_status='成功' AND older.sku_id IS NOT NULL"
+    ")"
+)
+
+
+def _has_snapshot_success_index(conn: sqlite3.Connection) -> bool:
+    """唯一索引在不在——在，就说明这个库已经过了那次整表去重。"""
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+        (SNAPSHOT_SUCCESS_INDEX,),
+    ).fetchone() is not None
+
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -379,25 +408,19 @@ def connect(db_path: Path) -> sqlite3.Connection:
     # 迁移：同一轮、店铺、商品和 SKU 只保留最新成功快照，再建立最终唯一约束。
     # 失败记录与无 SKU 的跳过记录不参与该约束。极旧库可能还没有 page_status，
     # 先完成其列迁移，等新写入路径可用时再建立约束。
+    #
+    # 去重是整表扫描，而界面每次刷新都走一次 connect()。所以它只在「唯一索引还不在」
+    # 时跑：索引一旦建好，重复行不可能再写进来，后面的开库不该再付这笔随快照总量线性
+    # 增长的成本（IS-38 实测 6 万行 0.020 秒、30 万行 0.107 秒、60 万行 0.218 秒）。
     snapshot_cols = {
         row[1] for row in conn.execute('PRAGMA table_info("snapshots")').fetchall()
     }
-    if {"id", "round_id", "shop_key", "offer_id", "sku_id", "page_status"} <= snapshot_cols:
-        conn.execute(
-            "DELETE FROM snapshots WHERE id IN ("
-            "SELECT older.id FROM snapshots older "
-            "JOIN snapshots newer ON newer.round_id=older.round_id "
-            "AND newer.shop_key=older.shop_key AND newer.offer_id=older.offer_id "
-            "AND newer.sku_id=older.sku_id AND newer.page_status='成功' "
-            "AND newer.sku_id IS NOT NULL AND newer.id > older.id "
-            "WHERE older.page_status='成功' AND older.sku_id IS NOT NULL"
-            ")"
-        )
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_success_key "
-            "ON snapshots(round_id, shop_key, offer_id, sku_id) "
-            "WHERE page_status='成功' AND sku_id IS NOT NULL"
-        )
+    if ({"id", "round_id", "shop_key", "offer_id", "sku_id", "page_status"} <= snapshot_cols
+            and not _has_snapshot_success_index(conn)):
+        removed = conn.execute(_SNAPSHOT_DEDUPE_SQL).rowcount
+        conn.execute(_SNAPSHOT_SUCCESS_INDEX_SQL)
+        log.info("快照去重迁移：删除 %d 行重复成功记录并建立唯一索引 %s",
+                 removed, SNAPSHOT_SUCCESS_INDEX)
     conn.commit()
     return conn
 

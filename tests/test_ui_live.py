@@ -61,6 +61,44 @@ window.pywebview = { platform: "edgechromium", api: {
 
 ERROR_BOX = "#apiError"
 
+# 轮询用桥：get_run 卡住直到测试放行，用来模拟「查询变慢」；返回值按调用那一刻的
+# 状态快照构造，这样「复用在途结果」与「重新取一次」在页面上看得出区别。
+POLL_MOCK_API = r"""
+window.__calls = [];
+window.__gate = false;
+window.__paused = false;
+window.__hold = null;
+window.__release = () => { const r = window.__hold; window.__hold = null; if (r) r(); };
+window.pywebview = { platform: "edgechromium", api: {
+  get_start: async () => {
+    window.__calls.push("get_start");
+    return {
+      ov: {products: 0, skus: 0},
+      summary: {started: false, rounds: 0, text: ""},
+      shops: [{key: "A01", name: "店铺A", products: 0, skus: 0, pages: 1,
+               default_checked: true}],
+      total_shops: 1, start_hint: "", crawler: null,
+    };
+  },
+  get_run: async () => {
+    window.__calls.push("get_run");
+    const pausedAtCall = window.__paused;
+    if (window.__gate) { await new Promise(resolve => { window.__hold = resolve; }); }
+    return {
+      running: true, manually_paused: pausedAtCall, has_round: true, round_id: 7,
+      started_hhmm: "10:00", elapsed_sec: 5, deny: 0, done_count: 0, total_count: 1,
+      progress: 0, current_shop: "A01", done: [], todo: [{key: "A01", name: "店铺A"}],
+    };
+  },
+  get_result: async () => { window.__calls.push("get_result"); return {has_round: false}; },
+  start_run: async (keys) => { window.__calls.push("start_run"); return {ok: true}; },
+  pause_run: async () => { window.__calls.push("pause_run"); window.__paused = true;
+                           return {ok: true}; },
+  resume_run: async () => { window.__calls.push("resume_run"); return {ok: true}; },
+  abort_run: async () => { window.__calls.push("abort_run"); return {ok: true}; },
+}};
+"""
+
 
 class UiLiveErrorFeedbackTests(unittest.TestCase):
     @classmethod
@@ -202,6 +240,85 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
 
             self.assertIn("已有采集进程在运行", page.inner_text(ERROR_BOX))
             self.assertEqual(self.active_tab(page), "开始", "被拒绝时不该停在结果页")
+        finally:
+            page.close()
+
+
+class UiLivePollingTests(unittest.TestCase):
+    """界面轮询要防重入（IS-38）。
+
+    原先每 2 秒无条件发一次异步 get_run：查询一慢，请求就堆在控制锁上，暂停/中止要
+    排在它们后面。这里锁住两件事——一次刷新没回来之前不再发第二条；手动触发的刷新
+    排在在途那条之后、取到的是新数据。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._pw = sync_playwright().start()
+        try:
+            cls.browser = cls._pw.chromium.launch(channel="msedge", headless=True)
+        except Exception as exc:  # noqa: BLE001
+            cls._pw.stop()
+            cls._pw = None
+            raise unittest.SkipTest(f"没有可用的 Edge/Playwright 浏览器：{exc}")
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._pw is not None:
+            cls.browser.close()
+            cls._pw.stop()
+
+    def open_page(self):
+        """加载真实页面，注入一个可卡住 get_run 的桥，并把节拍压到 50 毫秒。"""
+        page = self.browser.new_page(viewport={"width": 1100, "height": 1000})
+        page.add_init_script(POLL_MOCK_API)
+        page.goto(HTML_URI)
+        self.assertEqual(page.evaluate("POLL_MS"), 2000, "运行时默认节拍仍是 2 秒")
+        page.evaluate("POLL_MS = 50")
+        return page
+
+    def calls_of(self, page, name: str) -> int:
+        return page.evaluate("n => window.__calls.filter(c => c === n).length", name)
+
+    def start_a_run(self, page):
+        page.click("#startBtn")
+        page.wait_for_function("window.__calls.includes('get_run')", timeout=5000)
+
+    def test_a_slow_refresh_is_not_started_again_while_it_is_still_running(self):
+        page = self.open_page()
+        try:
+            page.evaluate("window.__gate = true")
+            self.start_a_run(page)
+
+            page.wait_for_timeout(500)   # 50 毫秒节拍 × 10：固定节拍会在这里堆 10 条
+
+            self.assertEqual(self.calls_of(page, "get_run"), 1,
+                             "上一次刷新还没回来，就不该再发下一条")
+
+            page.evaluate("window.__release()")
+            page.wait_for_function(
+                "window.__calls.filter(c => c === 'get_run').length === 2", timeout=5000)
+        finally:
+            page.close()
+
+    def test_a_manual_refresh_waits_then_fetches_new_data_instead_of_reusing_the_snapshot(self):
+        page = self.open_page()
+        try:
+            page.evaluate("window.__gate = true")
+            self.start_a_run(page)
+            page.click("#pauseBtn")
+            page.wait_for_function("window.__calls.includes('pause_run')", timeout=5000)
+
+            self.assertEqual(self.calls_of(page, "get_run"), 1, "在途那条还在跑，先不重入")
+
+            page.evaluate("window.__release()")   # 放行暂停前发出的那条
+            page.wait_for_function(
+                "window.__calls.filter(c => c === 'get_run').length === 2", timeout=5000)
+
+            page.evaluate("window.__release()")   # 放行排到后面的那条新请求
+            # 第 2 条取到的是暂停之后的状态：页面必须显示暂停，而不是复用暂停前的快照
+            page.wait_for_selector("#rPaused", state="visible", timeout=5000)
+            self.assertEqual(page.evaluate("window.__calls.filter(c => c === 'get_run').length"), 2)
         finally:
             page.close()
 
