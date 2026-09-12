@@ -20,6 +20,7 @@ from bestseller_monitor.rounds import (
     ShopScope,
     TerminalReason,
     finish,
+    finish_if_open,
     open,
 )
 
@@ -263,6 +264,27 @@ class RoundModuleTests(unittest.TestCase):
             finish(self.db, opened.round, TerminalReason.LEGACY_UNKNOWN)
 
         self.assertIsNone(self._row(opened.round.id)["terminal_reason"])
+
+    def test_settling_keeps_an_earlier_terminal_state_instead_of_failing(self):
+        """迟到的收尾：轮次已被人工中止，采集进程到检查点才停——不覆盖、不报错。"""
+        opened = open(self.db, RoundRequest("2026-09-12", _shops("A01")))
+        finish(self.db, opened.round, TerminalReason.ABANDONED, note="GUI 人工中止（放弃）")
+
+        settled = finish_if_open(self.db, opened.round, TerminalReason.DAY_BOUNDARY,
+                                 note=DAY_BOUNDARY_NOTE)
+
+        self.assertEqual(settled.reason, TerminalReason.ABANDONED)
+        row = self._row(opened.round.id)
+        self.assertEqual(row["terminal_reason"], "ABANDONED")
+        self.assertEqual(row["note"], "GUI 人工中止（放弃）")
+
+    def test_settling_an_open_round_writes_the_reason(self):
+        opened = open(self.db, RoundRequest("2026-09-12", _shops("A01")))
+
+        settled = finish_if_open(self.db, opened.round, TerminalReason.COMPLETED)
+
+        self.assertEqual(settled.reason, TerminalReason.COMPLETED)
+        self.assertEqual(self._row(opened.round.id)["terminal_reason"], "COMPLETED")
 
     def test_resumable_and_stops_work_boundaries(self):
         opened = open(self.db, RoundRequest("2026-09-12", _shops("A01")))

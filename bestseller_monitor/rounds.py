@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -19,6 +20,8 @@ from .db import (
 )
 
 _ROUND_COLUMNS = "id, run_date, terminal_reason, started_at, finished_at"
+
+log = logging.getLogger(__name__)
 
 
 class TerminalReason(str, Enum):
@@ -157,6 +160,27 @@ def active_round(db: Database, run_date: str | None = None) -> Round | None:
         if run_date is None or row.run_date == run_date:
             return row
     return None
+
+
+def finish_if_open(db: Database, round: Round, reason: TerminalReason, *,
+                   note: str | None = None, now=None) -> Round:
+    """收尾一轮；已经有终态就不覆盖也不报错，返回轮次当前的事实。
+
+    采集进程用这个收尾，而不是 finish()：轮次可能已经被别处收掉了——典型情形是
+    命令行起的采集还在跑，用户在界面里把那一轮「人工中止」了。迟到的收尾只是迟到，
+    既不该把终态改回去，也不该让采集进程带着异常退出。
+    """
+    try:
+        return finish(db, round, reason, note=note, now=now)
+    except RoundAlreadyFinished:
+        current = load(db, round.id)
+        log.info("轮次 #%s 已经是 %s（可能已被人工中止），迟到的收尾（%s）不覆盖。",
+                 current.id, _reason_text(current.reason), _reason_text(reason))
+        return current
+
+
+def _reason_text(reason: TerminalReason | None) -> str:
+    return reason.value if reason is not None else "进行中"
 
 
 def on_date(db: Database, run_date: str) -> tuple[Round, ...]:

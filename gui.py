@@ -287,6 +287,7 @@ class Api:
                     "shops": self._start_shops(conn),
                     "total_shops": len(self.shops),
                     "start_hint": hint,
+                    "crawler": running,
                 }
             finally:
                 conn.close()
@@ -448,7 +449,8 @@ class Api:
             f"{_fmt_hhmm(running['started_at'])} 起" if running.get("started_at") else None,
         ]
         who = "，".join(part for part in parts if part) or "身份未知"
-        return f"采集进程正在跑（{who}）：同一时刻只能有一个，现在点开始会被拒绝。"
+        return (f"采集进程正在跑（{who}）：同一时刻只能有一个，现在点开始会被拒绝；"
+                "要停它就用下面的「中止」按钮。")
 
     def _spawn_crawler(self, keys: list[str] | None = None):
         """拉起采集子进程；keys 为空表示「开始或续跑」，范围由子进程按轮次决定。"""
@@ -551,26 +553,61 @@ class Api:
             return {"ok": True}
 
     def abort_run(self) -> dict:
+        """中止：先让采集进程停下，再把轮次收尾为「人工放弃」。
+
+        停的可能是本界面拉起的子进程，也可能是别处起的（命令行、上一次界面留下的）——
+        顺序必须是先停进程、再写终态：反过来会撞上「不同终态不得覆盖」，那一轮就收不了尾。
+        """
         with self._lock:
             self.user_paused = False
             self._kill_proc()
             self._kill_browser()
-            if self.round_id is None and self.proc is None:
-                return {"ok": True}  # 没起过任务，也没有认领到轮次
+            if self.round_id is None and not self.any_crawler_running():
+                return {"ok": True}  # 没起过任务、也没有采集在跑：不必连库
             conn = self._open_conn()
             try:
                 db = Database(conn)
-                # 轮次由采集子进程创建，界面可能还没认领到编号：按今天进行中的轮次兜底。
-                rid = self.round_id
-                if rid is None:
-                    current = rounds.active_round(db, self._today())
-                    rid = current.id if current is not None else None
+                identity = self.crawler_identity(conn)
+                self._stop_crawler_process(identity)
+                rid = self._round_to_abandon(db, identity)
                 if rid is not None:
-                    rounds.finish(db, rounds.load(db, rid), TerminalReason.ABANDONED,
-                                  note="GUI 人工中止（放弃）")
+                    rounds.finish_if_open(db, rounds.load(db, rid), TerminalReason.ABANDONED,
+                                          note="GUI 人工中止（放弃）")
+                db.clear_crawler_process()
             finally:
                 conn.close()
-            return {"ok": True}
+            return {"ok": True, "round_id": rid}
+
+    def _round_to_abandon(self, db, identity: dict | None) -> int | None:
+        """该收尾哪一轮：本界面认领过的 > 身份行里的 > 今天进行中的。"""
+        if self.round_id is not None:
+            return self.round_id
+        if identity is not None and identity.get("round_id") is not None:
+            return identity["round_id"]
+        current = rounds.active_round(db, self._today())
+        return current.id if current is not None else None
+
+    @staticmethod
+    def _stop_crawler_process(identity: dict | None) -> int | None:
+        """结束身份行里那个采集进程；拿不到可用 PID 就返回 None。
+
+        PID 会被系统回收，所以先认镜像名：不是 python 就不动它。拿不到时调用方仍旧
+        只写终态——采集进程会在下一个检查点自己停下（轮次已是终态，它也干不下去了）。
+        """
+        pid = (identity or {}).get("pid")
+        if not pid:
+            return None
+        image = browser_proc.process_image_name(int(pid))
+        if not image:
+            log.info("身份行里的采集进程 PID %s 已经不在了。", pid)
+            return None
+        if not image.startswith("python"):
+            log.warning("身份行里的 PID %s 现在是 %s，不是采集进程，不动它。", pid, image)
+            return None
+        if browser_proc.terminate_process_tree(int(pid)):
+            log.info("已结束采集进程 PID %s。", pid)
+            return int(pid)
+        return None
 
     def _kill_proc(self):
         if self.proc is not None and self.proc.poll() is None:

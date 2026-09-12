@@ -30,7 +30,8 @@ window.pywebview = { platform: "edgechromium", api: {
     return {
       ov: {products: 180, skus: 1038},
       summary: {started: true, rounds: 1, text: "00:29 开始 · 跑约 20 分"},
-      shops: SHOPS, total_shops: 2, start_hint: "",
+      shops: SHOPS, total_shops: 2, start_hint: window.__crawler ? "采集进程正在跑" : "",
+      crawler: window.__crawler || null,
     };
   },
   get_run: async () => {
@@ -54,7 +55,7 @@ window.pywebview = { platform: "edgechromium", api: {
   },
   pause_run: async () => ({ok: true}),
   resume_run: async () => ({ok: true}),
-  abort_run: async () => ({ok: true}),
+  abort_run: async () => { window.__calls.push("abort_run"); return {ok: true}; },
 }};
 """
 
@@ -79,7 +80,7 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
             cls._pw.stop()
 
     def open_page(self, fail_on: str | None = None, message: str | None = None,
-                  start_error: str | None = None):
+                  start_error: str | None = None, crawler: dict | None = None):
         """加载真实页面，注入一个会按需抛错、按需拒绝启动的 pywebview 桥。"""
         page = self.browser.new_page(viewport={"width": 1100, "height": 1000})
         if fail_on:
@@ -88,6 +89,8 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
             page.add_init_script(f"window.__failMessage = {message!r};")
         if start_error:
             page.add_init_script(f"window.__startError = {start_error!r};")
+        if crawler is not None:
+            page.add_init_script(f"window.__crawler = {crawler!r};")
         page.add_init_script(MOCK_API)
         page.goto(HTML_URI)
         return page
@@ -163,6 +166,30 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
             page.wait_for_selector("#rows input", timeout=5000)
             self.assertFalse(page.is_visible(ERROR_BOX))
             self.assertEqual(page.eval_on_selector_all("#rows input", "els => els.length"), 2)
+        finally:
+            page.close()
+
+    def test_start_page_offers_the_abort_entry_for_a_running_crawler(self):
+        """有采集在跑（可能是命令行起的）：启动页给中止入口，点了真的调 abort_run（工单 03）。"""
+        page = self.open_page(crawler={"pid": 4321, "round_id": 7,
+                                       "started_at": "2026-09-12T01:12:00+00:00"})
+        try:
+            page.wait_for_selector("#abortForeignBtn", state="visible", timeout=5000)
+            self.assertIn("#7", page.inner_text("#abortForeignBtn"), "要说清中止的是哪一轮")
+
+            page.click("#abortForeignBtn")
+            page.wait_for_selector("#confirmModal.show", timeout=5000)
+            page.click("#confirmOk")
+            page.wait_for_function(
+                "() => window.__calls.some(c => c === 'abort_run')", timeout=5000)
+        finally:
+            page.close()
+
+    def test_start_page_hides_the_abort_entry_when_nothing_runs(self):
+        page = self.open_page()
+        try:
+            page.wait_for_selector("#rows input", timeout=5000)
+            self.assertFalse(page.is_visible("#abortForeignBtn"))
         finally:
             page.close()
 

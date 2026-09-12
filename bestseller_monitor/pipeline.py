@@ -171,16 +171,17 @@ def _run_round_locked(cfg: Config, shops: list[Shop]) -> None:
     except RoundDenyExceeded as exc:
         # 整轮 deny 超限是终态：数据保留，但本轮不可续跑，只能新开一轮。
         note = f"本轮因整轮 deny 超过阈值而意外中止：{exc}；已抓取数据已保留，不可续跑"
-        rounds.finish(db, opened.round, TerminalReason.DENY_EXCEEDED, note=note)
+        rounds.finish_if_open(db, opened.round, TerminalReason.DENY_EXCEEDED, note=note)
         log.error("本轮意外中止：%s", note)
         print(f"\n>>> {note}，请启动新的抓取轮次。\n")
     except DayBoundaryReached:
-        rounds.finish(db, opened.round, TerminalReason.DAY_BOUNDARY, note=DAY_BOUNDARY_NOTE)
+        rounds.finish_if_open(db, opened.round, TerminalReason.DAY_BOUNDARY,
+                              note=DAY_BOUNDARY_NOTE)
         log.warning("轮次 #%s：%s", round_id, DAY_BOUNDARY_NOTE)
         print(f"\n>>> {DAY_BOUNDARY_NOTE}。\n")
     except DetailBudgetExhausted:
-        rounds.finish(db, opened.round, TerminalReason.DETAIL_BUDGET_EXHAUSTED,
-                      note=DETAIL_BUDGET_NOTE)
+        rounds.finish_if_open(db, opened.round, TerminalReason.DETAIL_BUDGET_EXHAUSTED,
+                              note=DETAIL_BUDGET_NOTE)
         log.warning("轮次 #%s：%s", round_id, DETAIL_BUDGET_NOTE)
         print(f"\n>>> {DETAIL_BUDGET_NOTE}。\n")
     except RoundPauseRequired as exc:
@@ -454,11 +455,11 @@ def _finalize_round(db: Database, cfg: Config, run: Round) -> None:
     if attempted and fail_rate > cfg.fail_rate_limit:
         note = (f"失败率 {fail_rate:.1%} 超过阈值 {cfg.fail_rate_limit:.0%}"
                 f"（快照失败 {total - succeeded}，点击未得商品 {click_fail}），需人工决策")
-        rounds.finish(db, run, TerminalReason.FAIL_RATE_EXCEEDED, note=note)
+        rounds.finish_if_open(db, run, TerminalReason.FAIL_RATE_EXCEEDED, note=note)
         log.warning("轮次 #%s：%s", round_id, note)
         print(f"\n>>> {note}。请检查数据库 data/bestseller.db 中的结果后再决定。\n")
     else:
-        rounds.finish(db, run, TerminalReason.COMPLETED)
+        rounds.finish_if_open(db, run, TerminalReason.COMPLETED)
         log.info("轮次 #%s 完成（尝试 %s，成功 %s，点击未得商品 %s）",
                  round_id, attempted, succeeded, click_fail)
     db.commit()

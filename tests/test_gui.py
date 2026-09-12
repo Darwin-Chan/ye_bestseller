@@ -488,6 +488,123 @@ class GuiCrawlerMutexTests(unittest.TestCase):
         self.assertIn("已有采集进程在运行", data["start_error"])
 
 
+class GuiCrossSessionAbortTests(unittest.TestCase):
+    """跨会话中止：命令行起的、或上一次界面留下的采集，也能从这里停下来（工单 03）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tmp.name) / "test.db"
+        self.enterContext(isolated_locks())
+        self.api = Api.__new__(Api)
+        self.api._lock = RLock()
+        self.api.proc = None
+        self.api.round_id = None
+        self.api.user_paused = False
+        self.api.shops = [Shop("A01", "店铺A", "https://A01.example/")]
+        # start_browser=False：中止只收尾采集进程，不去动用户的浏览器（那一路由 IS-43 的测试盯）。
+        self.api.cfg = SimpleNamespace(max_pages_per_shop=3, start_browser=False)
+        self.api._open_conn = lambda: connect(self.db_path)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _running_crawler(self, pid: int = 4321) -> int:
+        """造出「别处有一个采集进程在跑」：抢住采集锁 + 写身份行。"""
+        conn = connect(self.db_path)
+        try:
+            db = Database(conn)
+            rid = new_round(db)
+            db.record_crawler_process(pid=pid, round_id=rid, note="run.py")
+        finally:
+            conn.close()
+        self.lock = single_instance.acquire(single_instance.CRAWLER_LOCK)
+        self.addCleanup(self.lock.release)
+        return rid
+
+    def _row(self, column: str, table: str = "rounds"):
+        conn = connect(self.db_path)
+        try:
+            row = conn.execute(
+                f"SELECT {column} FROM {table} ORDER BY id DESC LIMIT 1").fetchone()
+            return row[0] if row is not None else None
+        finally:
+            conn.close()
+
+    def test_abort_stops_the_process_before_writing_the_terminal_state(self):
+        rid = self._running_crawler()
+        seen = {}
+
+        def kill(pid):
+            seen["reason_at_kill_time"] = self._row("terminal_reason")
+            seen["pid"] = pid
+            return True
+
+        with patch.object(browser_proc, "process_image_name", return_value="python.exe"), \
+                patch.object(browser_proc, "terminate_process_tree", side_effect=kill):
+            result = self.api.abort_run()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(seen["pid"], 4321, "停下来的是身份行里那个进程")
+        self.assertIsNone(seen["reason_at_kill_time"], "顺序：先停进程，再写终态")
+        self.assertEqual(self._row("terminal_reason"), "ABANDONED")
+        self.assertEqual(self._row("note"), "GUI 人工中止（放弃）")
+        self.assertIsNone(self._row("pid", "crawler_process"), "身份行要清掉")
+
+    def test_abort_without_a_usable_pid_only_writes_the_terminal_state(self):
+        """PID 已经不在了：只写终态，采集进程会在下一个检查点自己停下。"""
+        self._running_crawler()
+
+        with patch.object(browser_proc, "process_image_name", return_value=""), \
+                patch.object(browser_proc, "terminate_process_tree") as kill:
+            result = self.api.abort_run()
+
+        self.assertTrue(result["ok"])
+        kill.assert_not_called()
+        self.assertEqual(self._row("terminal_reason"), "ABANDONED")
+
+    def test_abort_never_kills_a_pid_that_is_no_longer_our_crawler(self):
+        """PID 会被系统回收：镜像名不是 python 就不许动它。"""
+        self._running_crawler()
+
+        with patch.object(browser_proc, "process_image_name", return_value="msedge.exe"), \
+                patch.object(browser_proc, "terminate_process_tree") as kill:
+            result = self.api.abort_run()
+
+        self.assertTrue(result["ok"])
+        kill.assert_not_called()
+        self.assertEqual(self._row("terminal_reason"), "ABANDONED")
+
+    def test_abort_keeps_an_earlier_terminal_state(self):
+        """轮次刚好已经结束了：不改写终态，也不报错。"""
+        rid = self._running_crawler()
+        conn = connect(self.db_path)
+        try:
+            db = Database(conn)
+            rounds.finish(db, rounds.load(db, rid), TerminalReason.COMPLETED)
+        finally:
+            conn.close()
+
+        with patch.object(browser_proc, "process_image_name", return_value="python.exe"), \
+                patch.object(browser_proc, "terminate_process_tree", return_value=True):
+            result = self.api.abort_run()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(self._row("terminal_reason"), "COMPLETED")
+
+    def test_start_page_exposes_the_running_crawler_for_the_abort_entry(self):
+        rid = self._running_crawler()
+
+        start = self.api.get_start()
+
+        self.assertEqual(start["crawler"]["pid"], 4321)
+        self.assertEqual(start["crawler"]["round_id"], rid)
+
+    def test_start_page_has_no_abort_entry_when_nothing_runs(self):
+        start = self.api.get_start()
+
+        self.assertIsNone(start["crawler"])
+
+
 class GuiConnectionTests(unittest.TestCase):
     """界面自己的连接也要走迁移，否则旧结构的库会让三个页面一起报错（IS-37）。"""
 

@@ -6,9 +6,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import pipeline, single_instance
+from bestseller_monitor import pipeline, rounds, single_instance
 from bestseller_monitor.config import Shop
-from bestseller_monitor.db import connect
+from bestseller_monitor.db import Database, DayBoundaryReached, connect
+from bestseller_monitor.rounds import TerminalReason
 from helpers import isolated_locks
 
 SHOPS = [Shop("A01", "店铺A", "https://shop.example/")]
@@ -67,6 +68,51 @@ class CrawlerMutexTests(unittest.TestCase):
         self.assertEqual(seen["pid"], os.getpid())
         self.assertIsNotNone(seen["round_id"], "身份行要对得上正在跑的轮次")
         self.assertIsNone(self._identity_row(), "进程走了就不该留着身份行")
+
+    def _abandon(self, round_id: int) -> None:
+        """模拟界面那一刀：把轮次收尾为「人工放弃」。"""
+        conn = connect(self.db_path)
+        try:
+            db = Database(conn)
+            rounds.finish(db, rounds.load(db, round_id), TerminalReason.ABANDONED,
+                          note="GUI 人工中止（放弃）")
+        finally:
+            conn.close()
+
+    def _terminal(self):
+        conn = connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT terminal_reason, note FROM rounds ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            return (row["terminal_reason"], row["note"]) if row is not None else None
+        finally:
+            conn.close()
+
+    def test_a_late_finish_does_not_overwrite_the_abandoned_round(self):
+        """界面中止后，还在跑的采集进程到检查点停下：不崩，也不改回「跨天中止」。"""
+        def abandon_then_stop(_db, _cfg, round_id, _shops):
+            self._abandon(round_id)
+            raise DayBoundaryReached()
+
+        with isolated_locks():
+            with patch.object(pipeline, "_run_pwcdp_round", side_effect=abandon_then_stop):
+                pipeline.run_round(self.cfg, SHOPS)
+
+        self.assertEqual(self._terminal(), ("ABANDONED", "GUI 人工中止（放弃）"))
+
+    def test_finalizing_does_not_overwrite_the_abandoned_round(self):
+        """采集跑完时轮次已经被中止：正常收尾也不该把它改写成「完成」。"""
+        def finish_shop_then_abandon(db, _cfg, round_id, _shops):
+            db.save_shop_offers(round_id, "A01", "https://shop.example/", "店铺A", [],
+                                pages_read=1, confirmed_empty=True)
+            self._abandon(round_id)
+
+        with isolated_locks():
+            with patch.object(pipeline, "_run_pwcdp_round", side_effect=finish_shop_then_abandon):
+                pipeline.run_round(self.cfg, SHOPS)
+
+        self.assertEqual(self._terminal(), ("ABANDONED", "GUI 人工中止（放弃）"))
 
 if __name__ == "__main__":
     unittest.main()
