@@ -1,4 +1,4 @@
-"""界面刷新基准脚本：建得出合成大盘库，量得出刷新成本（工单 IS-38）。"""
+"""界面刷新基准脚本：建得出合成大盘库，量得出刷新成本与索引对照（工单 IS-38）。"""
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,6 +43,7 @@ class RefreshBenchTests(unittest.TestCase):
         self.assertEqual(report["done_count"], 2)
         self.assertGreater(report["connect_sec"], 0)
         self.assertGreater(report["refresh_sec"], 0)
+        self.assertGreater(report["refresh_without_event_index_sec"], 0)
         self.assertIsNotNone(report["legacy_sec"], "缺索引的老库要单独量一次去重成本")
         self.assertEqual(report["legacy_removed"], 0, "唯一索引只防新重复，老库里本来就没有")
 

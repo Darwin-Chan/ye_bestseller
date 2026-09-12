@@ -33,7 +33,12 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
-from bestseller_monitor.db import Database, SNAPSHOT_SUCCESS_INDEX, connect  # noqa: E402
+from bestseller_monitor.db import (  # noqa: E402
+    Database,
+    EVENT_REFRESH_INDEXES,
+    SNAPSHOT_SUCCESS_INDEX,
+    connect,
+)
 from bestseller_monitor import rounds  # noqa: E402
 from bestseller_monitor.rounds import RoundRequest, ShopScope  # noqa: E402
 
@@ -54,6 +59,13 @@ def refresh_api(db_file: Path):
     api._run_start_ts = None
     api.cfg = SimpleNamespace(db_file=db_file)
     return api
+
+
+class _ReusableConnection(sqlite3.Connection):
+    """基准里复用同一条连接：`get_run()` 的 finally 会把它关掉。"""
+
+    def close(self) -> None:  # noqa: D102 - 故意什么都不做
+        pass
 
 
 def build_dataset(conn: sqlite3.Connection, shops: int, rows_per_shop: int,
@@ -123,6 +135,21 @@ def measure(*, shops: int, rows_per_shop: int, repeats: int, legacy: bool = Fals
         run = api.get_run()
         refresh_sec = _best(api.get_run, repeats)
 
+        # 对照：同一个 get_run()，把两条事件索引摘掉再量一次。得绕开 connect()——它每次
+        # 开连接都会把索引建回来，所以这里直接用一条裸连接（索引改动因此真的生效）。
+        raw = sqlite3.connect(path, factory=_ReusableConnection)
+        raw.row_factory = sqlite3.Row
+        for name in EVENT_REFRESH_INDEXES:
+            raw.execute(f"DROP INDEX IF EXISTS {name}")
+        raw.commit()
+        original_open = api._open_conn
+        api._open_conn = lambda: raw
+        try:
+            without_index_sec = _best(api.get_run, repeats)
+        finally:
+            api._open_conn = original_open
+            sqlite3.Connection.close(raw)
+
         result = {
             "shops": shops,
             "rows": rows,
@@ -130,6 +157,7 @@ def measure(*, shops: int, rows_per_shop: int, repeats: int, legacy: bool = Fals
             "done_count": run["done_count"],
             "connect_sec": connect_sec,
             "refresh_sec": refresh_sec,
+            "refresh_without_event_index_sec": without_index_sec,
             "legacy_sec": None,
             "legacy_removed": None,
         }
@@ -175,6 +203,8 @@ def main(argv: list[str] | None = None) -> int:
           f"轮次 #{result['round_id']}（{result['done_count']} 家已完成）")
     print(f"connect()（每次开连接） : {result['connect_sec'] * 1000:8.2f} ms")
     print(f"get_run()（一次刷新）   : {result['refresh_sec'] * 1000:8.2f} ms")
+    print(f"  摘掉两条事件索引对照   : "
+          f"{result['refresh_without_event_index_sec'] * 1000:8.2f} ms")
     if result["legacy_sec"] is not None:
         print(f"老库首次去重（仅一次）  : {result['legacy_sec'] * 1000:8.2f} ms"
               f"（删除 {result['legacy_removed']} 行）")

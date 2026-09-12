@@ -147,6 +147,12 @@ CREATE INDEX IF NOT EXISTS idx_event_log_round ON event_log(round_id);
 CREATE INDEX IF NOT EXISTS idx_event_log_shop_ts ON event_log(shop_key, ts);
 CREATE INDEX IF NOT EXISTS idx_event_log_event ON event_log(event);
 CREATE INDEX IF NOT EXISTS idx_event_log_verification ON event_log(verification_type);
+-- 过程页刷新按「轮次 + 店铺」问这两件事：deny 计数、该店的时间跨度。只按 round_id
+-- 索引的话，12 家店要各扫一遍本轮全部事件（IS-38：30 万行一次刷新 0.80 → 0.09 秒）。
+CREATE INDEX IF NOT EXISTS idx_event_log_round_shop_event
+    ON event_log(round_id, shop_key, event);
+CREATE INDEX IF NOT EXISTS idx_event_log_round_shop_ts
+    ON event_log(round_id, shop_key, ts);
 
 CREATE TABLE IF NOT EXISTS run_params (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -166,6 +172,13 @@ CREATE TABLE IF NOT EXISTS crawler_process (
 
 # 同一轮、店铺、商品和 SKU 至多一条成功快照：靠唯一索引保证（见 connect() 的迁移）。
 SNAPSHOT_SUCCESS_INDEX = "idx_snapshots_success_key"
+
+# 过程页刷新的两条索引：逐店 deny 计数、逐店时间跨度（名字要与上面 SCHEMA 里的
+# 两条 CREATE INDEX 一致，tests/test_db.py 有用例守着）。
+EVENT_REFRESH_INDEXES = (
+    "idx_event_log_round_shop_event",
+    "idx_event_log_round_shop_ts",
+)
 
 
 def _has_snapshot_success_index(conn: sqlite3.Connection) -> bool:

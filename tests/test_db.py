@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from bestseller_monitor.db import (
     Database,
+    EVENT_REFRESH_INDEXES,
     SCHEMA,
     connect,
     cst_date,
@@ -865,6 +866,81 @@ class DbTests(unittest.TestCase):
         self.assertNotIn("stock_delta", cols)
         conn.close()
         old.unlink(missing_ok=True)
+
+
+class EventIndexTests(unittest.TestCase):
+    """事件表要有为过程页刷新建的索引（IS-38）。
+
+    一次刷新里逐店的 deny 计数与时间跨度约占九成：这两条原先各扫一遍本轮全部事件
+    （12 店就是 12 遍）。WAL 库 30 万行实测：一次刷新 0.80 秒 → 0.09 秒；代价是事件
+    写入（采集热路径）2000 条 17.1 → 20.1 毫秒。
+    """
+
+    DENY_SQL = ("SELECT COUNT(*) FROM event_log WHERE round_id=? AND shop_key=? "
+                "AND event='click_deny'")
+    SPAN_SQL = "SELECT MIN(ts), MAX(ts) FROM event_log WHERE round_id=? AND shop_key=?"
+
+    def _index_names(self, conn) -> set[str]:
+        return {row[1] for row in conn.execute("PRAGMA index_list('event_log')")}
+
+    def _insert_event(self, conn, shop_key: str, event: str, ts: str) -> None:
+        conn.execute(
+            "INSERT INTO event_log (round_id, shop_key, event, ts) VALUES (1, ?, ?, ?)",
+            (shop_key, event, ts),
+        )
+        conn.commit()
+
+    def test_a_fresh_database_has_the_event_indexes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.db")
+            try:
+                self.assertTrue(set(EVENT_REFRESH_INDEXES) <= self._index_names(conn))
+            finally:
+                conn.close()
+
+    def test_the_names_match_the_schema(self):
+        for name in EVENT_REFRESH_INDEXES:
+            with self.subTest(name=name):
+                self.assertIn(name, SCHEMA, "常量与 SCHEMA 里的 CREATE INDEX 要对得上")
+
+    def test_an_existing_database_gets_them_on_open(self):
+        """老库没有这两条索引：下一次开连接要补上，别等人工迁。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy.db"
+            conn = connect(path)
+            try:
+                for name in EVENT_REFRESH_INDEXES:
+                    conn.execute(f"DROP INDEX {name}")
+                conn.commit()
+            finally:
+                conn.close()
+
+            conn = connect(path)
+            try:
+                self.assertTrue(set(EVENT_REFRESH_INDEXES) <= self._index_names(conn))
+            finally:
+                conn.close()
+
+    def test_the_refresh_queries_land_on_those_indexes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.db")
+            try:
+                for i in range(50):
+                    self._insert_event(
+                        conn, "A01", "click_deny" if i % 5 == 0 else "detail_ok",
+                        f"2026-09-12T01:00:{i:02d}+08:00",
+                    )
+
+                for sql in (self.DENY_SQL, self.SPAN_SQL):
+                    with self.subTest(sql=sql):
+                        plan = [row[3] for row in conn.execute(
+                            "EXPLAIN QUERY PLAN " + sql, (1, "A01"))]
+                        self.assertTrue(
+                            any(name in step for step in plan for name in EVENT_REFRESH_INDEXES),
+                            f"这两条查询要为它们建的索引服务，实际计划：{plan}",
+                        )
+            finally:
+                conn.close()
 
 
 class SnapshotDedupeMigrationTests(unittest.TestCase):

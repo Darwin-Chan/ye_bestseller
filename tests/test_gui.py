@@ -709,13 +709,13 @@ class GuiRefreshCostTests(unittest.TestCase):
     断言两件事：这次刷新没有整表语句，且耗时不至于离谱。更大规模的耗时复现在
     `tools/bench_refresh.py`（默认 30 万行，可 `--rows-per-shop` 继续放大）。
 
-    耗时上界只是护栏，不是性能目标：这台机器、30 万行、WAL 库上一次刷新实测 0.8～1.1 秒
-    （其中事件那 24 条占九成），所以留了 3 倍余量。
+    耗时上界只是护栏，不是性能目标：这台机器、30 万行、WAL 库上一次刷新实测约 0.09 秒
+    （补事件索引之前是 0.80 秒），所以 1 秒的界有十倍余量。
     """
 
     SHOPS = 12
     ROWS_PER_SHOP = 25_000      # 12 店 × 2.5 万 = 30 万快照 + 30 万事件
-    REFRESH_LIMIT_SEC = 3.0
+    REFRESH_LIMIT_SEC = 1.0
 
     def test_refresh_on_a_large_database_does_not_scan_the_snapshot_table(self):
         with tempfile.TemporaryDirectory() as tmp:
