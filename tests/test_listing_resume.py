@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_pw, pipeline
+from bestseller_monitor import browser_pw, click_listing, pipeline
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import Database, connect
 from helpers import new_round
@@ -81,7 +81,7 @@ class ListingResumeTests(unittest.TestCase):
         self.assertEqual(statuses, {"A01": "完成", "A02": "完成"}, "未完成店铺这一轮被补完")
 
     def test_cdp_click_path_skips_the_completed_shop(self):
-        with patch.object(browser_pw, "crawl_store_by_click",
+        with patch.object(click_listing, "crawl_store_by_click",
                           return_value=(UNFINISHED_OFFERS, 1)) as crawl, \
              patch.object(pipeline, "_retry_shop_pending_pw"):
             pipeline._run_listing_pw(

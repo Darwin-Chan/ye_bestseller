@@ -8,7 +8,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from . import browser_pw, dedupe, detail, rounds, single_instance, stop_request
+from . import browser_pw, click_listing, dedupe, detail, rounds, single_instance, stop_request
 from .browser_pw import DenyTracker, ShopDenyExceeded, RoundDenyExceeded
 from .config import Config, Shop, load_shops
 from .db import (
@@ -313,8 +313,9 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
             _retry_shop_pending_pw(db, cfg, round_id, shop, page, human, emit=emit)
             continue
         try:
-            offers, pages_read = browser_pw.crawl_store_by_click(
-                page, shop, cfg, human, db=db, round_id=round_id, emit=emit,
+            listing_page = click_listing.PlaywrightListing(page, shop, cfg, human)
+            offers, pages_read = click_listing.crawl_store_by_click(
+                listing_page, shop, cfg, human, db=db, round_id=round_id, emit=emit,
                 deny_tracker=deny_tracker,
             )
             log.info("店铺 %s 榜单：%s 个商品（%s 页）", shop.key, len(offers), pages_read)

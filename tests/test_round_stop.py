@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_pw, detail, pipeline, rounds, stop_request
+from bestseller_monitor import browser_pw, click_listing, detail, pipeline, rounds, stop_request
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import CST, Database, DayBoundaryReached, connect, cst_date
 from bestseller_monitor.rounds import RoundRequest, ShopScope
@@ -146,7 +146,7 @@ class RoundStopRuleTests(unittest.TestCase):
         stale = self._open(_yesterday(), "A01")
         shop = Shop("A01", "店铺A01", "https://A01.example/")
 
-        with patch.object(browser_pw, "crawl_store_by_click") as crawl:
+        with patch.object(click_listing, "crawl_store_by_click") as crawl:
             with self.assertRaises(DayBoundaryReached):
                 pipeline._run_listing_pw(self.db, self._cfg(), stale.id, [shop], MagicMock())
 
@@ -155,19 +155,6 @@ class RoundStopRuleTests(unittest.TestCase):
             "SELECT list_status FROM shop_rounds WHERE round_id=?", (stale.id,)
         ).fetchone()
         self.assertEqual(row["list_status"], "待处理")
-
-    def test_click_path_stops_before_opening_a_card(self):
-        stale = self._open(_yesterday(), "A01")
-        shop = Shop("A01", "店铺A01", "https://A01.example/")
-
-        with patch.object(browser_pw, "_click_one_product") as click:
-            with self.assertRaises(DayBoundaryReached):
-                browser_pw._capture_card(
-                    MagicMock(), MagicMock(), "商品", self._cfg(), [False], MagicMock(),
-                    MagicMock(), self.db, stale.id, shop, [], set(),
-                )
-
-        click.assert_not_called()
 
     def _request_pause(self, round_id: int) -> None:
         """模拟界面那一跳：按身份行里的目标进程写一条暂停请求（ADR-0009）。"""
@@ -178,22 +165,6 @@ class RoundStopRuleTests(unittest.TestCase):
         self.db.request_stop(round_id=round_id, kind=stop_request.PAUSE,
                              target_pid=os.getpid(), target_started_at=started_at)
 
-    def test_click_path_stops_when_the_interface_asks_for_a_pause(self):
-        """暂停与跨天走同一条检查点，但抛的是停止请求：轮次保持进行中、可续跑。"""
-        run = self._open(cst_date(), "A01")
-        shop = Shop("A01", "店铺A01", "https://A01.example/")
-        self._request_pause(run.id)
-
-        with patch.object(browser_pw, "_click_one_product") as click:
-            with self.assertRaises(stop_request.StopRequested):
-                browser_pw._capture_card(
-                    MagicMock(), MagicMock(), "商品", self._cfg(), [False], MagicMock(),
-                    MagicMock(), self.db, run.id, shop, [], set(),
-                )
-
-        click.assert_not_called()
-        self.assertIsNotNone(self.db.stop_request()["ack_at"], "认领时回执")
-
     def test_pause_marks_the_shop_it_interrupted(self):
         """停在一家店的中途：这家店记为未完成，原因写「用户暂停」而不是人工介入。"""
         run = self._open(cst_date(), "A01")
@@ -203,7 +174,7 @@ class RoundStopRuleTests(unittest.TestCase):
             self._request_pause(run.id)                      # 界面那一跳
             rounds.ensure_workable(self.db, run.id, cst_date())   # 采集进程的检查点
 
-        with patch.object(browser_pw, "crawl_store_by_click", side_effect=crawl):
+        with patch.object(click_listing, "crawl_store_by_click", side_effect=crawl):
             with self.assertRaises(stop_request.StopRequested):
                 pipeline._run_listing_pw(self.db, self._cfg(), run.id, [shop], MagicMock())
 

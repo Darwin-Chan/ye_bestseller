@@ -60,6 +60,14 @@ class Outcome(str, Enum):
     DUPLICATE = "duplicate"          # 同一次遍历里已经观测过这个商品
 
 
+class FailureKind(str, Enum):
+    """这次观测是怎么没成的：调用方据此决定记哪几条事件。"""
+
+    READ = "read"        # 读不到页面内容
+    PARSE = "parse"      # 页面结构解析不了
+    ACCESS = "access"    # 访问异常（导航、连接等）
+
+
 @dataclass(frozen=True)
 class DetailTarget:
     """要取观测的那个商品：哪个店铺、哪条榜单行、机会挂在哪个标识上。
@@ -88,22 +96,23 @@ class Observation:
     payload: dict | None = None
     failure: str | None = None
     raw_html: str = ""        # 失败时的原始页内容，有则存档供校准
+    kind: FailureKind | None = None
 
     @classmethod
     def read_failed(cls, exc: Exception) -> "Observation":
-        return cls(failure=f"详情页读取失败：{exc}")
+        return cls(failure=f"详情页读取失败：{exc}", kind=FailureKind.READ)
 
     @classmethod
     def parse_failed(cls, exc: Exception, html: str = "") -> "Observation":
-        return cls(failure=f"解析失败：{exc}", raw_html=html)
+        return cls(failure=f"解析失败：{exc}", raw_html=html, kind=FailureKind.PARSE)
 
     @classmethod
     def parse_crashed(cls, exc: Exception, html: str = "") -> "Observation":
-        return cls(failure=f"详情页解析异常：{exc}", raw_html=html)
+        return cls(failure=f"详情页解析异常：{exc}", raw_html=html, kind=FailureKind.PARSE)
 
     @classmethod
     def access_failed(cls, exc: Exception) -> "Observation":
-        return cls(failure=f"访问异常：{exc}")
+        return cls(failure=f"访问异常：{exc}", kind=FailureKind.ACCESS)
 
 
 @dataclass(frozen=True)
