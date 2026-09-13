@@ -36,9 +36,11 @@ browser PID / 端口占用者归属。`diag_card_urls` / `diag_verify_state` / `
   `_abandon_launched_browser()`：只结束「我们拉起、而且现在还活着」的那一个
   （`proc.poll() is None` 才动手）；同一 profile 已有实例时本次进程交接后立刻退出，
   `poll()` 有值，端口上那个是用户自己的浏览器，绝不去动它。这条对采集进程与界面同样生效。
-- **加一条结构护栏**：`tests/test_tool_sessions.py` 断言 `tools/` 下不再出现
-  `remote-debugging-port` 与 `"taskkill", "/IM"` 两个指纹。工具是手动脚本，行为测不了，但
-  「调试端口只准有一处」这条结构判据测得了。
+- **加一条结构护栏**：`tests/test_tool_sessions.py` 递归扫 `tools/`，断言不再出现
+  `remote-debugging-port` / `--user-data-dir` / `taskkill` 三个指纹，并另外断言这三个工具
+  确实调了 `browser_pw.open_session` / `close_session`（只查指纹挡不住「用 `cfg` 拼端口再
+  `connect_over_cdp`」的写法）。工具是手动脚本，行为测不了，但「调试端口只准有一处」这条
+  结构判据测得了。
 
 ## 结果
 
