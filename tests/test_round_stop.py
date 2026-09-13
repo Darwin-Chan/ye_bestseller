@@ -89,7 +89,7 @@ class RoundStopRuleTests(unittest.TestCase):
             self.db, self._cfg(), MagicMock(), round_id, self._target(), observe, **kwargs)
 
     def _observation(self):
-        return detail.Observation(offer_id="111", payload=self._payload())
+        return detail.Observation(payload=self._payload())
 
     @staticmethod
     def _payload():
@@ -134,8 +134,7 @@ class RoundStopRuleTests(unittest.TestCase):
             _cst(2026, 9, 12, 23, 54),
             _cst(2026, 9, 12, 23, 56),
         ]
-        with patch.object(detail, "utcnow", side_effect=moments), \
-             patch.object(detail, "extract_main_image", return_value=None):
+        with patch.object(detail, "utcnow", side_effect=moments):
             with self.assertRaises(DayBoundaryReached):
                 self._capture(run.id, lambda: self._observation(), attempts=1)
 
@@ -244,3 +243,17 @@ class RoundStopRuleTests(unittest.TestCase):
         self.assertEqual(
             self.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0], 0,
             "暂停不该留下失败记录")
+
+    def test_a_stop_request_from_the_detail_adapter_passes_through(self):
+        """补采 adapter 里的停止判定要原样穿过（ADR-0009），不许被记成访问异常。"""
+        run = self._open(cst_date(), "A01")
+
+        with patch.object(browser_pw, "capture_detail",
+                          side_effect=stop_request.StopRequested("停")):
+            with self.assertRaises(stop_request.StopRequested):
+                pipeline._capture_one_pw(self.db, self._cfg(), MagicMock(), run.id,
+                                         self._offer(), MagicMock())
+
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0], 0,
+            "停止判定不该留下失败记录")

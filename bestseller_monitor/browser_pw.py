@@ -18,6 +18,7 @@ from .config import Config, Shop, effective_pages_limit
 from .db import cst_date, utcnow
 from .delay import Humanizer
 from .detail import DetailParseFailed, parse_detail_html
+from .parse import extract_main_image
 from .guard import (
     RoundPauseRequired,
     body_text, captcha_visible, intervention_kind,
@@ -522,23 +523,29 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
         _remember_discovery(db, round_id, shop, offers, oid, url, list_title or "")
         log.info("命中商品 %s（累计 %s）", oid, len(offers))
 
+    def parse_error_events() -> None:
+        """详情没读成：与改前一样的两条事件（读不到页时只有前一条）。"""
+        se("click_parse_error", offer_id=oid, note=cnote + "&offer_id=" + oid)
+        se("detail_parse", offer_id=oid, note="sku_count=0")
+
     def read() -> detail.Observation:
         try:
             html = detail_page.content()
         except Exception as exc:
-            return detail.Observation(failure=f"详情页读取失败：{exc}")
+            se("click_parse_error", offer_id=oid, note=cnote + "&offer_id=" + oid)
+            return detail.Observation.read_failed(exc)
         try:
             payload = parse_detail_html(html, url)
+            # 主图字段异常在改前也算解析异常：先取图，再报「解析成功」。
+            payload["main_image_url"] = extract_main_image(html)
         except DetailParseFailed as exc:
-            return detail.Observation(failure=f"解析失败：{exc}", raw_html=exc.html)
+            parse_error_events()
+            return detail.Observation.parse_failed(exc, exc.html)
         except Exception as exc:
-            return detail.Observation(failure=f"详情页解析异常：{exc}", raw_html=html)
+            parse_error_events()
+            return detail.Observation.parse_crashed(exc, html)
         se("detail_parse", offer_id=oid, note=f"sku_count={len(payload['rows'])}")
         return detail.Observation(payload=payload)
-
-    def on_attempt_failed(note: str) -> None:
-        se("click_parse_error", offer_id=oid, note=cnote + "&offer_id=" + oid)
-        se("detail_parse", offer_id=oid, note="sku_count=0")
 
     try:
         result = detail.capture_observation(
@@ -547,11 +554,14 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
                 shop_key=shop.key, shop_url=shop.url, shop_name=shop.name,
                 product_url=url, slot_key=card_ref or oid, offer_id=oid,
                 list_title=list_title, duplicate=not first_time),
-            read, attempts=1, on_attempt_failed=on_attempt_failed)
-    finally:
+            read, attempts=1)
+    except BaseException:
+        # 停止判定（跨天／暂停／预算）从规则里抛出来：弹窗照常关掉再上抛，事件与改前一致。
         se("popup_close", offer_id=oid)
         _close_popup_or_back(detail_page, popup, page)
+        raise
 
+    # 事件按结果记、顺序与改前一致：先记结果，再关弹窗。
     if result.outcome is detail.Outcome.SKIPPED_TODAY:
         # 今天已采过：仍把该商品计入本轮榜单，跳过不快照成失败也不消耗详情预算。
         se("click_skipped", offer_id=oid, note=cnote + "&offer_id=" + oid)
@@ -561,6 +571,8 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
         se("click_ok", offer_id=oid, note=cnote + "&offer_id=" + oid + f"&sku={skus}")
     elif result.outcome is detail.Outcome.DUPLICATE:
         se("click_skipped", offer_id=oid, note=cnote + "&offer_id=" + oid + "&dup=1")
+    se("popup_close", offer_id=oid)
+    _close_popup_or_back(detail_page, popup, page)
     # 失败与「没读到编号」一样：对调用方来说这张卡没有拿到商品（只留了失败行）。
     return None if result.outcome is detail.Outcome.FAILED else result.offer_id
 

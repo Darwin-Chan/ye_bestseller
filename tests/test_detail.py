@@ -142,7 +142,7 @@ class SameDaySkipTests(DetailTestCase):
 
         result = self.capture(target, self.observe(self.payload()))
 
-        self.assertEqual(result.outcome, detail.Outcome.EXHAUSTED)
+        self.assertEqual(result.outcome, detail.Outcome.ATTEMPTS_EXHAUSTED)
         self.assertEqual(self.visits, 0)
         self.assertEqual(self.opportunity_ledger(), [])
 
@@ -162,7 +162,7 @@ class FailureTests(DetailTestCase):
 
         result = self.capture(
             self.target(), self.observe(detail.Observation(
-                offer_id="11", failure="解析失败：页面结构变了", raw_html="<html>raw</html>")),
+                failure="解析失败：页面结构变了", raw_html="<html>raw</html>")),
             attempts=1, on_attempt_failed=notes.append)
 
         self.assertEqual(result.outcome, detail.Outcome.FAILED)

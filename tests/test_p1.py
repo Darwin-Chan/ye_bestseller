@@ -102,7 +102,7 @@ class P1Tests(unittest.TestCase):
             "rows": [{"sku_id": "red", "sku_name": "红色", "sku_price": 10, "sku_stock": 3}],
         }
         with patch.object(browser_pw, "capture_detail", return_value=payload), \
-             patch.object(detail, "extract_main_image", return_value=None):
+             patch.object(pipeline, "extract_main_image", return_value=None):
             pipeline._capture_one_pw(
                 self.db, self._cfg(), MagicMock(), round_id, offer, MagicMock(),
             )
@@ -794,7 +794,7 @@ class P1Tests(unittest.TestCase):
         )
         shop = Shop("A01", "店铺A", "https://shop.example/")
         cfg = self._cfg(raw_page_dir=Path(self.tmp.name) / "raw")
-        with patch.object(detail, "extract_main_image", side_effect=ValueError("图片字段异常")):
+        with patch.object(browser_pw, "extract_main_image", side_effect=ValueError("图片字段异常")):
             result = browser_pw._ingest_detail(
                 page, detail_page, popup, "商品", cfg, [False], MagicMock(), MagicMock(), self.db,
                 round_id, shop, [], set(), "page=1&idx=0",
@@ -1142,3 +1142,54 @@ class P1Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+    def _click_detail_events(self, *, content=None, read_error=None, round_id=None):
+        """跑一次点击路径的详情，返回 (发出的事件名序列, 结果)。"""
+        round_id = round_id or new_round(self.db)
+        page, popup, detail_page = MagicMock(), MagicMock(), MagicMock()
+        detail_page.url = "https://detail.1688.com/offer/11.html"
+        if read_error is not None:
+            detail_page.content.side_effect = read_error
+        else:
+            detail_page.content.return_value = content
+        se = MagicMock()
+        try:
+            with patch.object(browser_pw, "extract_main_image", return_value=None):
+                result = browser_pw._ingest_detail(
+                    page, detail_page, popup, "商品", self._cfg(), [False], MagicMock(), se,
+                    self.db, round_id, Shop("A01", "店铺A", "https://shop.example/"),
+                    [], set(), "page=1&idx=0")
+        except BaseException as exc:   # 停止判定从规则里抛出来也算一种「结果」
+            return [call.args[0] for call in se.call_args_list], exc
+        return [call.args[0] for call in se.call_args_list], result
+
+    def test_click_detail_success_event_sequence_is_unchanged(self):
+        """点击路径的事件内容与行序：event_log 是既有工具的输入，改这里等于改口径。"""
+        events, result = self._click_detail_events(
+            content='<script>{"skuInfoMap":{"A":{"skuId":1,"canBookCount":1}}}</script>')
+
+        self.assertEqual(events, ["popup_open", "detail_parse", "click_ok", "popup_close"])
+        self.assertEqual(result, "11")
+
+    def test_click_detail_parse_failure_event_sequence_is_unchanged(self):
+        events, result = self._click_detail_events(content="<html></html>")
+
+        self.assertEqual(events, ["popup_open", "click_parse_error", "detail_parse",
+                                  "popup_close"])
+        self.assertIsNone(result)
+
+    def test_click_detail_read_failure_event_sequence_is_unchanged(self):
+        """读不到页面只发 click_parse_error（改前就是如此，别多补一条 detail_parse）。"""
+        events, _ = self._click_detail_events(read_error=RuntimeError("页面没了"))
+
+        self.assertEqual(events, ["popup_open", "click_parse_error", "popup_close"])
+
+    def test_click_detail_refuses_a_stale_round_before_reading(self):
+        """过期轮次（昨天）在读页面之前就被拦下：不读、不写行。"""
+        stale = rounds.open(self.db, RoundRequest(
+            _yesterday(), (ShopScope("A01", "https://shop.example/", "店铺A"),))).round.id
+
+        events, result = self._click_detail_events(content="<html></html>", round_id=stale)
+
+        self.assertEqual(events, [], "还没读页面就结束了，一条事件都不该发")
+        self.assertIsInstance(result, DayBoundaryReached)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0], 0)

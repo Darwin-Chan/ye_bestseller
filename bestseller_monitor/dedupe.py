@@ -35,6 +35,16 @@ def claim_offer_slot(db: Database, round_id: int, shop_key: str, offer_id: str,
     _claim(db, round_id, shop_key, offer_id, budget_limit)
 
 
+def claim_slot(db: Database, round_id: int, shop_key: str, key: str,
+               budget_limit: int) -> None:
+    """占一次机会，`key` 是这个名额的标识。
+
+    标识可能是商品编号（编号已知时）或卡片位置（点击式列表在打开卡片前还不知道编号）；
+    对账本来说两者一样，上面的两个名字只是把这两种情形说出来。
+    """
+    _claim(db, round_id, shop_key, key, budget_limit)
+
+
 def bind_card_to_offer(db: Database, round_id: int, shop_key: str, card_ref: str,
                        offer_id: str) -> None:
     """把卡片占用的机会绑定到它打开的商品编号。

@@ -9,8 +9,7 @@ from pathlib import Path
 from . import dedupe, rounds
 from .config import Config
 from .db import Database, cst_date, utcnow
-from .parse import (extract_main_image, extract_skus_from_html, extract_title,
-                    is_single_spec_offer)
+from .parse import extract_skus_from_html, extract_title, is_single_spec_offer
 
 log = logging.getLogger(__name__)
 
@@ -56,7 +55,7 @@ class Outcome(str, Enum):
 
     SUBMITTED = "submitted"          # 观测成功，已提交库存快照
     SKIPPED_TODAY = "skipped_today"  # 今天已经采过，跳过（不消耗详情机会）
-    EXHAUSTED = "exhausted"          # 本轮尝试额度已用尽，没有进详情
+    ATTEMPTS_EXHAUSTED = "attempts_exhausted"   # 本轮尝试额度已用尽，没有读页面
     FAILED = "failed"                # 观测失败，已记失败行
     DUPLICATE = "duplicate"          # 同一次遍历里已经观测过这个商品
 
@@ -81,19 +80,36 @@ class DetailTarget:
 
 @dataclass(frozen=True)
 class Observation:
-    """adapter 交回的一次观测：拿到了哪个商品、成功 payload，或失败原因。"""
+    """adapter 交回的一次观测：成功 payload，或失败原因。
 
-    offer_id: str | None = None
+    失败文案的用词收在这里（读不到页 / 解析失败 / 解析崩了 / 访问异常），adapter 只管挑一个。
+    """
+
     payload: dict | None = None
     failure: str | None = None
     raw_html: str = ""        # 失败时的原始页内容，有则存档供校准
+
+    @classmethod
+    def read_failed(cls, exc: Exception) -> "Observation":
+        return cls(failure=f"详情页读取失败：{exc}")
+
+    @classmethod
+    def parse_failed(cls, exc: Exception, html: str = "") -> "Observation":
+        return cls(failure=f"解析失败：{exc}", raw_html=html)
+
+    @classmethod
+    def parse_crashed(cls, exc: Exception, html: str = "") -> "Observation":
+        return cls(failure=f"详情页解析异常：{exc}", raw_html=html)
+
+    @classmethod
+    def access_failed(cls, exc: Exception) -> "Observation":
+        return cls(failure=f"访问异常：{exc}")
 
 
 @dataclass(frozen=True)
 class CaptureResult:
     outcome: Outcome
     offer_id: str | None = None
-    note: str = ""
     sku_count: int | None = None   # 提交成功时的 SKU 行数（调用方记事件用）
 
 
@@ -125,17 +141,13 @@ def capture_observation(db: Database, cfg: Config, human, round_id: int,
     if attempts is None and first_attempt > cfg.max_attempts_per_page:
         log.info("店铺 %s 商品 %s 本轮尝试已用尽（%s/%s），不再补采",
                  shop_key, offer_id, first_attempt - 1, cfg.max_attempts_per_page)
-        return CaptureResult(Outcome.EXHAUSTED, offer_id, "本轮尝试已用尽")
+        return CaptureResult(Outcome.ATTEMPTS_EXHAUSTED, offer_id)
     if target.duplicate:
         # 同一次遍历里已经观测过这个商品：不再提交，也不动账本（改前点击路径如此）。
         return CaptureResult(Outcome.DUPLICATE, offer_id)
 
-    if target.slot_key == offer_id:
-        dedupe.claim_offer_slot(db, round_id, shop_key, offer_id,
-                                cfg.max_detail_opportunities_per_round)
-    else:
-        dedupe.claim_card_slot(db, round_id, shop_key, target.slot_key,
-                               cfg.max_detail_opportunities_per_round)
+    dedupe.claim_slot(db, round_id, shop_key, target.slot_key,
+                      cfg.max_detail_opportunities_per_round)
     dedupe.bind_card_to_offer(db, round_id, shop_key, target.slot_key, offer_id)
 
     last_attempt = (cfg.max_attempts_per_page if attempts is None
@@ -156,7 +168,7 @@ def _skip_today(db: Database, round_id: int, target: DetailTarget,
         db.mark_skipped(round_id, target.shop_key, target.shop_url, target.shop_name,
                         offer_id, target.product_url, target.list_title)
     log.info("店铺 %s 商品 %s 今日已有库存，跳过详情抓取", target.shop_key, offer_id)
-    return CaptureResult(Outcome.SKIPPED_TODAY, offer_id, "今日已有库存")
+    return CaptureResult(Outcome.SKIPPED_TODAY, offer_id)
 
 
 def _capture_attempts(db: Database, cfg: Config, human, round_id: int, target: DetailTarget,
@@ -166,17 +178,7 @@ def _capture_attempts(db: Database, cfg: Config, human, round_id: int, target: D
     note = ""
     for attempt in range(first_attempt, last_attempt + 1):
         observation = read()
-        if observation.payload is not None and observation.failure is None:
-            try:
-                payload = dict(observation.payload,
-                               main_image_url=extract_main_image(observation.payload["html"]))
-            except Exception as exc:
-                # 主图字段异常与解析失败同类：记失败、留原始页，不算访问异常。
-                observation = Observation(failure=f"详情页解析异常：{exc}",
-                                          raw_html=observation.payload.get("html", ""))
-                payload = None
-        else:
-            payload = None
+        payload = observation.payload if observation.failure is None else None
         if payload is None:
             note = _failure_note(cfg, round_id, offer_id, observation)
             db.mark_failure(round_id, target.shop_key, offer_id, attempt, note,
@@ -199,7 +201,7 @@ def _capture_attempts(db: Database, cfg: Config, human, round_id: int, target: D
             product_url=target.product_url,
             list_title=target.list_title,
             detail_title=payload["product_name"],
-            main_image_url=payload["main_image_url"],
+            main_image_url=payload.get("main_image_url"),
             sku_rows=payload["rows"],
             collected_at=utcnow(),
             attempt=attempt,
@@ -209,7 +211,7 @@ def _capture_attempts(db: Database, cfg: Config, human, round_id: int, target: D
         log.info("店铺 %s 商品 %s 抓取成功：%s 个 SKU（第 %s 次尝试）",
                  target.shop_key, offer_id, len(payload["rows"]), attempt)
         return CaptureResult(Outcome.SUBMITTED, offer_id, sku_count=len(payload["rows"]))
-    return CaptureResult(Outcome.FAILED, offer_id, note)
+    return CaptureResult(Outcome.FAILED, offer_id)
 
 
 def _failure_note(cfg: Config, round_id: int, offer_id: str,

@@ -23,6 +23,7 @@ from .db import (
 )
 from .delay import Humanizer
 from .detail import DetailParseFailed
+from .parse import extract_main_image
 from .guard import RoundPauseRequired
 from .rounds import Round, RoundRequest, ShopScope, TerminalReason
 from .stop_request import StopRequested
@@ -374,13 +375,14 @@ def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, 
         try:
             payload = browser_pw.capture_detail(page, offer["product_url"], cfg, human,
                                                 emit=emit_detail)
+            payload["main_image_url"] = extract_main_image(payload["html"])
         except STOP_EXCEPTIONS:
             # 停止判定（暂停／跨天／预算）不是「访问异常」：原样上抛。
             raise
         except DetailParseFailed as exc:
-            return detail.Observation(failure=f"解析失败：{exc}", raw_html=exc.html)
+            return detail.Observation.parse_failed(exc, exc.html)
         except Exception as exc:
-            return detail.Observation(failure=f"访问异常：{exc}")
+            return detail.Observation.access_failed(exc)
         return detail.Observation(payload=payload)
 
     def on_attempt_failed(note: str) -> None:
