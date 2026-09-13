@@ -4,7 +4,8 @@
 详情观测规则在 detail.py；这里只剩：
 
 - 用普通进程拉起浏览器、经调试端口接管、按归属收尾（IS-43）；
-- 逐店补采用的 `capture_detail`（打开一个详情页、取回观测）。
+- 逐店补采用的 `open_detail`（打开一个详情页、把页面读成 html；读到什么算失败归
+  `detail.observe_page`，见 ADR-0018）。
 
 `DenyTracker` 与那两个 deny 异常从 click_listing 转出来，供沿用旧 import 的调用方。
 """
@@ -88,11 +89,31 @@ def open_session(cfg: Config):
             pw.stop()
         except Exception:
             pass
+        _abandon_launched_browser()
         raise RuntimeError(f"无法连接浏览器调试端口 {cfg.attach_port}（{last_exc}）")
     ctx = br.contexts[0]
     page = ctx.new_page()
     page.set_default_timeout(cfg.timeout_ms)
     return pw, br, page, ctx
+
+
+def _abandon_launched_browser() -> None:
+    """连不上调试端口、会话没能建立时，收掉本次由我们拉起的浏览器进程。
+
+    只结束「我们拉起、而且现在还活着」的那一个（`proc.poll() is None`）。同一 profile
+    已经有实例时，本次 msedge.exe 交接后立刻退出、`poll()` 有值——这时端口上那个是用户
+    自己的浏览器，绝不能按端口占用者去关它。
+    """
+    global _launched_proc, _launched_port
+    proc = _launched_proc
+    _launched_proc = None
+    _launched_port = None
+    if proc is None:
+        return
+    if proc.poll() is None:
+        browser_proc.terminate_process_tree(proc.pid)
+    else:
+        log.info("本次启动的浏览器进程（PID %s）已退出（交接给既有实例），无需收尾。", proc.pid)
 
 
 def cdp_browser_pid(br) -> int | None:

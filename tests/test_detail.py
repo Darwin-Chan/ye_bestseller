@@ -301,3 +301,14 @@ class ObservePageTests(unittest.TestCase):
         observation = detail.observe_page(read_html, self.URL)
         self.assertEqual(observation.kind, detail.FailureKind.READ,
                          "没点名要上抛的异常照旧算读取失败")
+
+    def test_the_observation_tells_the_caller_whether_it_got_a_page(self):
+        """`ok` / `sku_count`：两条路径问「这次读成了吗、几行 SKU」只用这一份判据。"""
+        with patch.object(detail, "extract_main_image", return_value=None):
+            read = detail.observe_page(lambda: self.HTML, self.URL)
+        failed = detail.observe_page(lambda: "<html>没有 SKU</html>", self.URL)
+
+        self.assertTrue(read.ok)
+        self.assertEqual(read.sku_count, 1)
+        self.assertFalse(failed.ok)
+        self.assertEqual(failed.sku_count, 0, "没读到页面时事件备注也写 sku_count=0")

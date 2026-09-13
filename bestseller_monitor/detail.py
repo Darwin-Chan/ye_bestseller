@@ -99,6 +99,16 @@ class Observation:
     raw_html: str = ""        # 失败时的原始页内容，有则存档供校准
     kind: FailureKind | None = None
 
+    @property
+    def ok(self) -> bool:
+        """这次读到了页面吗（读到了才有 payload）。调用方按它决定记哪条事件。"""
+        return self.payload is not None
+
+    @property
+    def sku_count(self) -> int:
+        """读到的 SKU 行数；没读到就是 0（事件备注的 `sku_count=` 一律从这里取值）。"""
+        return 0 if self.payload is None else len(self.payload["rows"])
+
     @classmethod
     def read_failed(cls, exc: Exception) -> "Observation":
         return cls(failure=f"详情页读取失败：{exc}", kind=FailureKind.READ)

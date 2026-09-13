@@ -424,10 +424,11 @@ def _retry_shop_pending_pw(db: Database, cfg: Config, round_id: int, shop: Shop,
 
 def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, offer, page,
                     emit=None) -> None:
-    """逐店补采一个商品：adapter 负责取一次详情，规则在 detail.capture_observation。
+    """逐店补采一个商品：adapter 只把页面读成 html，其余规则在 detail 里。
 
     编号在取观测前就已知，所以「今天采过就不打开页面、额度用尽就不进详情」这条省事的路
-    在这里成立（候选 02 / ADR-0013）。
+    在这里成立（候选 02 / ADR-0013）；读到什么算失败由 `detail.observe_page` 判
+    （候选 02 / ADR-0018），规则在 `detail.capture_observation`。
     """
     def emit_detail(event: str, **kw: object) -> None:
         if emit is not None:
@@ -440,9 +441,9 @@ def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, 
                                            emit=emit_detail),
             offer["product_url"],
             reraise=STOP_EXCEPTIONS)
-        if observation.payload is not None:
+        if observation.ok:
             emit_detail("detail_parse", phase="detail",
-                        note=f"sku_count={len(observation.payload['rows'])}")
+                        note=f"sku_count={observation.sku_count}")
         return observation
 
     def on_attempt_failed(note: str) -> None:

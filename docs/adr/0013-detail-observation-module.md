@@ -1,6 +1,6 @@
 # 0013. 详情观测收成一个 module：接缝从 fetch() 挪到「读一次详情观测」
 
-- 状态：已接受
+- 状态：已接受（一处决策被 [ADR-0018](0018-page-to-observation-in-detail.md) 取代：「取主图留在 adapter 里」——`detail.observe_page()` 把它收进 detail）
 - 日期：2026-09-13
 
 ## 背景

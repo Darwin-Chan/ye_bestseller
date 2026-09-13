@@ -1,6 +1,6 @@
 # 0014. 点击式列表：卡片层 adapter + 遍历上下文
 
-- 状态：已接受
+- 状态：已接受（两处描述被 [ADR-0018](0018-page-to-observation-in-detail.md) 更新：补采 adapter 改名 `open_detail` 且只交 html；`FailureKind` 去掉「访问异常」）
 - 日期：2026-09-13
 
 ## 背景

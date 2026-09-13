@@ -33,7 +33,6 @@ from bestseller_monitor import browser_pw
 from bestseller_monitor.browser_pw import _PRODUCT_IMG_SEL
 
 ROOT = os.path.dirname(REPO)
-cfg_timeout = 45000
 
 _cfg = Config.from_file(Path(REPO) / "config/config.toml", root=Path(REPO))
 
@@ -348,7 +347,7 @@ def _diagnose(page, url: str) -> int:
                     )
                 pop = pi.value
                 if pop:
-                    pop.wait_for_load_state("domcontentloaded", timeout=cfg_timeout)
+                    pop.wait_for_load_state("domcontentloaded", timeout=_cfg.timeout_ms)
                     m = re.search(r"/(?:offer|item)/(\d+)", pop.url)
                     oid = m.group(1) if m else ""
                     try:

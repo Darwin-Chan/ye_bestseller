@@ -134,6 +134,61 @@ class CloseBrowserTests(unittest.TestCase):
         self.assertEqual(run.call_args[0][0], ["taskkill", "/PID", "10500", "/T", "/F"])
 
 
+class AbandonLaunchedBrowserTests(unittest.TestCase):
+    """会话没建起来时，别把本任务拉起的浏览器丢在后台（ADR-0019 的收尾只关自己那份）。"""
+
+    def test_terminates_our_own_still_alive_process(self):
+        alive = SimpleNamespace(pid=20301, poll=lambda: None)
+        with patch.object(browser_pw, "_launched_proc", alive), \
+                patch.object(browser_pw, "_launched_port", 9222), \
+                patch.object(browser_proc, "terminate_process_tree") as kill:
+            browser_pw._abandon_launched_browser()
+
+        kill.assert_called_once_with(20301)
+        self.assertIsNone(browser_pw._launched_proc)
+        self.assertIsNone(browser_pw._launched_port)
+
+    def test_leaves_the_port_alone_when_our_process_already_exited(self):
+        """同一 profile 有实例时，本次 msedge.exe 交接后退出；端口上那个是用户自己的。"""
+        handed_off = SimpleNamespace(pid=22008, poll=lambda: 0)
+        with patch.object(browser_pw, "_launched_proc", handed_off), \
+                patch.object(browser_pw, "_launched_port", 9222), \
+                patch.object(browser_proc, "terminate_process_tree") as kill, \
+                self.assertLogs(LOG, level="INFO"):
+            browser_pw._abandon_launched_browser()
+
+        kill.assert_not_called()
+
+    def test_noop_when_we_launched_nothing(self):
+        with patch.object(browser_pw, "_launched_proc", None), \
+                patch.object(browser_proc, "terminate_process_tree") as kill:
+            browser_pw._abandon_launched_browser()
+
+        kill.assert_not_called()
+
+    def test_open_session_cleans_up_when_the_debug_port_never_answers(self):
+        """端到端那一条：连不上就收掉自己拉起的浏览器，再上抛。"""
+        cfg = SimpleNamespace(attach_port=9222, timeout_ms=45000,
+                              user_data_path="ignored", chrome_path=os.sys.executable,
+                              start_browser=True)
+        fake_pw = MagicMock()
+        fake_pw.start.return_value = fake_pw
+        fake_pw.chromium.connect_over_cdp.side_effect = RuntimeError("拒绝连接")
+        alive = SimpleNamespace(pid=20302, poll=lambda: None)
+        # open_session 会写这两个模块级全局：不管成不成，跑完都擦干净，别污染别的用例。
+        self.addCleanup(setattr, browser_pw, "_launched_proc", None)
+        self.addCleanup(setattr, browser_pw, "_launched_port", None)
+        with patch("playwright.sync_api.sync_playwright", return_value=fake_pw), \
+                patch.object(browser_pw, "_WAIT_LAUNCH_SEC", 0.05), \
+                patch.object(browser_pw.time, "sleep"), \
+                patch.object(browser_pw.subprocess, "Popen", return_value=alive), \
+                patch.object(browser_proc, "terminate_process_tree") as kill:
+            with self.assertRaises(RuntimeError):
+                browser_pw.open_session(cfg)
+
+        kill.assert_called_once_with(20302)
+
+
 class ProcessLookupTests(unittest.TestCase):
     """解析函数对真实系统输出有效（不 mock OS）。"""
 

@@ -284,9 +284,9 @@ class ShopWalk:
     def _read(self, card, offer_id: str) -> detail.Observation:
         """读一次观测，并按「这次读成什么样」记事件（事件顺序与改前一致）。"""
         observation = card.read()
-        if observation.failure is None:
+        if observation.ok:
             self.emit("detail_parse", offer_id=offer_id,
-                    note=f"sku_count={len(observation.payload['rows'])}")
+                    note=f"sku_count={observation.sku_count}")
             return observation
         self.emit("click_parse_error", offer_id=offer_id,
                 note=self._card_note(card, offer_id))
