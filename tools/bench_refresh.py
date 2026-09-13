@@ -198,7 +198,8 @@ def main(argv: list[str] | None = None) -> int:
           f"{result['refresh_without_event_index_sec'] * 1000:8.2f} ms")
     if result["legacy_sec"] is not None:
         print(f"老库首次去重（仅一次）  : {result['legacy_sec'] * 1000:8.2f} ms"
-              f"（删除 {result['legacy_removed']} 行）")
+              f"（删除 {result['legacy_removed']} 行，建索引 "
+              f"{','.join(result['legacy_index_built']) or '无'}）")
     return 0
 
 

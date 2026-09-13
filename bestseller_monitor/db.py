@@ -398,6 +398,7 @@ def _drop_column(table: str, column: str) -> _Migration:
         except sqlite3.OperationalError as exc:
             log.debug("删除 %s.%s 失败（可能已删除或版本不支持）：%s", table, column, exc)
             return False
+        conn.commit()
         log.info("迁移 %s：已删除 %s.%s", name, table, column)
         return True
 
@@ -416,33 +417,39 @@ def _drop_shops_active(conn: sqlite3.Connection, out: _ReportBuilder) -> bool:
         conn.execute("ALTER TABLE shops DROP COLUMN active")
     except sqlite3.OperationalError:
         return False
+    conn.commit()
     log.info("迁移 drop_shops_active：已删除 shops.active 列")
     return True
 
 
 def _skus_primary_key_on_sku_id(conn: sqlite3.Connection, out: _ReportBuilder) -> bool:
-    """迁移：旧 skus 主键为 (offer_id, sku_name)，统一改为 (offer_id, sku_id)。"""
+    """迁移：旧 skus 主键为 (offer_id, sku_name)，统一改为 (offer_id, sku_id)。
+
+    整段包在 try 里：这一段改不动就不改（旧代码同样静默跳过），
+    别让一次迁移把库卡在打不开的状态。
+    """
     try:
         info = conn.execute('PRAGMA table_info("skus")').fetchall()
-    except sqlite3.OperationalError:
+        pk_cols = [row[1] for row in info if row[5] > 0]
+        if not pk_cols or "sku_name" not in pk_cols:
+            return False
+        conn.execute("ALTER TABLE skus RENAME TO skus_old")
+        conn.executescript(
+            "CREATE TABLE IF NOT EXISTS skus ("
+            " offer_id TEXT NOT NULL, sku_name TEXT, sku_id TEXT NOT NULL, "
+            " first_seen_at TEXT NOT NULL, last_seen_at TEXT, "
+            " PRIMARY KEY (offer_id, sku_id));"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO skus(offer_id, sku_name, sku_id, first_seen_at, last_seen_at) "
+            "SELECT offer_id, MAX(sku_name), sku_id, MIN(first_seen_at), MAX(last_seen_at) "
+            "FROM skus_old WHERE sku_id IS NOT NULL GROUP BY offer_id, sku_id"
+        )
+        conn.execute("DROP TABLE skus_old")
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        log.debug("skus 主键迁移跳过（改不动就不改）：%s", exc)
         return False
-    pk_cols = [row[1] for row in info if row[5] > 0]
-    if not pk_cols or "sku_name" not in pk_cols:
-        return False
-    conn.execute("ALTER TABLE skus RENAME TO skus_old")
-    conn.executescript(
-        "CREATE TABLE IF NOT EXISTS skus ("
-        " offer_id TEXT NOT NULL, sku_name TEXT, sku_id TEXT NOT NULL, "
-        " first_seen_at TEXT NOT NULL, last_seen_at TEXT, "
-        " PRIMARY KEY (offer_id, sku_id));"
-    )
-    conn.execute(
-        "INSERT OR IGNORE INTO skus(offer_id, sku_name, sku_id, first_seen_at, last_seen_at) "
-        "SELECT offer_id, MAX(sku_name), sku_id, MIN(first_seen_at), MAX(last_seen_at) "
-        "FROM skus_old WHERE sku_id IS NOT NULL GROUP BY offer_id, sku_id"
-    )
-    conn.execute("DROP TABLE skus_old")
-    conn.commit()
     log.info("迁移 skus_primary_key_on_sku_id：skus 主键已改为 (offer_id, sku_id)")
     return True
 
@@ -451,6 +458,7 @@ def _rounds_legacy_status_columns(conn: sqlite3.Connection, out: _ReportBuilder)
     """迁移：旧轮次的日期与终态折算，以及丢弃过渡用的中文状态列。"""
     try:
         changed = _migrate_round_columns(conn)
+        conn.commit()
     except sqlite3.OperationalError as exc:
         log.debug("轮次列迁移失败：%s", exc)
         return False

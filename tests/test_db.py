@@ -1020,6 +1020,56 @@ class SnapshotDedupeMigrationTests(unittest.TestCase):
                 conn.close()
 
 
+class SkusPrimaryKeyMigrationTests(unittest.TestCase):
+    """旧 skus 主键 (offer_id, sku_name) 要迁到 (offer_id, sku_id)；迁不动时不许把库卡住。"""
+
+    @staticmethod
+    def _old_skus_db(tmp: str, *, leftover: bool = False) -> Path:
+        path = Path(tmp) / "old-skus.db"
+        raw = sqlite3.connect(path)
+        raw.executescript(
+            "CREATE TABLE skus ("
+            " offer_id TEXT NOT NULL, sku_name TEXT, sku_id TEXT NOT NULL, "
+            " first_seen_at TEXT NOT NULL, last_seen_at TEXT, "
+            " PRIMARY KEY (offer_id, sku_name));"
+        )
+        raw.executemany(
+            "INSERT INTO skus(offer_id, sku_name, sku_id, first_seen_at, last_seen_at) "
+            "VALUES ('111', ?, 'red', '2026-09-01T00:00:00+00:00', '2026-09-02T00:00:00+00:00')",
+            [("规格A",), ("规格B",)],
+        )
+        if leftover:
+            # 上一次迁移半途留下的表：RENAME 到 skus_old 会撞名，这一段只能跳过。
+            raw.executescript("CREATE TABLE skus_old (offer_id TEXT)")
+        raw.commit()
+        raw.close()
+        return path
+
+    def test_an_old_primary_key_is_rebuilt_and_the_rows_are_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(self._old_skus_db(tmp))
+            try:
+                pk = [row[1] for row in conn.execute('PRAGMA table_info("skus")') if row[5] > 0]
+                self.assertEqual(pk, ["offer_id", "sku_id"])
+                rows = conn.execute(
+                    "SELECT sku_name FROM skus WHERE offer_id='111' AND sku_id='red'").fetchall()
+                self.assertEqual([row[0] for row in rows], ["规格B"],
+                                 "同一个 SKU 编号的多行按名字取最大合并成一行")
+            finally:
+                conn.close()
+
+    def test_a_leftover_skus_old_table_does_not_break_opening(self):
+        """迁不动就跳过：这一段失败不该让整个库打不开（改前就是静默跳过）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(self._old_skus_db(tmp, leftover=True))
+
+            try:
+                pk = [row[1] for row in conn.execute('PRAGMA table_info("skus")') if row[5] > 0]
+                self.assertEqual(pk, ["offer_id", "sku_name"], "这一段被跳过，表保持原样")
+            finally:
+                conn.close()
+
+
 class CrawlerIdentityTests(unittest.TestCase):
     """采集进程的身份行：同一时刻至多一行，进程走了就该清掉（工单 02）。"""
 

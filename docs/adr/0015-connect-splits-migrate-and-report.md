@@ -46,6 +46,22 @@ SNAPSHOT_DEDUPE_MARK = "DELETE FROM snapshots"
 但如果将来要长期监控刷新成本，得再给一个入口。其二，隐式条件照旧：报告能说「这一段动手了」，
 说不出「为什么动手」；想读懂某一段仍要去看它的 PRAGMA/异常判断。
 
+两轴审查在第一版里抓到两处**行为不等价**（都撞「动作体与条件逐字照旧」这条承诺），已改回：
+
+1. `_skus_primary_key_on_sku_id` 原来把**整段**（PRAGMA、RENAME、重建、DROP）包在
+   `except OperationalError` 里；重排时我只把 PRAGMA 包了进去，于是「上一次迁移半途留下的
+   `skus_old` 表」会让 RENAME 抛错并冒到 `connect()`——**那个库直接打不开，界面刷新即崩**。
+   已整段包回 try。
+2. `migrate()` 把原来逐段的 `conn.commit()` 收成末尾一次：正常路径等价，但末段
+   `_snapshot_success_index`（最贵的整表去重 + 建索引）一抛错就会把前面各段一起回滚。
+   已按段恢复提交时机（两个 `_drop_column`、`drop_shops_active`、轮次列各提交一次）。
+
+顺带补了 `tests/test_db.py` 的 `SkusPrimaryKeyMigrationTests`：旧主键迁移后主键变成
+`(offer_id, sku_id)` 且同名 SKU 合并保留名字较大的那行；以及「残留 `skus_old` 时这一段
+静默跳过、库照常打得开」——改前仓库里**没有**任何 skus 旧主键迁移的用例，所以第一版的
+回归全套 337 条也照样全绿。另外把迁移日志统一成「迁移 <段名>：…」，`bench_refresh` 顺手
+打印建了哪个索引。
+
 被否掉的方向：
 
 - **把「加列前先查缺哪列」显式化**（11 段手工改写）：条件写错就会让旧库迁移**静默失效**，
