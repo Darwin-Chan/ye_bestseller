@@ -67,7 +67,6 @@ def _scroll_cards_until_stable(page, describe: str = "滚动加载新卡片") ->
         except Exception:
             break
         loaded = listing.wait_until(
-            page,
             describe,
             lambda: page.locator(listing.PRODUCT_IMG_SEL).count() > baseline,
             _WAIT_SCROLL_SEC,
@@ -313,7 +312,7 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
             # 只有确认需要进入详情后才消耗详情间隔和长停顿预算。
             _claim_card_slot(db, round_id, shop, cfg, _card_ref(pages_read, i))
             human.before_detail()
-            img = page.locator(_PRODUCT_IMG_SEL).nth(i)
+            img = page.locator(listing.PRODUCT_IMG_SEL).nth(i)
             _capture_card(page, img, list_title, cfg, punished, on_response, se, db,
                           round_id, shop, offers, seen, idx=i, page_no=pages_read,
                           human=human, deny_tracker=deny_tracker)
@@ -345,7 +344,7 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                         _claim_card_slot(db, round_id, shop, cfg, _card_ref(rpg, i))
                         human.before_detail()
                         se("product_open")
-                        img = page.locator(_PRODUCT_IMG_SEL).nth(i)
+                        img = page.locator(listing.PRODUCT_IMG_SEL).nth(i)
                         _capture_card(page, img, name, cfg, punished, on_response, se, db,
                                       round_id, shop, offers, seen, idx=i, page_no=rpg,
                                       human=human, deny_tracker=deny_tracker)
@@ -417,7 +416,7 @@ def _click_one_product(page, img, cfg, punished, on_response, emit=None):
 
 
 def _read_card_title(page, idx: int) -> str:
-    """读取第 idx 张商品卡（与 _PRODUCT_IMG_SEL 同序）在列表页展示的商品名。
+    """读取第 idx 张商品卡（与 listing.PRODUCT_IMG_SEL 同序）在列表页展示的商品名。
 
     用「仅含一张商品图的最小祖先容器」定位卡片，取其 innerText 首行作为商品名；
     对卡片版式不敏感（不依赖 已售/¥ 等特定文案）。取不到（如店铺 logo 卡）返回空串。

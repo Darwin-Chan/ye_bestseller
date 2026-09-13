@@ -56,7 +56,7 @@ WAIT_SORT_SEC = 10.0      # 点「销量」排序后等列表刷新
 WAIT_NEXT_SEC = 10.0      # 翻页/加载更多后等列表刷新
 
 
-def wait_until(page, describe: str, predicate, timeout_sec: float, poll: float = 0.4) -> bool:
+def wait_until(describe: str, predicate, timeout_sec: float, poll: float = 0.4) -> bool:
     """条件等待 + 上限兜底：条件满足返回 True；超时记日志并返回 False（不中断流程）。"""
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
@@ -70,12 +70,15 @@ def wait_until(page, describe: str, predicate, timeout_sec: float, poll: float =
     return False
 
 
-def wait_cards(page, min_count: int = 1, timeout_sec: float = WAIT_UI_SEC,
+def wait_cards(page, min_count: int = 1, timeout_sec: float | None = None,
                describe: str = "商品卡片出现"):
-    """等列表页出现至少 min_count 张商品卡片（条件等待，超时兜底）。"""
-    return wait_until(page, describe,
+    """等列表页出现至少 min_count 张商品卡片（条件等待，超时兜底）。
+
+    timeout_sec 省略时取 WAIT_UI_SEC（调用时解析，方便按驱动调整）。
+    """
+    return wait_until(describe,
                       lambda: page.locator(PRODUCT_IMG_SEL).count() >= min_count,
-                      timeout_sec)
+                      WAIT_UI_SEC if timeout_sec is None else timeout_sec)
 
 
 def click_text_in_frames(page, label: str) -> bool:
@@ -218,11 +221,7 @@ def wait_for_list_change(page, before: tuple, describe: str,
     timeout_sec 省略时取 LIST_CHANGE_TIMEOUT_SEC（调用时解析，方便按驱动调整）。
     """
     return wait_for_change(lambda: list_identity(page), before, describe,
-                           _resolve_timeout(timeout_sec))
-
-
-def _resolve_timeout(timeout_sec: float | None) -> float:
-    return LIST_CHANGE_TIMEOUT_SEC if timeout_sec is None else timeout_sec
+                           LIST_CHANGE_TIMEOUT_SEC if timeout_sec is None else timeout_sec)
 
 
 # ---------- 推进：换到下一批 ----------
