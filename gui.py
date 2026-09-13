@@ -18,17 +18,15 @@ import ctypes
 import logging
 import logging.handlers
 import os
-import sqlite3
 import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import webview
 
-from bestseller_monitor.config import Config, effective_pages_limit, load_shops
+from bestseller_monitor.config import Config, load_shops
 from bestseller_monitor.db import Database, connect, cst_date, utcnow
 from bestseller_monitor.rounds import (
     RoundRequest,
@@ -40,6 +38,7 @@ from bestseller_monitor import rounds
 from bestseller_monitor import browser_proc
 from bestseller_monitor import single_instance
 from bestseller_monitor import stop_request
+from bestseller_monitor import views
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -59,8 +58,6 @@ def _crawler_python(exe: str | None = None) -> str:
             return str(console)
     return exe
 
-
-CST = timezone(timedelta(hours=8))
 
 WINDOW_TITLE = "1688 畅销品监控 · 每日库存抓取"
 
@@ -110,89 +107,27 @@ def _configure_gui_logging(cfg=None) -> logging.Handler:
     return handler
 
 
-def _fmt_hhmm(iso_utc: str | None) -> str:
-    if not iso_utc:
-        return "—"
-    try:
-        dt = datetime.fromisoformat(iso_utc)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(CST).strftime("%H:%M")
-    except ValueError:
-        return "—"
-
-
-def _fmt_dur(seconds: float | None) -> str:
-    if seconds is None or seconds < 0:
-        return "进行中"
-    s = int(seconds)
-    if s < 60:
-        return f"{s} 秒"
-    m = s // 60
-    if m < 60:
-        return f"{m} 分"
-    h, m = divmod(m, 60)
-    return f"{h} 时 {m} 分"
-
-
-def _fmt_minutes(seconds: float | None) -> str:
-    if seconds is None or seconds < 0:
-        return "—"
-    return f"{round(seconds / 60, 1)} 分"
-
-
-_TERMINAL_TEXT = {
-    TerminalReason.COMPLETED: ("正常完成", "本轮正常完成。"),
-    TerminalReason.DAY_BOUNDARY: (
-        "跨天中止",
-        "本轮因库存数据即将跨天而中止，已抓取数据已保留；请0点后启动新的抓取轮次。",
-    ),
-    TerminalReason.DENY_EXCEEDED: (
-        "意外中止",
-        "本轮因整轮 deny 达到阈值而意外中止，已抓取数据已保留；本轮不可续跑，请启动新的抓取轮次。",
-    ),
-    TerminalReason.FAIL_RATE_EXCEEDED: (
-        "暂停待处理",
-        "本轮因失败率超过阈值而暂停，需人工决策；未抓取店铺见下方。",
-    ),
-    TerminalReason.DETAIL_BUDGET_EXHAUSTED: (
-        "预算耗尽",
-        "本轮详情预算已用尽，已抓取数据已保留；剩余商品留待下一轮重新发现。",
-    ),
-    TerminalReason.ABANDONED: (
-        "人工中止",
-        "本轮由人工中止（放弃），已抓取数据已保留、不再续跑；未抓取店铺见下方。",
-    ),
-}
-
-
-def _terminal_text(reason) -> tuple[str, str]:
-    """轮次终态 → 结果页的标签与说明。改文案不影响任何判定。"""
-    if reason is None:
-        return "进行中", "本轮仍在进行；未抓取店铺见下方。"
-    return _TERMINAL_TEXT.get(reason, ("意外中止", "本轮非正常结束，已抓取数据已保留；未抓取店铺见下方。"))
-
-
-def _terminal_suffix(reason) -> str:
-    """开始页摘要里的一句短注；进行中的轮次不加注。"""
-    return "" if reason is None else "，" + _terminal_text(reason)[0]
-
-
-def _duration_seconds(started_at: str | None, finished_at: str | None) -> float | None:
-    if not started_at or not finished_at:
-        return None
-    try:
-        return (datetime.fromisoformat(finished_at) - datetime.fromisoformat(started_at)).total_seconds()
-    except ValueError:
-        return None
-
-
 class Api:
-    """暴露给 pywebview 前端的方法。返回 JSON 可序列化的基本类型。"""
+    """暴露给 pywebview 前端的方法。返回 JSON 可序列化的基本类型。
 
-    def __init__(self):
-        self.cfg = Config.from_file(PROJECT_ROOT / "config" / "config.toml", root=PROJECT_ROOT)
-        self.shops = [s for s in load_shops(self.cfg.shop_csv) if s.active]
+    三个页面的取数不在这里：那部分见 `bestseller_monitor.views`。本类持有界面会话事实
+    （`_ui_state()` 折出来的 `views.UiState`）与连接生命周期，取数与渲染文案交给那个 module。
+    """
+
+    def __init__(self, cfg=None, *, now=utcnow, open_conn=None, shops=None):
+        """构造 interface：配置、时刻、连接与店铺表都可以注入。
+
+        `main()` 仍写 `Api()`——那时配置按项目默认位置读，「现在」取本机时间，
+        连接走数据层入口（`connect()` 会建目录、建表并执行迁移，见 IS-37）。
+        测试与基准注入固定时刻与自己的库，于是「今天」可判定、也不用手工塞私有属性。
+        """
+        self.cfg = cfg if cfg is not None else Config.from_file(
+            PROJECT_ROOT / "config" / "config.toml", root=PROJECT_ROOT)
+        self._now = now
+        self._open_conn = open_conn if open_conn is not None else (
+            lambda: connect(self.cfg.db_file))
+        self.shops = (list(shops) if shops is not None else
+                      [s for s in load_shops(self.cfg.shop_csv) if s.active])
         self._lock = threading.RLock()
         self.proc: subprocess.Popen | None = None
         self.round_id: int | None = None
@@ -204,16 +139,9 @@ class Api:
         self._stop: dict | None = None
 
     # ---------- 基础 ----------
-    def _open_conn(self) -> sqlite3.Connection:
-        """走数据层的连接入口：它会建目录、建表并执行迁移。
-
-        界面自己开连接就会绕过迁移，对着旧结构的库报 `no such column`（IS-37）。
-        """
-        return connect(self.cfg.db_file)
-
-    @staticmethod
-    def _today() -> str:
-        return cst_date()
+    def _today(self) -> str:
+        """今天的北京日期；「现在」来自构造时注入的时刻，不读挂钟。"""
+        return cst_date(self._now())
 
     def _current_elapsed(self) -> float:
         """当前已抓时长：运行中 = 累计段 + 当前段；暂停 = 仅累计段（冻结）。"""
@@ -221,216 +149,55 @@ class Api:
             return self._elapsed_base + (time.time() - self._run_start_ts)
         return self._elapsed_base
 
+    def _refused_start_error(self) -> str | None:
+        """本界面拉起的采集子进程被「已有采集在跑」拒绝了吗（专用退出码）。"""
+        if (self.proc is not None
+                and self.proc.poll() == single_instance.CRAWLER_BUSY_EXIT_CODE):
+            return "已有采集进程在运行：本次启动被拒绝了，等它跑完再试。"
+        return None
+
+    def _ui_state(self) -> views.UiState:
+        """界面会话事实：取数要读、又不属于数据层的那几件。"""
+        return views.UiState(
+            round_id=self.round_id,
+            crawler_running=self._own_crawler_alive(),
+            manually_paused=self.user_paused,
+            stopping=self._stop_state(),
+            stop_grace_sec=_STOP_GRACE_SEC,
+            elapsed_sec=self._current_elapsed(),
+            start_error=self._refused_start_error(),
+        )
+
     # ---------- 开始页 ----------
-    def _start_summary(self, conn) -> dict:
-        today = self._today()
-        today_rounds = rounds.on_date(Database(conn), today)
-        if not today_rounds:
-            return {
-                "started": False,
-                "rounds": 0,
-                "text": "今天尚未开始",
-            }
-
-        lines = []
-        for run in today_rounds:
-            dur = _duration_seconds(run.started_at, run.finished_at)
-            lines.append(
-                f"{_fmt_hhmm(run.started_at)} 开始 · 跑约 {_fmt_dur(dur)}"
-                f"{_terminal_suffix(run.reason)}"
-            )
-        return {
-            "started": True,
-            "rounds": len(today_rounds),
-            "text": "\n".join(lines),
-        }
-
-    def _start_shops(self, conn) -> list[dict]:
-        today = self._today()
-        out = []
-        for s in self.shops:
-            p = conn.execute(
-                "SELECT COUNT(DISTINCT offer_id) c FROM inventory WHERE shop_key=? AND date=?",
-                (s.key, today),
-            ).fetchone()["c"]
-            k = conn.execute(
-                "SELECT COUNT(*) c FROM inventory WHERE shop_key=? AND date=?",
-                (s.key, today),
-            ).fetchone()["c"]
-            # 该店实际翻页上限：店铺未单独配置时回落到全局默认（与抓取逻辑一致）
-            pages = effective_pages_limit(s, self.cfg)
-            out.append({
-                "key": s.key,
-                "name": s.name,
-                "products": p,
-                "skus": k,
-                "pages": pages,
-                "default_checked": (p < pages * 30),
-            })
-        return out
-
     def get_start(self) -> dict:
         with self._lock:
             conn = self._open_conn()
             try:
                 self._enforce_stop_deadline(conn)
-                today = self._today()
-                ov_products = conn.execute(
-                    "SELECT COUNT(DISTINCT offer_id) c FROM inventory WHERE date=?", (today,)
-                ).fetchone()["c"]
-                ov_skus = conn.execute(
-                    "SELECT COUNT(*) c FROM inventory WHERE date=?", (today,)
-                ).fetchone()["c"]
-                db = Database(conn)
-                running = self.crawler_identity(conn)
-                current = rounds.active_round(db, today)
-                stale = None if current is not None else rounds.active_round(db)
-                if running is not None:
-                    hint = self._crawler_hint(running)
-                elif current is not None:
-                    hint = (f"轮次 #{current.id} 正在进行（{current.run_date}），"
-                            "点「开始抓取」会按它的店铺范围续跑。")
-                elif stale is not None:
-                    hint = (f"轮次 #{stale.id}（{stale.run_date}）已经跨天，不会再续跑；"
-                            "点「开始抓取」会新建一轮。")
-                else:
-                    hint = ""
-                return {
-                    "ov": {
-                        "products": ov_products,
-                        "skus": ov_skus,
-                    },
-                    "summary": self._start_summary(conn),
-                    "shops": self._start_shops(conn),
-                    "total_shops": len(self.shops),
-                    "start_hint": hint,
-                    "crawler": running,
-                    "stopping": self._stop_state(),
-                    "stop_grace_sec": _STOP_GRACE_SEC,
-                }
+                return views.start_view(
+                    conn, cfg=self.cfg, shops=self.shops, state=self._ui_state(),
+                    crawler=self.crawler_identity(conn), now=self._now())
             finally:
                 conn.close()
 
     # ---------- 过程页 ----------
-    def _shop_metrics(self, conn, round_id: int, shop_key: str) -> tuple[int, int, int, float | None]:
-        prod = conn.execute(
-            "SELECT COUNT(DISTINCT offer_id) c FROM snapshots "
-            "WHERE round_id=? AND shop_key=? AND page_status='成功' AND sku_id IS NOT NULL",
-            (round_id, shop_key),
-        ).fetchone()["c"]
-        sku = conn.execute(
-            "SELECT COUNT(*) c FROM snapshots WHERE round_id=? AND shop_key=? "
-            "AND page_status='成功' AND sku_id IS NOT NULL",
-            (round_id, shop_key),
-        ).fetchone()["c"]
-        deny = conn.execute(
-            "SELECT COUNT(*) c FROM event_log WHERE round_id=? AND shop_key=? AND event='click_deny'",
-            (round_id, shop_key),
-        ).fetchone()["c"]
-        ts = conn.execute(
-            "SELECT MIN(ts), MAX(ts) FROM event_log WHERE round_id=? AND shop_key=?",
-            (round_id, shop_key),
-        ).fetchone()
-        dur = None
-        if ts and ts[0] and ts[1]:
-            try:
-                dur = (datetime.fromisoformat(ts[1]) - datetime.fromisoformat(ts[0])).total_seconds()
-            except ValueError:
-                dur = None
-        return prod, sku, deny, dur
-
     def get_run(self) -> dict:
         with self._lock:
-            if (self.proc is not None
-                    and self.proc.poll() == single_instance.CRAWLER_BUSY_EXIT_CODE):
-                return self._refused_start()
-            running = self._own_crawler_alive()
+            if self._refused_start_error() is not None:
+                # 子进程因「已有采集在跑」被拒：不碰数据库，直接说清原因。
+                return views.run_view(None, state=self._ui_state(), now=self._now())
             conn = self._open_conn()
             try:
                 self._enforce_stop_deadline(conn)
-                stopping = self._stop_state()
-                active = rounds.active_round(Database(conn), self._today())
-                if active is None:
-                    return {"running": running, "manually_paused": self.user_paused,
-                            "has_round": False, "stopping": stopping,
-                            "stop_grace_sec": _STOP_GRACE_SEC}
-                rid = active.id
-                # 轮次由采集子进程创建，界面在这里随轮询认领它。
-                self.round_id = rid
-                started_at = active.started_at
-                elapsed = self._current_elapsed()
-
-                deny = conn.execute(
-                    "SELECT COUNT(*) c FROM event_log WHERE round_id=? AND event='click_deny'",
-                    (rid,),
-                ).fetchone()["c"]
-                done_rows = conn.execute(
-                    "SELECT * FROM shop_rounds WHERE round_id=? AND list_status='完成' ORDER BY shop_key",
-                    (rid,),
-                ).fetchall()
-                total = conn.execute(
-                    "SELECT COUNT(*) c FROM shop_rounds WHERE round_id=?", (rid,)
-                ).fetchone()["c"]
-                todo_rows = conn.execute(
-                    "SELECT * FROM shop_rounds WHERE round_id=? AND list_status!='完成' ORDER BY shop_key",
-                    (rid,),
-                ).fetchall()
-
-                done = []
-                for r in done_rows:
-                    p, k, d, dur = self._shop_metrics(conn, rid, r["shop_key"])
-                    done.append({
-                        "key": r["shop_key"],
-                        "name": r["shop_name"],
-                        "products": p,
-                        "skus": k,
-                        "duration": _fmt_minutes(dur),
-                        "deny": d,
-                    })
-                todo_names = [{"key": r["shop_key"], "name": r["shop_name"]} for r in todo_rows]
-
-                # 当前处理中的店：未完成里最近有事件的
-                current = None
-                if todo_rows:
-                    cur = conn.execute(
-                        "SELECT shop_key FROM event_log WHERE round_id=? AND shop_key IN (%s) "
-                        "ORDER BY id DESC LIMIT 1" % ",".join("?" for _ in todo_rows),
-                        (rid, *(r["shop_key"] for r in todo_rows)),
-                    ).fetchone()
-                    if cur:
-                        current = cur["shop_key"]
-
-                return {
-                    "running": running,
-                    "manually_paused": self.user_paused,
-                    "stopping": stopping,
-                    "stop_grace_sec": _STOP_GRACE_SEC,
-                    "has_round": True,
-                    "round_id": rid,
-                    "started_hhmm": _fmt_hhmm(started_at),
-                    "elapsed_sec": max(elapsed, 0),
-                    "deny": deny,
-                    "done_count": len(done),
-                    "total_count": total,
-                    "progress": (len(done) / total) if total else 0.0,
-                    "current_shop": current,
-                    "done": done,
-                    "todo": todo_names,
-                }
+                view = views.run_view(conn, state=self._ui_state(), now=self._now())
+                if view.get("has_round"):
+                    # 轮次由采集子进程创建，界面在这里随轮询认领它。
+                    self.round_id = view["round_id"]
+                return view
             finally:
                 conn.close()
 
     # ---------- 控制 ----------
-    @staticmethod
-    def _refused_start() -> dict:
-        """子进程因为「已有采集在跑」被拒绝：说清原因，别把它当成一轮跑完。"""
-        return {
-            "running": False,
-            "manually_paused": False,
-            "has_round": False,
-            "start_error": "已有采集进程在运行：本次启动被拒绝了，等它跑完再试。",
-        }
-
     def _own_crawler_alive(self) -> bool:
         """本界面拉起的采集子进程还活着吗。"""
         return self.proc is not None and self.proc.poll() is None
@@ -464,18 +231,6 @@ class Api:
             "started_at": None,
             "note": None,
         }
-
-    @staticmethod
-    def _crawler_hint(running: dict) -> str:
-        """启动页在「已经有采集在跑」时说什么：谁在跑，以及点开始会被拒。"""
-        parts = [
-            f"轮次 #{running['round_id']}" if running.get("round_id") is not None else None,
-            f"PID {running['pid']}" if running.get("pid") else None,
-            f"{_fmt_hhmm(running['started_at'])} 起" if running.get("started_at") else None,
-        ]
-        who = "，".join(part for part in parts if part) or "身份未知"
-        return (f"采集进程正在跑（{who}）：同一时刻只能有一个，现在点开始会被拒绝；"
-                "要停它就用下面的「中止」按钮。")
 
     def _spawn_crawler(self, keys: list[str] | None = None):
         """拉起采集子进程；keys 为空表示「开始或续跑」，范围由子进程按轮次决定。"""
@@ -774,76 +529,7 @@ class Api:
             conn = self._open_conn()
             try:
                 self._enforce_stop_deadline(conn)
-                stopping = self._stop_state()
-                db = Database(conn)
-                run = (rounds.load(db, self.round_id) if self.round_id is not None
-                       else rounds.latest(db, finished=True))
-                if run is None:
-                    return {"has_round": False, "stopping": stopping,
-                            "stop_grace_sec": _STOP_GRACE_SEC}
-                rid = run.id
-                dur = _duration_seconds(run.started_at, run.finished_at)
-                if dur is None and rid == self.round_id:
-                    # 榜单未完成时轮次保持进行中、没有 finished_at，
-                    # 即便抓取进程已经停下也仍可续跑，所以用当前已抓时长。
-                    dur = self._current_elapsed()
-                deny = conn.execute(
-                    "SELECT COUNT(*) c FROM event_log WHERE round_id=? AND event='click_deny'",
-                    (rid,),
-                ).fetchone()["c"]
-                prod_total = conn.execute(
-                    "SELECT COUNT(DISTINCT offer_id) c FROM snapshots "
-                    "WHERE round_id=? AND page_status='成功' AND sku_id IS NOT NULL",
-                    (rid,),
-                ).fetchone()["c"]
-                sku_total = conn.execute(
-                    "SELECT COUNT(*) c FROM snapshots WHERE round_id=? "
-                    "AND page_status='成功' AND sku_id IS NOT NULL",
-                    (rid,),
-                ).fetchone()["c"]
-                done_rows = conn.execute(
-                    "SELECT * FROM shop_rounds WHERE round_id=? AND list_status='完成' ORDER BY shop_key",
-                    (rid,),
-                ).fetchall()
-                total = conn.execute(
-                    "SELECT COUNT(*) c FROM shop_rounds WHERE round_id=?", (rid,)
-                ).fetchone()["c"]
-                todo_rows = conn.execute(
-                    "SELECT * FROM shop_rounds WHERE round_id=? AND list_status!='完成' ORDER BY shop_key",
-                    (rid,),
-                ).fetchall()
-                done = []
-                for r in done_rows:
-                    p, k, d, dur_s = self._shop_metrics(conn, rid, r["shop_key"])
-                    done.append({
-                        "key": r["shop_key"],
-                        "name": r["shop_name"],
-                        "products": p,
-                        "skus": k,
-                        "duration": _fmt_minutes(dur_s),
-                        "deny": d,
-                    })
-                todo = [{"key": r["shop_key"], "name": r["shop_name"]} for r in todo_rows]
-                tag, note = _terminal_text(run.reason)
-                return {
-                    "has_round": True,
-                    "round_id": rid,
-                    "stopping": stopping,
-                    "stop_grace_sec": _STOP_GRACE_SEC,
-                    "reason": run.reason.value if run.reason is not None else None,
-                    "started_hhmm": _fmt_hhmm(run.started_at),
-                    "finished_hhmm": _fmt_hhmm(run.finished_at),
-                    "duration_text": _fmt_dur(dur),
-                    "deny": deny,
-                    "done_count": len(done),
-                    "total_count": total,
-                    "products_total": prod_total,
-                    "skus_total": sku_total,
-                    "done": done,
-                    "todo": todo,
-                    "note": note,
-                    "tag": tag,
-                }
+                return views.result_view(conn, state=self._ui_state(), now=self._now())
             finally:
                 conn.close()
 

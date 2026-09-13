@@ -21,7 +21,6 @@ import tempfile
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from threading import RLock
 from types import SimpleNamespace
 
 REPO = Path(__file__).resolve().parents[1]
@@ -42,41 +41,30 @@ from bestseller_monitor.db import (  # noqa: E402
 from bestseller_monitor import rounds  # noqa: E402
 from bestseller_monitor.rounds import RoundRequest, ShopScope  # noqa: E402
 
+# 合成轮次的日期与对应的「现在」：基准不读挂钟，量的是刷新本身（候选 04）。
+RUN_DATE = "2026-09-12"
+NOW = "2026-09-12T04:00:00+00:00"      # 北京时间同日 12:00
 
-def refresh_api(db_file: Path):
+
+def refresh_api(db_file: Path, *, now: str = NOW, open_conn=None):
     """给基准一个真界面对象：量的是 `get_run()` 本身，不是复刻它的 SQL。
 
     `gui` 只在用到时才导入——它拖着 pywebview 那一套，别的 tools 不依赖。
     """
     from gui import Api
 
-    api = Api.__new__(Api)
-    api._lock = RLock()
-    api._stop = None            # 基准对象没有停止在跑（见 gui.Api 的停止状态，ADR-0009）
-    api.proc = None
-    api.round_id = None
-    api.user_paused = False
-    api._elapsed_base = 0.0
-    api._run_start_ts = None
-    api.cfg = SimpleNamespace(db_file=db_file)
-    return api
-
-
-class _ReusableConnection(sqlite3.Connection):
-    """基准里复用同一条连接：`get_run()` 的 finally 会把它关掉。"""
-
-    def close(self) -> None:  # noqa: D102 - 故意什么都不做
-        pass
+    return Api(cfg=SimpleNamespace(db_file=db_file, max_pages_per_shop=3),
+               shops=[], now=lambda: now, open_conn=open_conn)
 
 
 def build_dataset(conn: sqlite3.Connection, shops: int, rows_per_shop: int,
-                  run_date: str = "2026-09-12") -> tuple[int, int]:
+                  run_date: str = RUN_DATE) -> tuple[int, int]:
     """建一轮「已完成」的合成数据，返回 (轮次号, 写入的快照行数)。"""
     keys = [f"S{i:02d}" for i in range(1, shops + 1)]
     scopes = tuple(ShopScope(k, f"https://{k}.example/", f"店铺{k}") for k in keys)
     db = Database(conn)
     rid = rounds.open(db, RoundRequest(run_date, scopes)).round.id
-    base = datetime(2026, 9, 12, 1, 0, 0)
+    base = datetime.fromisoformat(run_date + "T01:00:00")
     snapshots, events = [], []
     for key in keys:
         db.add_shop(rid, key, f"https://{key}.example/", f"店铺{key}")
@@ -137,19 +125,21 @@ def measure(*, shops: int, rows_per_shop: int, repeats: int, legacy: bool = Fals
         refresh_sec = _best(api.get_run, repeats)
 
         # 对照：同一个 get_run()，把两条事件索引摘掉再量一次。得绕开 connect()——它每次
-        # 开连接都会把索引建回来，所以这里直接用一条裸连接（索引改动因此真的生效）。
-        raw = sqlite3.connect(path, factory=_ReusableConnection)
-        raw.row_factory = sqlite3.Row
-        for name in EVENT_REFRESH_INDEXES:
-            raw.execute(f"DROP INDEX IF EXISTS {name}")
-        raw.commit()
-        original_open = api._open_conn
-        api._open_conn = lambda: raw
+        # 开连接都会把索引建回来，所以这里让界面用裸连接（摘掉的索引因此真的不在了）。
+        raw = sqlite3.connect(path)
         try:
-            without_index_sec = _best(api.get_run, repeats)
+            for name in EVENT_REFRESH_INDEXES:
+                raw.execute(f"DROP INDEX IF EXISTS {name}")
+            raw.commit()
         finally:
-            api._open_conn = original_open
-            sqlite3.Connection.close(raw)
+            raw.close()
+
+        def open_raw():
+            opened = sqlite3.connect(path)
+            opened.row_factory = sqlite3.Row
+            return opened
+
+        without_index_sec = _best(refresh_api(path, open_conn=open_raw).get_run, repeats)
 
         result = {
             "shops": shops,

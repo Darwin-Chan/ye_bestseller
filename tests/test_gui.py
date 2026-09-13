@@ -5,7 +5,6 @@ import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
-from threading import RLock
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -70,11 +69,9 @@ class GuiResultTests(unittest.TestCase):
                 round_id = new_round(db)
                 rounds.finish(db, rounds.load(db, round_id),
                               TerminalReason.DETAIL_BUDGET_EXHAUSTED, note=DETAIL_BUDGET_NOTE)
-                api = Api.__new__(Api)
-                api._lock = RLock()
-                api._stop = None
+                api = Api(cfg=SimpleNamespace(max_pages_per_shop=3), shops=[],
+                          open_conn=lambda: conn)
                 api.round_id = round_id
-                api._open_conn = lambda: conn
 
                 result = api.get_result()
 
@@ -90,12 +87,10 @@ class GuiResultTests(unittest.TestCase):
             conn = connect(Path(tmp) / "test.db")
             try:
                 round_id = new_round(Database(conn))
-                api = Api.__new__(Api)
-                api._lock = RLock()
-                api._stop = None
+                api = Api(cfg=SimpleNamespace(max_pages_per_shop=3), shops=[],
+                          open_conn=lambda: conn)
                 api.round_id = round_id
                 api._current_elapsed = MagicMock(return_value=125.0)
-                api._open_conn = lambda: conn
 
                 result = api.get_result()
 
@@ -105,16 +100,6 @@ class GuiResultTests(unittest.TestCase):
                 api._current_elapsed.assert_called_once_with()
             finally:
                 conn.close()
-
-    def test_every_terminal_reason_has_result_text(self):
-        for reason in TerminalReason:
-            with self.subTest(reason=reason):
-                tag, note = gui._terminal_text(reason)
-                self.assertTrue(tag)
-                self.assertTrue(note)
-
-        self.assertEqual(gui._terminal_text(None), ("进行中", "本轮仍在进行；未抓取店铺见下方。"))
-
 
 class GuiStopRequestTests(unittest.TestCase):
     """暂停／中止都先请求协作停止，窗口内没停下才强杀（ADR-0009）。"""
@@ -129,19 +114,10 @@ class GuiStopRequestTests(unittest.TestCase):
         self.api = self._api()
 
     def _api(self, start_browser=True, attach_port=9222):
-        api = Api.__new__(Api)
-        api._lock = RLock()
-        api.proc = None
-        api.round_id = None
-        api.user_paused = False
-        api._elapsed_base = 0.0
-        api._run_start_ts = None
-        api._stop = None
-        api.shops = [Shop("A01", "店铺A", "https://A01.example/")]
-        api.cfg = SimpleNamespace(max_pages_per_shop=3, start_browser=start_browser,
-                                  attach_port=attach_port)
-        api._open_conn = lambda: connect(self.db_path)
-        return api
+        return Api(cfg=SimpleNamespace(max_pages_per_shop=3, start_browser=start_browser,
+                                       attach_port=attach_port),
+                   shops=[Shop("A01", "店铺A", "https://A01.example/")],
+                   open_conn=lambda: connect(self.db_path))
 
     def _running_crawler(self, pid: int = 6104) -> tuple[int, str]:
         """造出「本界面拉起的采集进程在跑」：占住会话锁 + 身份行 + 活着的子进程句柄。"""
@@ -313,23 +289,11 @@ class GuiRoundScopeTests(unittest.TestCase):
     def _api(self, db_path):
         # 锁名字按用例隔离：本机正在跑的界面/采集不该让这些用例莫名其妙地被拒。
         self.enterContext(isolated_locks())
-        api = Api.__new__(Api)
-        api._lock = RLock()
-        api._stop = None
-        api.proc = None
-        api.round_id = None
-        api.start_ts = None
-        api.user_paused = False
-        api._elapsed_base = 0.0
-        api._run_start_ts = None
-        api.shops = [
-            Shop("A01", "店铺A", "https://A01.example/"),
-            Shop("A02", "店铺B", "https://A02.example/"),
-        ]
-        api.cfg = SimpleNamespace(max_pages_per_shop=3)
         # start_run 会关掉自己开的连接，所以每次都要给一条新的。
-        api._open_conn = lambda: connect(db_path)
-        return api
+        return Api(cfg=SimpleNamespace(max_pages_per_shop=3),
+                   shops=[Shop("A01", "店铺A", "https://A01.example/"),
+                          Shop("A02", "店铺B", "https://A02.example/")],
+                   open_conn=lambda: connect(db_path))
 
     @staticmethod
     def _scope(db_path, round_id):
@@ -528,19 +492,9 @@ class GuiCrawlerMutexTests(unittest.TestCase):
 
     def _api(self, db_path):
         self.enterContext(isolated_locks())
-        api = Api.__new__(Api)
-        api._lock = RLock()
-        api._stop = None
-        api.proc = None
-        api.round_id = None
-        api.start_ts = None
-        api.user_paused = False
-        api._elapsed_base = 0.0
-        api._run_start_ts = None
-        api.shops = [Shop("A01", "店铺A", "https://A01.example/")]
-        api.cfg = SimpleNamespace(max_pages_per_shop=3)
-        api._open_conn = lambda: connect(db_path)
-        return api
+        return Api(cfg=SimpleNamespace(max_pages_per_shop=3),
+                   shops=[Shop("A01", "店铺A", "https://A01.example/")],
+                   open_conn=lambda: connect(db_path))
 
     @staticmethod
     def _identity_row(db_path):
@@ -604,12 +558,11 @@ class GuiCrawlerMutexTests(unittest.TestCase):
             self.assertIsNone(self._identity_row(db_path), "残留身份行要清掉")
 
     def test_a_refused_child_reports_its_reason_instead_of_a_result_page(self):
-        api = Api.__new__(Api)
-        api._lock = RLock()
-        api._stop = None
+        def never_open():
+            raise AssertionError("被拒绝的启动不该连库")
+
+        api = Api(cfg=SimpleNamespace(max_pages_per_shop=3), shops=[], open_conn=never_open)
         api.proc = SimpleNamespace(poll=lambda: single_instance.CRAWLER_BUSY_EXIT_CODE)
-        api.round_id = None
-        api.user_paused = False
 
         data = api.get_run()
 
@@ -624,16 +577,10 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tmp.name) / "test.db"
         self.enterContext(isolated_locks())
-        self.api = Api.__new__(Api)
-        self.api._lock = RLock()
-        self.api.proc = None
-        self.api.round_id = None
-        self.api.user_paused = False
-        self.api._stop = None
-        self.api.shops = [Shop("A01", "店铺A", "https://A01.example/")]
         # start_browser=False：中止只收尾采集进程，不去动用户的浏览器（那一路由 IS-43 的测试盯）。
-        self.api.cfg = SimpleNamespace(max_pages_per_shop=3, start_browser=False)
-        self.api._open_conn = lambda: connect(self.db_path)
+        self.api = Api(cfg=SimpleNamespace(max_pages_per_shop=3, start_browser=False),
+                       shops=[Shop("A01", "店铺A", "https://A01.example/")],
+                       open_conn=lambda: connect(self.db_path))
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -813,16 +760,8 @@ class GuiConnectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "legacy.db"
             self._legacy_db(db_path)
-            api = Api.__new__(Api)
-            api._lock = RLock()
-            api._stop = None
-            api.proc = None
-            api.round_id = None
-            api.user_paused = False
-            api._elapsed_base = 0.0
-            api._run_start_ts = None
-            api.shops = [Shop("A01", "店铺A01", "https://A01.example/")]
-            api.cfg = SimpleNamespace(db_file=db_path, max_pages_per_shop=3)
+            api = Api(cfg=SimpleNamespace(db_file=db_path, max_pages_per_shop=3),
+                      shops=[Shop("A01", "店铺A01", "https://A01.example/")])
 
             # 三个页面都不再抛 no such column
             start = api.get_start()
@@ -862,19 +801,13 @@ class GuiRefreshCostTests(unittest.TestCase):
             path = Path(tmp) / "big.db"
             conn = connect(path)
             try:
-                rid, _ = bench_refresh.build_dataset(conn, self.SHOPS, self.ROWS_PER_SHOP)
+                rid, _ = bench_refresh.build_dataset(
+                    conn, self.SHOPS, self.ROWS_PER_SHOP, run_date=bench_refresh.RUN_DATE)
             finally:
                 conn.close()
 
-            api = Api.__new__(Api)
-            api._lock = RLock()
-            api._stop = None
-            api.proc = None
-            api.round_id = None
-            api.user_paused = False
-            api._elapsed_base = 0.0
-            api._run_start_ts = None
-            api.cfg = SimpleNamespace(db_file=path)
+            api = Api(cfg=SimpleNamespace(db_file=path, max_pages_per_shop=3), shops=[],
+                      now=lambda: bench_refresh.NOW)
 
             seen: list[str] = []
             with traced_connections(seen):
@@ -891,6 +824,55 @@ class GuiRefreshCostTests(unittest.TestCase):
             )
             self.assertLess(elapsed, self.REFRESH_LIMIT_SEC,
                             f"一次刷新耗时离谱，实测 {elapsed:.3f} 秒")
+
+
+class GuiApiConstructionTests(unittest.TestCase):
+    """界面取数的构造 interface：配置、时刻、连接与店铺表都是入参（候选 04）。"""
+
+    YESTERDAY = "2026-09-12"
+    YESTERDAY_ISO = "2026-09-12T04:00:00+00:00"
+    TODAY_ISO = "2026-09-13T04:00:00+00:00"
+
+    def setUp(self):
+        self.enterContext(isolated_locks())
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.path = self.tmp / "gui.db"
+        self.conn = connect(self.path)
+        self.addCleanup(self.conn.close)
+        self.db = Database(self.conn)
+        self.cfg = SimpleNamespace(max_pages_per_shop=3)
+
+    def api(self, *, now, shops=(), db_path=None):
+        path = db_path or self.path
+        return Api(cfg=self.cfg, shops=shops, now=lambda: now,
+                   open_conn=lambda: connect(path))
+
+    def test_injected_clock_decides_which_day_the_pages_show(self):
+        round_id = new_round(self.db, run_date=self.YESTERDAY)
+
+        yesterday = self.api(now=self.YESTERDAY_ISO).get_run()
+        today = self.api(now=self.TODAY_ISO).get_run()
+
+        self.assertTrue(yesterday["has_round"])
+        self.assertEqual(yesterday["round_id"], round_id)
+        self.assertFalse(today["has_round"], "昨天的轮次不算今天的")
+
+    def test_pages_read_the_injected_connection_and_shops(self):
+        round_id = new_round(self.db, ("A01", "https://A01.example/", "店铺A"),
+                             run_date="2026-09-13")
+        elsewhere = self.tmp / "elsewhere.db"
+        connect(elsewhere).close()
+        shops = [Shop("A01", "店铺A", "https://A01.example/")]
+
+        start = self.api(now=self.TODAY_ISO, shops=shops).get_start()
+        run = self.api(now=self.TODAY_ISO, shops=shops).get_run()
+        other_db = self.api(now=self.TODAY_ISO, shops=shops, db_path=elsewhere).get_run()
+
+        self.assertEqual((start["total_shops"], start["shops"][0]["key"]), (1, "A01"))
+        self.assertEqual(run["round_id"], round_id)
+        self.assertFalse(other_db["has_round"], "读的是注入的那条连接")
 
 
 if __name__ == "__main__":
