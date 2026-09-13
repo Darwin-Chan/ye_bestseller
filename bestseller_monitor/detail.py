@@ -9,7 +9,8 @@ from pathlib import Path
 from . import dedupe, rounds
 from .config import Config
 from .db import Database, cst_date, utcnow
-from .parse import extract_skus_from_html, extract_title, is_single_spec_offer
+from .parse import (extract_main_image, extract_skus_from_html, extract_title,
+                    is_single_spec_offer)
 
 log = logging.getLogger(__name__)
 
@@ -63,9 +64,8 @@ class Outcome(str, Enum):
 class FailureKind(str, Enum):
     """这次观测是怎么没成的：调用方据此决定记哪几条事件。"""
 
-    READ = "read"        # 读不到页面内容
-    PARSE = "parse"      # 页面结构解析不了
-    ACCESS = "access"    # 访问异常（导航、连接等）
+    READ = "read"        # 读不到页面内容（导航、连接、取内容都算）
+    PARSE = "parse"      # 读到了页面，但解析不了（或取主图时崩了）
 
 
 @dataclass(frozen=True)
@@ -90,7 +90,8 @@ class DetailTarget:
 class Observation:
     """adapter 交回的一次观测：成功 payload，或失败原因。
 
-    失败文案的用词收在这里（读不到页 / 解析失败 / 解析崩了 / 访问异常），adapter 只管挑一个。
+    失败文案的用词收在这里（读不到页 / 解析失败 / 解析崩了），由 `observe_page` 挑，
+    adapter 只管把 html 交回来。
     """
 
     payload: dict | None = None
@@ -110,9 +111,33 @@ class Observation:
     def parse_crashed(cls, exc: Exception, html: str = "") -> "Observation":
         return cls(failure=f"详情页解析异常：{exc}", raw_html=html, kind=FailureKind.PARSE)
 
-    @classmethod
-    def access_failed(cls, exc: Exception) -> "Observation":
-        return cls(failure=f"访问异常：{exc}", kind=FailureKind.ACCESS)
+
+def observe_page(read_html, product_url: str, *,
+                 reraise: tuple[type[BaseException], ...] = ()) -> Observation:
+    """读一次详情页并翻译成一次观测：读 html → 解析 → 取主图。
+
+    点击式列表的弹窗与逐店补采的详情页都穿过这里，「读到什么算失败、留不留原始页」只写
+    一份（候选 02）：读不到 html 是读取失败（没有原始页可留）；解析失败与解析崩了都算解析
+    失败，**都留原始页**供校准。
+
+    `read_html` 是 adapter：打开页面或读弹窗内容，返回 html 字符串，读不到就抛。`reraise`
+    是「不许当成读取失败、要原样上抛」的异常（停止判定那一族，见 ADR-0009）；它只圈住读
+    html 那一段——解析段没有这类异常。
+    """
+    try:
+        html = read_html()
+    except reraise:
+        raise
+    except Exception as exc:  # noqa: BLE001 —— 读不到就是读取失败，原因留给调用方看
+        return Observation.read_failed(exc)
+    try:
+        payload = parse_detail_html(html, product_url)
+        payload["main_image_url"] = extract_main_image(html)
+    except DetailParseFailed as exc:
+        return Observation.parse_failed(exc, exc.html)
+    except Exception as exc:  # noqa: BLE001 —— 解析崩了也留原始页（解析失败的一种）
+        return Observation.parse_crashed(exc, html)
+    return Observation(payload=payload)
 
 
 @dataclass(frozen=True)

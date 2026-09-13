@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_pw, click_listing, pipeline, rounds
+from bestseller_monitor import browser_pw, click_listing, detail, pipeline, rounds
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import (
     CST,
@@ -24,6 +24,12 @@ from helpers import isolated_locks, new_round
 from tools import check_orphans
 
 
+# 一次「读到了页面」的补采：真 html，交给 detail.observe_page 翻译（候选 02 之后
+# 补采 adapter 只交 html，不自己解析）。
+DETAIL_HTML = ('<script>{"skuInfoMap":{"红色":{"skuId":"red","name":"红色",'
+               '"price":10,"canBookCount":3}}}</script>')
+
+
 def _yesterday() -> str:
     return (datetime.now(CST) - timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -34,11 +40,11 @@ class P1Tests(unittest.TestCase):
         self.conn = connect(Path(self.tmp.name) / "test.db")
         self.db = Database(self.conn)
 
-    def test_capture_detail_reads_a_real_page_and_announces_the_offer(self):
-        """补采 adapter 的真实路径：导航、认商品编号、读回解析结果。
+    def test_open_detail_reads_a_real_page_and_announces_the_offer(self):
+        """补采 adapter 的真实路径：导航、认商品编号、把页面读成 html。
 
-        这条守的是「`capture_detail` 本身还能跑」——候选 03 收口时它一度因为少了一个 import
-        每次都抛 NameError，而所有用例都把函数打了桩，谁也没发现。
+        这条守的是「`open_detail` 本身还能跑」——候选 03 收口时它（当时叫 `capture_detail`）
+        一度因为少了一个 import 每次都抛 NameError，而所有用例都把函数打了桩，谁也没发现。
         """
         page = MagicMock()
         page.content.return_value = (
@@ -47,13 +53,15 @@ class P1Tests(unittest.TestCase):
 
         with patch.object(browser_pw.time, "sleep"), \
              patch.object(browser_pw, "intervention_kind", return_value=None):
-            payload = browser_pw.capture_detail(
+            html = browser_pw.open_detail(
                 page, "https://detail.1688.com/offer/111.html", self._cfg(), MagicMock(),
                 emit=lambda event, **kw: events.append((event, kw)))
 
-        self.assertEqual([event for event, _ in events], ["detail_nav", "detail_parse"])
+        self.assertEqual([event for event, _ in events], ["detail_nav"],
+                         "读成 html 就交回去，解析与事件交给 observe_page 那一侧")
         self.assertEqual(events[0][1]["offer_id"], "111")
-        self.assertEqual([row["sku_stock"] for row in payload["rows"]], [2])
+        self.assertEqual(
+            [row["sku_stock"] for row in parse_detail_html(html, "u")["rows"]], [2])
 
     def tearDown(self):
         self.conn.close()
@@ -116,13 +124,8 @@ class P1Tests(unittest.TestCase):
             "product_url": "https://detail.1688.com/offer/111.html",
             "list_title": "榜单标题",
         }
-        payload = {
-            "html": "<html></html>",
-            "product_name": "详情标题",
-            "rows": [{"sku_id": "red", "sku_name": "红色", "sku_price": 10, "sku_stock": 3}],
-        }
-        with patch.object(browser_pw, "capture_detail", return_value=payload), \
-             patch.object(pipeline, "extract_main_image", return_value=None):
+        with patch.object(browser_pw, "open_detail", return_value=DETAIL_HTML), \
+             patch.object(detail, "extract_main_image", return_value=None):
             pipeline._capture_one_pw(
                 self.db, self._cfg(), MagicMock(), round_id, offer, MagicMock(),
             )
@@ -132,6 +135,36 @@ class P1Tests(unittest.TestCase):
             (round_id,),
         ).fetchone()
         self.assertEqual(tuple(row), ("red", 3))
+
+    def test_a_main_image_crash_in_the_backfill_keeps_the_raw_page(self):
+        """补采路径与点击路径共用同一份翻译：主图字段异常记解析崩溃、留原始页。
+
+        改前它落成「访问异常」且不留原始页——同一个失败，两条路两种待遇（候选 02）。
+        """
+        round_id = new_round(self.db)
+        offer = {
+            "shop_key": "A01",
+            "shop_url": "https://shop.example/",
+            "shop_name": "店铺A",
+            "offer_id": "111",
+            "product_url": "https://detail.1688.com/offer/111.html",
+            "list_title": "榜单标题",
+        }
+        with patch.object(browser_pw, "open_detail", return_value=DETAIL_HTML), \
+             patch.object(detail, "extract_main_image",
+                          side_effect=ValueError("图片字段异常")):
+            pipeline._capture_one_pw(
+                self.db, self._cfg(raw_page_dir=Path(self.tmp.name) / "raw"),
+                MagicMock(), round_id, offer, MagicMock(),
+            )
+
+        note = self.conn.execute(
+            "SELECT detail_note FROM snapshots WHERE round_id=? AND page_status='失败'",
+            (round_id,),
+        ).fetchone()["detail_note"]
+        self.assertIn("详情页解析异常：图片字段异常", note)
+        self.assertIn("原始页面：", note)
+        self.assertTrue(Path(note.split("原始页面：")[1]).exists(), "原始页要存下来供校准")
 
     def test_failed_offer_with_many_skus_triggers_failure_rate_pause(self):
         round_id = new_round(self.db)
@@ -269,18 +302,15 @@ class P1Tests(unittest.TestCase):
         return round_id, offer
 
     @staticmethod
-    def _detail_payload():
-        return {
-            "product_name": "厨房清洁膏",
-            "rows": [{"sku_id": "s2", "sku_name": "标准", "sku_price": 9.9, "sku_stock": 150}],
-            "html": "",
-        }
+    def _detail_html() -> str:
+        """补采 adapter 交回的真 html（解析、取主图都在 `detail.observe_page` 里）。"""
+        return DETAIL_HTML
 
     def test_same_name_inventory_does_not_block_failed_offer_detail(self):
         round_id, offer = self._seed_same_name_failed_offer()
         cfg = self._cfg()
-        with patch.object(browser_pw, "capture_detail",
-                          return_value=self._detail_payload()) as capture:
+        with patch.object(browser_pw, "open_detail",
+                          return_value=self._detail_html()) as capture:
             pipeline._capture_one_pw(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
 
         self.assertEqual(capture.call_count, 1, "同名库存不应阻止已知 offer_id 的补采")
@@ -299,8 +329,8 @@ class P1Tests(unittest.TestCase):
         self.db.mark_failure(round_id, shop.key, "22", 1, "解析失败")
         cfg = self._cfg(max_detail_opportunities_per_round=1)
 
-        with patch.object(browser_pw, "capture_detail",
-                          return_value=self._detail_payload()) as capture:
+        with patch.object(browser_pw, "open_detail",
+                          return_value=self._detail_html()) as capture:
             with self.assertRaises(pipeline.DetailBudgetExhausted):
                 pipeline._retry_shop_pending_pw(
                     self.db, cfg, round_id, shop, MagicMock(), Humanizer(cfg),
@@ -388,7 +418,7 @@ class P1Tests(unittest.TestCase):
         ).fetchone()
         cfg = self._cfg(max_detail_opportunities_per_round=1)
 
-        with patch.object(browser_pw, "capture_detail") as capture:
+        with patch.object(browser_pw, "open_detail") as capture:
             pipeline._capture_one_pw(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
 
         capture.assert_not_called()
@@ -399,8 +429,8 @@ class P1Tests(unittest.TestCase):
         round_id, offer = self._seed_same_name_failed_offer()   # 商品 22 已有 attempt=1 的失败记录
         cfg = self._cfg(max_attempts_per_page=2)
 
-        with patch.object(browser_pw, "capture_detail",
-                          return_value=self._detail_payload()) as capture:
+        with patch.object(browser_pw, "open_detail",
+                          return_value=self._detail_html()) as capture:
             pipeline._capture_one_pw(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
 
         self.assertEqual(capture.call_count, 1)
@@ -417,7 +447,7 @@ class P1Tests(unittest.TestCase):
         self.db.mark_failure(round_id, offer["shop_key"], "22", 2, "第二次也失败")
         cfg = self._cfg(max_attempts_per_page=2)
 
-        with patch.object(browser_pw, "capture_detail") as capture:
+        with patch.object(browser_pw, "open_detail") as capture:
             pipeline._capture_one_pw(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
 
         capture.assert_not_called()

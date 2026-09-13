@@ -25,10 +25,8 @@ from . import dedupe, detail, listing, rounds
 from .config import Config, Shop, effective_pages_limit
 from .db import cst_date, utcnow
 from .delay import Humanizer
-from .detail import DetailParseFailed, parse_detail_html
 from .guard import (RoundPauseRequired, intervention_kind, is_deny_url, is_punish_url,
                     vtype, wait_for_resolution)
-from .parse import extract_main_image
 
 log = logging.getLogger(__name__)
 
@@ -434,19 +432,8 @@ class PlaywrightCard:
         return self._detail_page is not None and is_deny_url(self.url)
 
     def read(self) -> detail.Observation:
-        """读一次详情观测：内容、解析、主图都算「这次读到了什么」。"""
-        try:
-            html = self._detail_page.content()
-        except Exception as exc:
-            return detail.Observation.read_failed(exc)
-        try:
-            payload = parse_detail_html(html, self.url)
-            payload["main_image_url"] = extract_main_image(html)
-        except DetailParseFailed as exc:
-            return detail.Observation.parse_failed(exc, exc.html)
-        except Exception as exc:
-            return detail.Observation.parse_crashed(exc, html)
-        return detail.Observation(payload=payload)
+        """读一次详情观测：怎么拿到 html 归弹窗，读到什么算失败归 `detail.observe_page`。"""
+        return detail.observe_page(self._detail_page.content, self.url)
 
     def close(self) -> None:
         close_popup_or_back(self._detail_page, self._popup, self._owner.page)

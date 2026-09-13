@@ -180,16 +180,16 @@ class FailureTests(DetailTestCase):
     def test_a_failure_without_a_page_keeps_just_the_reason(self):
         result = self.capture(
             self.target(offer_id="11", slot_key="11"),
-            self.observe(detail.Observation(failure="访问异常：连接被重置")))
+            self.observe(detail.Observation(failure="详情页读取失败：连接被重置")))
 
         self.assertEqual(result.outcome, detail.Outcome.FAILED)
-        self.assertEqual(self.snapshots("失败")[0]["detail_note"], "访问异常：连接被重置")
+        self.assertEqual(self.snapshots("失败")[0]["detail_note"], "详情页读取失败：连接被重置")
 
     def test_retries_until_the_attempt_budget_runs_out(self):
         """补采路径：一次失败接着试下一次，直到成功或额度用尽。"""
         result = self.capture(
             self.target(offer_id="11", slot_key="11"),
-            self.observe(detail.Observation(failure="访问异常：超时"),
+            self.observe(detail.Observation(failure="详情页读取失败：超时"),
                          self.payload("11")))
 
         self.assertEqual(result.outcome, detail.Outcome.SUBMITTED)
@@ -237,3 +237,67 @@ class SubmitTests(DetailTestCase):
                 self.capture(self.target(), self.observe(self.payload("11")))
 
         self.assertEqual(len(self.snapshots("成功")), 1, "提交过的数据保留，判定不回滚它")
+
+
+class ObservePageTests(unittest.TestCase):
+    """`observe_page`：把「读 html → 解析 → 取主图」翻译成一次观测（候选 02）。
+
+    两条路径（点击式列表的弹窗、逐店补采的详情页）只交「怎么拿到 html」；读到什么算失败、
+    留不留原始页只在这里判一次。
+    """
+
+    URL = "https://detail.1688.com/offer/11.html"
+    HTML = ('<script>{"skuInfoMap":{"红色":{"skuId":"red","name":"红色",'
+            '"price":10,"canBookCount":3}}}</script>')
+
+    def test_a_read_page_becomes_a_payload_with_the_main_image(self):
+        with patch.object(detail, "extract_main_image", return_value="https://img/1.png"):
+            observation = detail.observe_page(lambda: self.HTML, self.URL)
+
+        self.assertIsNone(observation.failure)
+        self.assertEqual(observation.payload["main_image_url"], "https://img/1.png")
+        self.assertEqual(observation.payload["rows"],
+                         [{"sku_id": "red", "sku_name": "红色", "sku_price": 10.0,
+                           "sku_stock": 3}])
+
+    def test_an_unreadable_page_is_a_read_failure(self):
+        def read_html():
+            raise RuntimeError("页面没了")
+
+        observation = detail.observe_page(read_html, self.URL)
+
+        self.assertEqual(observation.kind, detail.FailureKind.READ)
+        self.assertEqual(observation.failure, "详情页读取失败：页面没了")
+        self.assertEqual(observation.raw_html, "", "读不到页面就没有原始页可留")
+
+    def test_a_parse_failure_keeps_the_raw_page(self):
+        observation = detail.observe_page(lambda: "<html>没有 SKU</html>", self.URL)
+
+        self.assertEqual(observation.kind, detail.FailureKind.PARSE)
+        self.assertIn("未解析到 SKU", observation.failure)
+        self.assertEqual(observation.raw_html, "<html>没有 SKU</html>")
+
+    def test_a_main_image_crash_is_a_parse_failure_with_the_raw_page(self):
+        """主图字段异常算解析崩溃（旧补采路径记成「访问异常」且丢了原始页）。"""
+        with patch.object(detail, "extract_main_image",
+                          side_effect=ValueError("图片字段异常")):
+            observation = detail.observe_page(lambda: self.HTML, self.URL)
+
+        self.assertEqual(observation.kind, detail.FailureKind.PARSE)
+        self.assertIn("图片字段异常", observation.failure)
+        self.assertEqual(observation.raw_html, self.HTML, "原始页要留着供校准")
+
+    def test_the_caller_can_keep_its_own_exceptions_flying(self):
+        """停止判定那一族不许被当成「读不到页面」（ADR-0009）：调用方点名要原样上抛。"""
+        class Stop(Exception):
+            pass
+
+        def read_html():
+            raise Stop("暂停")
+
+        with self.assertRaises(Stop):
+            detail.observe_page(read_html, self.URL, reraise=(Stop,))
+
+        observation = detail.observe_page(read_html, self.URL)
+        self.assertEqual(observation.kind, detail.FailureKind.READ,
+                         "没点名要上抛的异常照旧算读取失败")

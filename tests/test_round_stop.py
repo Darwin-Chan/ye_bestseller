@@ -247,7 +247,7 @@ class RoundStopRuleTests(unittest.TestCase):
         """补采 adapter 里的停止判定要原样穿过（ADR-0009），不许被记成访问异常。"""
         run = self._open(cst_date(), "A01")
 
-        with patch.object(browser_pw, "capture_detail",
+        with patch.object(browser_pw, "open_detail",
                           side_effect=stop_request.StopRequested("停")):
             with self.assertRaises(stop_request.StopRequested):
                 pipeline._capture_one_pw(self.db, self._cfg(), MagicMock(), run.id,

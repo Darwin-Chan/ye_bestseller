@@ -21,7 +21,6 @@ from .click_listing import (DenyTracker, RoundDenyExceeded,  # noqa: F401  旧�
                             ShopDenyExceeded, WAIT_POPUP_MS)
 from .config import Config
 from .delay import Humanizer
-from .detail import parse_detail_html
 from .guard import (
     body_text, captcha_visible, intervention_kind,
     is_deny_url, is_punish_url, resolved, vtype, wait_for_resolution,
@@ -139,7 +138,12 @@ def close_session(pw, br) -> None:
                                browser_pid=browser_pid, own_pid=own_pid)
 
 
-def capture_detail(page, product_url: str, cfg: Config, human: Humanizer, emit=None) -> dict:
+def open_detail(page, product_url: str, cfg: Config, human: Humanizer, emit=None) -> str:
+    """打开一个详情页并把它读成 html（补采路径的那半条 adapter）。
+
+    「读到什么算失败、留不留原始页」不在这里：读回来的 html 交给
+    `detail.observe_page()`，两条路径共用同一份翻译（候选 02）。
+    """
     if emit:
         m = re.search(r"/(?:offer|item)/(\d+)\.html", product_url)
         emit("detail_nav", offer_id=m.group(1) if m else None, phase="detail")
@@ -150,7 +154,4 @@ def capture_detail(page, product_url: str, cfg: Config, human: Humanizer, emit=N
         wait_for_resolution(page, cfg.human_pause_minutes, emit=emit,
                             verification_type=_vtype(kind),
                             confirm_sec=cfg.intervention_confirmation_sec)
-    payload = parse_detail_html(page.content(), product_url)
-    if emit:
-        emit("detail_parse", phase="detail", note=f"sku_count={len(payload['rows'])}")
-    return payload
+    return page.content()

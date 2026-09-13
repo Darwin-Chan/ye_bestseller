@@ -24,8 +24,6 @@ from .db import (
     DETAIL_BUDGET_NOTE,
 )
 from .delay import Humanizer
-from .detail import DetailParseFailed
-from .parse import extract_main_image
 from .guard import RoundPauseRequired
 from .rounds import Round, RoundRequest, ShopScope, TerminalReason
 from .stop_request import StopRequested
@@ -436,18 +434,16 @@ def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, 
             emit(event, shop_key=offer["shop_key"], **kw)
 
     def observe() -> detail.Observation:
-        try:
-            payload = browser_pw.capture_detail(page, offer["product_url"], cfg, human,
-                                                emit=emit_detail)
-            payload["main_image_url"] = extract_main_image(payload["html"])
-        except STOP_EXCEPTIONS:
-            # 停止判定（暂停／跨天／预算）不是「访问异常」：原样上抛。
-            raise
-        except DetailParseFailed as exc:
-            return detail.Observation.parse_failed(exc, exc.html)
-        except Exception as exc:
-            return detail.Observation.access_failed(exc)
-        return detail.Observation(payload=payload)
+        """补采的详情访问：怎么打开归 browser_pw，读到什么算失败归 detail.observe_page。"""
+        observation = detail.observe_page(
+            lambda: browser_pw.open_detail(page, offer["product_url"], cfg, human,
+                                           emit=emit_detail),
+            offer["product_url"],
+            reraise=STOP_EXCEPTIONS)
+        if observation.payload is not None:
+            emit_detail("detail_parse", phase="detail",
+                        note=f"sku_count={len(observation.payload['rows'])}")
+        return observation
 
     def on_attempt_failed(note: str) -> None:
         emit_detail("detail_fail", offer_id=offer["offer_id"], phase="detail", note=note)

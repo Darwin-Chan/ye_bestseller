@@ -362,7 +362,7 @@ class PlaywrightAdapterTests(ClickListingTestCase):
 
         with patch.object(click_listing, "click_card", return_value=(detail_page, MagicMock())):
             card.open()
-        with patch.object(click_listing, "extract_main_image", return_value="https://img/1.png"):
+        with patch.object(detail, "extract_main_image", return_value="https://img/1.png"):
             observation = card.read()
 
         self.assertEqual(card.offer_id, "11")
@@ -379,7 +379,7 @@ class PlaywrightAdapterTests(ClickListingTestCase):
 
         with patch.object(click_listing, "click_card", return_value=(detail_page, MagicMock())):
             card.open()
-        with patch.object(click_listing, "extract_main_image",
+        with patch.object(detail, "extract_main_image",
                           side_effect=ValueError("图片字段异常")):
             observation = card.read()
 
