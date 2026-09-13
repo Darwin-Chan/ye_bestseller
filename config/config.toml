@@ -69,7 +69,7 @@ raw_page_dir = "F:/AI/bestseller_runtime/data/raw_pages"
 #  - 页面/商品“就绪”相关的等待，已改为「条件等待为主 + 上限兜底」：
 #    driver 层等「商品卡片出现 / 翻页后列表身份变化 / 新卡片加载 / 调试端口可连接」，
 #    超时才按 browser_pw 里的 _WAIT_* 常量继续，不再固定 sleep；也不再作为配置项开放。
-#    翻页等待（IS-36）在 bestseller_monitor/pagination.py，靠商品卡片身份序列判断
+#    榜单页（准备 / 推进 / 翻页等待，IS-36）在 bestseller_monitor/listing.py，靠商品卡片身份序列判断
 #    「新一页真的换了」，始终不变则按列表失败收尾，不留待续跑。
 #  - 仍写死在代码里、随窗口/流程节拍走的是下面这 4 项“人工介入”节奏，
 #    改动本区块不会生效，仅留档当前值。

@@ -13,17 +13,16 @@ import time
 
 from playwright.sync_api import Error as PlaywrightError
 
-from . import browser_proc, dedupe, pagination, rounds
+from . import browser_proc, dedupe, listing, rounds
 from .config import Config, Shop, effective_pages_limit
-from .db import DayBoundaryReached, DetailBudgetExhausted, utcnow, cst_date
+from .db import DayBoundaryReached, utcnow, cst_date
 from .delay import Humanizer
 from .detail import DetailParseFailed, parse_detail_html, save_raw_page
 from .parse import extract_main_image
-from .listing import ListingLoadFailed
 from .guard import (
     RoundPauseRequired,
     body_text, captcha_visible, intervention_kind,
-    is_deny_url, is_login_url, is_punish_url, resolved, vtype, wait_for_resolution,
+    is_deny_url, is_punish_url, resolved, vtype, wait_for_resolution,
 )
 
 log = logging.getLogger(__name__)
@@ -43,44 +42,15 @@ _vtype = vtype
 
 # 条件等待的上限兜底（秒）——优先“等条件满足”，超时才继续，替代固定 sleep。
 _WAIT_LAUNCH_SEC = 25.0    # 等浏览器调试端口可连接
-_WAIT_UI_SEC = 18.0        # 列表页等商品卡片出现
-_WAIT_SORT_SEC = 10.0      # 点「销量」排序后等列表刷新
 _WAIT_SCROLL_SEC = 3.0     # 每次滚动后等新一批卡片
-_WAIT_NEXT_SEC = 10.0      # 翻页/加载更多后等列表刷新
 _WAIT_BACK_SEC = 8.0       # 返回上一页后等就绪
 _WAIT_POPUP_MS = 2500      # 点击后等待新标签页；有效弹窗通常在 2 秒内出现
 
-
-def _wait_until(page, describe: str, predicate, timeout_sec: float, poll: float = 0.4) -> bool:
-    """条件等待 + 上限兜底：条件满足返回 True；超时记日志并返回 False（不中断流程）。"""
-    deadline = time.time() + timeout_sec
-    while time.time() < deadline:
-        try:
-            if predicate():
-                return True
-        except Exception:
-            pass
-        time.sleep(poll)
-    log.info("等待「%s」超时(%.0fs)，按当前状态继续。", describe, timeout_sec)
-    return False
-
-
-def _wait_cards(page, min_count: int = 1, timeout_sec: float = _WAIT_UI_SEC,
-                describe: str = "商品卡片出现"):
-    """等列表页出现至少 min_count 张商品卡片（条件等待，超时兜底）。"""
-    return _wait_until(page, describe,
-                       lambda: page.locator(_PRODUCT_IMG_SEL).count() >= min_count,
-                       timeout_sec)
-
-
-def _list_identity(page) -> tuple:
-    """翻页前后对比用的列表身份（商品卡片序列）：见 pagination.list_identity()。"""
-    return pagination.list_identity(page)
-
-
-def _wait_for_list_change(page, before: tuple, describe: str, timeout_sec: float) -> bool:
-    """等翻页后的列表相对翻页前的身份发生变化：见 pagination.wait_for_list_change()。"""
-    return pagination.wait_for_list_change(page, before, describe, timeout_sec)
+# 搬到 listing.py 的榜单页原语：诊断工具仍按旧私有名引用，这里留兼容别名（同 guard 那组）。
+# 本文件内部一律走 listing.*，别名只给工具用——否则测试打桩 listing 的改动会静默失效
+# （2026-09-13 被这条咬过：测试改打 listing，采集路径却用别名，于是真的走进人工介入等待）。
+_PRODUCT_IMG_SEL = listing.PRODUCT_IMG_SEL
+_click_text_in_frames = listing.click_text_in_frames
 
 
 def _scroll_cards_until_stable(page, describe: str = "滚动加载新卡片") -> int:
@@ -90,40 +60,22 @@ def _scroll_cards_until_stable(page, describe: str = "滚动加载新卡片") ->
     只会给每页额外增加一个完整的超时窗口。
     """
     for _ in range(12):
-        baseline = page.locator(_PRODUCT_IMG_SEL).count()
+        baseline = page.locator(listing.PRODUCT_IMG_SEL).count()
         try:
             page.mouse.wheel(0, 6000)
             page.wait_for_load_state("domcontentloaded")
         except Exception:
             break
-        loaded = _wait_until(
+        loaded = listing.wait_until(
             page,
             describe,
-            lambda: page.locator(_PRODUCT_IMG_SEL).count() > baseline,
+            lambda: page.locator(listing.PRODUCT_IMG_SEL).count() > baseline,
             _WAIT_SCROLL_SEC,
         )
-        cur = page.locator(_PRODUCT_IMG_SEL).count()
+        cur = page.locator(listing.PRODUCT_IMG_SEL).count()
         if not loaded or cur <= baseline:
             break
-    return page.locator(_PRODUCT_IMG_SEL).count()
-
-
-def _page_html(page) -> str:
-    try:
-        return page.content()
-    except Exception:
-        return ""
-
-
-def _listing_load_failed(page, reason: str) -> ListingLoadFailed:
-    try:
-        cards = page.locator(_PRODUCT_IMG_SEL).count()
-    except Exception:
-        cards = "unknown"
-    return ListingLoadFailed(
-        f"{reason}（current_url={getattr(page, 'url', '')}，cards={cards}）",
-        html=_page_html(page),
-    )
+    return page.locator(listing.PRODUCT_IMG_SEL).count()
 
 
 def open_session(cfg: Config):
@@ -243,33 +195,6 @@ class DenyTracker:
         return len(self.events)
 
 
-# 只认商品图。曾经把 img.hover-trigger 也算进来，但那是店铺头部的 48×48 图标
-# （imgextra/...-tps-48-48.png，渲染成 12×12，不在商品网格内），排在所有商品图
-# 之前，导致下标 0 恒为它、点击必然没有弹窗，还会让「等商品卡片出现」在商品图
-# 渲染前就提前通过。真实列表页 30 张商品图全部是 img.main-picture。
-_PRODUCT_IMG_SEL = "img.main-picture"
-
-
-def _click_text_in_frames(page, label: str) -> bool:
-    # 先在顶层找，再逐个 frame 找
-    try:
-        loc = page.get_by_text(label, exact=False)
-        if loc.count() > 0:
-            loc.first.click(timeout=6000)
-            return True
-    except Exception:
-        pass
-    for fr in page.frames:
-        try:
-            loc = fr.get_by_text(label, exact=False)
-            if loc.count() > 0:
-                loc.first.click(timeout=6000)
-                return True
-        except Exception:
-            continue
-    return False
-
-
 def capture_detail(page, product_url: str, cfg: Config, human: Humanizer, emit=None) -> dict:
     if emit:
         m = re.search(r"/(?:offer|item)/(\d+)\.html", product_url)
@@ -342,23 +267,9 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
             pass
 
     page.on("response", on_response)
-    page.goto(shop.url, wait_until="domcontentloaded")
-    human.after_load()          # read_delay_sec：页面加载后、读取数据前的拟人化延迟
-    cards_ready = _wait_cards(page, min_count=1, describe="店铺首屏商品卡片")
-    kind = intervention_kind(page, punished[0])
-    if kind:
-        wait_for_resolution(page, cfg.human_pause_minutes, emit=se,
-                            verification_type=_vtype(kind),
-                            confirm_sec=cfg.intervention_confirmation_sec)
-    if not cards_ready and not _wait_cards(page, min_count=1, describe="验证后商品卡片"):
-        raise _listing_load_failed(page, f"店铺首屏未加载商品卡片：{shop.url}")
-    se("list_load", note=shop.url)
-    human.before_action()       # action_delay_sec：点击排序前的拟人化延迟
-    if _click_text_in_frames(page, "销量"):
-        _wait_cards(page, min_count=1, timeout_sec=_WAIT_SORT_SEC,
-                    describe="销量排序后商品卡片")   # 条件等待，替代固定 3s
-        log.info("已点击「销量」排序")
-        se("list_sort")
+    # 打开并准备好榜单页：等首屏卡片 → 人工介入 → 点「销量」排序（榜单页的行为在 listing）。
+    listing.prepare(page, shop.url, cfg, human, describe=f"店铺 {shop.key} 首屏",
+                    punished=punished[0], emit=se)
     while pages_read < max_pages:
         pages_read += 1
         human.before_list_page()
@@ -409,22 +320,9 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
 
         if pages_read >= max_pages:
             break
-        human.before_action()   # 翻页/加载更多前的拟人化延迟
-        before = _list_identity(page)   # 翻页前的列表身份，用来确认新页真的换了
-        advanced = _click_text_in_frames(page, "下一页")
-        if not advanced:
-            advanced = _click_text_in_frames(page, "加载更多")
-        if not advanced:
-            log.info("店铺 %s 第 %s 页后无下一页/加载更多，提前结束", shop.key, pages_read)
+        # 推进到下一批：换了内容才继续读（IS-36）；没有下一批就收工。
+        if not listing.advance(page, human, cfg, f"店铺 {shop.key} 第 {pages_read} 页"):
             break
-        page.wait_for_load_state("domcontentloaded", timeout=cfg.timeout_ms)
-        if not _wait_for_list_change(page, before, f"店铺 {shop.key} 第 {pages_read + 1} 页",
-                                     _WAIT_NEXT_SEC):
-            # 点了翻页但列表没换：旧页卡片还在，再读一遍只会重复旧页、漏掉新页（IS-36）。
-            raise _listing_load_failed(
-                page, f"翻页后未确认新一页加载（已读 {pages_read} 页）：{shop.url}")
-        _wait_cards(page, min_count=1, timeout_sec=_WAIT_NEXT_SEC,
-                    describe="翻页后商品卡片")   # 条件等待，替代固定 2s
 
     # 第二遍：计数>1 的同名商品，按名找回并补抓（offer_id 去重，避免重复/遗漏）
     ambiguous = {n for n, c in name_counter.items() if c > 1}
@@ -433,18 +331,9 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
         rescue_last_page = max(ambiguous_pages)
         log.info("店铺 %s 发现 %s 个同名商品名，回头补抓第 %s 页（共 %s 页）",
                  shop.key, len(ambiguous), ",".join(map(str, sorted(ambiguous_pages))), rescue_last_page)
-        page.goto(shop.url, wait_until="domcontentloaded")
-        human.after_load()
-        _wait_cards(page, min_count=1, describe="补抓店铺首屏商品卡片")
-        human.before_action()
-        if _click_text_in_frames(page, "销量"):
-            _wait_cards(page, min_count=1, timeout_sec=_WAIT_SORT_SEC,
-                        describe="补抓排序后商品卡片")
-        rkind = intervention_kind(page, punished[0])
-        if rkind:
-            wait_for_resolution(page, cfg.human_pause_minutes, emit=se,
-                                verification_type=_vtype(rkind),
-                                confirm_sec=cfg.intervention_confirmation_sec)
+        # 补抓第二遍与主页走同一份准备：顺序、兜底、事件都不再各写一遍。
+        listing.prepare(page, shop.url, cfg, human, describe=f"店铺 {shop.key} 补抓首屏",
+                        punished=punished[0], emit=se)
         for rpg in range(1, rescue_last_page + 1):
             human.before_list_page()
             se("list_page", note=f"rescue_page={rpg}")
@@ -462,23 +351,11 @@ def crawl_store_by_click(page, shop: Shop, cfg: Config, human: Humanizer,
                                       human=human, deny_tracker=deny_tracker)
             if rpg >= rescue_last_page:
                 break
-            human.before_action()
-            before = _list_identity(page)   # 同上：补抓翻页也要确认换了页
-            advanced = _click_text_in_frames(page, "下一页")
-            if not advanced:
-                advanced = _click_text_in_frames(page, "加载更多")
-            if not advanced:
-                log.info("店铺 %s 补抓在第 %s 页后无下一页，提前结束", shop.key, rpg)
+            # 补抓翻页走同一道推进，确认规则不另写一份（IS-36）。
+            if not listing.advance(page, human, cfg, f"店铺 {shop.key} 补抓第 {rpg} 页"):
                 break
-            page.wait_for_load_state("domcontentloaded", timeout=cfg.timeout_ms)
-            if not _wait_for_list_change(page, before, f"店铺 {shop.key} 补抓第 {rpg + 1} 页",
-                                         _WAIT_NEXT_SEC):
-                raise _listing_load_failed(
-                    page, f"补抓翻页后未确认新一页加载（已读 {rpg} 页）：{shop.url}")
-            _wait_cards(page, min_count=1, timeout_sec=_WAIT_NEXT_SEC,
-                        describe="补抓翻页后商品卡片")
     if not offers:
-        raise _listing_load_failed(page, f"店铺列表未解析到商品：{shop.url}")
+        raise listing.listing_load_failed(page, f"店铺列表未解析到商品：{shop.url}")
     return offers, pages_read
 
 
@@ -546,7 +423,7 @@ def _read_card_title(page, idx: int) -> str:
     对卡片版式不敏感（不依赖 已售/¥ 等特定文案）。取不到（如店铺 logo 卡）返回空串。
     """
     try:
-        loc = page.locator(_PRODUCT_IMG_SEL).nth(idx)
+        loc = page.locator(listing.PRODUCT_IMG_SEL).nth(idx)
         return (loc.evaluate(
             """el => {
                 let e = el;
@@ -738,7 +615,7 @@ def _close_popup_or_back(detail_page, popup, page):
     elif detail_page is page:
         try:
             page.go_back(wait_until="domcontentloaded", timeout=30000)
-            _wait_cards(page, min_count=1, timeout_sec=_WAIT_BACK_SEC,
-                        describe="返回列表页商品卡片")   # 条件等待，替代固定 1s
+            listing.wait_cards(page, min_count=1, timeout_sec=_WAIT_BACK_SEC,
+                               describe="返回列表页商品卡片")   # 条件等待，替代固定 1s
         except Exception:
             pass

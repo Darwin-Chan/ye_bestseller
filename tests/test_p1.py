@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_pw, dedupe, pipeline, rounds
+from bestseller_monitor import browser_pw, dedupe, listing, pipeline, rounds
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import (
     CST,
@@ -226,6 +226,7 @@ class P1Tests(unittest.TestCase):
         page = MagicMock()
         popup = MagicMock()
         page.expect_popup.return_value.__enter__.return_value = SimpleNamespace(value=popup)
+        # 这条走的是详情弹窗那条路（还在 browser_pw 里），所以打桩也打在那边。
         with patch.object(browser_pw, "intervention_kind", return_value="滑块"), \
              patch.object(browser_pw, "wait_for_resolution", side_effect=InterventionTimeout("超时")):
             with self.assertRaises(InterventionTimeout):
@@ -245,10 +246,10 @@ class P1Tests(unittest.TestCase):
         db.find_offer_id_by_name.return_value = "123"
         shop = Shop("A01", "店铺A", "https://shop.example/")
 
-        with patch.object(browser_pw, "_wait_cards", return_value=True), \
+        with patch.object(listing, "wait_cards", return_value=True), \
              patch.object(browser_pw, "_scroll_cards_until_stable", return_value=1), \
-             patch.object(browser_pw, "intervention_kind", return_value=None), \
-             patch.object(browser_pw, "_click_text_in_frames", return_value=False), \
+             patch.object(listing, "intervention_kind", return_value=None), \
+             patch.object(listing, "click_text_in_frames", return_value=False), \
              patch.object(browser_pw, "_capture_card") as capture:
             offers, pages = browser_pw.crawl_store_by_click(
                 page, shop, self._cfg(max_pages_per_shop=1), human,
@@ -279,10 +280,10 @@ class P1Tests(unittest.TestCase):
             offers.append((len(offers) + 1, "1",
                            "https://detail.1688.com/offer/1.html", list_title, ""))
 
-        with patch.object(browser_pw, "_wait_cards", return_value=True), \
+        with patch.object(listing, "wait_cards", return_value=True), \
              patch.object(browser_pw, "_scroll_cards_until_stable", return_value=1), \
-             patch.object(browser_pw, "intervention_kind", return_value=None), \
-             patch.object(browser_pw, "_click_text_in_frames", return_value=True), \
+             patch.object(listing, "intervention_kind", return_value=None), \
+             patch.object(listing, "click_text_in_frames", return_value=True), \
              patch.object(browser_pw, "_read_card_title",
                           side_effect=lambda *_: f"商品{next(title_seq)}"), \
              patch.object(browser_pw, "_capture_card", side_effect=fake_capture):
@@ -319,6 +320,32 @@ class P1Tests(unittest.TestCase):
         self.assertEqual(pages, 2)
         self.assertEqual(seen_pages, [1, 2])
 
+    def test_no_next_batch_stops_the_walk_at_that_page(self):
+        """点不到「下一页/加载更多」就收工：读到的页数就是实际翻过的页数（listing.advance 返回 False）。"""
+        shop = Shop("A01", "店铺A", "https://shop.example/")
+        page = MagicMock()
+        locator = MagicMock()
+        locator.count.return_value = 1
+        page.locator.return_value = locator
+        seen_pages: list[int] = []
+
+        def fake_capture(page_, img, list_title, cfg_, punished, on_response, se,
+                         db, round_id, shop_, offers, seen, idx=0, page_no=1,
+                         human=None, deny_tracker=None):
+            seen_pages.append(page_no)
+            offers.append((1, "1", "https://detail.1688.com/offer/1.html", list_title, ""))
+
+        with patch.object(listing, "wait_cards", return_value=True), \
+             patch.object(browser_pw, "_scroll_cards_until_stable", return_value=1), \
+             patch.object(listing, "intervention_kind", return_value=None), \
+             patch.object(listing, "click_text_in_frames", return_value=False), \
+             patch.object(browser_pw, "_read_card_title", return_value="商品1"), \
+             patch.object(browser_pw, "_capture_card", side_effect=fake_capture):
+            _offers, pages = browser_pw.crawl_store_by_click(
+                page, shop, self._cfg(max_pages_per_shop=3), MagicMock())
+
+        self.assertEqual((pages, seen_pages), (1, [1]), "没有下一批就不该再读第 2 页")
+
     def test_click_path_stops_when_detail_budget_exhausted(self):
         """点击式列表也必须遵守单轮详情预算。"""
         page = MagicMock()
@@ -329,10 +356,10 @@ class P1Tests(unittest.TestCase):
         round_id = new_round(self.db)
         shop = Shop("A01", "店铺A", "https://shop.example/")
 
-        with patch.object(browser_pw, "_wait_cards", return_value=True), \
+        with patch.object(listing, "wait_cards", return_value=True), \
              patch.object(browser_pw, "_scroll_cards_until_stable", return_value=1), \
-             patch.object(browser_pw, "intervention_kind", return_value=None), \
-             patch.object(browser_pw, "_click_text_in_frames", return_value=False), \
+             patch.object(listing, "intervention_kind", return_value=None), \
+             patch.object(listing, "click_text_in_frames", return_value=False), \
              patch.object(browser_pw, "_read_card_title", return_value="商品1"), \
              patch.object(dedupe, "claim_card_slot",
                           side_effect=pipeline.DetailBudgetExhausted("预算耗尽")), \
@@ -367,10 +394,10 @@ class P1Tests(unittest.TestCase):
         popup = MagicMock()
         cfg = self._cfg(max_pages_per_shop=1, max_detail_opportunities_per_round=1)
 
-        with patch.object(browser_pw, "_wait_cards", return_value=True), \
+        with patch.object(listing, "wait_cards", return_value=True), \
              patch.object(browser_pw, "_scroll_cards_until_stable", return_value=1), \
-             patch.object(browser_pw, "intervention_kind", return_value=None), \
-             patch.object(browser_pw, "_click_text_in_frames", return_value=False), \
+             patch.object(listing, "intervention_kind", return_value=None), \
+             patch.object(listing, "click_text_in_frames", return_value=False), \
              patch.object(browser_pw, "_read_card_title", return_value=""), \
              patch.object(browser_pw, "_click_one_product",
                           return_value=(detail_page, popup)), \
@@ -608,7 +635,7 @@ class P1Tests(unittest.TestCase):
         locator = MagicMock()
         locator.count.return_value = 31
         page.locator.return_value = locator
-        with patch.object(browser_pw, "_wait_until", return_value=False) as wait:
+        with patch.object(listing, "wait_until", return_value=False) as wait:
             self.assertEqual(browser_pw._scroll_cards_until_stable(page), 31)
 
         wait.assert_called_once()
@@ -628,13 +655,13 @@ class P1Tests(unittest.TestCase):
         def capture(*args, **kwargs):
             args[10].append((len(args[10]) + 1, "offer", "url", "name", ""))
 
-        with patch.object(browser_pw, "_wait_cards", return_value=True), \
+        with patch.object(listing, "wait_cards", return_value=True), \
              patch.object(browser_pw, "_scroll_cards_until_stable",
                           side_effect=lambda *args: next(scroll_counts)) as scroll, \
              patch.object(browser_pw, "_read_card_title",
                           side_effect=lambda *_args: next(titles)), \
-             patch.object(browser_pw, "intervention_kind", return_value=None), \
-             patch.object(browser_pw, "_click_text_in_frames", return_value=True), \
+             patch.object(listing, "intervention_kind", return_value=None), \
+             patch.object(listing, "click_text_in_frames", return_value=True), \
              patch.object(browser_pw, "_capture_card", side_effect=capture):
             offers, pages = browser_pw.crawl_store_by_click(
                 page, shop, self._cfg(max_pages_per_shop=2), human,
@@ -644,6 +671,44 @@ class P1Tests(unittest.TestCase):
         self.assertEqual((len(offers), pages), (5, 2))
         # Initial pages 1/2 plus rescue page 2; rescue page 1 has no ambiguous name.
         self.assertEqual(scroll.call_count, 3)
+
+    def test_rescue_also_requires_the_next_page_to_really_load(self):
+        """补抓第二遍走同一道推进：列表没换就报榜单失败（改前这条路径会直接放行）。"""
+        page = MagicMock()
+        locator = MagicMock()
+        locator.count.return_value = 1
+        page.locator.return_value = locator
+        round_id = new_round(self.db)
+        shop = Shop("A01", "店铺A", "https://shop.example/")
+        titles = iter(["唯一商品", "重复商品", "重复商品", "重复商品", "重复商品"])
+        scroll_counts = iter([1, 2, 2])
+        identities = [("p1",), ("p2",)]   # 主页翻页真的换了；补抓翻页永远不换
+
+        def identity_sequence(*_args, **_kwargs):
+            return identities.pop(0) if identities else ("p2",)
+
+        def capture(*args, **kwargs):
+            args[10].append((len(args[10]) + 1, "offer", "url", "name", ""))
+
+        with patch.object(listing, "_POLL_SEC", 0.0), \
+             patch.object(listing, "WAIT_NEXT_SEC", 0.05), \
+             patch.object(listing, "list_identity", side_effect=identity_sequence), \
+             patch.object(listing, "wait_cards", return_value=True), \
+             patch.object(browser_pw, "_scroll_cards_until_stable",
+                          side_effect=lambda *args: next(scroll_counts)), \
+             patch.object(browser_pw, "_read_card_title",
+                          side_effect=lambda *_args: next(titles)), \
+             patch.object(listing, "intervention_kind", return_value=None), \
+             patch.object(listing, "click_text_in_frames", return_value=True), \
+             patch.object(browser_pw, "_capture_card", side_effect=capture):
+            with self.assertRaises(ListingLoadFailed) as ctx:
+                browser_pw.crawl_store_by_click(
+                    page, shop, self._cfg(max_pages_per_shop=2), MagicMock(),
+                    db=self.db, round_id=round_id,
+                )
+
+        self.assertIn("补抓第 1 页", str(ctx.exception),
+                      "失败要报在补抓那一遍上，而不是主页那遍")
 
     def test_click_listing_records_a_listing_row_for_a_deferred_same_name_offer(self):
         """按名暂缓命中的商品同样要立刻落榜单行，否则它的跳过快照会成为孤儿。"""
@@ -662,10 +727,10 @@ class P1Tests(unittest.TestCase):
         locator.count.return_value = 1
         page.locator.return_value = locator
 
-        with patch.object(browser_pw, "_wait_cards", return_value=True), \
+        with patch.object(listing, "wait_cards", return_value=True), \
              patch.object(browser_pw, "_scroll_cards_until_stable", return_value=1), \
-             patch.object(browser_pw, "intervention_kind", return_value=None), \
-             patch.object(browser_pw, "_click_text_in_frames", return_value=False), \
+             patch.object(listing, "intervention_kind", return_value=None), \
+             patch.object(listing, "click_text_in_frames", return_value=False), \
              patch.object(browser_pw, "_read_card_title", return_value="商品1"), \
              patch.object(browser_pw, "_capture_card") as capture, \
              patch.object(self.db, "mark_skipped") as mark_skipped:
@@ -769,8 +834,8 @@ class P1Tests(unittest.TestCase):
         page = MagicMock()
         page.content.return_value = "<html></html>"
         shop = Shop("A01", "店铺A", "https://shop.example/")
-        with patch.object(browser_pw, "_wait_cards", return_value=False), \
-             patch.object(browser_pw, "intervention_kind", return_value=None):
+        with patch.object(listing, "wait_cards", return_value=False), \
+             patch.object(listing, "intervention_kind", return_value=None):
             with self.assertRaises(ListingLoadFailed):
                 browser_pw.crawl_store_by_click(
                     page, shop, self._cfg(max_pages_per_shop=1), MagicMock(),
