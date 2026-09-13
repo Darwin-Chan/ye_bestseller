@@ -6,13 +6,14 @@
 结论用于判断能否把「同日去重跳过」前移到点卡片之前。
 
 用法：python tools/diag_offer_id_presolve.py [店铺URL]
+
+浏览器会话走 `browser_pw.open_session` / `close_session`（候选 03 / ADR-0019）。
 """
 from __future__ import annotations
 
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -27,18 +28,14 @@ REPO = os.path.abspath(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
-from playwright.sync_api import sync_playwright
-
 from bestseller_monitor.config import Config, load_shops
+from bestseller_monitor import browser_pw
 from bestseller_monitor.browser_pw import _PRODUCT_IMG_SEL
 
-EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-PORT = 9222
 ROOT = os.path.dirname(REPO)
 cfg_timeout = 45000
 
 _cfg = Config.from_file(Path(REPO) / "config/config.toml", root=Path(REPO))
-PROFILE = str(_cfg.user_data_path)
 
 
 def pick_url(arg: str | None) -> str:
@@ -93,17 +90,14 @@ def main(argv: list[str] | None = None) -> int:
     print("=== 诊断店铺列表 URL ===")
     print(url)
 
-    subprocess.Popen([
-        EDGE, f"--remote-debugging-port={PORT}", f"--user-data-dir={PROFILE}",
-        "--no-first-run", "--no-default-browser-check", "about:blank",
-    ])
-    time.sleep(9)
-    pw = sync_playwright().start()
-    br = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{PORT}")
-    ctx = br.contexts[0]
-    page = ctx.new_page()
-    page.set_default_timeout(45000)
+    pw, br, page, ctx = browser_pw.open_session(_cfg)
+    try:
+        return _diagnose(page, url)
+    finally:
+        browser_pw.close_session(pw, br)
 
+
+def _diagnose(page, url: str) -> int:
     offer_ids_xhr: list[dict] = []
     api_bodies: list[dict] = []
     xhr_urls: list[str] = []
@@ -371,9 +365,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  in shop.data.get? {match}")
     print(f"  exact order match={got_ids == shop_ids[:len(got_ids)]}")
 
-    br.close()
-    pw.stop()
-    subprocess.run(["taskkill", "/IM", "msedge.exe", "/F"], capture_output=True)
     print("\n=== 诊断结束 ===")
     return 0
 
