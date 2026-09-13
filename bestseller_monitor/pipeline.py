@@ -9,7 +9,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from . import browser_pw, click_listing, dedupe, detail, rounds, single_instance, stop_request
-from .browser_pw import DenyTracker, ShopDenyExceeded, RoundDenyExceeded
+from .click_listing import DenyTracker, ShopDenyExceeded, RoundDenyExceeded
 from .config import Config, Shop, load_shops
 from .db import (
     Database,

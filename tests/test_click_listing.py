@@ -190,6 +190,50 @@ class SameNameTests(ClickListingTestCase):
         self.assertEqual(len(self.offer_rows()), 1, "同一个商品只有一条榜单行")
         self.assertEqual(len(self.snapshots("成功")), 1, "重复看到不再提交")
 
+    def test_a_deferred_name_still_gets_its_listing_row(self):
+        """同名暂缓的商品也要落榜单行，否则它的跳过快照会成为孤儿。"""
+        self.collected_today("11", "商品1")
+
+        self.crawl([[FakeCard("商品1", offer_id="11")]])
+
+        self.assertEqual([row["offer_id"] for row in self.offer_rows()], ["11"])
+        self.human.before_detail.assert_not_called()
+
+    def test_the_rescue_pass_claims_before_opening_the_card(self):
+        """补抓那遍同样先申请机会：预算用尽时那张卡根本不该被点开。
+
+        第一张同名卡在主遍历里被按名暂缓（没占机会），第二张进了详情（占掉唯一的机会）；
+        补抓那遍回头读第一张时必须先申请、拿不到就报预算耗尽。
+        """
+        self.collected_today("11", "商品1")
+        deferred = FakeCard("商品1", offer_id="11")
+        second = FakeCard("商品1", offer_id="12")
+
+        with self.assertRaises(DetailBudgetExhausted):
+            self.crawl([[deferred, second]], cfg=_cfg(max_detail_opportunities_per_round=1))
+
+        self.assertEqual(deferred.opens, 0, "预算用尽时补抓也不该点开卡片")
+        self.assertEqual(second.opens, 1)
+
+    def test_the_rescue_pass_stops_when_the_next_page_never_loads(self):
+        """补抓翻页也走同一道推进：没有下一批就收工，不再读第二页。"""
+        first, second = FakeCard("商品1", offer_id="11"), FakeCard("商品1", offer_id="12")
+        page, offers, pages_read = self.crawl([[first, second]])
+
+        self.assertEqual(page.prepared, ["店铺 A01 首屏", "店铺 A01 补抓首屏"])
+        self.assertEqual(page.advanced, [], "单页的店没有可推进的下一批")
+
+    def test_the_rescue_pass_advances_with_its_own_describe(self):
+        """同名商品分布在两页时，补抓那遍自己翻页（推进的文案与主页那遍分开）。"""
+        first, second = FakeCard("商品1", offer_id="11"), FakeCard("商品1", offer_id="12")
+        page, offers, pages_read = self.crawl([[first], [second]])
+
+        self.assertEqual(pages_read, 2)
+        self.assertEqual(page.advanced,
+                         ["店铺 A01 第 1 页",              # 主遍历：第 1 页之后
+                          "店铺 A01 补抓第 1 页"],         # 补抓：第 1 页之后
+                         "补抓翻页走同一道推进，但文案是自己的")
+
 
 class DenyTests(ClickListingTestCase):
     def test_the_third_deny_closes_the_card_and_skips_the_product(self):

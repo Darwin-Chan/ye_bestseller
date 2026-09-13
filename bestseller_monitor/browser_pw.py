@@ -1,25 +1,28 @@
 """浏览器会话与详情页读取（Playwright 连接接管，ADR-0010）。
 
-点击式列表的遍历与逐卡逻辑在 click_listing.py，榜单页行为在 listing.py，
+点击式列表的遍历、逐卡逻辑与 deny 账本在 click_listing.py，榜单页行为在 listing.py，
 详情观测规则在 detail.py；这里只剩：
 
 - 用普通进程拉起浏览器、经调试端口接管、按归属收尾（IS-43）；
-- 逐店补采用的 `capture_detail`（打开一个详情页、取回观测）；
-- deny 计数（`DenyTracker`）与它那两个异常。
+- 逐店补采用的 `capture_detail`（打开一个详情页、取回观测）。
+
+`DenyTracker` 与那两个 deny 异常从 click_listing 转出来，供沿用旧 import 的调用方。
 """
 from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import time
 
 from . import browser_proc, listing
+from .click_listing import (DenyTracker, RoundDenyExceeded,  # noqa: F401  旧名兼容
+                            ShopDenyExceeded, WAIT_POPUP_MS)
 from .config import Config
 from .delay import Humanizer
 from .detail import parse_detail_html
 from .guard import (
-    RoundPauseRequired,
     body_text, captcha_visible, intervention_kind,
     is_deny_url, is_punish_url, resolved, vtype, wait_for_resolution,
 )
@@ -41,11 +44,11 @@ _vtype = vtype
 
 # 条件等待的上限兜底（秒）——优先“等条件满足”，超时才继续，替代固定 sleep。
 _WAIT_LAUNCH_SEC = 25.0    # 等浏览器调试端口可连接
-_WAIT_POPUP_MS = 2500      # 点击后等待新标签页；有效弹窗通常在 2 秒内出现（点击式列表用）
 
 # 搬到 listing.py 的榜单页原语：诊断工具仍按旧私有名引用，这里留兼容别名（同 guard 那组）。
 # 本文件内部一律走 listing.*，别名只给工具用——否则测试打桩 listing 的改动会静默失效
 # （2026-09-13 被这条咬过：测试改打 listing，采集路径却用别名，于是真的走进人工介入等待）。
+_WAIT_POPUP_MS = WAIT_POPUP_MS
 _PRODUCT_IMG_SEL = listing.PRODUCT_IMG_SEL
 _click_text_in_frames = listing.click_text_in_frames
 
@@ -134,37 +137,6 @@ def close_session(pw, br) -> None:
                     "改按调试端口 %s 的归属关闭。", proc.pid, port)
     browser_proc.close_browser(port, launched_by_us=True,
                                browser_pid=browser_pid, own_pid=own_pid)
-
-
-class ShopDenyExceeded(Exception):
-    """某店滚动窗口内 deny 数达到阈值，跳过该店。"""
-
-
-class RoundDenyExceeded(RoundPauseRequired):
-    """整轮滚动窗口内 deny 数达到阈值，中止本轮。"""
-
-
-class DenyTracker:
-    """滚动窗口内的 deny 计数（按店 + 整轮）。"""
-    def __init__(self, window_sec: float):
-        self.window_sec = window_sec
-        self.events: list[tuple[float, str]] = []
-
-    def _prune(self, now: float) -> None:
-        self.events = [(t, s) for t, s in self.events if now - t <= self.window_sec]
-
-    def record(self, shop_key: str) -> None:
-        now = time.time()
-        self.events.append((now, shop_key))
-        self._prune(now)
-
-    def shop_count(self, shop_key: str) -> int:
-        self._prune(time.time())
-        return sum(1 for t, s in self.events if s == shop_key)
-
-    def round_count(self) -> int:
-        self._prune(time.time())
-        return len(self.events)
 
 
 def capture_detail(page, product_url: str, cfg: Config, human: Humanizer, emit=None) -> dict:

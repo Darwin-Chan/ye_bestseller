@@ -25,23 +25,23 @@ class DedupeTests(unittest.TestCase):
         return self.db.detail_opportunity_total(self.rid)
 
     def test_retrying_same_offer_takes_one_slot(self):
-        dedupe.claim_offer_slot(self.db, self.rid, "A01", "111", 2)
-        dedupe.claim_offer_slot(self.db, self.rid, "A01", "111", 2)
+        dedupe.claim_slot(self.db, self.rid, "A01", "111", 2)
+        dedupe.claim_slot(self.db, self.rid, "A01", "111", 2)
         self.assertEqual(self.used(), 1, "同一商品的补采复用同一次详情机会")
 
     def test_budget_exhaustion_blocks_new_offer_but_allows_retry(self):
-        dedupe.claim_offer_slot(self.db, self.rid, "A01", "111", 1)
+        dedupe.claim_slot(self.db, self.rid, "A01", "111", 1)
         with self.assertRaises(DetailBudgetExhausted):
-            dedupe.claim_offer_slot(self.db, self.rid, "A01", "222", 1)
+            dedupe.claim_slot(self.db, self.rid, "A01", "222", 1)
         # 已占过机会的商品只是重试，不该被预算耗尽挡住
-        dedupe.claim_offer_slot(self.db, self.rid, "A01", "111", 1)
+        dedupe.claim_slot(self.db, self.rid, "A01", "111", 1)
         self.assertEqual(self.used(), 1)
 
     def test_budget_limit_binds_to_round_not_to_later_config(self):
-        dedupe.claim_offer_slot(self.db, self.rid, "A01", "111", 1)
+        dedupe.claim_slot(self.db, self.rid, "A01", "111", 1)
         # 续跑时即使配置放宽，仍沿用轮次已记录的上限
         with self.assertRaises(DetailBudgetExhausted):
-            dedupe.claim_offer_slot(self.db, self.rid, "A01", "222", 5)
+            dedupe.claim_slot(self.db, self.rid, "A01", "222", 5)
 
     def test_budget_survives_reopening_the_database(self):
         """重启不能绕过单轮预算：重新打开同一个库后，已用尽的预算仍然用尽。"""
@@ -50,7 +50,7 @@ class DedupeTests(unittest.TestCase):
         try:
             db = Database(first)
             rid = new_round(db)
-            dedupe.claim_offer_slot(db, rid, "A01", "111", 1)
+            dedupe.claim_slot(db, rid, "A01", "111", 1)
         finally:
             first.close()
 
@@ -59,35 +59,35 @@ class DedupeTests(unittest.TestCase):
             db = Database(second)
             self.assertEqual(db.detail_opportunity_total(rid), 1)
             with self.assertRaises(DetailBudgetExhausted):
-                dedupe.claim_offer_slot(db, rid, "A01", "222", 1)
+                dedupe.claim_slot(db, rid, "A01", "222", 1)
             # 已经占过机会的商品只是重试，不该被预算耗尽挡住
-            dedupe.claim_offer_slot(db, rid, "A01", "111", 1)
+            dedupe.claim_slot(db, rid, "A01", "111", 1)
             self.assertEqual(db.detail_opportunity_total(rid), 1)
         finally:
             second.close()
 
     def test_binding_merges_when_offer_already_holds_a_slot(self):
-        dedupe.claim_offer_slot(self.db, self.rid, "A01", "33", 5)
-        dedupe.claim_card_slot(self.db, self.rid, "A01", "card:p2:i1", 5)
+        dedupe.claim_slot(self.db, self.rid, "A01", "33", 5)
+        dedupe.claim_slot(self.db, self.rid, "A01", "card:p2:i1", 5)
         self.assertEqual(self.used(), 2)
         dedupe.bind_card_to_offer(self.db, self.rid, "A01", "card:p2:i1", "33")
         self.assertEqual(self.used(), 1, "同一商品的两份机会合并成一次")
 
     def test_rescanning_a_bound_card_does_not_take_a_second_slot(self):
         """重扫同一张卡片（补抓/排序重排）不该重复占用预算。"""
-        dedupe.claim_card_slot(self.db, self.rid, "A01", "card:p1:i0", 1)
+        dedupe.claim_slot(self.db, self.rid, "A01", "card:p1:i0", 1)
         dedupe.bind_card_to_offer(self.db, self.rid, "A01", "card:p1:i0", "22")
-        dedupe.claim_card_slot(self.db, self.rid, "A01", "card:p1:i0", 1)
-        dedupe.claim_offer_slot(self.db, self.rid, "A01", "22", 1)
+        dedupe.claim_slot(self.db, self.rid, "A01", "card:p1:i0", 1)
+        dedupe.claim_slot(self.db, self.rid, "A01", "22", 1)
         self.assertEqual(self.used(), 1)
 
     def test_released_slot_frees_budget_for_other_offers(self):
         """同日跳过要退还机会，否则会白白吃掉别的商品的预算。"""
-        dedupe.claim_card_slot(self.db, self.rid, "A01", "card:p1:i0", 1)
+        dedupe.claim_slot(self.db, self.rid, "A01", "card:p1:i0", 1)
         dedupe.bind_card_to_offer(self.db, self.rid, "A01", "card:p1:i0", "22")
         dedupe.release_slot(self.db, self.rid, "A01", "22")
         self.assertEqual(self.used(), 0)
-        dedupe.claim_offer_slot(self.db, self.rid, "A01", "33", 1)
+        dedupe.claim_slot(self.db, self.rid, "A01", "33", 1)
         self.assertEqual(self.used(), 1)
 
     def test_next_attempt_continues_from_earlier_retry_in_same_round(self):
@@ -139,7 +139,7 @@ class DedupeTests(unittest.TestCase):
                 conn.execute('PRAGMA table_info("detail_opportunities")').fetchall()
             ]
             self.assertIn("offer_id", opp_cols)
-            dedupe.claim_offer_slot(Database(conn), 1, "A01", "111", 1)
+            dedupe.claim_slot(Database(conn), 1, "A01", "111", 1)
         finally:
             conn.close()
             old.unlink(missing_ok=True)

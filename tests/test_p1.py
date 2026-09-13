@@ -34,6 +34,27 @@ class P1Tests(unittest.TestCase):
         self.conn = connect(Path(self.tmp.name) / "test.db")
         self.db = Database(self.conn)
 
+    def test_capture_detail_reads_a_real_page_and_announces_the_offer(self):
+        """补采 adapter 的真实路径：导航、认商品编号、读回解析结果。
+
+        这条守的是「`capture_detail` 本身还能跑」——候选 03 收口时它一度因为少了一个 import
+        每次都抛 NameError，而所有用例都把函数打了桩，谁也没发现。
+        """
+        page = MagicMock()
+        page.content.return_value = (
+            '<script>{"skuInfoMap":{"A":{"skuId":1,"canBookCount":2}}}</script>')
+        events: list[tuple[str, dict]] = []
+
+        with patch.object(browser_pw.time, "sleep"), \
+             patch.object(browser_pw, "intervention_kind", return_value=None):
+            payload = browser_pw.capture_detail(
+                page, "https://detail.1688.com/offer/111.html", self._cfg(), MagicMock(),
+                emit=lambda event, **kw: events.append((event, kw)))
+
+        self.assertEqual([event for event, _ in events], ["detail_nav", "detail_parse"])
+        self.assertEqual(events[0][1]["offer_id"], "111")
+        self.assertEqual([row["sku_stock"] for row in payload["rows"]], [2])
+
     def tearDown(self):
         self.conn.close()
         self.tmp.cleanup()

@@ -113,7 +113,7 @@ class SameDaySkipTests(DetailTestCase):
     def test_the_slot_the_call_site_reserved_is_released_on_a_same_day_skip(self):
         """点击路径在打开卡片前就占了机会（预算限制的是详情访问），发现今天采过就要退还。"""
         self.collected_today("11")
-        dedupe.claim_card_slot(self.db, self.round_id, "A01", "card:p1&i0", 10)
+        dedupe.claim_slot(self.db, self.round_id, "A01", "card:p1&i0", 10)
 
         result = self.capture(self.target(), self.observe(self.payload("11")))
 

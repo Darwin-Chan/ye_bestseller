@@ -24,7 +24,7 @@ if str(REPO) not in sys.path:
 from bestseller_monitor.config import Config, effective_pages_limit, load_shops
 from bestseller_monitor.db import Database, connect, cst_date
 from bestseller_monitor.delay import Humanizer
-from bestseller_monitor import browser_pw
+from bestseller_monitor import browser_pw, click_listing
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -64,20 +64,20 @@ def main(argv: list[str] | None = None) -> int:
                 prev = cur
             n = page.locator(browser_pw._PRODUCT_IMG_SEL).count()
             for i in range(n):
-                title = browser_pw._read_card_title(page, i)
+                title = click_listing.read_card_title(page, i)
                 img = page.locator(browser_pw._PRODUCT_IMG_SEL).nth(i)
-                detail_page, popup = browser_pw._click_one_product(
-                    page, img, cfg, [False], lambda r: None
+                detail_page, popup = click_listing.click_card(
+                    page, img, cfg, False, lambda r: None
                 )
                 if detail_page is None:
                     continue
                 m = re.search(r"/(?:offer|item)/(\d+)\.html", detail_page.url)
                 if not m:
-                    browser_pw._close_popup_or_back(detail_page, popup, page)
+                    click_listing.close_popup_or_back(detail_page, popup, page)
                     continue
                 oid = m.group(1)
                 mapping.setdefault(oid, title or "")
-                browser_pw._close_popup_or_back(detail_page, popup, page)
+                click_listing.close_popup_or_back(detail_page, popup, page)
             if pg >= max_pages:
                 break
             if not browser_pw._click_text_in_frames(page, "下一页"):

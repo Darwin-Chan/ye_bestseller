@@ -19,22 +19,6 @@ def next_attempt(db: Database, round_id: int, shop_key: str, offer_id: str) -> i
     return db.detail_attempts_used(round_id, shop_key, offer_id) + 1
 
 
-def claim_card_slot(db: Database, round_id: int, shop_key: str, card_ref: str,
-                    budget_limit: int) -> None:
-    """点击式列表在打开卡片前占一次机会，预算耗尽时结束本轮。
-
-    此时还拿不到商品编号，用卡片位置作标识；编号确定后由 bind_card_to_offer
-    绑定过去。同日跳过不该走到这里——跳过不消耗预算。
-    """
-    _claim(db, round_id, shop_key, card_ref, budget_limit)
-
-
-def claim_offer_slot(db: Database, round_id: int, shop_key: str, offer_id: str,
-                     budget_limit: int) -> None:
-    """已知商品编号时占一次机会，预算耗尽时结束本轮。"""
-    _claim(db, round_id, shop_key, offer_id, budget_limit)
-
-
 def claim_slot(db: Database, round_id: int, shop_key: str, key: str,
                budget_limit: int) -> None:
     """占一次机会，`key` 是这个名额的标识。

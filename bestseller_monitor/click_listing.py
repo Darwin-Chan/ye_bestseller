@@ -17,22 +17,23 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 
 from playwright.sync_api import Error as PlaywrightError
 
 from . import dedupe, detail, listing, rounds
-from .browser_pw import (DenyTracker, RoundDenyExceeded, ShopDenyExceeded,  # noqa: F401
-                         _WAIT_POPUP_MS)
 from .config import Config, Shop, effective_pages_limit
 from .db import cst_date, utcnow
 from .delay import Humanizer
 from .detail import DetailParseFailed, parse_detail_html
-from .guard import intervention_kind, is_deny_url, is_punish_url, vtype, wait_for_resolution
+from .guard import (RoundPauseRequired, intervention_kind, is_deny_url, is_punish_url,
+                    vtype, wait_for_resolution)
 from .parse import extract_main_image
 
 log = logging.getLogger(__name__)
 
 # 条件等待的上限兜底（秒）
+WAIT_POPUP_MS = 2500       # 点击后等待新标签页；有效弹窗通常在 2 秒内出现
 WAIT_SCROLL_SEC = 3.0      # 每次滚动后等新一批卡片
 WAIT_BACK_SEC = 8.0        # 从详情返回列表页后等就绪
 
@@ -47,6 +48,40 @@ def crawl_store_by_click(listing_page, shop: Shop, cfg: Config, human: Humanizer
     walk = ShopWalk(listing_page, shop, cfg, human,
                     db=db, round_id=round_id, emit=emit, deny_tracker=deny_tracker)
     return walk.run()
+
+
+# ---------- deny：被反爬拦下的计数与两个异常 ----------
+
+class ShopDenyExceeded(Exception):
+    """某店滚动窗口内 deny 数达到阈值，跳过该店。"""
+
+
+class RoundDenyExceeded(RoundPauseRequired):
+    """整轮滚动窗口内 deny 数达到阈值，中止本轮。"""
+
+
+class DenyTracker:
+    """滚动窗口内的 deny 计数（按店 + 整轮）。"""
+
+    def __init__(self, window_sec: float):
+        self.window_sec = window_sec
+        self.events: list[tuple[float, str]] = []
+
+    def _prune(self, now: float) -> None:
+        self.events = [(t, s) for t, s in self.events if now - t <= self.window_sec]
+
+    def record(self, shop_key: str) -> None:
+        now = time.time()
+        self.events.append((now, shop_key))
+        self._prune(now)
+
+    def shop_count(self, shop_key: str) -> int:
+        self._prune(time.time())
+        return sum(1 for t, s in self.events if s == shop_key)
+
+    def round_count(self) -> int:
+        self._prune(time.time())
+        return len(self.events)
 
 
 class ShopWalk:
@@ -69,21 +104,29 @@ class ShopWalk:
         self._emit = emit
 
     # ---------- 事件 ----------
-    def se(self, event: str, **kw: object) -> None:
+    def emit(self, event: str, **kw: object) -> None:
         """店铺作用域事件：统一注入 shop_key；phase 默认 listing，可按调用单独覆盖。"""
         if self._emit is not None:
             self._emit(event, shop_key=self.shop.key, phase=kw.pop("phase", "listing"), **kw)
+
+    @staticmethod
+    def _card_note(card, offer_id: str | None = None, suffix: str = "") -> str:
+        """事件备注：卡片位置 +(可选)商品编号 +(可选)后缀——改前遍历手拼的那一套。"""
+        note = card.note
+        if offer_id is not None:
+            note += "&offer_id=" + offer_id
+        return note + suffix
 
     # ---------- 遍历 ----------
     def run(self):
         shop = self.shop
         log.info("开始点击式抓取店铺 %s（%s）", shop.key, shop.url)
         max_pages = effective_pages_limit(shop, self.cfg)
-        self.listing_page.prepare(f"店铺 {shop.key} 首屏", emit=self.se)
+        self.listing_page.prepare(f"店铺 {shop.key} 首屏", emit=self.emit)
         while self.pages_read < max_pages:
             self.pages_read += 1
             self.human.before_list_page()
-            self.se("list_page", note=f"page={self.pages_read}")
+            self.emit("list_page", note=f"page={self.pages_read}")
             count = self.listing_page.scroll_to_load("滚动加载新卡片")
             log.info("店铺 %s 第 %s 页图片总数 %s（滚动后）", shop.key, self.pages_read, count)
             for index in range(count):
@@ -101,7 +144,7 @@ class ShopWalk:
 
     def _visit_card(self, index: int) -> None:
         """列表页上第 index 张卡：读名字、按名暂缓、进详情。"""
-        self.se("product_open")
+        self.emit("product_open")
         card = self.listing_page.card(index)
         list_title = card.title()
         if list_title:
@@ -112,7 +155,7 @@ class ShopWalk:
                 # 同店（同页/跨页）重复商品名异常检测（第 2 次及以上出现）
                 log.warning("异常：店铺 %s 出现重复商品名「%s」（第 %s 个商品）",
                             self.shop.key, list_title[:60], index)
-                self.se("duplicate_name", note=f"name={list_title[:60]} @idx={index}")
+                self.emit("duplicate_name", note=f"name={list_title[:60]} @idx={index}")
             # 计数=1 且今天已有库存 → 暂缓（只记位置事件），若该名字最终计数>1 则第二遍补抓
             if (seen_times == 1
                     and self.db.inventory_exists_by_name(self.shop.key, list_title, cst_date())):
@@ -124,7 +167,7 @@ class ShopWalk:
         """同名暂缓：按名能找到唯一商品编号就把它计入榜单并写一条跳过，否则只记事件。"""
         shop = self.shop
         log.info("店铺 %s 商品「%s」今日已有库存，暂缓（计数 1）", shop.key, list_title[:40])
-        self.se("defer_samename",
+        self.emit("defer_samename",
                 note=f"name={list_title[:40]} @page={self.pages_read} @idx={index}")
         known_offer_id = self.db.find_offer_id_by_name(shop.key, list_title, cst_date())
         if not known_offer_id:
@@ -158,20 +201,20 @@ class ShopWalk:
             rounds.ensure_workable(self.db, self.round_id, utcnow())
             card.open()
             if not card.opened():
-                self.se("click_no_popup", note=note)
+                self.emit("click_no_popup", note=note)
                 return None
             if card.denied():
                 per_product_denies += 1
                 if self.deny_tracker is not None:
                     self.deny_tracker.record(self.shop.key)
                     if self.deny_tracker.round_count() >= self.cfg.deny_round_limit:
-                        self.se("click_deny", phase="detail",
+                        self.emit("click_deny", phase="detail",
                                 note=note + f"&n={per_product_denies}&round_abort")
                         raise RoundDenyExceeded(
                             f"整轮 {self.cfg.deny_window_minutes} 分钟内"
                             f" deny≥{self.cfg.deny_round_limit}")
                     if self.deny_tracker.shop_count(self.shop.key) >= self.cfg.deny_shop_limit:
-                        self.se("click_deny", phase="detail",
+                        self.emit("click_deny", phase="detail",
                                 note=note + f"&n={per_product_denies}&shop_skip")
                         raise ShopDenyExceeded(
                             f"店铺 {self.shop.key} {self.cfg.deny_window_minutes} 分钟内"
@@ -179,16 +222,16 @@ class ShopWalk:
                 log.warning("店铺 %s 商品命中 deny（该商品第 %s 次）",
                             self.shop.key, per_product_denies)
                 if per_product_denies == 1:
-                    self.se("click_deny", phase="detail", note=note + "&n=1")
+                    self.emit("click_deny", phase="detail", note=note + "&n=1")
                     card.close()
                     self.human.sleep(self.cfg.deny_backoff_sec)
                     continue
                 if per_product_denies == 2:
-                    self.se("click_deny", phase="detail", note=note + "&n=2")
+                    self.emit("click_deny", phase="detail", note=note + "&n=2")
                     card.close()
                     self.human.sleep(self.cfg.deny_retry2_backoff_sec)
                     continue
-                self.se("click_deny", phase="detail", note=note + "&n=3&skip")
+                self.emit("click_deny", phase="detail", note=note + "&n=3&skip")
                 log.warning("店铺 %s 商品第 3 次命中 deny，跳过当前商品", self.shop.key)
                 card.close()
                 return None
@@ -199,10 +242,10 @@ class ShopWalk:
         """一张卡的详情观测：认领商品、按结果记事件、把卡片关掉。"""
         offer_id = card.offer_id
         if offer_id is None:
-            self.se("click_url_notoffer", note=card.note)
+            self.emit("click_url_notoffer", note=card.note)
             card.close()
             return None
-        self.se("popup_open", offer_id=offer_id)
+        self.emit("popup_open", offer_id=offer_id)
         first_time = offer_id not in self.seen
         if first_time:
             self.seen.add(offer_id)
@@ -220,22 +263,22 @@ class ShopWalk:
                 lambda: self._read(card, offer_id), attempts=1)
         except BaseException:
             # 停止判定（跨天／暂停／预算）从规则里抛出来：弹窗照常关掉再上抛。
-            self.se("popup_close", offer_id=offer_id)
+            self.emit("popup_close", offer_id=offer_id)
             card.close()
             raise
 
         if result.outcome is detail.Outcome.SKIPPED_TODAY:
-            self.se("click_skipped", offer_id=offer_id,
+            self.emit("click_skipped", offer_id=offer_id,
                     note=card.note + "&offer_id=" + offer_id)
-            self.se("skip_existing", offer_id=offer_id, note="inventory_exists_today")
+            self.emit("skip_existing", offer_id=offer_id, note="inventory_exists_today")
         elif result.outcome is detail.Outcome.SUBMITTED:
             skus = result.sku_count if result.sku_count is not None else 0
-            self.se("click_ok", offer_id=offer_id,
-                    note=card.note + "&offer_id=" + offer_id + f"&sku={skus}")
+            self.emit("click_ok", offer_id=offer_id,
+                    note=self._card_note(card, offer_id, f"&sku={skus}"))
         elif result.outcome is detail.Outcome.DUPLICATE:
-            self.se("click_skipped", offer_id=offer_id,
-                    note=card.note + "&offer_id=" + offer_id + "&dup=1")
-        self.se("popup_close", offer_id=offer_id)
+            self.emit("click_skipped", offer_id=offer_id,
+                    note=self._card_note(card, offer_id, "&dup=1"))
+        self.emit("popup_close", offer_id=offer_id)
         card.close()
         # 失败与「没读到编号」一样：对调用方来说这张卡没有拿到商品（只留了失败行）。
         return None if result.outcome is detail.Outcome.FAILED else result.offer_id
@@ -244,13 +287,13 @@ class ShopWalk:
         """读一次观测，并按「这次读成什么样」记事件（事件顺序与改前一致）。"""
         observation = card.read()
         if observation.failure is None:
-            self.se("detail_parse", offer_id=offer_id,
+            self.emit("detail_parse", offer_id=offer_id,
                     note=f"sku_count={len(observation.payload['rows'])}")
             return observation
-        self.se("click_parse_error", offer_id=offer_id,
-                note=card.note + "&offer_id=" + offer_id)
+        self.emit("click_parse_error", offer_id=offer_id,
+                note=self._card_note(card, offer_id))
         if observation.kind is detail.FailureKind.PARSE:
-            self.se("detail_parse", offer_id=offer_id, note="sku_count=0")
+            self.emit("detail_parse", offer_id=offer_id, note="sku_count=0")
         return observation
 
     # ---------- 同名商品第二遍 ----------
@@ -266,19 +309,19 @@ class ShopWalk:
                  shop.key, len(ambiguous), ",".join(map(str, sorted(ambiguous_pages))),
                  rescue_last_page)
         # 补抓第二遍与主页走同一份准备：顺序、兜底、事件都不再各写一遍。
-        self.listing_page.prepare(f"店铺 {shop.key} 补抓首屏", emit=self.se)
+        self.listing_page.prepare(f"店铺 {shop.key} 补抓首屏", emit=self.emit)
         for rescue_page in range(1, rescue_last_page + 1):
             self.human.before_list_page()
-            self.se("list_page", note=f"rescue_page={rescue_page}")
+            self.emit("list_page", note=f"rescue_page={rescue_page}")
             if rescue_page in ambiguous_pages:
                 count = self.listing_page.scroll_to_load("补抓滚动加载新卡片")
                 for index in range(count):
                     card = self.listing_page.card(index)
                     name = card.title()
                     if name and name in ambiguous:
-                        self.se("product_open")
-                        self.human.before_detail()
-                        self.capture(card, name)
+                        self.emit("product_open")
+                        # 与主页一样：先申请机会（预算限制详情访问），再点开。
+                        self._enter_detail(card, name)
             if rescue_page >= rescue_last_page:
                 break
             if not self.listing_page.advance(f"店铺 {shop.key} 补抓第 {rescue_page} 页"):
@@ -467,7 +510,7 @@ def click_card(page, image, cfg: Config, punished: bool, on_response, emit=None)
     """
     popup = None
     try:
-        with page.expect_popup(timeout=_WAIT_POPUP_MS) as pending:
+        with page.expect_popup(timeout=WAIT_POPUP_MS) as pending:
             image.evaluate(
                 """el => {
                     let t = el;
