@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_pw, pipeline, rounds, stop_request
+from bestseller_monitor import browser_pw, detail, pipeline, rounds, stop_request
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import CST, Database, DayBoundaryReached, connect, cst_date
 from bestseller_monitor.rounds import RoundRequest, ShopScope
@@ -74,6 +74,23 @@ class RoundStopRuleTests(unittest.TestCase):
             "list_title": "榜单标题",
         }
 
+    def _target(self):
+        """补采路径的 target：编号在取观测之前就已知。"""
+        offer = self._offer()
+        return detail.DetailTarget(
+            shop_key=offer["shop_key"], shop_url=offer["shop_url"],
+            shop_name=offer["shop_name"], product_url=offer["product_url"],
+            slot_key=offer["offer_id"], list_title=offer["list_title"],
+            offer_id=offer["offer_id"])
+
+    def _capture(self, round_id, observe, **kwargs):
+        """照补采路径的样子取一次观测：规则在 detail.capture_observation 里。"""
+        return detail.capture_observation(
+            self.db, self._cfg(), MagicMock(), round_id, self._target(), observe, **kwargs)
+
+    def _observation(self):
+        return detail.Observation(offer_id="111", payload=self._payload())
+
     @staticmethod
     def _payload():
         return {
@@ -100,33 +117,27 @@ class RoundStopRuleTests(unittest.TestCase):
 
     def test_before_detail_stops_without_starting_work(self):
         stale = self._open(_yesterday(), "A01")
-        fetch = MagicMock(return_value=self._payload())
+        visits: list[int] = []
 
         with self.assertRaises(DayBoundaryReached):
-            pipeline._capture_offer_detail(
-                self.db, self._cfg(), MagicMock(), stale.id, self._offer(), fetch,
-            )
+            self._capture(stale.id, lambda: visits.append(1) or self._observation())
 
-        fetch.assert_not_called()
+        self.assertEqual(visits, [], "该停就不该打开详情")
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0], 0)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM inventory").fetchone()[0], 0)
 
     def test_after_commit_stops_but_keeps_the_data(self):
         run = self._open("2026-09-12", "A01")
-        fetch = MagicMock(return_value=self._payload())
         # utcnow 的三次调用：进详情前（23:54，不触发）、写入时间戳、提交之后（23:56，触发）
         moments = [
             _cst(2026, 9, 12, 23, 54),
             _cst(2026, 9, 12, 23, 54),
             _cst(2026, 9, 12, 23, 56),
         ]
-        with patch.object(pipeline, "utcnow", side_effect=moments), \
-             patch.object(pipeline, "extract_main_image", return_value=None):
+        with patch.object(detail, "utcnow", side_effect=moments), \
+             patch.object(detail, "extract_main_image", return_value=None):
             with self.assertRaises(DayBoundaryReached):
-                pipeline._capture_offer_detail(
-                    self.db, self._cfg(max_attempts_per_page=1), MagicMock(),
-                    run.id, self._offer(), fetch,
-                )
+                self._capture(run.id, lambda: self._observation(), attempts=1)
 
         self.assertEqual(
             self.conn.execute("SELECT COUNT(*) FROM snapshots WHERE page_status='成功'").fetchone()[0], 1)
@@ -210,8 +221,7 @@ class RoundStopRuleTests(unittest.TestCase):
 
         def capture(_offer):
             self._request_pause(run.id)
-            pipeline._capture_offer_detail(self.db, self._cfg(), MagicMock(), run.id,
-                                           _offer, MagicMock())
+            self._capture(run.id, lambda: self._observation(), attempts=1)
 
         with self.assertRaises(stop_request.StopRequested):
             pipeline._capture_pending_offers(self.db, self._cfg(), MagicMock(), run.id,
@@ -225,11 +235,11 @@ class RoundStopRuleTests(unittest.TestCase):
         """暂停落在长睡眠的切片里（fetch 途中）：同样要原样上抛，不许当成访问异常。"""
         run = self._open(cst_date(), "A01")
 
+        def observe():
+            raise stop_request.StopRequested("停")
+
         with self.assertRaises(stop_request.StopRequested):
-            pipeline._capture_offer_detail(
-                self.db, self._cfg(), MagicMock(), run.id, self._offer(),
-                MagicMock(side_effect=stop_request.StopRequested("停")),
-            )
+            self._capture(run.id, observe, attempts=1)
 
         self.assertEqual(
             self.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0], 0,

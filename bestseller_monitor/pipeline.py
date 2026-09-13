@@ -8,7 +8,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from . import browser_pw, dedupe, rounds, single_instance, stop_request
+from . import browser_pw, dedupe, detail, rounds, single_instance, stop_request
 from .browser_pw import DenyTracker, ShopDenyExceeded, RoundDenyExceeded
 from .config import Config, Shop, load_shops
 from .db import (
@@ -22,9 +22,8 @@ from .db import (
     DETAIL_BUDGET_NOTE,
 )
 from .delay import Humanizer
-from .detail import DetailParseFailed, save_raw_page
+from .detail import DetailParseFailed
 from .guard import RoundPauseRequired
-from .parse import extract_main_image
 from .rounds import Round, RoundRequest, ShopScope, TerminalReason
 from .stop_request import StopRequested
 from .listing import ListingLoadFailed, save_raw_listing_page
@@ -257,93 +256,6 @@ def _capture_pending_offers(db: Database, cfg: Config, human: Humanizer, round_i
     return processed
 
 
-def _capture_offer_detail(db: Database, cfg: Config, human: Humanizer, round_id: int, offer,
-                          fetch, *, on_attempt_failed=None) -> None:
-    """同日去重与补采 module：一个商品的详情采集规则集中在这里。
-
-    - 同日去重按商品编号判断，跳过不消耗预算
-    - 初次访问与补采共享同一份尝试额度
-    - 进入详情前申请轮次详情预算，用尽则结束本轮
-    - 重试、失败记录与成功提交
-
-    fetch 是 adapter 边界，只负责取一次详情并返回 payload。
-    """
-    shop_key = offer["shop_key"]
-    offer_id = offer["offer_id"]
-    product_url = offer["product_url"]
-    shop_url = offer["shop_url"]
-    shop_name = offer["shop_name"]
-    max_attempts = cfg.max_attempts_per_page
-
-    # 进详情之前先问轮次：跨到次日或已过截止线就不再开始新的详情采集。
-    rounds.ensure_workable(db, round_id, utcnow())
-
-    if db.inventory_exists(shop_key, offer_id, cst_date()):
-        db.mark_skipped(round_id, shop_key, shop_url, shop_name, offer_id, product_url,
-                        offer["list_title"])
-        log.info("店铺 %s 商品 %s 今日已有库存，跳过详情抓取", shop_key, offer_id)
-        return
-
-    # 初次访问和补采共享同一份尝试额度；已经用尽的商品不再进入详情。
-    next_attempt_no = dedupe.next_attempt(db, round_id, shop_key, offer_id)
-    if next_attempt_no > max_attempts:
-        log.info("店铺 %s 商品 %s 本轮尝试已用尽（%s/%s），不再补采",
-                 shop_key, offer_id, next_attempt_no - 1, max_attempts)
-        return
-
-    # 同日跳过不消耗预算；只有真正要进入详情的商品才申请机会。
-    dedupe.claim_offer_slot(db, round_id, shop_key, offer_id,
-                            cfg.max_detail_opportunities_per_round)
-
-    for attempt in range(next_attempt_no, max_attempts + 1):
-        try:
-            payload = fetch()
-        except DetailParseFailed as exc:
-            raw_path = save_raw_page(cfg, round_id, offer_id, exc.html) if exc.html else ""
-            note = f"解析失败：{exc}；原始页面：{raw_path}"
-            db.mark_failure(round_id, shop_key, offer_id, attempt, note)
-            log.warning("第 %s 次解析失败：%s", attempt, note)
-            if on_attempt_failed is not None:
-                on_attempt_failed(note)
-            if attempt < max_attempts:
-                human.sleep(human.retry_delay(attempt))
-            continue
-        except STOP_EXCEPTIONS:
-            # 停止判定（暂停／跨天／预算）不是「访问异常」：原样上抛，别记成一次失败尝试。
-            # 长睡眠的切片会在 fetch 途中抛出来，这一层是它唯一的兜底。
-            raise
-        except Exception as exc:
-            note = f"访问异常：{exc}"
-            db.mark_failure(round_id, shop_key, offer_id, attempt, note)
-            log.warning("第 %s 次访问失败：%s", attempt, note)
-            if on_attempt_failed is not None:
-                on_attempt_failed(note)
-            if attempt < max_attempts:
-                human.sleep(human.retry_delay(attempt))
-            continue
-
-        img = extract_main_image(payload["html"])
-        db.submit_inventory_snapshot(
-            round_id=round_id,
-            shop_key=shop_key,
-            shop_url=shop_url,
-            shop_name=shop_name,
-            offer_id=offer_id,
-            product_url=product_url,
-            list_title=offer["list_title"],
-            detail_title=payload["product_name"],
-            main_image_url=img,
-            sku_rows=payload["rows"],
-            collected_at=utcnow(),
-            attempt=attempt,
-        )
-        # 提交之后再看一次：已提交的数据保留，停止判定不回滚它。
-        rounds.ensure_workable(db, round_id, utcnow())
-        log.info("店铺 %s 商品 %s 抓取成功：%s 个 SKU（第 %s 次尝试）",
-                 shop_key, offer_id, len(payload["rows"]), attempt)
-        return
-
-
 def _finalize_round(db: Database, cfg: Config, run: Round) -> None:
     round_id = run.id
     incomplete = db.incomplete_listings(round_id)
@@ -449,16 +361,37 @@ def _retry_shop_pending_pw(db: Database, cfg: Config, round_id: int, shop: Shop,
 
 def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, offer, page,
                     emit=None) -> None:
+    """逐店补采一个商品：adapter 负责取一次详情，规则在 detail.capture_observation。
+
+    编号在取观测前就已知，所以「今天采过就不打开页面、额度用尽就不进详情」这条省事的路
+    在这里成立（候选 02 / ADR-0013）。
+    """
     def emit_detail(event: str, **kw: object) -> None:
         if emit is not None:
             emit(event, shop_key=offer["shop_key"], **kw)
 
-    def fetch():
-        return browser_pw.capture_detail(page, offer["product_url"], cfg, human,
-                                         emit=emit_detail)
+    def observe() -> detail.Observation:
+        try:
+            payload = browser_pw.capture_detail(page, offer["product_url"], cfg, human,
+                                                emit=emit_detail)
+        except STOP_EXCEPTIONS:
+            # 停止判定（暂停／跨天／预算）不是「访问异常」：原样上抛。
+            raise
+        except DetailParseFailed as exc:
+            return detail.Observation(failure=f"解析失败：{exc}", raw_html=exc.html)
+        except Exception as exc:
+            return detail.Observation(failure=f"访问异常：{exc}")
+        return detail.Observation(payload=payload)
 
     def on_attempt_failed(note: str) -> None:
         emit_detail("detail_fail", offer_id=offer["offer_id"], phase="detail", note=note)
 
-    _capture_offer_detail(db, cfg, human, round_id, offer, fetch,
-                          on_attempt_failed=on_attempt_failed)
+    detail.capture_observation(
+        db, cfg, human, round_id,
+        detail.DetailTarget(
+            shop_key=offer["shop_key"], shop_url=offer["shop_url"],
+            shop_name=offer["shop_name"], product_url=offer["product_url"],
+            slot_key=offer["offer_id"], list_title=offer["list_title"],
+            offer_id=offer["offer_id"],
+        ),
+        observe, on_attempt_failed=on_attempt_failed)

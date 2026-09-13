@@ -13,12 +13,11 @@ import time
 
 from playwright.sync_api import Error as PlaywrightError
 
-from . import browser_proc, dedupe, listing, rounds
+from . import browser_proc, dedupe, detail, listing, rounds
 from .config import Config, Shop, effective_pages_limit
-from .db import DayBoundaryReached, utcnow, cst_date
+from .db import cst_date, utcnow
 from .delay import Humanizer
-from .detail import DetailParseFailed, parse_detail_html, save_raw_page
-from .parse import extract_main_image
+from .detail import DetailParseFailed, parse_detail_html
 from .guard import (
     RoundPauseRequired,
     body_text, captcha_visible, intervention_kind,
@@ -490,13 +489,21 @@ def _capture_card(page, img, list_title, cfg, punished, on_response, se, db, rou
             return None
         return _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_response,
                               se, db, round_id, shop, offers, seen, cnote,
-                              card_ref=_card_ref(page_no, idx))
+                              human=human, card_ref=_card_ref(page_no, idx))
     return None
 
 
 def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_response, se, db,
-                   round_id, shop, offers, seen, cnote, card_ref: str | None = None) -> str | None:
-    """对非 deny 的详情弹窗做 offer_id 去重、读 SKU、入库；成功返回 offer_id。"""
+                   round_id, shop, offers, seen, cnote, human=None,
+                   card_ref: str | None = None) -> str | None:
+    """点击路径的详情 adapter 与事件：页面动作在这里，规则在 detail.capture_observation。
+
+    - adapter 负责读弹窗内容并关掉它；规则（同日去重、机会与绑定、额度、提交、失败记录）
+      与逐店补采共用一份实现（候选 02 / ADR-0013）。
+    - 事件由这里按结果记：`event_log` 的内容与改前一致，工具的统计口径不变。
+      唯一的例外是「提交后立刻跨天」那一瞬——采集进程会先抛终止，`click_ok` 不再补发。
+    - 同一次遍历里的 `seen` 去重与「立刻落榜单行」仍在这里，那是遍历的事。
+    """
     # IS-18：详情弹窗内的事件应记为 detail 阶段（传入的 se 默认标为 listing）
     _shop_emit = se
     def se(event: str, **kw: object) -> None:
@@ -508,101 +515,54 @@ def _ingest_detail(page, detail_page, popup, list_title, cfg, punished, on_respo
         _close_popup_or_back(detail_page, popup, page)
         return None
     oid = m.group(1)
-    if db and round_id and card_ref:
-        # 编号已确定：把卡片占用的详情机会绑定到该商品，补采重试才能复用同一次机会。
-        dedupe.bind_card_to_offer(db, round_id, shop.key, card_ref, oid)
     se("popup_open", offer_id=oid)
     first_time = oid not in seen
     if first_time:
         seen.add(oid)
         _remember_discovery(db, round_id, shop, offers, oid, url, list_title or "")
         log.info("命中商品 %s（累计 %s）", oid, len(offers))
-    if db and round_id and db.inventory_exists(shop.key, oid, cst_date()):
-        # 今天已采过：仍把该商品计入本轮榜单，并补写一条“成功/跳过”快照，
-        # 避免轮次商品数被低估、或误计为失败/待处理（PRD 口径）。
-        # 本次没有产生详情观测，退还刚占用的机会：同日跳过不消耗详情预算。
-        dedupe.release_slot(db, round_id, shop.key, oid)
-        if first_time:
-            db.mark_skipped(round_id, shop.key, shop.url, shop.name, oid, url,
-                            list_title or "", note="今日已有库存，跳过")
-        se("click_skipped", offer_id=oid, note=cnote + "&offer_id=" + oid)
-        se("skip_existing", offer_id=oid, note="inventory_exists_today")
-        _close_popup_or_back(detail_page, popup, page)
-        return oid
-    stop_round = False
-    if db and round_id and first_time:
-        # 初次访问与补采共享同一份尝试额度：本次是第几次尝试要接着已用掉的次数。
-        attempt = dedupe.next_attempt(db, round_id, shop.key, oid)
+
+    def read() -> detail.Observation:
         try:
             html = detail_page.content()
         except Exception as exc:
-            note = f"详情页读取失败：{exc}"
-            db.mark_failure(
-                round_id, shop.key, oid, attempt, note,
-                shop_url=shop.url, shop_name=shop.name, product_url=url,
-                product_name=list_title or None,
-            )
-            se("click_parse_error", offer_id=oid, note=cnote + "&offer_id=" + oid)
-            se("popup_close", offer_id=oid)
-            _close_popup_or_back(detail_page, popup, page)
-            return None
+            return detail.Observation(failure=f"详情页读取失败：{exc}")
         try:
             payload = parse_detail_html(html, url)
-            img_url = extract_main_image(html)
-            title = payload["product_name"]
-            rows = payload["rows"]
         except DetailParseFailed as exc:
-            raw_path = save_raw_page(cfg, round_id, oid, exc.html) if exc.html else ""
-            note = f"解析失败：{exc}；原始页面：{raw_path}"
-            db.mark_failure(
-                round_id, shop.key, oid, attempt, note,
-                shop_url=shop.url, shop_name=shop.name, product_url=url,
-                product_name=list_title or None,
-            )
-            se("click_parse_error", offer_id=oid, note=cnote + "&offer_id=" + oid)
-            se("detail_parse", offer_id=oid, note="sku_count=0")
-            se("popup_close", offer_id=oid)
-            _close_popup_or_back(detail_page, popup, page)
-            return None
+            return detail.Observation(failure=f"解析失败：{exc}", raw_html=exc.html)
         except Exception as exc:
-            raw_path = save_raw_page(cfg, round_id, oid, html) if html else ""
-            note = f"详情页解析异常：{exc}；原始页面：{raw_path}"
-            db.mark_failure(
-                round_id, shop.key, oid, attempt, note,
-                shop_url=shop.url, shop_name=shop.name, product_url=url,
-                product_name=list_title or None,
-            )
-            se("click_parse_error", offer_id=oid, note=cnote + "&offer_id=" + oid)
-            se("detail_parse", offer_id=oid, note="sku_count=0")
-            se("popup_close", offer_id=oid)
-            _close_popup_or_back(detail_page, popup, page)
-            return None
+            return detail.Observation(failure=f"详情页解析异常：{exc}", raw_html=html)
+        se("detail_parse", offer_id=oid, note=f"sku_count={len(payload['rows'])}")
+        return detail.Observation(payload=payload)
 
-        se("detail_parse", offer_id=oid, note=f"sku_count={len(rows)}")
-        db.submit_inventory_snapshot(
-            round_id=round_id,
-            shop_key=shop.key,
-            shop_url=shop.url,
-            shop_name=shop.name,
-            offer_id=oid,
-            product_url=url,
-            list_title=list_title,
-            detail_title=title,
-            main_image_url=img_url,
-            sku_rows=rows,
-            collected_at=utcnow(),
-            attempt=attempt,
-        )
-        se("click_ok", offer_id=oid, note=cnote + "&offer_id=" + oid + f"&sku={len(rows)}")
-        # 提交之后再看一次：已提交的数据保留，停止判定不回滚它。
-        stop_round = rounds.load(db, round_id).stops_work(utcnow())
-    elif db and round_id:
+    def on_attempt_failed(note: str) -> None:
+        se("click_parse_error", offer_id=oid, note=cnote + "&offer_id=" + oid)
+        se("detail_parse", offer_id=oid, note="sku_count=0")
+
+    try:
+        result = detail.capture_observation(
+            db, cfg, human, round_id,
+            detail.DetailTarget(
+                shop_key=shop.key, shop_url=shop.url, shop_name=shop.name,
+                product_url=url, slot_key=card_ref or oid, offer_id=oid,
+                list_title=list_title, duplicate=not first_time),
+            read, attempts=1, on_attempt_failed=on_attempt_failed)
+    finally:
+        se("popup_close", offer_id=oid)
+        _close_popup_or_back(detail_page, popup, page)
+
+    if result.outcome is detail.Outcome.SKIPPED_TODAY:
+        # 今天已采过：仍把该商品计入本轮榜单，跳过不快照成失败也不消耗详情预算。
+        se("click_skipped", offer_id=oid, note=cnote + "&offer_id=" + oid)
+        se("skip_existing", offer_id=oid, note="inventory_exists_today")
+    elif result.outcome is detail.Outcome.SUBMITTED:
+        skus = result.sku_count if result.sku_count is not None else 0
+        se("click_ok", offer_id=oid, note=cnote + "&offer_id=" + oid + f"&sku={skus}")
+    elif result.outcome is detail.Outcome.DUPLICATE:
         se("click_skipped", offer_id=oid, note=cnote + "&offer_id=" + oid + "&dup=1")
-    se("popup_close", offer_id=oid)
-    _close_popup_or_back(detail_page, popup, page)
-    if stop_round:
-        raise DayBoundaryReached()
-    return oid
+    # 失败与「没读到编号」一样：对调用方来说这张卡没有拿到商品（只留了失败行）。
+    return None if result.outcome is detail.Outcome.FAILED else result.offer_id
 
 
 def _close_popup_or_back(detail_page, popup, page):

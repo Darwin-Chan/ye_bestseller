@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_pw, dedupe, listing, pipeline, rounds
+from bestseller_monitor import browser_pw, dedupe, detail, listing, pipeline, rounds
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import (
     CST,
@@ -102,7 +102,7 @@ class P1Tests(unittest.TestCase):
             "rows": [{"sku_id": "red", "sku_name": "红色", "sku_price": 10, "sku_stock": 3}],
         }
         with patch.object(browser_pw, "capture_detail", return_value=payload), \
-             patch.object(pipeline, "extract_main_image", return_value=None):
+             patch.object(detail, "extract_main_image", return_value=None):
             pipeline._capture_one_pw(
                 self.db, self._cfg(), MagicMock(), round_id, offer, MagicMock(),
             )
@@ -794,7 +794,7 @@ class P1Tests(unittest.TestCase):
         )
         shop = Shop("A01", "店铺A", "https://shop.example/")
         cfg = self._cfg(raw_page_dir=Path(self.tmp.name) / "raw")
-        with patch.object(browser_pw, "extract_main_image", side_effect=ValueError("图片字段异常")):
+        with patch.object(detail, "extract_main_image", side_effect=ValueError("图片字段异常")):
             result = browser_pw._ingest_detail(
                 page, detail_page, popup, "商品", cfg, [False], MagicMock(), MagicMock(), self.db,
                 round_id, shop, [], set(), "page=1&idx=0",
@@ -809,10 +809,9 @@ class P1Tests(unittest.TestCase):
         self.assertTrue((Path(self.tmp.name) / "raw" / f"round_{round_id}" / "11.html").exists())
 
     def test_click_detail_closes_popup_before_stopping_at_day_boundary(self):
-        # 轮次日期是昨天：跨日之后不再开始详情，但这次已提交的数据要保留。
-        round_id = rounds.open(self.db, RoundRequest(
-            _yesterday(), (ShopScope("A01", "https://shop.example/", "店铺A"),),
-        )).round.id
+        # 提交之后才发现跨天：已提交的数据保留，弹窗照常关掉（点击路径的收尾）。
+        round_id = new_round(self.db)
+        run_date = rounds.load(self.db, round_id).run_date
         page = MagicMock()
         popup = MagicMock()
         detail_page = MagicMock()
@@ -821,11 +820,16 @@ class P1Tests(unittest.TestCase):
             '<script>{"skuInfoMap":{"A":{"skuId":1,"canBookCount":1}}}</script>'
         )
         shop = Shop("A01", "店铺A", "https://shop.example/")
-        with self.assertRaises(DayBoundaryReached):
-            browser_pw._ingest_detail(
-                page, detail_page, popup, "商品", self._cfg(), [False], MagicMock(),
-                MagicMock(), self.db, round_id, shop, [], set(), "page=1&idx=0",
-            )
+        with patch.object(detail, "utcnow", side_effect=[
+                f"{run_date}T04:00:00+00:00",   # 进详情前：还能开工
+                f"{run_date}T04:00:01+00:00",   # 提交用的采集时刻
+                f"{run_date}T16:00:00+00:00",   # 提交后：北京时间已是次日 0 点
+        ]):
+            with self.assertRaises(DayBoundaryReached):
+                browser_pw._ingest_detail(
+                    page, detail_page, popup, "商品", self._cfg(), [False], MagicMock(),
+                    MagicMock(), self.db, round_id, shop, [], set(), "page=1&idx=0",
+                )
 
         popup.close.assert_called_once_with()
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM inventory").fetchone()[0], 1)
