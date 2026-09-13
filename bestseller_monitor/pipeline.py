@@ -7,6 +7,7 @@ import random
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from . import browser_pw, click_listing, dedupe, detail, rounds, single_instance, stop_request
@@ -35,6 +36,13 @@ log = logging.getLogger(__name__)
 # 用户按暂停打断某家店时，这家店的失败原因。人工介入超时另有文案，不许混用（ADR-0009）。
 PAUSE_BY_USER_NOTE = "用户在界面暂停，本店未完成"
 
+class StopScope(str, Enum):
+    """这个停止影响谁：整轮，还是只跳过这家店。"""
+
+    ROUND = "round"   # 整轮的停止：该店记为未完成并上抛
+    SHOP = "shop"     # 只跳过这家店：该店记为未完成，接着跑下一家
+
+
 @dataclass(frozen=True)
 class StopOutcome:
     """一个停止异常该怎么收尾（ADR-0009）。
@@ -48,8 +56,9 @@ class StopOutcome:
     shop_note: str = ""       # 该店本轮未完成的备注
     notice: str = ""          # 给操作者看的那一句
     log_line: str = ""        # 日志那一行
+    ladder_log: str = ""      # 单店阶梯额外要记的那一行（多数异常不需要）
     log_level: int = logging.INFO
-    skip_shop: bool = False   # True = 只跳过这家店，不打断整轮
+    scope: StopScope = StopScope.ROUND
 
 
 # 「这个异常代表哪种停止」只有这一处定义；两套阶梯都查它。
@@ -66,6 +75,7 @@ _STOP_OUTCOMES: dict[type, StopOutcome] = {
         round_end=TerminalReason.DENY_EXCEEDED,
         round_note="本轮因整轮 deny 超过阈值而意外中止：{exc}；已抓取数据已保留，不可续跑",
         shop_note="整轮 deny 超过阈值：{exc}",
+        ladder_log="整轮 deny 超过阈值，中止本轮：{exc}",
         log_line="本轮意外中止：{note}",
         notice="{note}，请启动新的抓取轮次。",
         log_level=logging.ERROR,
@@ -94,14 +104,15 @@ _STOP_OUTCOMES: dict[type, StopOutcome] = {
     ),
     ShopDenyExceeded: StopOutcome(
         shop_note="榜单 deny 超过阈值：{exc}",
-        skip_shop=True,
+        scope=StopScope.SHOP,
     ),
 }
 
-# 「该不该继续」这一族异常：不是采集失败，处理方式一律是原样上抛（ADR-0009）。
-STOP_EXCEPTIONS = tuple(exc for exc, outcome in _STOP_OUTCOMES.items() if not outcome.skip_shop)
+# 「该不该继续」这一族异常：整轮级的停止，处理方式一律是原样上抛（ADR-0009）。
+STOP_EXCEPTIONS = tuple(exc for exc, outcome in _STOP_OUTCOMES.items()
+                        if outcome.scope is StopScope.ROUND)
 
-# 一套阶梯要认得的所有停止异常：跳过单店那种也在内。
+# 单店那条阶梯要认得的全部：跳过单店那种也在内。
 STOP_WITH_OUTCOME = tuple(_STOP_OUTCOMES)
 
 
@@ -256,17 +267,17 @@ def _run_round_locked(cfg: Config, shops: list[Shop]) -> None:
     except STOP_WITH_OUTCOME as exc:
         # 停止这一族在这里统一收尾：分类与文案都来自 _STOP_OUTCOMES。
         outcome = stop_outcome(exc)
+        note = outcome.round_note.format(exc=exc)
+        fields = {"exc": exc, "note": note, "round_id": round_id}
         if outcome.round_end is None:
             # 保持可续跑：数据保留，轮次不写终态。
-            log.log(outcome.log_level, outcome.log_line.format(exc=exc))
-            print(f"\n>>> {outcome.notice.format(exc=exc)}\n")
+            log.log(outcome.log_level, outcome.log_line.format(**fields))
+            print(f"\n>>> {outcome.notice.format(**fields)}\n")
         else:
-            note = outcome.round_note.format(exc=exc)
             settled = rounds.finish_if_open(db, opened.round, outcome.round_end, note=note)
             if settled.reason is outcome.round_end:
-                log.log(outcome.log_level,
-                        outcome.log_line.format(note=note, round_id=round_id))
-                print(f"\n>>> {outcome.notice.format(note=note)}\n")
+                log.log(outcome.log_level, outcome.log_line.format(**fields))
+                print(f"\n>>> {outcome.notice.format(**fields)}\n")
             else:
                 _report_late_stop(settled, outcome.round_end)
     finally:
@@ -388,7 +399,9 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
             outcome = stop_outcome(exc)
             _record_incomplete_listing(db, round_id, shop,
                                        outcome.shop_note.format(exc=exc))
-            if outcome.skip_shop:
+            if outcome.ladder_log:
+                log.log(outcome.log_level, outcome.ladder_log.format(exc=exc))
+            if outcome.scope is StopScope.SHOP:
                 continue
             raise
         except ListingLoadFailed as exc:

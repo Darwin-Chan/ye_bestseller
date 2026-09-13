@@ -59,16 +59,29 @@ def check() -> None:
         hook()
 
 
+def targets(request, *, pid: int, started_at: str | None) -> bool:
+    """这条停止请求是不是指向 (PID, 启动时刻) 那个进程。
+
+    协议两端都按这一条判断：采集端认领的是「指向本进程」的请求，
+    界面端放宽窗口时看的是「采集进程认领了它自己那条请求」。
+    """
+    if request is None:
+        return False
+    return (int(request["target_pid"]) == int(pid)
+            and request["target_started_at"] == started_at)
+
+
 def _mine(db: Database, *, pid: int | None = None):
     """表里那条请求如果指向本进程就返回它，否则返回 None。"""
     request = db.stop_request()
     if request is None:
         return None
     identity = db.crawler_process()
-    if identity is None or int(identity["pid"]) != (os.getpid() if pid is None else pid):
+    if identity is None:
         return None
-    if (int(request["target_pid"]) != int(identity["pid"])
-            or request["target_started_at"] != identity["started_at"]):
+    if int(identity["pid"]) != (os.getpid() if pid is None else pid):
+        return None
+    if not targets(request, pid=identity["pid"], started_at=identity["started_at"]):
         return None
     return request
 
@@ -101,7 +114,6 @@ class StopInFlight:
 
     kind: str
     target: dict | None
-    round_id: int | None
     deadline: float
     acked: bool = False
 
@@ -120,14 +132,16 @@ class StopWatch:
     驱动的仍然是既有的约 2 秒轮询（三个取数入口各调一次 `tick()`），不新增线程。
     """
 
-    def __init__(self, *, kill_child: Callable[[], None] | None = None,
-                 stop_foreign=None, close_browser=None, is_running=None, identity_of=None,
-                 now=time.time, grace_sec: float = 8.0, ack_grace_sec: float = 10.0):
-        self._kill_child = kill_child or (lambda: None)
-        self._stop_foreign = stop_foreign or (lambda identity: None)
-        self._close_browser = close_browser or (lambda: None)
-        self._is_running = is_running or (lambda: False)
-        self._identity_of = identity_of or (lambda conn: None)
+    def __init__(self, *, kill_child: Callable[[], None], stop_foreign: Callable,
+                 close_browser: Callable[[], None], is_running: Callable[[], bool],
+                 identity_of: Callable, now=time.time, grace_sec: float = 8.0,
+                 ack_grace_sec: float = 10.0):
+        # 五个口子都必填：漏接线时要当场报错，不是静默什么都不做。
+        self._kill_child = kill_child
+        self._stop_foreign = stop_foreign
+        self._close_browser = close_browser
+        self._is_running = is_running
+        self._identity_of = identity_of
         self._now = now
         self._grace_sec = grace_sec
         self._ack_grace_sec = ack_grace_sec
@@ -147,9 +161,9 @@ class StopWatch:
         """丢掉在跑的停止：没起过任务、也没有采集在跑时用。"""
         self._in_flight = None
 
-    def begin(self, kind: str, target: dict | None, round_id: int | None) -> StopInFlight:
+    def begin(self, kind: str, target: dict | None) -> StopInFlight:
         """记下「正在停止」：不阻塞，倒计时与超时兜底交给轮询。"""
-        self._in_flight = StopInFlight(kind=kind, target=target, round_id=round_id,
+        self._in_flight = StopInFlight(kind=kind, target=target,
                                        deadline=self._now() + self._grace_sec)
         return self._in_flight
 
@@ -177,8 +191,8 @@ class StopWatch:
         request = db.stop_request()
         if request is None:
             return stop
-        if (int(request["target_pid"]) != stop.target["pid"]
-                or request["target_started_at"] != stop.target["started_at"]):
+        if not targets(request, pid=stop.target["pid"],
+                       started_at=stop.target["started_at"]):
             return stop
         if not request["ack_at"]:
             return stop

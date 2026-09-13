@@ -67,11 +67,6 @@ log = logging.getLogger(__name__)
 _BROWSER_CLOSE_RETRY_SEC = 3.0
 _BROWSER_CLOSE_RETRY_INTERVAL = 0.7
 
-# 停止的种类。「暂停」写进 stop_requests 的 kind；「中止」不用请求行——轮次终态
-# 本身就是停止信号，这里只是一个内存里的标记（ADR-0009）。
-_STOP_PAUSE = stop_request.PAUSE
-_STOP_ABORT = stop_request.ABORT
-
 # 一句提示的 MessageBox 旗标：信息图标 + 抢到前台 + 置顶。
 _MB_ICONINFORMATION = 0x40
 _MB_SETFOREGROUND = 0x10000
@@ -136,6 +131,7 @@ class Api:
         # 停止编排（窗口、回执、超时强杀）在 stop_request 里；这里只把世界的几个口子接上。
         # 一律用 lambda 晚绑定：测试 patch 类方法（例如 `_kill_proc`）时要打到实际调用点上，
         # 直接传绑定方法会在构造那一刻就定死（与前面几轮踩过的别名坑同一类）。
+        # 窗口：请求发出后 8 秒、采集进程回执之后再 10 秒（ADR-0009，数值在 StopWatch 里）。
         self._stop_watch = stop_request.StopWatch(
             kill_child=lambda: self._kill_proc(),
             stop_foreign=lambda identity: self._stop_crawler_process(identity),
@@ -353,10 +349,10 @@ class Api:
                     self._kill_proc()
                     self._kill_browser()
                     return {"ok": True}
-                db.request_stop(round_id=self.round_id, kind=_STOP_PAUSE,
+                db.request_stop(round_id=self.round_id, kind=stop_request.PAUSE,
                                 target_pid=target["pid"],
                                 target_started_at=target["started_at"])
-                self._stop_watch.begin(_STOP_PAUSE, target, self.round_id)
+                self._stop_watch.begin(stop_request.PAUSE, target)
                 log.info("暂停：已写下停止请求（目标 PID %s），等它自己停下。", target["pid"])
                 return {"ok": True, "stopping": self._stop_watch.state}
             finally:
@@ -389,7 +385,7 @@ class Api:
                 if identity is None:
                     self._stop_watch.forget()
                     return {"ok": True, "round_id": rid}   # 采集进程已经不在了
-                self._stop_watch.begin(_STOP_ABORT, self._stop_target(conn), rid)
+                self._stop_watch.begin(stop_request.ABORT, self._stop_target(conn))
                 log.info("中止：轮次 #%s 已收尾为人工放弃，等采集进程自己停下。", rid)
                 return {"ok": True, "round_id": rid, "stopping": self._stop_watch.state}
             finally:

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import gui
-from bestseller_monitor import browser_proc, db, rounds, single_instance
+from bestseller_monitor import browser_proc, db, rounds, single_instance, stop_request
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import (CST, DETAIL_BUDGET_NOTE, Database, connect,
                                    cst_date, utcnow)
@@ -268,7 +268,7 @@ class GuiStopRequestTests(unittest.TestCase):
         self.lock.release()          # 采集进程已经走了，只剩表里那条请求
         conn = connect(self.db_path)
         try:
-            Database(conn).request_stop(round_id=rid, kind=gui._STOP_PAUSE,
+            Database(conn).request_stop(round_id=rid, kind=stop_request.PAUSE,
                                         target_pid=6104, target_started_at=started_at)
         finally:
             conn.close()

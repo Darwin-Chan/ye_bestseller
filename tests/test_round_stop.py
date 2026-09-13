@@ -39,7 +39,7 @@ class RoundStopRuleTests(unittest.TestCase):
             with self.subTest(exc=type(exc).__name__):
                 outcome = pipeline.stop_outcome(exc)
                 self.assertTrue(outcome.shop_note, "每个停止异常都要能写本店备注")
-                if not outcome.skip_shop:
+                if outcome.scope is pipeline.StopScope.ROUND:
                     self.assertTrue(outcome.notice, "整轮级的停止要有一句给人看的提示")
 
     def test_inheritance_no_longer_decides_how_a_stop_ends(self):

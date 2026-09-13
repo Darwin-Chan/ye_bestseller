@@ -195,7 +195,7 @@ class StopWatchTests(unittest.TestCase):
         self.running = False
 
     def begin(self, kind: str = stop_request.PAUSE) -> None:
-        self.watch.begin(kind, {"pid": os.getpid(), "started_at": self.started_at}, self.rid)
+        self.watch.begin(kind, {"pid": os.getpid(), "started_at": self.started_at})
 
     def test_nothing_happens_inside_the_window(self):
         self.begin()
@@ -249,8 +249,7 @@ class StopWatchTests(unittest.TestCase):
         self.db.clear_crawler_process()
         target_started_at = self.db.record_crawler_process(
             pid=4321, round_id=self.rid, note="别处起的")
-        self.watch.begin(stop_request.ABORT, {"pid": 4321, "started_at": target_started_at},
-                         self.rid)
+        self.watch.begin(stop_request.ABORT, {"pid": 4321, "started_at": target_started_at})
 
         self.now += 8.0
         self.watch.tick(self.conn)
@@ -265,6 +264,7 @@ class StopWatchTests(unittest.TestCase):
                              target_pid=os.getpid(), target_started_at=self.started_at)
         self.watch = stop_request.StopWatch(
             kill_child=lambda: self.killed.append("child"),   # 杀了但进程还在
+            stop_foreign=lambda identity: None,
             close_browser=lambda: self.killed.append("browser"),
             is_running=lambda: True,
             identity_of=lambda conn: self.db.crawler_process(),

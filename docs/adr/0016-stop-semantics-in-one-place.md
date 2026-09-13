@@ -40,8 +40,10 @@ ADR-0009 的停止协议横跨两个进程，但「这个停止该怎么收尾�
 
 ## 结果
 
-- 界面侧：`gui.Api` 不再有 `self._stop` 与那七个方法；`tests/test_gui.py` 里七处改私有状态的
-  写法变成 `self.clock.advance(20)`——**推动窗口用的是 interface，不是私有字段**。
+- 界面侧：`gui.Api` 不再有 `self._stop` 与五个内部方法（`_begin_stop` / `_stop_state` /
+  `_enforce_stop_deadline` / `_note_stop_ack` / `_force_stop`）；`pause_run` / `abort_run`
+  仍是入口，只是改成「写请求/写终态 → `watch.begin(...)`」。`tests/test_gui.py` 里七处改私有
+  状态的写法变成 `self.clock.advance(20)`——**推动窗口用的是 interface，不是私有字段**。
 - 采集侧：两套阶梯各剩「查表 + 兜底」，文案与分类同处一行；「顺序承重」不再存在。
 - 新增 `tests/test_stop_request.py::StopWatchTests` 七条，把整条协议在没有进程的情况下走完：
   窗口内不动手、到点强杀并清理、回执放宽窗口、进程已走只清理、强杀没落到实处就把请求留给
@@ -58,6 +60,21 @@ ADR-0009 的停止协议横跨两个进程，但「这个停止该怎么收尾�
   stop_request），分类会跟着散开；表把它们聚在一处。
 - **只在注释里写下那个承重顺序**：隐患还在，只是被写下来了。
 - **界面侧只把 dict 换成 dataclass**：窗口仍旧读挂钟，用例仍旧只能改私有状态。
+
+两轴审查（成文标准硬违规 0）另抓到五处，都已收口：
+
+1. 我在把 `_run_listing_pw` 的六段阶梯收成查表时，**把整轮 deny 那一段的
+   `log.error("整轮 deny 超过阈值，中止本轮：…")` 一起删掉了**——日志行为变了，不算逐字等价。
+   现在这条日志跟着那条表项走（`ladder_log` 字段）。
+2. `STOP_WITH_OUTCOME` 把只跳过单店的 `ShopDenyExceeded` 也收进来，而它在轮次级阶梯里
+   `round_end`/`notice` 全空——万一漏进去就是「空 INFO + 空提示、轮次静默留进行中」。现在用
+   一个 `scope`（`ROUND` / `SHOP`）说清「影响谁」，两条阶梯各按 scope 派生，不再靠
+   `skip_shop` 反推、也不再让一个字段担两个意思。
+3. 身份匹配规则（「这条请求指向的是不是那个进程」）在 `stop_request.py` 里写了两遍
+   （采集端的 `_mine` 与界面端放宽窗口时的判断），合并成 `targets(request, pid=…, started_at=…)`。
+4. `StopInFlight.round_id` 只写不读（旧 dict 里也一样），删掉。
+5. `StopWatch` 的五个口子原来带 no-op 默认值，漏接线时静默什么都不做——与这份 ADR 自己主张的
+   「未登记就显式报错」相反，改成必填。
 
 相关词汇见 [CONTEXT.md](../../CONTEXT.md) 的「停止请求」「协作停止」「强制停止」「界面会话事实」；
 来源是 `docs/reviews/architecture-review-2026-09-13.html` 候选 06，规格在
