@@ -6,6 +6,7 @@ import os
 import random
 import sys
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import browser_pw, click_listing, dedupe, detail, rounds, single_instance, stop_request
@@ -34,9 +35,87 @@ log = logging.getLogger(__name__)
 # 用户按暂停打断某家店时，这家店的失败原因。人工介入超时另有文案，不许混用（ADR-0009）。
 PAUSE_BY_USER_NOTE = "用户在界面暂停，本店未完成"
 
+@dataclass(frozen=True)
+class StopOutcome:
+    """一个停止异常该怎么收尾（ADR-0009）。
+
+    文案与分类放在一起：谁抛出这个异常，谁就该知道「本店怎么记、轮次写不写终态、
+    给操作者看哪一句」。模板里的 `{exc}` / `{note}` / `{round_id}` 由收尾处替换。
+    """
+
+    round_end: TerminalReason | None = None   # 轮次终态；None = 保持进行中（可续跑）
+    round_note: str = ""      # 写终态时的说明
+    shop_note: str = ""       # 该店本轮未完成的备注
+    notice: str = ""          # 给操作者看的那一句
+    log_line: str = ""        # 日志那一行
+    log_level: int = logging.INFO
+    skip_shop: bool = False   # True = 只跳过这家店，不打断整轮
+
+
+# 「这个异常代表哪种停止」只有这一处定义；两套阶梯都查它。
+# 查法是「自己 → 父类」（见 stop_outcome）：登记了父类就等于登记了它的子类，
+# 而子类自己登记的条目优先——RoundDenyExceeded 继承 RoundPauseRequired，
+# 两者各占一行，谁也不遮谁，也就不再需要靠 except 的先后顺序来保证。
+_STOP_OUTCOMES: dict[type, StopOutcome] = {
+    StopRequested: StopOutcome(
+        shop_note=PAUSE_BY_USER_NOTE,
+        log_line="收到界面暂停请求：本轮停在检查点，已抓数据保留、可续跑。",
+        notice="本轮已暂停（可再次运行续跑）。",
+    ),
+    RoundDenyExceeded: StopOutcome(
+        round_end=TerminalReason.DENY_EXCEEDED,
+        round_note="本轮因整轮 deny 超过阈值而意外中止：{exc}；已抓取数据已保留，不可续跑",
+        shop_note="整轮 deny 超过阈值：{exc}",
+        log_line="本轮意外中止：{note}",
+        notice="{note}，请启动新的抓取轮次。",
+        log_level=logging.ERROR,
+    ),
+    DayBoundaryReached: StopOutcome(
+        round_end=TerminalReason.DAY_BOUNDARY,
+        round_note=DAY_BOUNDARY_NOTE,
+        shop_note=DAY_BOUNDARY_NOTE,
+        log_line="轮次 #{round_id}：{note}",
+        notice="{note}。",
+        log_level=logging.WARNING,
+    ),
+    DetailBudgetExhausted: StopOutcome(
+        round_end=TerminalReason.DETAIL_BUDGET_EXHAUSTED,
+        round_note=DETAIL_BUDGET_NOTE,
+        shop_note=DETAIL_BUDGET_NOTE,
+        log_line="轮次 #{round_id}：{note}",
+        notice="{note}。",
+        log_level=logging.WARNING,
+    ),
+    RoundPauseRequired: StopOutcome(
+        shop_note="人工介入未完成：{exc}",
+        log_line="本轮暂停：{exc}",
+        notice="本轮已暂停（可再次运行续跑）：{exc}",
+        log_level=logging.ERROR,
+    ),
+    ShopDenyExceeded: StopOutcome(
+        shop_note="榜单 deny 超过阈值：{exc}",
+        skip_shop=True,
+    ),
+}
+
 # 「该不该继续」这一族异常：不是采集失败，处理方式一律是原样上抛（ADR-0009）。
-STOP_EXCEPTIONS = (StopRequested, RoundPauseRequired, DayBoundaryReached,
-                   DetailBudgetExhausted)
+STOP_EXCEPTIONS = tuple(exc for exc, outcome in _STOP_OUTCOMES.items() if not outcome.skip_shop)
+
+# 一套阶梯要认得的所有停止异常：跳过单店那种也在内。
+STOP_WITH_OUTCOME = tuple(_STOP_OUTCOMES)
+
+
+def stop_outcome(exc: BaseException) -> StopOutcome:
+    """查这个异常该怎么收尾：先看它自己，再沿继承链找最近的登记项。
+
+    `InterventionTimeout` 就是靠这条落进「人工介入未完成」——它继承
+    `RoundPauseRequired`，不必单独登记。
+    """
+    for cls in type(exc).__mro__:
+        outcome = _STOP_OUTCOMES.get(cls)
+        if outcome is not None:
+            return outcome
+    raise KeyError(f"没有登记这个停止异常：{type(exc).__name__}")
 
 
 def round_shops(db: Database, round_id: int, cfg: Config) -> list[Shop]:
@@ -174,39 +253,22 @@ def _run_round_locked(cfg: Config, shops: list[Shop]) -> None:
         # 采集驱动只有一条；别的值在配置加载处就被拦住（ADR-0010），这里不再有分支。
         _run_pwcdp_round(db, cfg, round_id, work_shops)
         _finalize_round(db, cfg, opened.round)
-    except StopRequested:
-        # 界面按了暂停：轮次保持进行中，已抓数据保留，可再次运行续跑。
-        log.info("收到界面暂停请求：本轮停在检查点，已抓数据保留、可续跑。")
-        print("\n>>> 本轮已暂停（可再次运行续跑）。\n")
-    except RoundDenyExceeded as exc:
-        # 整轮 deny 超限是终态：数据保留，但本轮不可续跑，只能新开一轮。
-        note = f"本轮因整轮 deny 超过阈值而意外中止：{exc}；已抓取数据已保留，不可续跑"
-        settled = rounds.finish_if_open(db, opened.round, TerminalReason.DENY_EXCEEDED, note=note)
-        if settled.reason is TerminalReason.DENY_EXCEEDED:
-            log.error("本轮意外中止：%s", note)
-            print(f"\n>>> {note}，请启动新的抓取轮次。\n")
+    except STOP_WITH_OUTCOME as exc:
+        # 停止这一族在这里统一收尾：分类与文案都来自 _STOP_OUTCOMES。
+        outcome = stop_outcome(exc)
+        if outcome.round_end is None:
+            # 保持可续跑：数据保留，轮次不写终态。
+            log.log(outcome.log_level, outcome.log_line.format(exc=exc))
+            print(f"\n>>> {outcome.notice.format(exc=exc)}\n")
         else:
-            _report_late_stop(settled, TerminalReason.DENY_EXCEEDED)
-    except DayBoundaryReached:
-        settled = rounds.finish_if_open(db, opened.round, TerminalReason.DAY_BOUNDARY,
-                                        note=DAY_BOUNDARY_NOTE)
-        if settled.reason is TerminalReason.DAY_BOUNDARY:
-            log.warning("轮次 #%s：%s", round_id, DAY_BOUNDARY_NOTE)
-            print(f"\n>>> {DAY_BOUNDARY_NOTE}。\n")
-        else:
-            _report_late_stop(settled, TerminalReason.DAY_BOUNDARY)
-    except DetailBudgetExhausted:
-        settled = rounds.finish_if_open(db, opened.round, TerminalReason.DETAIL_BUDGET_EXHAUSTED,
-                                        note=DETAIL_BUDGET_NOTE)
-        if settled.reason is TerminalReason.DETAIL_BUDGET_EXHAUSTED:
-            log.warning("轮次 #%s：%s", round_id, DETAIL_BUDGET_NOTE)
-            print(f"\n>>> {DETAIL_BUDGET_NOTE}。\n")
-        else:
-            _report_late_stop(settled, TerminalReason.DETAIL_BUDGET_EXHAUSTED)
-    except RoundPauseRequired as exc:
-        # 人工处理超时等情况：保留轮次状态，提示稍后续跑
-        log.error("本轮暂停：%s", exc)
-        print(f"\n>>> 本轮已暂停（可再次运行续跑）：{exc}\n")
+            note = outcome.round_note.format(exc=exc)
+            settled = rounds.finish_if_open(db, opened.round, outcome.round_end, note=note)
+            if settled.reason is outcome.round_end:
+                log.log(outcome.log_level,
+                        outcome.log_line.format(note=note, round_id=round_id))
+                print(f"\n>>> {outcome.notice.format(note=note)}\n")
+            else:
+                _report_late_stop(settled, outcome.round_end)
     finally:
         stop_request.uninstall()
         db.clear_crawler_process()
@@ -320,26 +382,14 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
             )
             log.info("店铺 %s 榜单：%s 个商品（%s 页）", shop.key, len(offers), pages_read)
             db.save_shop_offers(round_id, shop.key, shop.url, shop.name, offers, pages_read)
-        except ShopDenyExceeded as exc:
-            _record_incomplete_listing(db, round_id, shop, f"榜单 deny 超过阈值：{exc}")
-            continue
-        except RoundDenyExceeded as exc:
-            _record_incomplete_listing(db, round_id, shop, f"整轮 deny 超过阈值：{exc}")
-            log.error("整轮 deny 超过阈值，中止本轮：%s", exc)
-            raise
-        except DetailBudgetExhausted:
-            _record_incomplete_listing(db, round_id, shop, DETAIL_BUDGET_NOTE)
-            raise
-        except DayBoundaryReached:
-            _record_incomplete_listing(db, round_id, shop, DAY_BOUNDARY_NOTE)
-            raise
-        except RoundPauseRequired as exc:
-            # 人工验证等不到结果：轮次保持可续跑，这家店要如实记为未完成。
-            _record_incomplete_listing(db, round_id, shop, f"人工介入未完成：{exc}")
-            raise
-        except StopRequested:
-            # 用户在界面按了暂停：轮次同样保持可续跑，但原因不许写成人工介入。
-            _record_incomplete_listing(db, round_id, shop, PAUSE_BY_USER_NOTE)
+        except STOP_WITH_OUTCOME as exc:
+            # 该店如实记为未完成（备注文案来自 _STOP_OUTCOMES），
+            # 整轮级的停止原样上抛、跳过单店的那种接着跑下一家。
+            outcome = stop_outcome(exc)
+            _record_incomplete_listing(db, round_id, shop,
+                                       outcome.shop_note.format(exc=exc))
+            if outcome.skip_shop:
+                continue
             raise
         except ListingLoadFailed as exc:
             _record_listing_failure(db, cfg, round_id, shop, exc)

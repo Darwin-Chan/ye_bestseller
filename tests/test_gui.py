@@ -19,7 +19,20 @@ from helpers import isolated_locks, new_round
 from tools import bench_refresh
 
 
-def gui_api(*, shops=(), now=None, db_path=None, open_conn=None, **cfg):
+class StopClock:
+    """停止窗口用的时钟：用例想让它走多快就多快（窗口是 8 秒 / 回执后 10 秒）。"""
+
+    def __init__(self, start: float = 1_000.0):
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def gui_api(*, shops=(), now=None, db_path=None, open_conn=None, stop_clock=None, **cfg):
     """建一个界面对象：走真实构造 interface（候选 04），用例只说自己关心的那几件。
 
     默认给一个够用的 cfg；`db_path` 与 `open_conn` 二选一，前者按数据层入口开连接
@@ -30,7 +43,8 @@ def gui_api(*, shops=(), now=None, db_path=None, open_conn=None, **cfg):
     return Api(cfg=SimpleNamespace(max_pages_per_shop=3, **cfg),
                shops=list(shops),
                now=now or utcnow,
-               open_conn=open_conn)
+               open_conn=open_conn,
+               stop_clock=stop_clock)
 
 
 class GuiWindowHeightTests(unittest.TestCase):
@@ -124,12 +138,13 @@ class GuiStopRequestTests(unittest.TestCase):
         # 锁名字按用例隔离：这些用例要看「有没有采集在跑」，那是机器级锁——本机真跑着
         # 界面/采集时，用例会莫名其妙地连库、撞上「已有任务在运行」。
         self.enterContext(isolated_locks())
+        self.clock = StopClock()
         self.api = self._api()
 
     def _api(self, start_browser=True, attach_port=9222):
         return gui_api(shops=[Shop("A01", "店铺A", "https://A01.example/")],
                        db_path=self.db_path, start_browser=start_browser,
-                       attach_port=attach_port)
+                       attach_port=attach_port, stop_clock=self.clock)
 
     def _running_crawler(self, pid: int = 6104) -> tuple[int, str]:
         """造出「本界面拉起的采集进程在跑」：占住会话锁 + 身份行 + 活着的子进程句柄。"""
@@ -198,12 +213,12 @@ class GuiStopRequestTests(unittest.TestCase):
         with patch.object(Api, "_kill_proc", side_effect=self._dies()) as kill_proc, \
                 patch.object(browser_proc, "close_browser", return_value=6104) as close:
             self.api.pause_run()
-            self.api._stop["deadline"] = time.time() - 1
+            self.clock.advance(20)   # 拨过 8 秒窗口
             self.api.get_run()      # 轮询驱动兜底，不新增后台线程
 
         kill_proc.assert_called_once_with()
         close.assert_called_once_with(9222, launched_by_us=True)
-        self.assertIsNone(self.api._stop)
+        self.assertIsNone(self.api._stop_watch.state)
         self.assertIsNone(self._request_row(), "停下之后不该留着停止请求")
 
     def test_pause_acknowledgement_widens_the_window_and_reports_closing(self):
@@ -213,7 +228,7 @@ class GuiStopRequestTests(unittest.TestCase):
                 patch.object(browser_proc, "close_browser"):
             self.api.pause_run()
             self._acknowledge()
-            self.api._stop["deadline"] = time.time() - 1   # 原窗口已经到点
+            self.clock.advance(20)   # 原窗口已经到点
             data = self.api.get_run()
 
         kill_proc.assert_not_called()
@@ -226,7 +241,7 @@ class GuiStopRequestTests(unittest.TestCase):
         with patch.object(Api, "_kill_proc", side_effect=self._dies()), \
                 patch.object(browser_proc, "close_browser") as close:
             self.api.pause_run()
-            self.api._stop["deadline"] = time.time() - 1
+            self.clock.advance(20)
             self.api.get_run()
 
         close.assert_not_called()
@@ -257,13 +272,13 @@ class GuiStopRequestTests(unittest.TestCase):
                                         target_pid=6104, target_started_at=started_at)
         finally:
             conn.close()
-        self.api._stop = None
+        self.api._stop_watch.forget()
 
         with patch.object(Api, "_spawn_crawler"):
             result = self.api.start_run(["A01"])
 
         self.assertTrue(result["ok"], result.get("error"))
-        self.assertIsNone(self.api._stop, "新的一轮不该继承上一次的停止状态")
+        self.assertIsNone(self.api._stop_watch.state, "新的一轮不该继承上一次的停止状态")
         self.assertIsNotNone(self._request_row(),
                              "惰性请求可以留着：认领按目标进程匹配，撞不上新进程")
 
@@ -586,9 +601,11 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tmp.name) / "test.db"
         self.enterContext(isolated_locks())
+        self.clock = StopClock()
         # start_browser=False：中止只收尾采集进程，不去动用户的浏览器（那一路由 IS-43 的测试盯）。
         self.api = gui_api(shops=[Shop("A01", "店铺A", "https://A01.example/")],
-                           db_path=self.db_path, start_browser=False)
+                           db_path=self.db_path, start_browser=False,
+                           stop_clock=self.clock)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -640,7 +657,7 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
             self.assertEqual(self._row("terminal_reason"), "ABANDONED",
                              "先写终态：它本身就是停止信号（ADR-0009）")
             self.assertEqual(seen, {}, "窗口还没到，不许先杀")
-            self.api._stop["deadline"] = time.time() - 1
+            self.clock.advance(20)
             self.api.get_start()      # 轮询驱动兜底
 
         self.assertTrue(result["ok"])
@@ -659,7 +676,7 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         with patch.object(browser_proc, "process_image_name", return_value=""), \
                 patch.object(browser_proc, "terminate_process_tree") as kill:
             result = self.api.abort_run()
-            self.api._stop["deadline"] = time.time() - 1
+            self.clock.advance(20)
             self.api.get_start()
 
         self.assertTrue(result["ok"])
@@ -673,7 +690,7 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         with patch.object(browser_proc, "process_image_name", return_value=""), \
                 patch.object(browser_proc, "terminate_process_tree") as kill:
             self.api.abort_run()
-            self.api._stop["deadline"] = time.time() - 1
+            self.clock.advance(20)
             self.api.get_start()
 
         kill.assert_not_called()
@@ -687,7 +704,7 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         with patch.object(browser_proc, "process_image_name", return_value="msedge.exe"), \
                 patch.object(browser_proc, "terminate_process_tree") as kill:
             result = self.api.abort_run()
-            self.api._stop["deadline"] = time.time() - 1
+            self.clock.advance(20)
             self.api.get_start()
 
         self.assertTrue(result["ok"])

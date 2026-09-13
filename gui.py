@@ -67,15 +67,10 @@ log = logging.getLogger(__name__)
 _BROWSER_CLOSE_RETRY_SEC = 3.0
 _BROWSER_CLOSE_RETRY_INTERVAL = 0.7
 
-# 协作停止的窗口（ADR-0009）：请求发出后 8 秒还没停下就强制结束；采集进程回执之后
-# 再给 10 秒，让它把浏览器会话关干净。这一跳由轮询驱动，关掉界面就没有兜底了。
-_STOP_GRACE_SEC = 8.0
-_STOP_ACK_GRACE_SEC = 10.0
-
 # 停止的种类。「暂停」写进 stop_requests 的 kind；「中止」不用请求行——轮次终态
 # 本身就是停止信号，这里只是一个内存里的标记（ADR-0009）。
 _STOP_PAUSE = stop_request.PAUSE
-_STOP_ABORT = "abort"
+_STOP_ABORT = stop_request.ABORT
 
 # 一句提示的 MessageBox 旗标：信息图标 + 抢到前台 + 置顶。
 _MB_ICONINFORMATION = 0x40
@@ -114,12 +109,15 @@ class Api:
     （`_ui_state()` 折出来的 `views.UiState`）与连接生命周期，取数与渲染文案交给那个 module。
     """
 
-    def __init__(self, cfg=None, *, now=utcnow, open_conn=None, shops=None):
+    def __init__(self, cfg=None, *, now=utcnow, open_conn=None, shops=None,
+                 stop_clock=None):
         """构造 interface：配置、时刻、连接与店铺表都可以注入。
 
         `main()` 仍写 `Api()`——那时配置按项目默认位置读，「现在」取本机时间，
         连接走数据层入口（`connect()` 会建目录、建表并执行迁移，见 IS-37）。
         测试与基准注入固定时刻与自己的库，于是「今天」可判定、也不用手工塞私有属性。
+        `stop_clock` 是停止窗口用的时钟（默认挂钟）：用例给它一个能推进的时钟，
+        就能把 8 秒 / 10 秒那两段窗口走到点，而不必去改私有状态。
         """
         self.cfg = cfg if cfg is not None else Config.from_file(
             PROJECT_ROOT / "config" / "config.toml", root=PROJECT_ROOT)
@@ -135,8 +133,17 @@ class Api:
         self.user_paused = False
         self._elapsed_base = 0.0
         self._run_start_ts: float | None = None
-        # 正在进行的停止：{"kind", "target", "deadline", "acked", "round_id"}（ADR-0009）
-        self._stop: dict | None = None
+        # 停止编排（窗口、回执、超时强杀）在 stop_request 里；这里只把世界的几个口子接上。
+        # 一律用 lambda 晚绑定：测试 patch 类方法（例如 `_kill_proc`）时要打到实际调用点上，
+        # 直接传绑定方法会在构造那一刻就定死（与前面几轮踩过的别名坑同一类）。
+        self._stop_watch = stop_request.StopWatch(
+            kill_child=lambda: self._kill_proc(),
+            stop_foreign=lambda identity: self._stop_crawler_process(identity),
+            close_browser=lambda: self._kill_browser(),
+            is_running=lambda: self.any_crawler_running(),
+            identity_of=lambda conn: self.crawler_identity(conn),
+            now=stop_clock or time.time,
+        )
 
     # ---------- 基础 ----------
     def _today(self) -> str:
@@ -162,8 +169,8 @@ class Api:
             round_id=self.round_id,
             crawler_running=self._own_crawler_alive(),
             manually_paused=self.user_paused,
-            stopping=self._stop_state(),
-            stop_grace_sec=_STOP_GRACE_SEC,
+            stopping=self._stop_watch.state,
+            stop_grace_sec=self._stop_watch.grace_sec,
             elapsed_sec=self._current_elapsed(),
             start_error=self._refused_start_message(),
         )
@@ -173,7 +180,7 @@ class Api:
         with self._lock:
             conn = self._open_conn()
             try:
-                self._enforce_stop_deadline(conn)
+                self._stop_watch.tick(conn)
                 return views.start_view(
                     conn, cfg=self.cfg, shops=self.shops, state=self._ui_state(),
                     crawler=self.crawler_identity(conn), now=self._now())
@@ -189,7 +196,7 @@ class Api:
                 return views.run_view(None, state=state, now=self._now())
             conn = self._open_conn()
             try:
-                self._enforce_stop_deadline(conn)
+                self._stop_watch.tick(conn)
                 view = views.run_view(conn, state=self._ui_state(), now=self._now())
                 if view.get("has_round"):
                     # 轮次由采集子进程创建，界面在这里随轮询认领它。
@@ -349,9 +356,9 @@ class Api:
                 db.request_stop(round_id=self.round_id, kind=_STOP_PAUSE,
                                 target_pid=target["pid"],
                                 target_started_at=target["started_at"])
-                self._begin_stop(_STOP_PAUSE, target, self.round_id)
+                self._stop_watch.begin(_STOP_PAUSE, target, self.round_id)
                 log.info("暂停：已写下停止请求（目标 PID %s），等它自己停下。", target["pid"])
-                return {"ok": True, "stopping": self._stop_state()}
+                return {"ok": True, "stopping": self._stop_watch.state}
             finally:
                 conn.close()
 
@@ -373,18 +380,18 @@ class Api:
                 db.clear_stop_request()
                 identity = self.crawler_identity(conn)
                 if self.round_id is None and identity is None:
-                    self._stop = None
+                    self._stop_watch.forget()
                     return {"ok": True}  # 没起过任务、也没有采集在跑：不必连库
                 rid = self._round_to_abandon(db, identity)
                 if rid is not None:
                     rounds.finish_if_open(db, rounds.load(db, rid), TerminalReason.ABANDONED,
                                           note="GUI 人工中止（放弃）")
                 if identity is None:
-                    self._stop = None
+                    self._stop_watch.forget()
                     return {"ok": True, "round_id": rid}   # 采集进程已经不在了
-                self._begin_stop(_STOP_ABORT, self._stop_target(conn), rid)
+                self._stop_watch.begin(_STOP_ABORT, self._stop_target(conn), rid)
                 log.info("中止：轮次 #%s 已收尾为人工放弃，等采集进程自己停下。", rid)
-                return {"ok": True, "round_id": rid, "stopping": self._stop_state()}
+                return {"ok": True, "round_id": rid, "stopping": self._stop_watch.state}
             finally:
                 conn.close()
 
@@ -455,81 +462,12 @@ class Api:
             return None
         return {"pid": int(row["pid"]), "started_at": row["started_at"]}
 
-    def _begin_stop(self, kind: str, target: dict | None, round_id: int | None) -> None:
-        """记下「正在停止」，到点由轮询兜底（不新增后台线程，也不挡住取数链）。"""
-        self._stop = {
-            "kind": kind,
-            "target": target,
-            "round_id": round_id,
-            "deadline": time.time() + _STOP_GRACE_SEC,
-            "acked": False,
-        }
-
-    def _stop_state(self) -> str | None:
-        """给界面看的停止阶段：没有停止在进行时是 None。"""
-        if self._stop is None:
-            return None
-        return "closing" if self._stop["acked"] else "stopping"
-
-    def _enforce_stop_deadline(self, conn) -> None:
-        """停止窗口到点还没停下就强制结束；已经停下就把状态收干净。
-
-        由三个取数入口的轮询驱动（IS-38 同一条链），所以关掉界面之后就没有这一半，
-        只剩采集进程自己读停止请求那一半——见 ADR-0009 的代价一节。
-        """
-        stop = self._stop
-        if stop is None:
-            return
-        db = Database(conn)
-        self._note_stop_ack(db, stop)
-        if not self.any_crawler_running():
-            log.info("采集进程已停下（%s）。", stop["kind"])
-            db.clear_stop_request()
-            self._stop = None
-            return
-        if time.time() < stop["deadline"]:
-            return
-        self._force_stop(conn, db, stop)
-
-    @staticmethod
-    def _note_stop_ack(db, stop: dict) -> None:
-        """采集进程回执了就放宽窗口：它在收尾，而不是没响应。"""
-        if stop["acked"] or stop["target"] is None:
-            return
-        request = db.stop_request()
-        if request is None:
-            return
-        if (int(request["target_pid"]) != stop["target"]["pid"]
-                or request["target_started_at"] != stop["target"]["started_at"]):
-            return
-        if request["ack_at"]:
-            stop["acked"] = True
-            stop["deadline"] = time.time() + _STOP_ACK_GRACE_SEC
-            log.info("采集进程已回执停止请求，再等 %.0f 秒收尾。", _STOP_ACK_GRACE_SEC)
-
-    def _force_stop(self, conn, db, stop: dict) -> None:
-        """强制停止：强杀进程 → 按归属收尾浏览器 → 清停止请求 → 收尾状态。"""
-        log.warning("停止窗口内没停下（%s），强制结束采集进程。", stop["kind"])
-        self._kill_proc()
-        identity = self.crawler_identity(conn)
-        if stop["kind"] == _STOP_ABORT and identity is not None:
-            # 中止要停的可能是别处起的采集：按身份行里的 PID 停，镜像名先核过。
-            self._stop_crawler_process(identity)
-        self._kill_browser()
-        if self.any_crawler_running():
-            # 强杀没落到实处：请求留着，采集进程在下一个检查点仍会自己停下。
-            log.warning("强制结束之后采集进程仍在跑，停止请求留在库里等它自己认领。")
-        else:
-            db.clear_crawler_process()
-            db.clear_stop_request()
-        self._stop = None
-
     # ---------- 结果页 ----------
     def get_result(self) -> dict:
         with self._lock:
             conn = self._open_conn()
             try:
-                self._enforce_stop_deadline(conn)
+                self._stop_watch.tick(conn)
                 return views.result_view(conn, state=self._ui_state(), now=self._now())
             finally:
                 conn.close()

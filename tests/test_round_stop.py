@@ -7,9 +7,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from bestseller_monitor import browser_pw, click_listing, detail, pipeline, rounds, stop_request
+from bestseller_monitor.click_listing import RoundDenyExceeded, ShopDenyExceeded
 from bestseller_monitor.config import Shop
-from bestseller_monitor.db import CST, Database, DayBoundaryReached, connect, cst_date
-from bestseller_monitor.rounds import RoundRequest, ShopScope
+from bestseller_monitor.db import (CST, Database, DayBoundaryReached, DetailBudgetExhausted,
+                                   connect, cst_date)
+from bestseller_monitor.guard import InterventionTimeout, RoundPauseRequired
+from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
+from bestseller_monitor.stop_request import StopRequested
 
 
 def _cst(y: int, m: int, d: int, hh: int, mm: int) -> str:
@@ -22,6 +26,30 @@ def _yesterday() -> str:
 
 class RoundStopRuleTests(unittest.TestCase):
     """工单 03：停止判定比较轮次日期与当前北京日期，不再只看「现在几点」。"""
+
+    def test_every_stop_exception_has_one_place_that_says_how_to_end_it(self):
+        """停止分类只有一处定义：查得到、文案有、子类沿继承链落到父类。"""
+        examples = [
+            StopRequested("停"), RoundPauseRequired("人工"), InterventionTimeout("超时"),
+            DayBoundaryReached(), DetailBudgetExhausted(), ShopDenyExceeded("店"),
+            RoundDenyExceeded("整轮"),
+        ]
+
+        for exc in examples:
+            with self.subTest(exc=type(exc).__name__):
+                outcome = pipeline.stop_outcome(exc)
+                self.assertTrue(outcome.shop_note, "每个停止异常都要能写本店备注")
+                if not outcome.skip_shop:
+                    self.assertTrue(outcome.notice, "整轮级的停止要有一句给人看的提示")
+
+    def test_inheritance_no_longer_decides_how_a_stop_ends(self):
+        """RoundDenyExceeded 继承 RoundPauseRequired：两者收尾不同，谁也不许遮谁。"""
+        denied = pipeline.stop_outcome(RoundDenyExceeded("整轮 deny"))
+        paused = pipeline.stop_outcome(InterventionTimeout("人工介入超时"))
+
+        self.assertIs(denied.round_end, TerminalReason.DENY_EXCEEDED)
+        self.assertIsNone(paused.round_end, "人工介入超时保持可续跑")
+        self.assertIn("人工介入未完成", paused.shop_note)
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
