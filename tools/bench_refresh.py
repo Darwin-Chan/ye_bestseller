@@ -32,6 +32,7 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
+from bestseller_monitor import db  # noqa: E402
 from bestseller_monitor.db import (  # noqa: E402
     Database,
     EVENT_REFRESH_INDEXES,
@@ -160,21 +161,20 @@ def measure(*, shops: int, rows_per_shop: int, repeats: int, legacy: bool = Fals
             try:
                 raw.execute(f"DROP INDEX IF EXISTS {SNAPSHOT_SUCCESS_INDEX}")
                 raw.commit()
-                before = raw.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
             finally:
                 raw.close()
 
+            # 报告直接回答「这次开库删了几行、建了哪个索引」，不用前后数行数。
+            migrated: list = []
+
             def reopen():
-                opened = connect(copy_path)
+                opened = db.open(copy_path)
+                migrated.append(db.migrate(opened))
                 opened.close()
 
             result["legacy_sec"] = _best(reopen, 1)
-            reopened = sqlite3.connect(copy_path)
-            try:
-                after = reopened.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
-            finally:
-                reopened.close()
-            result["legacy_removed"] = before - after
+            result["legacy_removed"] = migrated[0].deduped_snapshot_rows
+            result["legacy_index_built"] = migrated[0].created_indexes
         return result
 
 

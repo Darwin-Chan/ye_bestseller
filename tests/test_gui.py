@@ -9,13 +9,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import gui
-from bestseller_monitor import browser_proc, rounds, single_instance
+from bestseller_monitor import browser_proc, db, rounds, single_instance
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import (CST, DETAIL_BUDGET_NOTE, Database, connect,
                                    cst_date, utcnow)
 from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
 from gui import Api
-from helpers import SNAPSHOT_DEDUPE_MARK, isolated_locks, new_round, traced_connections
+from helpers import isolated_locks, new_round
 from tools import bench_refresh
 
 
@@ -816,19 +816,28 @@ class GuiRefreshCostTests(unittest.TestCase):
 
             api = gui_api(db_file=path, now=lambda: bench_refresh.NOW)
 
-            seen: list[str] = []
-            with traced_connections(seen):
-                started = time.perf_counter()
-                run = api.get_run()
-                elapsed = time.perf_counter() - started
+            # 刷新走的是界面自己的开连接入口：顺手把每次开库的迁移报告收下来。
+            reports: list = []
+
+            def open_conn():
+                opened = db.open(path)
+                reports.append(db.migrate(opened))
+                return opened
+
+            api._open_conn = open_conn
+            started = time.perf_counter()
+            run = api.get_run()
+            elapsed = time.perf_counter() - started
 
             self.assertEqual(run["round_id"], rid)
             self.assertEqual(run["done_count"], self.SHOPS, "12 家店的指标都要算出来")
             self.assertGreater(run["done"][0]["skus"], 0)
             self.assertEqual(
-                [sql for sql in seen if SNAPSHOT_DEDUPE_MARK in sql], [],
+                [report.deduped_snapshot_rows for report in reports], [None],
                 "刷新一次不该扫整表：唯一索引已在，重复行不可能写进来",
             )
+            self.assertEqual([report.applied for report in reports], [()],
+                             "这次开库没有任何一段迁移需要动手")
             self.assertLess(elapsed, self.REFRESH_LIMIT_SEC,
                             f"一次刷新耗时离谱，实测 {elapsed:.3f} 秒")
 

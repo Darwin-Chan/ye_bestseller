@@ -8,10 +8,12 @@ from bestseller_monitor.db import (
     Database,
     EVENT_REFRESH_INDEXES,
     SCHEMA,
+    SNAPSHOT_SUCCESS_INDEX,
     connect,
     cst_date,
 )
-from helpers import SNAPSHOT_DEDUPE_MARK, new_round, traced_connections
+from bestseller_monitor import db
+from helpers import new_round
 from bestseller_monitor.parse import DEFAULT_SKU_ID, DEFAULT_SKU_NAME
 
 
@@ -970,24 +972,19 @@ class SnapshotDedupeMigrationTests(unittest.TestCase):
         raw.close()
         return path
 
-    def _open_traced(self, path: Path) -> tuple[sqlite3.Connection, list[str]]:
-        """开库并记下这条连接上执行过的语句。"""
-        seen: list[str] = []
-        with traced_connections(seen):
-            conn = connect(path)
-        return conn, seen
-
-    def _statements_like(self, seen: list[str], mark: str) -> list[str]:
-        return [sql for sql in seen if mark in sql]
+    def _open_with_report(self, path: Path):
+        """开库并拿回这次开库做了什么的报告。"""
+        conn = db.open(path)
+        return conn, db.migrate(conn)
 
     def test_first_open_of_a_legacy_database_dedupes_and_builds_the_index(self):
         with tempfile.TemporaryDirectory() as tmp:
-            conn, seen = self._open_traced(self._legacy_db(tmp))
+            conn, report = self._open_with_report(self._legacy_db(tmp))
             try:
-                self.assertTrue(
-                    self._statements_like(seen, SNAPSHOT_DEDUPE_MARK),
-                    "缺索引的老库要靠这次去重才建得起唯一索引",
-                )
+                self.assertEqual(report.deduped_snapshot_rows, 1,
+                                 "缺索引的老库要靠这次去重才建得起唯一索引")
+                self.assertEqual(report.created_indexes, (SNAPSHOT_SUCCESS_INDEX,))
+                self.assertIn("snapshot_success_index", report.applied)
                 self.assertEqual(conn.execute(
                     "SELECT COUNT(*) FROM snapshots WHERE round_id=1 AND sku_id='red'"
                 ).fetchone()[0], 1)
@@ -997,17 +994,28 @@ class SnapshotDedupeMigrationTests(unittest.TestCase):
     def test_second_open_does_not_scan_the_snapshot_table_again(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._legacy_db(tmp)
-            conn, _ = self._open_traced(path)
+            conn, _ = self._open_with_report(path)
             conn.close()
 
-            conn, seen = self._open_traced(path)
+            conn, report = self._open_with_report(path)
             try:
-                self.assertEqual(
-                    self._statements_like(seen, SNAPSHOT_DEDUPE_MARK), [],
-                    "唯一索引已在，重复行不可能写进来：这次开库不该再扫整表",
-                )
+                self.assertIsNone(report.deduped_snapshot_rows,
+                                  "唯一索引已在，重复行不可能写进来：这次开库不该再扫整表")
+                self.assertEqual(report.created_indexes, ())
+                self.assertEqual(report.applied, (), "没有一段迁移需要动手")
                 indexes = [row[1] for row in conn.execute("PRAGMA index_list('snapshots')")]
-                self.assertIn("idx_snapshots_success_key", indexes, "闸门不能把索引本身也带掉")
+                self.assertIn(SNAPSHOT_SUCCESS_INDEX, indexes, "闸门不能把索引本身也带掉")
+            finally:
+                conn.close()
+
+    def test_a_fresh_database_reports_the_index_it_built(self):
+        """全新的库也要如实报告：去重跑了但一行没删，索引是这次建的。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            conn, report = self._open_with_report(Path(tmp) / "fresh.db")
+
+            try:
+                self.assertEqual(report.deduped_snapshot_rows, 0)
+                self.assertEqual(report.created_indexes, (SNAPSHOT_SUCCESS_INDEX,))
             finally:
                 conn.close()
 

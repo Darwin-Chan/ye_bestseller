@@ -6,10 +6,9 @@ import sqlite3
 import hashlib
 import json
 import re
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Iterator
 
 from .parse import DEFAULT_SKU_ID
 
@@ -330,212 +329,126 @@ def _migrate_round_columns(conn: sqlite3.Connection) -> bool:
     return touched
 
 
-# ---------- 连接即迁移：动作排成清单，做过什么写进报告 ----------
-
-@dataclass(frozen=True)
-class MigrationReport:
-    """这次开库做过哪些迁移。
-
-    `applied` 是真正动过手的段名（不需要动手的段不出现）；整表动作另有明细：
-    `deduped_snapshot_rows`（None = 这次没跑整表去重）与 `created_indexes`。
-    """
-
-    applied: tuple[str, ...] = ()
-    deduped_snapshot_rows: int | None = None
-    created_indexes: tuple[str, ...] = ()
-
-
-class _ReportBuilder:
-    """迁移过程中攒报告；最后交出去的是一份不可变快照。"""
-
-    def __init__(self) -> None:
-        self.applied: list[str] = []
-        self.deduped_snapshot_rows: int | None = None
-        self.created_indexes: list[str] = []
-
-    def did(self, name: str) -> None:
-        self.applied.append(name)
-
-    def build(self) -> MigrationReport:
-        return MigrationReport(tuple(self.applied), self.deduped_snapshot_rows,
-                               tuple(self.created_indexes))
-
-
-@dataclass(frozen=True)
-class _Migration:
-    name: str
-    apply: Callable[[sqlite3.Connection, "_ReportBuilder"], bool]
-
-
-def _add_column(table: str, column: str, ddl: str) -> _Migration:
-    """「旧库缺这一列就补上」：已经加过就什么都不做。"""
-    name = f"{table}_{column}"
-
-    def apply(conn: sqlite3.Connection, out: _ReportBuilder) -> bool:
-        try:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
-        except sqlite3.OperationalError:
-            return False
-        log.info("迁移 %s：已补上 %s.%s", name, table, column)
-        return True
-
-    return _Migration(name, apply)
-
-
-def _drop_column(table: str, column: str) -> _Migration:
-    """「旧库还留着这一列就删掉」。"""
-    name = f"drop_{table}_{column}"
-
-    def apply(conn: sqlite3.Connection, out: _ReportBuilder) -> bool:
-        try:
-            info = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
-        except sqlite3.OperationalError:
-            return False
-        if not any(row[1] == column for row in info):
-            return False
-        try:
-            conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
-        except sqlite3.OperationalError as exc:
-            log.debug("删除 %s.%s 失败（可能已删除或版本不支持）：%s", table, column, exc)
-            return False
-        log.info("迁移 %s：已删除 %s.%s", name, table, column)
-        return True
-
-    return _Migration(name, apply)
-
-
-def _drop_shops_active(conn: sqlite3.Connection, out: _ReportBuilder) -> bool:
-    """迁移：删除 shops.active 列（旧库）。"""
-    try:
-        info = conn.execute('PRAGMA table_info("shops")').fetchall()
-    except sqlite3.OperationalError:
-        return False
-    if not any(row[1] == "active" for row in info):
-        return False
-    try:
-        conn.execute("ALTER TABLE shops DROP COLUMN active")
-    except sqlite3.OperationalError:
-        return False
-    log.info("迁移 drop_shops_active：已删除 shops.active 列")
-    return True
-
-
-def _skus_primary_key_on_sku_id(conn: sqlite3.Connection, out: _ReportBuilder) -> bool:
-    """迁移：旧 skus 主键为 (offer_id, sku_name)，统一改为 (offer_id, sku_id)。"""
-    try:
-        info = conn.execute('PRAGMA table_info("skus")').fetchall()
-    except sqlite3.OperationalError:
-        return False
-    pk_cols = [row[1] for row in info if row[5] > 0]
-    if not pk_cols or "sku_name" not in pk_cols:
-        return False
-    conn.execute("ALTER TABLE skus RENAME TO skus_old")
-    conn.executescript(
-        "CREATE TABLE IF NOT EXISTS skus ("
-        " offer_id TEXT NOT NULL, sku_name TEXT, sku_id TEXT NOT NULL, "
-        " first_seen_at TEXT NOT NULL, last_seen_at TEXT, "
-        " PRIMARY KEY (offer_id, sku_id));"
-    )
-    conn.execute(
-        "INSERT OR IGNORE INTO skus(offer_id, sku_name, sku_id, first_seen_at, last_seen_at) "
-        "SELECT offer_id, MAX(sku_name), sku_id, MIN(first_seen_at), MAX(last_seen_at) "
-        "FROM skus_old WHERE sku_id IS NOT NULL GROUP BY offer_id, sku_id"
-    )
-    conn.execute("DROP TABLE skus_old")
-    conn.commit()
-    log.info("迁移 skus_primary_key_on_sku_id：skus 主键已改为 (offer_id, sku_id)")
-    return True
-
-
-def _rounds_legacy_status_columns(conn: sqlite3.Connection, out: _ReportBuilder) -> bool:
-    """迁移：旧轮次的日期与终态折算，以及丢弃过渡用的中文状态列。"""
-    try:
-        changed = _migrate_round_columns(conn)
-    except sqlite3.OperationalError as exc:
-        log.debug("轮次列迁移失败：%s", exc)
-        return False
-    return changed
-
-
-def _snapshot_success_index(conn: sqlite3.Connection, out: _ReportBuilder) -> bool:
-    """迁移：同一轮、店铺、商品和 SKU 只留最新成功快照，再建唯一索引。
-
-    失败记录与无 SKU 的跳过记录不参与该约束。去重是整表扫描，而界面每次刷新都走一次
-    connect()，所以它只在「唯一索引还不在」时跑：索引一旦建好，重复行不可能再写进来，
-    后面的开库不该再付这笔随快照总量线性增长的成本（IS-38 实测：WAL 库 30 万行上
-    这次去重 + 建索引约 0.42 秒；索引已在时 connect() 约 1.6 毫秒）。
-    """
-    snapshot_cols = {
-        row[1] for row in conn.execute('PRAGMA table_info("snapshots")').fetchall()
-    }
-    if not ({"id", "round_id", "shop_key", "offer_id", "sku_id", "page_status"} <= snapshot_cols):
-        return False
-    if _has_snapshot_success_index(conn):
-        return False
-    removed = conn.execute(
-        "DELETE FROM snapshots WHERE id IN ("
-        "SELECT older.id FROM snapshots older "
-        "JOIN snapshots newer ON newer.round_id=older.round_id "
-        "AND newer.shop_key=older.shop_key AND newer.offer_id=older.offer_id "
-        "AND newer.sku_id=older.sku_id AND newer.page_status='成功' "
-        "AND newer.sku_id IS NOT NULL AND newer.id > older.id "
-        "WHERE older.page_status='成功' AND older.sku_id IS NOT NULL"
-        ")"
-    ).rowcount
-    conn.execute(
-        f"CREATE UNIQUE INDEX IF NOT EXISTS {SNAPSHOT_SUCCESS_INDEX} "
-        "ON snapshots(round_id, shop_key, offer_id, sku_id) "
-        "WHERE page_status='成功' AND sku_id IS NOT NULL"
-    )
-    out.deduped_snapshot_rows = removed
-    out.created_indexes.append(SNAPSHOT_SUCCESS_INDEX)
-    log.info("快照去重迁移：删除 %d 行重复成功记录并建立唯一索引 %s",
-             removed, SNAPSHOT_SUCCESS_INDEX)
-    return True
-
-
-_MIGRATIONS: tuple[_Migration, ...] = (
-    _Migration("drop_shops_active", _drop_shops_active),
-    _Migration("skus_primary_key_on_sku_id", _skus_primary_key_on_sku_id),
-    _add_column("products", "last_seen_at", "TEXT"),
-    _add_column("products", "main_image_url", "TEXT"),
-    _add_column("shop_rounds", "list_note", "TEXT"),
-    _add_column("rounds", "detail_budget_limit", "INTEGER"),
-    _add_column("rounds", "run_date", "TEXT"),
-    _add_column("rounds", "terminal_reason", "TEXT"),
-    _Migration("rounds_legacy_status_columns", _rounds_legacy_status_columns),
-    _add_column("detail_opportunities", "offer_id", "TEXT"),
-    _drop_column("skus", "main_image_url"),
-    _drop_column("snapshots", "stock_delta"),
-    _Migration("snapshot_success_index", _snapshot_success_index),
-)
-
-
-def migrate(conn: sqlite3.Connection) -> MigrationReport:
-    """按序跑完所有迁移，交回这次开库做过什么。"""
-    out = _ReportBuilder()
-    for migration in _MIGRATIONS:
-        if migration.apply(conn, out):
-            out.did(migration.name)
-    conn.commit()
-    return out.build()
-
-
-def open(db_path: Path) -> sqlite3.Connection:
-    """开一条连接并建好表（不跑迁移）。"""
+def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
-    return conn
-
-
-def connect(db_path: Path) -> sqlite3.Connection:
-    """界面、命令行与工具都走这里：连接即迁移（见 CONTEXT.md）。"""
-    conn = open(db_path)
-    migrate(conn)
+    # 迁移：删除 shops.active 列（旧库）
+    try:
+        info = conn.execute('PRAGMA table_info("shops")').fetchall()
+        if any(r[1] == "active" for r in info):
+            conn.execute("ALTER TABLE shops DROP COLUMN active")
+            conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    # 迁移：旧 skus 主键为 (offer_id, sku_name)，统一改为 (offer_id, sku_id)，保留数据并去重
+    try:
+        info = conn.execute('PRAGMA table_info("skus")').fetchall()
+        pk_cols = [r[1] for r in info if r[5] > 0]
+        if pk_cols and "sku_name" in pk_cols:
+            conn.execute("ALTER TABLE skus RENAME TO skus_old")
+            conn.executescript(
+                "CREATE TABLE IF NOT EXISTS skus ("
+                " offer_id TEXT NOT NULL, sku_name TEXT, sku_id TEXT NOT NULL, "
+                " first_seen_at TEXT NOT NULL, last_seen_at TEXT, "
+                " PRIMARY KEY (offer_id, sku_id));"
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO skus(offer_id, sku_name, sku_id, first_seen_at, last_seen_at) "
+                "SELECT offer_id, MAX(sku_name), sku_id, MIN(first_seen_at), MAX(last_seen_at) "
+                "FROM skus_old WHERE sku_id IS NOT NULL GROUP BY offer_id, sku_id"
+            )
+            conn.execute("DROP TABLE skus_old")
+            conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    # 兼容旧库：补 products.last_seen_at 列（已存在则忽略）
+    try:
+        conn.execute("ALTER TABLE products ADD COLUMN last_seen_at TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE products ADD COLUMN main_image_url TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE shop_rounds ADD COLUMN list_note TEXT")
+    except sqlite3.OperationalError:
+        pass
+    # 兼容旧库：轮次记录的详情预算上限（NULL 表示尚未绑定，首次申请时写入）
+    try:
+        conn.execute("ALTER TABLE rounds ADD COLUMN detail_budget_limit INTEGER")
+    except sqlite3.OperationalError:
+        pass
+    # 兼容旧库：轮次身份（北京日期）与终态标识（稳定标识取代中文状态串的判定作用）
+    try:
+        conn.execute("ALTER TABLE rounds ADD COLUMN run_date TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE rounds ADD COLUMN terminal_reason TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        _migrate_round_columns(conn)
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        log.debug("轮次列迁移失败：%s", exc)
+    # 兼容旧库：详情机会记录上绑定的商品编号（旧库残留的 attempts 列不再使用）
+    try:
+        conn.execute("ALTER TABLE detail_opportunities ADD COLUMN offer_id TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        info = conn.execute('PRAGMA table_info("skus")').fetchall()
+        if any(r[1] == "main_image_url" for r in info):
+            conn.execute("ALTER TABLE skus DROP COLUMN main_image_url")
+            conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    # 迁移：物理删除 snapshots.stock_delta（旧报表口径，SKU 差分改用 inventory.diff）
+    try:
+        info = conn.execute('PRAGMA table_info("snapshots")').fetchall()
+        if any(r[1] == "stock_delta" for r in info):
+            conn.execute("ALTER TABLE snapshots DROP COLUMN stock_delta")
+            conn.commit()
+            log.info("已物理删除 snapshots.stock_delta 列")
+    except sqlite3.OperationalError as exc:
+        log.debug("删除 snapshots.stock_delta 列失败（可能已删除或版本不支持）：%s", exc)
+    # 迁移：同一轮、店铺、商品和 SKU 只保留最新成功快照，再建立最终唯一约束。
+    # 失败记录与无 SKU 的跳过记录不参与该约束。极旧库可能还没有 page_status，
+    # 先完成其列迁移，等新写入路径可用时再建立约束。
+    #
+    # 去重是整表扫描，而界面每次刷新都走一次 connect()。所以它只在「唯一索引还不在」
+    # 时跑：索引一旦建好，重复行不可能再写进来，后面的开库不该再付这笔随快照总量线性
+    # 增长的成本（IS-38 实测：WAL 库 30 万行上，这次去重 + 建索引约 0.42 秒；索引已在
+    # 时 connect() 约 1.6 毫秒）。
+    snapshot_cols = {
+        row[1] for row in conn.execute('PRAGMA table_info("snapshots")').fetchall()
+    }
+    if ({"id", "round_id", "shop_key", "offer_id", "sku_id", "page_status"} <= snapshot_cols
+            and not _has_snapshot_success_index(conn)):
+        removed = conn.execute(
+            "DELETE FROM snapshots WHERE id IN ("
+            "SELECT older.id FROM snapshots older "
+            "JOIN snapshots newer ON newer.round_id=older.round_id "
+            "AND newer.shop_key=older.shop_key AND newer.offer_id=older.offer_id "
+            "AND newer.sku_id=older.sku_id AND newer.page_status='成功' "
+            "AND newer.sku_id IS NOT NULL AND newer.id > older.id "
+            "WHERE older.page_status='成功' AND older.sku_id IS NOT NULL"
+            ")"
+        ).rowcount
+        conn.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {SNAPSHOT_SUCCESS_INDEX} "
+            "ON snapshots(round_id, shop_key, offer_id, sku_id) "
+            "WHERE page_status='成功' AND sku_id IS NOT NULL"
+        )
+        log.info("快照去重迁移：删除 %d 行重复成功记录并建立唯一索引 %s",
+                 removed, SNAPSHOT_SUCCESS_INDEX)
+    conn.commit()
     return conn
 
 

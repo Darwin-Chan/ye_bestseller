@@ -1,5 +1,4 @@
 """测试共用件：建轮只走轮次模块这一条路；锁名字按用例隔离。"""
-import sqlite3
 from contextlib import contextmanager
 from unittest.mock import patch
 from uuid import uuid4
@@ -9,27 +8,6 @@ from bestseller_monitor import rounds
 from bestseller_monitor.db import cst_date
 from bestseller_monitor.listing import ListingLoadFailed
 from bestseller_monitor.rounds import RoundRequest, ShopScope
-
-# 整表去重的识别标记：生产语句是私有常量，用例只能按语句形状认它。
-SNAPSHOT_DEDUPE_MARK = "DELETE FROM snapshots"
-
-
-@contextmanager
-def traced_connections(seen: list[str]):
-    """拦截 sqlite3.connect，把这条连接上执行过的语句记进 seen。
-
-    迁移跑在 connect() 内部，测试拿不到那条连接的句柄，只能这样看它执行了什么。
-    """
-    real_connect = sqlite3.connect
-
-    def traced(*args, **kwargs):
-        conn = real_connect(*args, **kwargs)
-        conn.set_trace_callback(seen.append)
-        return conn
-
-    with patch("sqlite3.connect", traced):
-        yield
-
 
 @contextmanager
 def isolated_locks():
