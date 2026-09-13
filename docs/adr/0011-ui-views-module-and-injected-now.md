@@ -52,8 +52,14 @@
 重复的五段查询与第三种计数写法在界面上消失，改一次就够了；界面用例与基准共用一个构造器，
 `_ReusableConnection` 随之删掉（基准改为经 `open_conn` 注入裸连接）。日期炸弹拆除：全套
 `python -m unittest discover` 从「299 条、2 条 error」变成 307 条全绿。测试迁移是原地换
-fixture——`test_gui.py` 的断言没有搬家，新增的 `tests/test_views.py` 只补今天没有面的三件事
-（三个页面共用同一份店铺指标、入参决定「今天」、被拒时的拒绝形状）。
+fixture——`test_gui.py` 的断言没有搬家，新增的 `tests/test_views.py` 只补今天没有面的几件事
+（三个页面共用同一份店铺指标、入参决定「今天」、被拒时的拒绝形状，以及过程页要带出的会话事实
+和「轮次未完成时用已抓时长」）。
+
+两轴审查（Standards / Spec）在提交之后抓到一处硬违规：`resume_run()` 里的
+`resumable_on(utcnow())` 是这次改动漏掉的一处挂钟直读，「今天」在那条路径上仍然由本机时间
+决定。已改为 `self._now()`，并补了一条「用固定时刻续跑昨日轮次」的用例——把那行改回
+`utcnow()` 这条用例即红。
 
 代价有三处。其一，`Api` 的构造签名长了两个口子（`now`、`open_conn`），读模型也多两个入参，
 不读这份 ADR 会以为多此一举。其二，视图返回的是无类型保护的 dict，键名靠
@@ -67,8 +73,10 @@ fixture——`test_gui.py` 的断言没有搬家，新增的 `tests/test_views.p
 - **读模型自己开连接**：`Api` 的四个控制入口本来就要连接，多一个持有者只会让「谁负责关」变模糊。
 - **返回 dataclass 再由 `Api` 转 dict**：多一次转换，页面用例还要多一层心智，换来的类型保护在
   这个 JSON 边界上并不成立。
-- **把纯读数的断言从 `test_gui.py` 搬进 `test_views.py`**：`Api` 就是那道 interface 的持有者，
-  「从 `Api` 进去、得到页面要的 dict」本来就是对的测试面，搬迁只是换个地方重写覆盖。
+- **把 `test_gui.py` 的纯读断言整批搬进 `test_views.py`**：`Api` 就是那道 interface 的持有者，
+  「从 `Api` 进去、得到页面要的 dict」本来就是对的测试面，整批搬迁只是换个地方重写覆盖。
+  唯一的例外是终态文案表那条枚举断言——它跟着自己所在的 function 走，`gui._terminal_text`
+  已经不存在了。
 
 相关词汇见 [CONTEXT.md](../../CONTEXT.md) 的「界面刷新」「界面会话事实」；来源是
 `docs/reviews/architecture-review-2026-09-13.html` 候选 04，规格与工单在

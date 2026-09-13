@@ -151,6 +151,28 @@ class ResultViewTests(ViewsTestCase):
                          ("进行中", "本轮仍在进行；未抓取店铺见下方。"))
 
 
+class SharedMetricsTests(ViewsTestCase):
+    def test_progress_and_result_pages_report_the_same_shop_metrics(self):
+        """同一轮里两个页面对各店给出同一份指标——这正是从前两份实现要保证的事。"""
+        round_id = new_round(self.db, ("A01", "https://A01.example/", "店铺A"),
+                             ("A02", "https://A02.example/", "店铺B"), run_date=TODAY)
+        self.db.save_shop_offers(
+            round_id, "A01", "https://A01.example/", "店铺A",
+            [(1, "11", "https://detail.1688.com/offer/11.html", "商品11", "")], 1)
+        self.submit(round_id, "11", ("红", 5), ("蓝", 7))
+        self.db.append_event(round_id, "click_deny", shop_key="A01")
+
+        run = views.run_view(self.conn, state=self.state, now=NOW)
+        result = views.result_view(
+            self.conn, state=views.UiState(round_id=round_id), now=NOW)
+
+        self.assertEqual(run["done"], result["done"])
+        self.assertEqual(run["todo"], result["todo"])
+        self.assertEqual((run["done_count"], run["total_count"], run["deny"]),
+                         (result["done_count"], result["total_count"], result["deny"]))
+        self.assertEqual((result["products_total"], result["skus_total"]), (1, 2))
+
+
 class RefusedStartTests(ViewsTestCase):
     def test_refused_child_is_reported_instead_of_an_empty_result_page(self):
         new_round(self.db, run_date=TODAY)

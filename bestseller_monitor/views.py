@@ -119,6 +119,41 @@ def _duration_seconds(started_at: str | None, finished_at: str | None) -> float 
         return None
 
 
+# ---------- 观测计数：三个页面共用的两个口径 ----------
+
+def _inventory_counts(conn: sqlite3.Connection, date: str,
+                      shop_key: str | None = None) -> tuple[int, int]:
+    """某日（可选某店）的（商品数、SKU 行数）。
+
+    今日大盘与每店今日进度共用这一份;两个过滤片段都是字面量，不含外部输入。
+    """
+    where = "date=?"
+    params: list = [date]
+    if shop_key is not None:
+        where += " AND shop_key=?"
+        params.append(shop_key)
+    row = conn.execute(
+        f"SELECT COUNT(DISTINCT offer_id) products, COUNT(*) skus FROM inventory WHERE {where}",
+        params,
+    ).fetchone()
+    return int(row["products"]), int(row["skus"])
+
+
+def _snapshot_counts(conn: sqlite3.Connection, round_id: int,
+                     shop_key: str | None = None) -> tuple[int, int]:
+    """本轮（可选某店）的（成功商品数、成功 SKU 行数）；过程页与结果页共用。"""
+    where = "round_id=? AND page_status='成功' AND sku_id IS NOT NULL"
+    params: list = [round_id]
+    if shop_key is not None:
+        where += " AND shop_key=?"
+        params.append(shop_key)
+    row = conn.execute(
+        f"SELECT COUNT(DISTINCT offer_id) products, COUNT(*) skus FROM snapshots WHERE {where}",
+        params,
+    ).fetchone()
+    return int(row["products"]), int(row["skus"])
+
+
 # ---------- 开始页 ----------
 
 def _start_summary(conn: sqlite3.Connection, today: str) -> dict:
@@ -138,14 +173,7 @@ def _start_summary(conn: sqlite3.Connection, today: str) -> dict:
 def _start_shops(conn: sqlite3.Connection, shops, cfg, today: str) -> list[dict]:
     out = []
     for shop in shops:
-        products = conn.execute(
-            "SELECT COUNT(DISTINCT offer_id) c FROM inventory WHERE shop_key=? AND date=?",
-            (shop.key, today),
-        ).fetchone()["c"]
-        skus = conn.execute(
-            "SELECT COUNT(*) c FROM inventory WHERE shop_key=? AND date=?",
-            (shop.key, today),
-        ).fetchone()["c"]
+        products, skus = _inventory_counts(conn, today, shop.key)
         # 该店实际翻页上限：店铺未单独配置时回落到全局默认（与抓取逻辑一致）
         pages = effective_pages_limit(shop, cfg)
         out.append({
@@ -176,12 +204,7 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
     """开始页取数：今日大盘、每店今日进度、以及「点开始会发生什么」的提示。"""
     today = cst_date(now)
     db = Database(conn)
-    ov_products = conn.execute(
-        "SELECT COUNT(DISTINCT offer_id) c FROM inventory WHERE date=?", (today,)
-    ).fetchone()["c"]
-    ov_skus = conn.execute(
-        "SELECT COUNT(*) c FROM inventory WHERE date=?", (today,)
-    ).fetchone()["c"]
+    ov_products, ov_skus = _inventory_counts(conn, today)
     current = rounds.active_round(db, today)
     stale = None if current is not None else rounds.active_round(db)
     if crawler is not None:
@@ -206,21 +229,11 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
     }
 
 
-# ---------- 过程页 ----------
+# ---------- 过程页与结果页共用 ----------
 
-def _shop_metrics(conn: sqlite3.Connection, round_id: int,
-                  shop_key: str) -> tuple[int, int, int, float | None]:
-    """该店在本轮的（商品数、SKU 行数、deny 数、耗时秒）。过程页与结果页共用。"""
-    products = conn.execute(
-        "SELECT COUNT(DISTINCT offer_id) c FROM snapshots "
-        "WHERE round_id=? AND shop_key=? AND page_status='成功' AND sku_id IS NOT NULL",
-        (round_id, shop_key),
-    ).fetchone()["c"]
-    skus = conn.execute(
-        "SELECT COUNT(*) c FROM snapshots WHERE round_id=? AND shop_key=? "
-        "AND page_status='成功' AND sku_id IS NOT NULL",
-        (round_id, shop_key),
-    ).fetchone()["c"]
+def _shop_span(conn: sqlite3.Connection, round_id: int,
+               shop_key: str) -> tuple[int, float | None]:
+    """该店本轮的事件跨度：（deny 数、耗时秒）。"""
     deny = conn.execute(
         "SELECT COUNT(*) c FROM event_log WHERE round_id=? AND shop_key=? AND event='click_deny'",
         (round_id, shop_key),
@@ -229,14 +242,7 @@ def _shop_metrics(conn: sqlite3.Connection, round_id: int,
         "SELECT MIN(ts), MAX(ts) FROM event_log WHERE round_id=? AND shop_key=?",
         (round_id, shop_key),
     ).fetchone()
-    duration = None
-    if span and span[0] and span[1]:
-        try:
-            duration = (datetime.fromisoformat(span[1])
-                        - datetime.fromisoformat(span[0])).total_seconds()
-        except ValueError:
-            duration = None
-    return products, skus, deny, duration
+    return int(deny), (_duration_seconds(span[0], span[1]) if span else None)
 
 
 def _shop_breakdown(conn: sqlite3.Connection, round_id: int) -> tuple[list[dict], list[dict]]:
@@ -251,9 +257,11 @@ def _shop_breakdown(conn: sqlite3.Connection, round_id: int) -> tuple[list[dict]
     ).fetchall()
     done = []
     for row in done_rows:
-        products, skus, deny, duration = _shop_metrics(conn, round_id, row["shop_key"])
+        shop_key = row["shop_key"]
+        products, skus = _snapshot_counts(conn, round_id, shop_key)
+        deny, duration = _shop_span(conn, round_id, shop_key)
         done.append({
-            "key": row["shop_key"],
+            "key": shop_key,
             "name": row["shop_name"],
             "products": products,
             "skus": skus,
@@ -264,14 +272,14 @@ def _shop_breakdown(conn: sqlite3.Connection, round_id: int) -> tuple[list[dict]
     return done, todo
 
 
-def _current_shop(conn: sqlite3.Connection, round_id: int, todo_rows) -> str | None:
+def _current_shop(conn: sqlite3.Connection, round_id: int, todo_keys: list[str]) -> str | None:
     """当前处理中的店：未完成里最近有事件的那家。"""
-    if not todo_rows:
+    if not todo_keys:
         return None
     row = conn.execute(
         "SELECT shop_key FROM event_log WHERE round_id=? AND shop_key IN (%s) "
-        "ORDER BY id DESC LIMIT 1" % ",".join("?" for _ in todo_rows),
-        (round_id, *(r["shop_key"] for r in todo_rows)),
+        "ORDER BY id DESC LIMIT 1" % ",".join("?" for _ in todo_keys),
+        (round_id, *todo_keys),
     ).fetchone()
     return row["shop_key"] if row else None
 
@@ -304,10 +312,6 @@ def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str) -> di
             "stop_grace_sec": state.stop_grace_sec,
         }
     round_id = active.id
-    todo_rows = conn.execute(
-        "SELECT * FROM shop_rounds WHERE round_id=? AND list_status!='完成' ORDER BY shop_key",
-        (round_id,),
-    ).fetchall()
     done, todo = _shop_breakdown(conn, round_id)
     total, deny = _round_counts(conn, round_id)
     return {
@@ -323,7 +327,7 @@ def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str) -> di
         "done_count": len(done),
         "total_count": total,
         "progress": (len(done) / total) if total else 0.0,
-        "current_shop": _current_shop(conn, round_id, todo_rows),
+        "current_shop": _current_shop(conn, round_id, [row["key"] for row in todo]),
         "done": done,
         "todo": todo,
     }
@@ -360,16 +364,7 @@ def result_view(conn: sqlite3.Connection, *, state: UiState, now: str) -> dict:
         duration = state.elapsed_sec
     done, todo = _shop_breakdown(conn, round_id)
     total, deny = _round_counts(conn, round_id)
-    products_total = conn.execute(
-        "SELECT COUNT(DISTINCT offer_id) c FROM snapshots "
-        "WHERE round_id=? AND page_status='成功' AND sku_id IS NOT NULL",
-        (round_id,),
-    ).fetchone()["c"]
-    skus_total = conn.execute(
-        "SELECT COUNT(*) c FROM snapshots WHERE round_id=? "
-        "AND page_status='成功' AND sku_id IS NOT NULL",
-        (round_id,),
-    ).fetchone()["c"]
+    products_total, skus_total = _snapshot_counts(conn, round_id)
     tag, note = _terminal_text(run.reason)
     return {
         "has_round": True,

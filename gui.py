@@ -149,8 +149,8 @@ class Api:
             return self._elapsed_base + (time.time() - self._run_start_ts)
         return self._elapsed_base
 
-    def _refused_start_error(self) -> str | None:
-        """本界面拉起的采集子进程被「已有采集在跑」拒绝了吗（专用退出码）。"""
+    def _refused_start_message(self) -> str | None:
+        """本界面拉起的采集子进程被「已有采集在跑」拒绝时，要显示的那句话。"""
         if (self.proc is not None
                 and self.proc.poll() == single_instance.CRAWLER_BUSY_EXIT_CODE):
             return "已有采集进程在运行：本次启动被拒绝了，等它跑完再试。"
@@ -165,7 +165,7 @@ class Api:
             stopping=self._stop_state(),
             stop_grace_sec=_STOP_GRACE_SEC,
             elapsed_sec=self._current_elapsed(),
-            start_error=self._refused_start_error(),
+            start_error=self._refused_start_message(),
         )
 
     # ---------- 开始页 ----------
@@ -183,9 +183,10 @@ class Api:
     # ---------- 过程页 ----------
     def get_run(self) -> dict:
         with self._lock:
-            if self._refused_start_error() is not None:
+            state = self._ui_state()
+            if state.start_error is not None:
                 # 子进程因「已有采集在跑」被拒：不碰数据库，直接说清原因。
-                return views.run_view(None, state=self._ui_state(), now=self._now())
+                return views.run_view(None, state=state, now=self._now())
             conn = self._open_conn()
             try:
                 self._enforce_stop_deadline(conn)
@@ -302,7 +303,7 @@ class Api:
                             "请点「开始抓取」新建一轮。"
                         )}
                     return {"ok": False, "error": "没有进行中的轮次可继续。"}
-                if not current.resumable_on(utcnow()):
+                if not current.resumable_on(self._now()):
                     return {"ok": False, "error": (
                         f"轮次 #{current.id}（{current.run_date}）现在不可续跑；"
                         "请点「开始抓取」新建一轮。"
