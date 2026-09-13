@@ -31,7 +31,7 @@
 
       <header class="space-y-4">
         <p class="text-sm text-slate-700 rounded-lg bg-slate-100 border border-slate-200 p-4">
-          归档说明：本报告是 2026-09-13 的快照（当时 HEAD <code>b6d06ef</code>），文中的行号与测试数字指向当时的工作区，之后已位移。候选 04「界面取数收成一个 module」同日落地：新增 <code>bestseller_monitor/views.py</code>（<code>start_view</code> / <code>run_view</code> / <code>result_view</code> + <code>UiState</code>），<code>Api</code> 改为 <code>Api(cfg=None, *, now=utcnow, open_conn=None, shops=None)</code>，见 <code>docs/adr/0011-ui-views-module-and-injected-now.md</code> 与 <code>.scratch/ui-views/spec.md</code>；全套 307 条用例通过。候选 01 / 02 / 03 / 05 / 06 仍未做。正文保持 2026-09-13 快照原样，不随实现更新。
+          归档说明：本报告是 2026-09-13 的快照（当时 HEAD <code>b6d06ef</code>），文中的行号与测试数字指向当时的工作区，之后已位移。候选 04「界面取数收成一个 module」同日落地：新增 <code>bestseller_monitor/views.py</code>（<code>start_view</code> / <code>run_view</code> / <code>result_view</code> + <code>UiState</code>），<code>Api</code> 改为 <code>Api(cfg=None, *, now=utcnow, open_conn=None, shops=None)</code>，见 <code>docs/adr/0011-ui-views-module-and-injected-now.md</code> 与 <code>.scratch/ui-views/spec.md</code>；随后按两轴审查结论收口一轮（<code>c14577d</code>），全套 309 条用例通过、1 条跳过（本报告写下的那条日期炸弹已拆）。候选 01 / 02 / 03 / 05 / 06 仍未做。正文保持 2026-09-13 快照原样，不随实现更新。
         </p>
         <p class="text-xs uppercase tracking-[0.2em] text-slate-400">架构审查 · 加深机会</p>
         <h1 class="text-4xl font-serif">bestseller / 1688 库存快照</h1>
