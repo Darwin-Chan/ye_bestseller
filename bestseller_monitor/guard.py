@@ -1,8 +1,9 @@
-"""验证/拦截页识别与人工介入（统一口径，供多个驱动/路径复用）。
+"""验证/拦截页识别、deny 账目与人工介入（统一口径，供多个驱动/路径复用）。
 
 目标：所有「是否滑块 / 是否登录墙 / 是否 deny 限流 / 是否真 punish 页」的判定，
-以及人工介入的「确认窗口 + 刷新兜底 + 持续响铃」等待逻辑，都收敛到本模块。
-采集路径与诊断工具都从这一处取用（工具经 browser_pw 的兼容别名转发），避免各处口径不一致。
+「打开一个详情页之后怎么安顿它」，以及人工介入的「确认窗口 + 刷新兜底 + 持续响铃」等待逻辑，
+都收敛到本模块。采集的两条路径（点击式列表、逐店补采）与诊断工具都从这一处取用
+（工具经 browser_pw 的兼容别名转发），避免各处口径不一致。
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import time
 
 from . import sound
 from . import stop_request
+from .config import Config
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +23,42 @@ class RoundPauseRequired(RuntimeError):
 
 class InterventionTimeout(RoundPauseRequired):
     """人工验证或扫码未在配置时限内解决。"""
+
+
+class ShopDenyExceeded(Exception):
+    """某店滚动窗口内 deny 数达到阈值，跳过该店。"""
+
+
+class RoundDenyExceeded(RoundPauseRequired):
+    """整轮滚动窗口内 deny 数达到阈值，中止本轮。"""
+
+
+class DenyTracker:
+    """滚动窗口内的 deny 计数（按店 + 整轮）。
+
+    点击式列表与逐店补采共用同一个实例：deny 是「这台机器正在被限流」的同一个信号，
+    不能因为走哪条路而两种待遇（候选 04）。
+    """
+
+    def __init__(self, window_sec: float):
+        self.window_sec = window_sec
+        self.events: list[tuple[float, str]] = []
+
+    def _prune(self, now: float) -> None:
+        self.events = [(t, s) for t, s in self.events if now - t <= self.window_sec]
+
+    def record(self, shop_key: str) -> None:
+        now = time.time()
+        self.events.append((now, shop_key))
+        self._prune(now)
+
+    def shop_count(self, shop_key: str) -> int:
+        self._prune(time.time())
+        return sum(1 for t, s in self.events if s == shop_key)
+
+    def round_count(self) -> int:
+        self._prune(time.time())
+        return len(self.events)
 
 
 # 滑块/验证文案（含 punish，用于页面正文命中）
@@ -127,9 +165,39 @@ def resolved(page) -> bool:
         return False
 
 
-def deny_resolved(page) -> bool:
-    """deny 界面是否已解除：URL 不再是 deny 页即可认为解除（用户扫码后页面会离开 deny）。"""
-    return not is_deny_url(page.url or "")
+def ready_detail_page(page, cfg: Config, *, emit=None, punished: bool = False,
+                      deny_tracker: DenyTracker | None = None,
+                      shop_key: str | None = None) -> bool:
+    """一个刚打开的详情页能不能用：先认 deny（记账 + 阈值），不是 deny 才判人工介入并等人解决。
+
+    两条详情访问（点击式列表的弹窗、逐店补采的详情页）打开页面之后都先走这里，「deny 该不该
+    退避、滑块要不要响铃等人」只判一次（候选 04）。顺序是有意的：deny 页是自动限流，该退避，
+    不该当成滑块去响铃等人（`is_deny_url` 的注释就是这么写的）。
+
+    交回 `True` 表示这次落在 deny 页上（记账已经做完；阈值越界会抛下面两个异常），
+    `False` 表示页面可用——需要人工介入的话，已经等人解决完了。
+    """
+    if is_deny_url(page.url or ""):
+        if deny_tracker is not None and shop_key is not None:
+            deny_tracker.record(shop_key)
+            shop_denies = deny_tracker.shop_count(shop_key)
+            log.warning("店铺 %s 命中 deny 页（窗口内第 %s 次，整轮第 %s 次）",
+                        shop_key, shop_denies, deny_tracker.round_count())
+            if deny_tracker.round_count() >= cfg.deny_round_limit:
+                raise RoundDenyExceeded(
+                    f"整轮 {cfg.deny_window_minutes} 分钟内"
+                    f" deny≥{cfg.deny_round_limit}")
+            if shop_denies >= cfg.deny_shop_limit:
+                raise ShopDenyExceeded(
+                    f"店铺 {shop_key} {cfg.deny_window_minutes} 分钟内"
+                    f" deny≥{cfg.deny_shop_limit}")
+        return True
+    kind = intervention_kind(page, punished)
+    if kind:
+        wait_for_resolution(page, cfg.human_pause_minutes, emit=emit,
+                            verification_type=vtype(kind),
+                            confirm_sec=cfg.intervention_confirmation_sec)
+    return False
 
 
 def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | None = None,

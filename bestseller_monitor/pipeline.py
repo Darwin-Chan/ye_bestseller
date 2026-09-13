@@ -11,7 +11,7 @@ from enum import Enum
 from pathlib import Path
 
 from . import browser_pw, click_listing, dedupe, detail, rounds, single_instance, stop_request
-from .click_listing import DenyTracker, ShopDenyExceeded, RoundDenyExceeded
+from .guard import DenyTracker, RoundDenyExceeded, ShopDenyExceeded, ready_detail_page
 from .config import Config, Shop, load_shops
 from .db import (
     Database,
@@ -101,7 +101,7 @@ _STOP_OUTCOMES: dict[type, StopOutcome] = {
         log_level=logging.ERROR,
     ),
     ShopDenyExceeded: StopOutcome(
-        shop_note="榜单 deny 超过阈值：{exc}",
+        shop_note="deny 超过阈值，这家店本轮到此为止：{exc}",
         scope=StopScope.SHOP,
     ),
 }
@@ -305,16 +305,18 @@ def _report_late_stop(settled: Round, reason: TerminalReason) -> None:
 
 def _capture_pending_offers(db: Database, cfg: Config, human: Humanizer, round_id: int,
                             offers, capture) -> int:
-    """逐个补采；需要中止本轮的中断原样抛出，其余异常记为失败后继续。
+    """逐个补采；停止那一族原样抛出，其余异常记为失败后继续。
 
     兜底失败记录接着本轮的尝试额度编号，初次访问和补采共用同一份额度。
+    停止那一族按 `_STOP_OUTCOMES` 的全部登记项放行：注意 `ShopDenyExceeded` 只跳过单店，
+    所以它是「放行到这里、由店铺那一层收尾」（候选 04）。
     """
     processed = 0
     for offer in offers:
         processed += 1
         try:
             capture(offer)
-        except STOP_EXCEPTIONS:
+        except STOP_WITH_OUTCOME:
             raise
         except Exception as exc:  # 兜底：异常也记录失败，不中断整轮
             log.exception("详情抓取意外失败：%s", offer["product_url"])
@@ -371,6 +373,19 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int, shops: list[Shop]
         browser_pw.close_session(pw, br)
 
 
+def _record_shop_stop(db: Database, round_id: int, shop: Shop, exc: BaseException) -> bool:
+    """店里某一段停止的收尾：如实记未完成（文案来自 `_STOP_OUTCOMES`）。
+
+    交回「要不要接着跑下一家店」：只跳过单店的那种（`StopScope.SHOP`）接着跑，
+    整轮级的由调用方原样上抛。
+    """
+    outcome = stop_outcome(exc)
+    _record_incomplete_listing(db, round_id, shop, outcome.shop_note.format(exc=exc))
+    if outcome.ladder_log:
+        log.log(outcome.log_level, outcome.ladder_log.format(exc=exc))
+    return outcome.scope is StopScope.SHOP
+
+
 def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop], page,
                     emit=None, deny_tracker=None) -> None:
     db.set_phase(round_id, "listing")
@@ -379,56 +394,59 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
     for shop in shops:
         # 每家店开始之前先问轮次：跨天收尾发生在还没动这家店的干净点上。
         rounds.ensure_workable(db, round_id, utcnow())
-        if shop.key in done:
-            log.info("店铺 %s 本轮已完成榜单，跳过列表", shop.key)
-            _retry_shop_pending_pw(db, cfg, round_id, shop, page, human, emit=emit)
-            continue
         try:
-            listing_page = click_listing.PlaywrightListing(page, shop, cfg, human)
-            offers, pages_read = click_listing.crawl_store_by_click(
-                listing_page, shop, cfg, human, db=db, round_id=round_id, emit=emit,
-                deny_tracker=deny_tracker,
-            )
-            log.info("店铺 %s 榜单：%s 个商品（%s 页）", shop.key, len(offers), pages_read)
-            db.save_shop_offers(round_id, shop.key, shop.url, shop.name, offers, pages_read)
+            if shop.key in done:
+                log.info("店铺 %s 本轮已完成榜单，跳过列表", shop.key)
+            else:
+                listing_page = click_listing.PlaywrightListing(page, shop, cfg, human)
+                offers, pages_read = click_listing.crawl_store_by_click(
+                    listing_page, shop, cfg, human, db=db, round_id=round_id, emit=emit,
+                    deny_tracker=deny_tracker,
+                )
+                log.info("店铺 %s 榜单：%s 个商品（%s 页）",
+                         shop.key, len(offers), pages_read)
+                db.save_shop_offers(round_id, shop.key, shop.url, shop.name,
+                                    offers, pages_read)
+            # 补采也在这一层收尾：补采命中 deny 到阈值时同样是「这家店到此为止」。
+            _retry_shop_pending_pw(db, cfg, round_id, shop, page, human, emit=emit,
+                                   deny_tracker=deny_tracker)
         except STOP_WITH_OUTCOME as exc:
-            # 该店如实记为未完成（备注文案来自 _STOP_OUTCOMES），
-            # 整轮级的停止原样上抛、跳过单店的那种接着跑下一家。
-            outcome = stop_outcome(exc)
-            _record_incomplete_listing(db, round_id, shop,
-                                       outcome.shop_note.format(exc=exc))
-            if outcome.ladder_log:
-                log.log(outcome.log_level, outcome.ladder_log.format(exc=exc))
-            if outcome.scope is StopScope.SHOP:
-                continue
-            raise
+            # 该店如实记为未完成；整轮级的停止原样上抛、跳过单店的那种接着跑下一家。
+            if not _record_shop_stop(db, round_id, shop, exc):
+                raise
+            continue
         except ListingLoadFailed as exc:
             _record_listing_failure(db, cfg, round_id, shop, exc)
             continue
-        _retry_shop_pending_pw(db, cfg, round_id, shop, page, human, emit=emit)
     log.info("榜单阶段完成")
 
 
 def _retry_shop_pending_pw(db: Database, cfg: Config, round_id: int, shop: Shop, page,
-                           human: Humanizer, emit=None) -> None:
-    """某店榜单保存完成后，立即补抓该店本轮尚未成功的商品，再进入下一家店。"""
+                           human: Humanizer, emit=None, deny_tracker=None) -> None:
+    """某店榜单保存完成后，立即补抓该店本轮尚未成功的商品，再进入下一家店。
+
+    `deny_tracker` 是整轮那一个（与点击路径共用）：补采命中 deny 也计入店铺/整轮阈值
+    （候选 04）。
+    """
     offers = _pending_detail_offers(db, round_id, cfg, shop_key=shop.key)
     if not offers:
         return
     log.info("店铺 %s 榜单完成后立即补抓 %s 个失败商品", shop.key, len(offers))
     _capture_pending_offers(
         db, cfg, human, round_id, offers,
-        lambda offer: _capture_one_pw(db, cfg, human, round_id, offer, page, emit=emit),
+        lambda offer: _capture_one_pw(db, cfg, human, round_id, offer, page, emit=emit,
+                                      deny_tracker=deny_tracker),
     )
 
 
 def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, offer, page,
-                    emit=None) -> None:
+                    emit=None, deny_tracker=None) -> None:
     """逐店补采一个商品：adapter 只把页面读成 html，其余规则在 detail 里。
 
     编号在取观测前就已知，所以「今天采过就不打开页面、额度用尽就不进详情」这条省事的路
     在这里成立（候选 02 / ADR-0013）；读到什么算失败由 `detail.observe_page` 判
-    （候选 02 / ADR-0018），规则在 `detail.capture_observation`。
+    （候选 02 / ADR-0018），规则在 `detail.capture_observation`。补采命中的 deny 与点击
+    路径共用一个账目（候选 04）。
     """
     def emit_detail(event: str, **kw: object) -> None:
         if emit is not None:
@@ -436,11 +454,17 @@ def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, 
 
     def observe() -> detail.Observation:
         """补采的详情访问：怎么打开归 browser_pw，读到什么算失败归 detail.observe_page。"""
-        observation = detail.observe_page(
-            lambda: browser_pw.open_detail(page, offer["product_url"], cfg, human,
-                                           emit=emit_detail),
-            offer["product_url"],
-            reraise=STOP_EXCEPTIONS)
+        html = browser_pw.open_detail(page, offer["product_url"], cfg, emit=emit_detail)
+        # `punished=True`：补采这条没有点击路径那份响应监听，punish 只按地址认
+        # （`is_punish_url`，ADR-0020 记下了这点差别）。
+        if ready_detail_page(page, cfg, emit=emit_detail, punished=True,
+                             deny_tracker=deny_tracker, shop_key=offer["shop_key"]):
+            # 命中 deny：账目已经记在 guard，这一单按「没读到商品」记失败（理由写清是 deny）。
+            log.warning("店铺 %s 商品 %s 补采命中 deny 页", offer["shop_key"],
+                        offer["offer_id"])
+            return detail.Observation.denied(html)
+        observation = detail.observe_page(lambda: html, offer["product_url"],
+                                          reraise=STOP_EXCEPTIONS)
         if observation.ok:
             emit_detail("detail_parse", phase="detail",
                         note=f"sku_count={observation.sku_count}")

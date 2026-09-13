@@ -49,6 +49,18 @@ def save_raw_page(cfg: Config, round_id: int, offer_id: str, html: str) -> Path:
     return path
 
 
+def readable(html: str) -> bool:
+    """这份 html 已经能读出 SKU 行了吗——详情页「可读」的判据。
+
+    等页面可读（`browser_pw.wait_until_detail_readable()`）与判解析失败用的是同一个判据：
+    有 SKU 行才叫读到了，页面还在渲染、或者压根是拦截页时都不是。
+    """
+    try:
+        return bool(extract_skus_from_html(html))
+    except Exception:  # noqa: BLE001 —— 读不出来就是「还不可读」，由解析那一侧报失败
+        return False
+
+
 # ---------- 一次详情观测的规则（点击式列表与逐店补采共用） ----------
 
 class Outcome(str, Enum):
@@ -112,6 +124,14 @@ class Observation:
     @classmethod
     def read_failed(cls, exc: Exception) -> "Observation":
         return cls(failure=f"详情页读取失败：{exc}", kind=FailureKind.READ)
+
+    @classmethod
+    def denied(cls, html: str = "") -> "Observation":
+        """落到反爬拦截页（deny）：不是这个商品自己的问题，但得说清是它没读到。
+
+        账目与阈值在 `guard.ready_detail_page()`；这一条只是把理由写进失败记录、留下原始页
+        供校准（候选 04，补采路径与点击路径一样「deny 不算这个商品的失败原因」）。"""
+        return cls(failure="详情页被反爬拦截（deny）", raw_html=html, kind=FailureKind.READ)
 
     @classmethod
     def parse_failed(cls, exc: Exception, html: str = "") -> "Observation":

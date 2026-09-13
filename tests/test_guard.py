@@ -1,9 +1,17 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
+from bestseller_monitor import guard
 from bestseller_monitor.guard import (
+    DenyTracker,
+    InterventionTimeout,
+    RoundDenyExceeded,
+    ShopDenyExceeded,
     is_deny_url,
     is_login_url,
     is_punish_url,
+    ready_detail_page,
     vtype,
 )
 
@@ -31,6 +39,78 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(vtype("登录墙"), "login")
         self.assertEqual(vtype("滑块"), "slider")
         self.assertEqual(vtype(None), "none")
+
+
+class ReadyDetailPageTests(unittest.TestCase):
+    """详情页打开之后怎么安顿：deny 记账优先、滑块等人次之（候选 04，两条路共用一份）。"""
+
+    CFG = SimpleNamespace(deny_window_minutes=10, deny_shop_limit=7, deny_round_limit=10,
+                          human_pause_minutes=1, intervention_confirmation_sec=0)
+    DENY = "https://s.1688.com/bsop-punish?x=1"
+
+    @staticmethod
+    def page(url: str):
+        return SimpleNamespace(url=url)
+
+    def test_a_deny_page_is_recorded_and_reported(self):
+        tracker = DenyTracker(600)
+
+        denied = ready_detail_page(self.page(self.DENY), self.CFG, deny_tracker=tracker,
+                                   shop_key="A01")
+
+        self.assertTrue(denied, "落在 deny 页上")
+        self.assertEqual((tracker.shop_count("A01"), tracker.round_count()), (1, 1))
+
+    def test_a_deny_page_is_not_treated_as_a_slider(self):
+        """先认 deny：deny 是自动限流，不该走人工介入（改前会去响铃等人，候选 04）。"""
+        with patch.object(guard, "wait_for_resolution") as wait:
+            ready_detail_page(self.page(self.DENY), self.CFG, deny_tracker=DenyTracker(600),
+                              shop_key="A01")
+
+        wait.assert_not_called()
+
+    def test_the_shop_limit_raises_after_recording(self):
+        tracker = DenyTracker(600)
+        cfg = SimpleNamespace(**{**vars(self.CFG), "deny_shop_limit": 2})
+
+        ready_detail_page(self.page(self.DENY), cfg, deny_tracker=tracker, shop_key="A01")
+        with self.assertRaises(ShopDenyExceeded):
+            ready_detail_page(self.page(self.DENY), cfg, deny_tracker=tracker, shop_key="A01")
+
+        self.assertEqual(tracker.shop_count("A01"), 2, "越界的这一次也记进账目")
+
+    def test_the_round_limit_raises_before_the_shop_limit(self):
+        tracker = DenyTracker(600)
+        cfg = SimpleNamespace(**{**vars(self.CFG), "deny_shop_limit": 3,
+                                 "deny_round_limit": 2})
+
+        ready_detail_page(self.page(self.DENY), cfg, deny_tracker=tracker, shop_key="A01")
+        with self.assertRaises(RoundDenyExceeded):
+            ready_detail_page(self.page(self.DENY), cfg, deny_tracker=tracker, shop_key="A02")
+        self.assertEqual(tracker.shop_count("A02"), 1, "另一家店的计数远没到店铺阈值")
+
+    def test_a_slider_page_waits_for_the_human(self):
+        with patch.object(guard, "intervention_kind", return_value="滑块"), \
+             patch.object(guard, "wait_for_resolution") as wait:
+            denied = ready_detail_page(self.page("https://detail.1688.com/offer/11.html"),
+                                       self.CFG, emit=MagicMock(), shop_key="A01")
+
+        self.assertFalse(denied, "滑块页不是 deny，等完人照样往下走")
+        self.assertEqual(wait.call_args.args[0].url,
+                         "https://detail.1688.com/offer/11.html")
+        self.assertEqual(wait.call_args.kwargs["verification_type"], "slider")
+
+    def test_an_intervention_timeout_passes_through(self):
+        with patch.object(guard, "intervention_kind", return_value="滑块"), \
+             patch.object(guard, "wait_for_resolution",
+                          side_effect=InterventionTimeout("超时")):
+            with self.assertRaises(InterventionTimeout):
+                ready_detail_page(self.page("https://detail.1688.com/offer/11.html"),
+                                  self.CFG)
+
+    def test_without_a_tracker_a_deny_page_is_still_denied(self):
+        """点击路径没配账目时（用例、诊断工具）：deny 照样认得出来，由调用方退避。"""
+        self.assertTrue(ready_detail_page(self.page(self.DENY), self.CFG))
 
 
 if __name__ == "__main__":

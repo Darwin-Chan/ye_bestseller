@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_pw, click_listing, detail, pipeline, rounds
+from bestseller_monitor import browser_pw, click_listing, detail, guard, pipeline, rounds
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import (
     CST,
@@ -54,7 +54,7 @@ class P1Tests(unittest.TestCase):
         with patch.object(browser_pw.time, "sleep"), \
              patch.object(browser_pw, "intervention_kind", return_value=None):
             html = browser_pw.open_detail(
-                page, "https://detail.1688.com/offer/111.html", self._cfg(), MagicMock(),
+                page, "https://detail.1688.com/offer/111.html", self._cfg(),
                 emit=lambda event, **kw: events.append((event, kw)))
 
         self.assertEqual([event for event, _ in events], ["detail_nav"],
@@ -76,6 +76,11 @@ class P1Tests(unittest.TestCase):
             "fail_rate_limit": 0.1,
             "max_attempts_per_page": 2,
             "max_detail_opportunities_per_round": 1000,
+            "deny_window_minutes": 10,
+            "deny_shop_limit": 7,
+            "deny_round_limit": 10,
+            "deny_backoff_sec": 0.0,
+            "deny_retry2_backoff_sec": 0.0,
             "shuffle_within_shop": False,
             "long_pause_interval": (1, 1),
             "detail_delay_sec": (0.0, 0.0),
@@ -190,6 +195,85 @@ class P1Tests(unittest.TestCase):
             )
 
         self.assertEqual(events, ["detail_nav", "detail_parse"])
+
+    def test_a_deny_page_during_backfill_is_counted_and_named(self):
+        """补采命中 deny：计入整轮账目（候选 04 的 Q1 决定），失败记录里写清是 deny。"""
+        round_id = new_round(self.db)
+        self.db.add_shop(round_id, "A01", "https://shop.example/", "店铺A")
+        url = "https://detail.1688.com/offer/11.html"
+        self.db.save_shop_offers(round_id, "A01", "https://shop.example/", "店铺A",
+                                 [(1, "11", url, "商品11", "")], 1)
+        self.db.mark_failure(round_id, "A01", "11", 1, "解析失败")
+        offer = next(row for row in self.db.pending_offers(round_id, max_attempts=2)
+                     if row["offer_id"] == "11")
+        tracker = guard.DenyTracker(600)
+        page = SimpleNamespace(url="https://s.1688.com/bsop-punish?x=1")
+
+        with patch.object(browser_pw, "open_detail", return_value="<html>deny</html>"):
+            pipeline._capture_one_pw(
+                self.db, self._cfg(raw_page_dir=Path(self.tmp.name) / "raw"),
+                MagicMock(), round_id, offer, page, deny_tracker=tracker)
+
+        self.assertEqual((tracker.shop_count("A01"), tracker.round_count()), (1, 1),
+                         "补采的 deny 与点击路径共用一个账目")
+        note = self.conn.execute(
+            "SELECT detail_note FROM snapshots WHERE round_id=? AND page_status='失败' "
+            "ORDER BY id DESC LIMIT 1", (round_id,)).fetchone()["detail_note"]
+        self.assertIn("反爬拦截（deny）", note, "失败理由要说清是 deny，不是这个商品的锅")
+        self.assertIn("原始页面：", note, "deny 页的原文留着供校准")
+
+    def test_the_backfill_shop_is_skipped_when_deny_hits_the_limit(self):
+        """补采撞上店铺阈值：这家店记为未完成，后面的店接着跑（与点击路径同款收尾）。"""
+        round_id = new_round(self.db)
+        shops = [Shop("A01", "店A", "https://shop-a.example/"),
+                 Shop("A02", "店B", "https://shop-b.example/")]
+        for shop in shops:
+            self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        # A01：榜单已完成，两个商品都待补采——补采时连续命中 deny 撞上店铺阈值。
+        a01_offers = [(index, oid, f"https://detail.1688.com/offer/{oid}.html", f"商品{oid}", "")
+                      for index, oid in enumerate(("11", "12"), start=1)]
+        self.db.save_shop_offers(round_id, "A01", shops[0].url, shops[0].name, a01_offers, 1)
+        for index, oid in enumerate(("11", "12"), start=1):
+            self.db.mark_failure(round_id, "A01", oid, 1, "解析失败", shop_url=shops[0].url,
+                                 shop_name=shops[0].name,
+                                 product_url=f"https://detail.1688.com/offer/{oid}.html",
+                                 product_name=f"商品{oid}")
+        # A02：还没开始，用它验证「跳过 A01 之后这一轮接着跑下一家」。
+        self.db.submit_inventory_snapshot(
+            round_id=round_id, shop_key="A02", shop_url=shops[1].url, shop_name=shops[1].name,
+            offer_id="22", product_url="https://detail.1688.com/offer/22.html",
+            list_title="商品22", detail_title="商品22", main_image_url=None,
+            sku_rows=[{"sku_id": "22:1", "sku_name": "默认", "sku_price": 1.0,
+                       "sku_stock": 3}],
+            collected_at=utcnow(), attempt=1)
+        cfg = self._cfg(deny_shop_limit=2, raw_page_dir=Path(self.tmp.name) / "raw")
+        page = MagicMock()
+        page.url = "https://s.1688.com/bsop-punish?x=1"
+        crawled: list[str] = []
+
+        def fake_crawl(listing_page, shop, cfg_, human, *, db, round_id, emit=None,
+                       deny_tracker=None):
+            crawled.append(shop.key)
+            oid = "11" if shop.key == "A01" else "22"
+            return [(1, oid, f"https://detail.1688.com/offer/{oid}.html", f"商品{oid}", "")], 1
+
+        tracker = guard.DenyTracker(600)
+        with patch.object(click_listing, "crawl_store_by_click", side_effect=fake_crawl), \
+             patch.object(browser_pw, "open_detail", return_value="<html>deny</html>"):
+            pipeline._run_listing_pw(self.db, cfg, round_id, shops, page,
+                                     deny_tracker=tracker)
+
+        self.assertEqual(crawled, ["A02"])
+        self.assertEqual(tracker.shop_count("A01"), 2, "越界的这一次也记进账目")
+        rows = {row["shop_key"]: row["list_status"] for row in self.conn.execute(
+            "SELECT shop_key, list_status FROM shop_rounds WHERE round_id=?", (round_id,))}
+        self.assertEqual(rows["A01"], "失败",
+                         "补采撞阈值的那家店记为未完成（续跑时会接着补它）")
+        self.assertEqual(rows["A02"], "完成", "跳过 A01 之后这一轮接着跑 A02")
+        note = self.conn.execute(
+            "SELECT list_note FROM shop_rounds WHERE round_id=? AND shop_key='A01'",
+            (round_id,)).fetchone()["list_note"]
+        self.assertIn("deny", note, "原因写得出来，续跑的人知道为什么停")
 
     def test_failed_offer_with_many_skus_triggers_failure_rate_pause(self):
         round_id = new_round(self.db)
@@ -724,7 +808,7 @@ class P1Tests(unittest.TestCase):
             oid = "1" if shop.key == "A01" else "2"
             return [(1, oid, f"https://detail.1688.com/offer/{oid}.html", f"商品{oid}", "")], 1
 
-        def fake_capture(db, cfg_, human, rid, offer, page, emit=None):
+        def fake_capture(db, cfg_, human, rid, offer, page, emit=None, deny_tracker=None):
             events.append(("retry", offer["shop_key"]))
 
         with patch.object(click_listing, "crawl_store_by_click", side_effect=fake_crawl), \

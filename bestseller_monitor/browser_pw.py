@@ -7,7 +7,8 @@
 - 逐店补采用的 `open_detail`（打开一个详情页、把页面读成 html；读到什么算失败归
   `detail.observe_page`，见 ADR-0018）。
 
-`DenyTracker` 与那两个 deny 异常从 click_listing 转出来，供沿用旧 import 的调用方。
+`DenyTracker` 与那两个 deny 异常现在长在 guard.py（deny 判定的家），这里替沿用旧 import 的
+调用方转出来；详情页「打开之后怎么安顿」也归 `guard.ready_detail_page()`（候选 04）。
 """
 from __future__ import annotations
 
@@ -18,10 +19,12 @@ import subprocess
 import time
 
 from . import browser_proc, listing
-from .click_listing import (DenyTracker, RoundDenyExceeded,  # noqa: F401  旧名兼容
-                            ShopDenyExceeded, WAIT_POPUP_MS)
+from .click_listing import WAIT_POPUP_MS
 from .config import Config
 from .delay import Humanizer
+from .detail import readable
+from .guard import (DenyTracker, RoundDenyExceeded,  # noqa: F401  旧名兼容
+                    ShopDenyExceeded)
 from .guard import (
     body_text, captcha_visible, intervention_kind,
     is_deny_url, is_punish_url, resolved, vtype, wait_for_resolution,
@@ -159,20 +162,39 @@ def close_session(pw, br) -> None:
                                browser_pid=browser_pid, own_pid=own_pid)
 
 
-def open_detail(page, product_url: str, cfg: Config, human: Humanizer, emit=None) -> str:
+# 等详情页给出能解析的 html 的上限（秒）：与列表首屏同量级，超了就把当前 html 交出去。
+DETAIL_READY_TIMEOUT_SEC = 10.0
+DETAIL_READY_POLL_SEC = 0.25
+
+
+def wait_until_detail_readable(page, timeout: float = DETAIL_READY_TIMEOUT_SEC) -> str:
+    """等到详情页的 html 能读出 SKU 行（或等够 timeout），交回最后一次读到的 html。
+
+    改前这里是固定的 `time.sleep(2)`：拿时间赌「渲染完了」。等真正的判据既更快（通常第一个
+    轮询就命中）也更稳；等不到就把当前 html 交出去，由 `detail.observe_page()` 判失败。
+    落在 deny / punish 页上立刻返回——那是要按限流处理的页面，不该在这儿干等（候选 04）。
+    """
+    deadline = time.time() + timeout
+    html = page.content()
+    while True:
+        if readable(html) or is_deny_url(page.url or "") or is_punish_url(page.url or ""):
+            return html
+        if time.time() >= deadline:
+            log.warning("详情页 %s 等了 %.0f 秒仍读不出 SKU 行，按当前内容交给解析",
+                        page.url, timeout)
+            return html
+        time.sleep(DETAIL_READY_POLL_SEC)
+        html = page.content()
+
+
+def open_detail(page, product_url: str, cfg: Config, emit=None) -> str:
     """打开一个详情页并把它读成 html（补采路径的那半条 adapter）。
 
-    「读到什么算失败、留不留原始页」不在这里：读回来的 html 交给
-    `detail.observe_page()`，两条路径共用同一份翻译（候选 02）。
+    只负责「把页面打开、等到可读」；deny 账目、人工介入与「读到什么算失败」都不在这里
+    （分别归 `guard.ready_detail_page()` 与 `detail.observe_page()`，候选 02 / 04）。
     """
     if emit:
         m = re.search(r"/(?:offer|item)/(\d+)\.html", product_url)
         emit("detail_nav", offer_id=m.group(1) if m else None, phase="detail")
     page.goto(product_url, wait_until="domcontentloaded")
-    time.sleep(2)
-    kind = intervention_kind(page, False)
-    if kind:
-        wait_for_resolution(page, cfg.human_pause_minutes, emit=emit,
-                            verification_type=_vtype(kind),
-                            confirm_sec=cfg.intervention_confirmation_sec)
-    return page.content()
+    return wait_until_detail_readable(page)

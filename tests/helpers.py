@@ -1,5 +1,6 @@
 """测试共用件：建轮只走轮次模块这一条路；锁名字按用例隔离。"""
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -41,9 +42,11 @@ def new_round(db, *shops, run_date: str | None = None) -> int:
 class FakeCard:
     """脚本化的一张商品卡：标题、打开后读到什么、是不是 deny。
 
-    遍历只看这四件事（`title` / `open` / `opened` / `denied` / `read` / `close`），
-    所以它不需要任何页面对象。
+    遍历只看这几件事（`title` / `open` / `opened` / `page` / `url` / `offer_id` / `read` /
+    `close`）；`page` 是给 `guard.ready_detail_page()` 看的假页面句柄，deny 判定看它的 url。
     """
+
+    DENY_URL = "https://s.1688.com/bsop-punish?x=1"
 
     def __init__(self, title: str = "", *, offer_id: str | None = "11",
                  observation=None, denied: bool = False, opened: bool = True,
@@ -74,8 +77,10 @@ class FakeCard:
     def opened(self) -> bool:
         return self._opened
 
-    def denied(self) -> bool:
-        return self._denied
+    @property
+    def page(self):
+        """这次的详情页句柄：deny 的那种给 deny 地址（`is_deny_url` 认 bsop-punish）。"""
+        return SimpleNamespace(url=self.DENY_URL if self._denied else self.url)
 
     def read(self):
         if self._read_error is not None:

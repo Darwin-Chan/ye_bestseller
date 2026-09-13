@@ -5,9 +5,10 @@
 
 - **页面 adapter**（`PlaywrightListing`）：把页面动作翻译成遍历要的几件事——打开并准备、
   滚动取卡片数、拿第 i 张卡的句柄、推进到下一批。测试注一个脚本化实现就能跑完整条遍历。
-- **卡片句柄**：`title` / `open` / `opened` / `denied` / `url` / `offer_id` / `read` / `close`。
-  `read` 就是 `detail.capture_observation` 要的那道 adapter（候选 02 立的接缝），
-  弹窗谁开谁关。
+- **卡片句柄**：`title` / `open` / `opened` / `page` / `url` / `offer_id` / `read` / `close`。
+  `read` 就是 `detail.capture_observation` 要的那道 adapter（候选 02 立的接缝），弹窗谁开谁关；
+  `page` 是这次打开的详情页句柄——它是 deny 还是滑块由 `guard.ready_detail_page()` 判
+  （候选 04，卡片自己不再判 deny）。
 - **遍历上下文**（`ShopWalk`）：这家店这次遍历的账本、事件与每张卡的处理。
 
 浏览器会话与逐卡详情机制仍留在 browser_pw.py；榜单页本身的行为（准备、推进、列表身份）
@@ -25,8 +26,8 @@ from . import dedupe, detail, listing, rounds
 from .config import Config, Shop, effective_pages_limit
 from .db import cst_date, utcnow
 from .delay import Humanizer
-from .guard import (RoundPauseRequired, intervention_kind, is_deny_url, is_punish_url,
-                    vtype, wait_for_resolution)
+from .guard import (RoundDenyExceeded, ShopDenyExceeded, is_deny_url, is_punish_url,
+                    ready_detail_page)
 
 log = logging.getLogger(__name__)
 
@@ -46,40 +47,6 @@ def crawl_store_by_click(listing_page, shop: Shop, cfg: Config, human: Humanizer
     walk = ShopWalk(listing_page, shop, cfg, human,
                     db=db, round_id=round_id, emit=emit, deny_tracker=deny_tracker)
     return walk.run()
-
-
-# ---------- deny：被反爬拦下的计数与两个异常 ----------
-
-class ShopDenyExceeded(Exception):
-    """某店滚动窗口内 deny 数达到阈值，跳过该店。"""
-
-
-class RoundDenyExceeded(RoundPauseRequired):
-    """整轮滚动窗口内 deny 数达到阈值，中止本轮。"""
-
-
-class DenyTracker:
-    """滚动窗口内的 deny 计数（按店 + 整轮）。"""
-
-    def __init__(self, window_sec: float):
-        self.window_sec = window_sec
-        self.events: list[tuple[float, str]] = []
-
-    def _prune(self, now: float) -> None:
-        self.events = [(t, s) for t, s in self.events if now - t <= self.window_sec]
-
-    def record(self, shop_key: str) -> None:
-        now = time.time()
-        self.events.append((now, shop_key))
-        self._prune(now)
-
-    def shop_count(self, shop_key: str) -> int:
-        self._prune(time.time())
-        return sum(1 for t, s in self.events if s == shop_key)
-
-    def round_count(self) -> int:
-        self._prune(time.time())
-        return len(self.events)
 
 
 class ShopWalk:
@@ -189,8 +156,9 @@ class ShopWalk:
     def capture(self, card, list_title: str) -> str | None:
         """点开一张卡、取一次详情观测、按结果记事件；成功返回商品编号。
 
-        deny 处理：第 1/2 次退避重试，第 3 次关掉详情跳过当前商品。
-        可能抛 ShopDenyExceeded / RoundDenyExceeded。
+        打开之后先问 `guard.ready_detail_page()`（deny 记账、阈值、人工介入都在那儿，候选 04）：
+        命中 deny 按第 1/2 次退避重试、第 3 次关掉详情跳过当前商品；
+        阈值越界抛 ShopDenyExceeded / RoundDenyExceeded（收尾见 pipeline._STOP_OUTCOMES）。
         """
         note = card.note
         per_product_denies = 0
@@ -201,22 +169,21 @@ class ShopWalk:
             if not card.opened():
                 self.emit("click_no_popup", note=note)
                 return None
-            if card.denied():
+            try:
+                denied = ready_detail_page(card.page, self.cfg, emit=self.emit,
+                                           punished=getattr(self.listing_page, "punished",
+                                                            False),
+                                           deny_tracker=self.deny_tracker,
+                                           shop_key=self.shop.key)
+            except (ShopDenyExceeded, RoundDenyExceeded) as exc:
+                # 账目与判据都在 guard，这里只把它记成事件再上抛（收尾见 _STOP_OUTCOMES）。
+                flag = ("round_abort" if isinstance(exc, RoundDenyExceeded)
+                        else "shop_skip")
+                self.emit("click_deny", phase="detail",
+                        note=note + f"&n={per_product_denies + 1}&{flag}")
+                raise
+            if denied:
                 per_product_denies += 1
-                if self.deny_tracker is not None:
-                    self.deny_tracker.record(self.shop.key)
-                    if self.deny_tracker.round_count() >= self.cfg.deny_round_limit:
-                        self.emit("click_deny", phase="detail",
-                                note=note + f"&n={per_product_denies}&round_abort")
-                        raise RoundDenyExceeded(
-                            f"整轮 {self.cfg.deny_window_minutes} 分钟内"
-                            f" deny≥{self.cfg.deny_round_limit}")
-                    if self.deny_tracker.shop_count(self.shop.key) >= self.cfg.deny_shop_limit:
-                        self.emit("click_deny", phase="detail",
-                                note=note + f"&n={per_product_denies}&shop_skip")
-                        raise ShopDenyExceeded(
-                            f"店铺 {self.shop.key} {self.cfg.deny_window_minutes} 分钟内"
-                            f" deny≥{self.cfg.deny_shop_limit}")
                 log.warning("店铺 %s 商品命中 deny（该商品第 %s 次）",
                             self.shop.key, per_product_denies)
                 if per_product_denies == 1:
@@ -428,8 +395,10 @@ class PlaywrightCard:
     def opened(self) -> bool:
         return self._detail_page is not None
 
-    def denied(self) -> bool:
-        return self._detail_page is not None and is_deny_url(self.url)
+    @property
+    def page(self):
+        """这次打开的详情页句柄；安顿它（deny / 人工介入）交给 `guard.ready_detail_page()`。"""
+        return self._detail_page
 
     def read(self) -> detail.Observation:
         """读一次详情观测：怎么拿到 html 归弹窗，读到什么算失败归 `detail.observe_page`。"""
@@ -493,7 +462,9 @@ def read_card_title(page, idx: int) -> str:
 def click_card(page, image, cfg: Config, punished: bool, on_response, emit=None):
     """点商品图的「可点击父元素」并等详情打开；返回 (详情页, 弹窗)。
 
-    弹窗没出现时，页面可能就地跳到了详情；两种情况都可能需要人工介入。
+    弹窗没出现时，页面可能就地跳到了详情。这里只负责「把页面打开」；打开之后怎么安顿
+    （deny 记账、滑块等人）由调用方走 `guard.ready_detail_page()`（候选 04）——
+    诊断工具因此拿到的是页面的原始状态，不再被隐式的等待挡住。
     """
     popup = None
     try:
@@ -529,11 +500,6 @@ def click_card(page, image, cfg: Config, punished: bool, on_response, emit=None)
                 pass
             return None, None
         popup.on("response", on_response)
-        kind = intervention_kind(popup, punished)
-        if kind:
-            wait_for_resolution(popup, cfg.human_pause_minutes, emit=emit,
-                                verification_type=vtype(kind),
-                                confirm_sec=cfg.intervention_confirmation_sec)
         return popup, popup
 
     if "detail.1688.com/offer/" not in (page.url or ""):
@@ -542,11 +508,6 @@ def click_card(page, image, cfg: Config, punished: bool, on_response, emit=None)
         page.wait_for_load_state("domcontentloaded", timeout=cfg.timeout_ms)
     except PlaywrightError:
         return None, None
-    kind = intervention_kind(page, punished)
-    if kind:
-        wait_for_resolution(page, cfg.human_pause_minutes, emit=emit,
-                            verification_type=vtype(kind),
-                            confirm_sec=cfg.intervention_confirmation_sec)
     return page, None
 
 

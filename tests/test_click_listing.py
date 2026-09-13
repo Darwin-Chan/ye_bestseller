@@ -15,6 +15,7 @@ from bestseller_monitor import browser_pw, click_listing, detail, listing, round
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import (Database, DayBoundaryReached, DetailBudgetExhausted,
                                    connect, utcnow)
+from bestseller_monitor import guard
 from bestseller_monitor.guard import InterventionTimeout
 from bestseller_monitor.listing import ListingLoadFailed
 from helpers import FakeCard, ScriptedListing, new_round
@@ -238,7 +239,7 @@ class SameNameTests(ClickListingTestCase):
 class DenyTests(ClickListingTestCase):
     def test_the_third_deny_closes_the_card_and_skips_the_product(self):
         card = FakeCard("商品1", offer_id="11", denied=True)
-        tracker = click_listing.DenyTracker(600)
+        tracker = guard.DenyTracker(600)
 
         result = self.walk(ScriptedListing([[card]]),
                            deny_tracker=tracker).capture(card, "商品1")
@@ -255,9 +256,9 @@ class DenyTests(ClickListingTestCase):
     def test_the_shop_is_skipped_when_deny_hits_the_limit(self):
         card = FakeCard("商品1", offer_id="11", denied=True)
         walk = self.walk(ScriptedListing([[card]]), cfg=_cfg(deny_shop_limit=1),
-                         deny_tracker=click_listing.DenyTracker(600))
+                         deny_tracker=guard.DenyTracker(600))
 
-        with self.assertRaises(click_listing.ShopDenyExceeded):
+        with self.assertRaises(guard.ShopDenyExceeded):
             walk.capture(card, "商品1")
 
 
@@ -327,18 +328,27 @@ class StopAndBudgetTests(ClickListingTestCase):
 
 
 class PlaywrightAdapterTests(ClickListingTestCase):
-    """adapter 自己的翻译活儿：点卡片、读页面、滚动。"""
+    """adapter 自己的翻译活儿：点卡片、读页面、滚动。
 
-    def test_an_intervention_timeout_while_opening_a_card_propagates(self):
+    「打开之后安顿页面」（滑块等人 / deny 记账）不在这儿了——它归 `guard.ready_detail_page()`，
+    由遍历在点开卡片之后叫（候选 04），所以那条等待的用例移到 `test_guard`。
+    """
+
+    def test_opening_a_card_only_opens_the_page(self):
+        """点卡片只负责把页面打开：诊断工具因此拿到的是原始状态，不被隐式等待挡住。"""
         page, popup = MagicMock(), MagicMock()
         page.expect_popup.return_value.__enter__.return_value = SimpleNamespace(value=popup)
 
-        with patch.object(click_listing, "intervention_kind", return_value="滑块"), \
-             patch.object(click_listing, "wait_for_resolution",
-                          side_effect=InterventionTimeout("超时")):
-            with self.assertRaises(InterventionTimeout):
-                click_listing.click_card(page, MagicMock(), _cfg(), False, MagicMock())
+        with patch.object(guard, "intervention_kind", return_value="滑块") as kind, \
+             patch.object(guard, "wait_for_resolution",
+                          side_effect=InterventionTimeout("超时")) as wait:
+            detail_page, again = click_listing.click_card(
+                page, MagicMock(), _cfg(), False, MagicMock())
 
+        self.assertIs(detail_page, popup)
+        self.assertIs(again, popup)
+        kind.assert_not_called()
+        wait.assert_not_called()
         self.assertEqual(page.expect_popup.call_args.kwargs["timeout"],
                          browser_pw._WAIT_POPUP_MS)
 
