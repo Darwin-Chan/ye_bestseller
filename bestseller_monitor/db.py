@@ -581,24 +581,32 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-# 本轮计数的两条聚合查询：都按店铺编号分组、长度对得上 `_tally_by_shop()` 的 width。
-#
-# 快照侧：整轮里「已处理」「成功商品」「成功 SKU 行」三个数（走 idx_snapshots_round_counts）。
+# 「已处理」「成功库存快照」两个判据只在这一处写下来；下面两条计数查询都拼它（表别名一律 `s`）。
+_TALLY_HANDLED_WHEN = "s.page_status IN ('成功', '跳过')"
+_TALLY_SUCCESS_WHEN = "s.page_status='成功' AND s.sku_id IS NOT NULL"
+
+
+def _tally_columns() -> str:
+    """本轮计数的三列：已处理、成功商品、成功 SKU 行。"""
+    return ("COUNT(DISTINCT CASE WHEN "
+            f"{_TALLY_HANDLED_WHEN} THEN s.offer_id END) AS handled, "
+            "COUNT(DISTINCT CASE WHEN "
+            f"{_TALLY_SUCCESS_WHEN} THEN s.offer_id END) AS success_offers, "
+            f"SUM(CASE WHEN {_TALLY_SUCCESS_WHEN} THEN 1 ELSE 0 END) AS success_skus")
+
+
+# 榜单侧：这一轮榜单行里发现过哪些商品（`idx_shop_offers_key` 覆盖）。
+_DISCOVERED_TALLY_SQL = (
+    "SELECT shop_key, COUNT(DISTINCT offer_id) AS discovered FROM shop_offers "
+    "WHERE round_id=? GROUP BY shop_key")
+# 快照侧：整轮里「已处理」「成功商品」「成功 SKU 行」三个数（`idx_snapshots_round_counts` 覆盖）。
 _SNAPSHOT_TALLY_SQL = (
-    "SELECT shop_key, "
-    "COUNT(DISTINCT CASE WHEN page_status IN ('成功', '跳过') THEN offer_id END), "
-    "COUNT(DISTINCT CASE WHEN page_status='成功' AND sku_id IS NOT NULL "
-    "THEN offer_id END), "
-    "SUM(CASE WHEN page_status='成功' AND sku_id IS NOT NULL THEN 1 ELSE 0 END) "
-    "FROM snapshots WHERE round_id=? GROUP BY shop_key")
+    f"SELECT s.shop_key, {_tally_columns()} "
+    "FROM snapshots s WHERE s.round_id=? GROUP BY s.shop_key")
 # 孤儿侧：同一组数，但只看「有快照、无榜单行」的商品（IS-49；通常是零行）。
 _ORPHAN_TALLY_SQL = (
-    "SELECT s.shop_key, "
-    "COUNT(DISTINCT CASE WHEN s.page_status IN ('成功', '跳过') THEN s.offer_id END), "
-    "COUNT(DISTINCT CASE WHEN s.page_status='成功' AND s.sku_id IS NOT NULL "
-    "THEN s.offer_id END), "
-    "SUM(CASE WHEN s.page_status='成功' AND s.sku_id IS NOT NULL THEN 1 ELSE 0 END), "
-    "COUNT(DISTINCT s.offer_id) "
+    f"SELECT s.shop_key, {_tally_columns()}, "
+    "COUNT(DISTINCT s.offer_id) AS orphans "
     "FROM snapshots s WHERE s.round_id=? AND NOT EXISTS ("
     "SELECT 1 FROM shop_offers so WHERE so.round_id=s.round_id "
     "AND so.shop_key=s.shop_key AND so.offer_id=s.offer_id) "
@@ -607,9 +615,10 @@ _ORPHAN_TALLY_SQL = (
 
 @dataclass(frozen=True)
 class ShopTally:
-    """一家店（或整轮合计）的计数：**商品数一律按榜单行去重**（IS-49 判定
+    """一组本轮计数：整轮合计，或一家店的。**商品数一律按榜单行去重**（IS-49 判定
     「有快照、无榜单行」是异常）。
 
+    - `shop_key`：哪一家店；整轮合计是 `None`（它不属于任何一家店）
     - `discovered`：榜单里发现过的商品（榜单行去重）
     - `handled`：其中有成功或跳过快照的——跳过算已处理、不算失败（ADR-0002）
     - `failed_offers`：`discovered - handled`，含「只有榜单行、本轮没抓到」的商品
@@ -618,7 +627,7 @@ class ShopTally:
       `tools/check_orphans.py` 查同一件事）
     """
 
-    shop_key: str
+    shop_key: str | None = None
     discovered: int = 0
     handled: int = 0
     success_offers: int = 0
@@ -669,12 +678,12 @@ class RoundTally:
     def orphans(self) -> int:
         return self.total.orphans
 
-    def shop(self, shop_key: str) -> ShopTally | None:
-        """按店铺切片；这家店本轮一行榜单行都没有时返回 None。"""
+    def shop(self, shop_key: str) -> ShopTally:
+        """按店铺切片；本轮一行都没出现过的店铺给零计数（不返回 None，省得调用方补默认）。"""
         for one in self.per_shop:
             if one.shop_key == shop_key:
                 return one
-        return None
+        return ShopTally(shop_key=shop_key)
 
 
 class Database:
@@ -1297,12 +1306,9 @@ class Database:
         索引，30 万行的合成库上整轮 0.46 秒；把两张表 JOIN 起来逐行核对是 1.5 秒，写
         成相关 EXISTS 更慢（46 秒）。
         """
-        discovered = self._tally_by_shop(
-            round_id, 1,
-            "SELECT shop_key, COUNT(DISTINCT offer_id) FROM shop_offers "
-            "WHERE round_id=? GROUP BY shop_key")
-        snapped = self._tally_by_shop(round_id, 3, _SNAPSHOT_TALLY_SQL)
-        orphaned = self._tally_by_shop(round_id, 4, _ORPHAN_TALLY_SQL)
+        discovered = self._counts_by_shop(round_id, _DISCOVERED_TALLY_SQL)
+        snapped = self._counts_by_shop(round_id, _SNAPSHOT_TALLY_SQL)
+        orphaned = self._counts_by_shop(round_id, _ORPHAN_TALLY_SQL)
 
         per_shop = tuple(
             self._shop_tally(key, discovered, snapped, orphaned)
@@ -1311,7 +1317,7 @@ class Database:
         # 整轮合计就是各店相加：店铺编号互不重叠，没有跨店的商品。
         return RoundTally(
             total=ShopTally(
-                shop_key="",
+                shop_key=None,
                 discovered=sum(one.discovered for one in per_shop),
                 handled=sum(one.handled for one in per_shop),
                 success_offers=sum(one.success_offers for one in per_shop),
@@ -1322,15 +1328,17 @@ class Database:
             click_card_failures=self.click_card_failures(round_id),
         )
 
-    def _tally_by_shop(self, round_id: int, width: int,
-                       sql: str) -> dict[str, tuple[int, ...]]:
-        """跑一条按店铺编号分组的聚合，交回 {店铺编号: 一列一列的计数}。
+    def _counts_by_shop(self, round_id: int,
+                        sql: str) -> dict[str, dict[str, int]]:
+        """跑一条按店铺编号分组的聚合，交回 {店铺编号: {列名: 计数}}。
 
-        没抓到的列（COUNT 遇不到行、SUM 全是 NULL）一律补 0，调用方只管按位置取值。
+        列名取自查询自己的 `AS` 别名；没抓到的列（COUNT 遇不到行、SUM 全是 NULL）补 0。
         """
+        cursor = self.conn.execute(sql, (round_id,))
+        columns = [column[0] for column in cursor.description][1:]
         return {
-            str(row[0]): tuple(int(value or 0) for value in row[1:width + 1])
-            for row in self.conn.execute(sql, (round_id,)).fetchall()
+            str(row[0]): {name: int(value or 0) for name, value in zip(columns, row[1:])}
+            for row in cursor.fetchall()
         }
 
     @staticmethod
@@ -1340,19 +1348,22 @@ class Database:
         「快照里有、榜单行里没有」的商品不算榜单里的商品（IS-49），所以减掉它之后
         剩下的正好是「榜单行里的商品」那份数——不需要把两张表 JOIN 起来逐行核对。
         """
-        handled, success_offers, success_skus = snapped.get(shop_key, (0, 0, 0))
-        lonely_handled, lonely_offers, lonely_skus, orphans = orphaned.get(
-            shop_key, (0, 0, 0, 0))
+        snapshot_side = snapped.get(shop_key, {})
+        orphan_side = orphaned.get(shop_key, {})
+
+        def listed(column: str) -> int:
+            return snapshot_side.get(column, 0) - orphan_side.get(column, 0)
+
         return ShopTally(
             shop_key=shop_key,
-            discovered=discovered.get(shop_key, (0,))[0],
-            handled=handled - lonely_handled,
-            success_offers=success_offers - lonely_offers,
-            success_skus=success_skus - lonely_skus,
-            orphans=orphans,
+            discovered=discovered.get(shop_key, {}).get("discovered", 0),
+            handled=listed("handled"),
+            success_offers=listed("success_offers"),
+            success_skus=listed("success_skus"),
+            orphans=orphan_side.get("orphans", 0),
         )
 
-    def click_card_failures(self, round_id: int, shop_key: str | None = None) -> int:
+    def click_card_failures(self, round_id: int) -> int:
         """统计「点击后从未抓到任何 SKU」的失败卡片数（按 shop+page+idx 去重）。
 
         判定：
@@ -1364,9 +1375,8 @@ class Database:
         rows = self.conn.execute(
             "SELECT shop_key, event, note FROM event_log "
             "WHERE round_id=? AND event IN "
-            "('click_ok','click_skipped','click_no_popup','click_url_notoffer','click_deny')"
-            + (" AND shop_key=?" if shop_key is not None else ""),
-            (round_id, *((shop_key,) if shop_key is not None else ())),
+            "('click_ok','click_skipped','click_no_popup','click_url_notoffer','click_deny')",
+            (round_id,),
         ).fetchall()
         ok_keys: set[tuple] = set()
         fail_keys: set[tuple] = set()

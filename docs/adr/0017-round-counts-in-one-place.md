@@ -37,18 +37,28 @@
 
 ## 结果
 
-**这是一处有意的行为变化**：凡是数「成功商品 / SKU 行数」的地方，现在都排除了孤儿。结果页
-与 `tools/summary.py` 的数字在库里有孤儿时会变小（过程页同理）；`tools/check_orphans.py`
-不受影响（它是按行报孤儿，不是数它们）。用例
-`test_round_tally_counts_every_question_in_one_place` 钉住了这件事：4 个榜单行商品
-（1 成功两行 SKU、1 跳过、1 失败、1 只有榜单行）+ 1 个孤儿 → `discovered=4, handled=2,
-failed_offers=2, success_offers=1, success_skus=2, orphans=1`。
+**这是有意的行为变化，共三处**（前两处在库里没有孤儿时也成立，别把它只当成孤儿的事）：
+
+1. **成功口径**：数「成功商品 / SKU 行数」的地方（过程页、结果页、摘要）都排除了孤儿。
+   `tools/check_orphans.py` 不受影响（它按行报孤儿，不是数它们）。
+2. **摘要的 `fail_offers`**：从「有 `失败` 快照的商品数」改成失败率那条口径
+   （`discovered - handled`，即「榜单行里没成功的商品数」）。于是「本轮一次都没碰到的榜单行
+   商品」现在算失败（旧口径不算），而孤儿的失败快照不算（它不在榜单里）。
+3. **摘要的 `shop_offers`**：从「榜单行行数」改成「按商品去重的榜单行数」。同一商品在
+   `shop_offers` 落两行（不同档位）时，旧口径会多算。
+
+失败率那一路（`pipeline._finalize_round` 的算式与两条日志）行为不变：旧 `offer_counts` 本来
+就是榜单口径。用例 `test_round_tally_counts_every_question_in_one_place` 钉住了 1：4 个榜单
+行商品（1 成功两行 SKU、1 跳过、1 失败、1 只有榜单行）+ 1 个孤儿 → `discovered=4, handled=2,
+failed_offers=2, success_offers=1, success_skus=2, orphans=1`；摘要那两处见
+`tests/test_summary.py`。
 
 **性能**：口径统一到榜单行要付一次「这条快照对应的商品在不在榜单里」的归属核对。第一版
 把它写成相关 `EXISTS`（2.4 万行 46 秒），第二版写成 JOIN（SQLite 会挑「从榜单行驱动」的
 顺序，3.6 万行 >3 分钟）。最后的形状是**三条覆盖索引聚合**：榜单行一条、快照侧一条、孤儿
 侧一条，榜单口径 = 快照侧 − 孤儿那一份（差额正好是孤儿，不需要逐行核对）。30 万行合成库
-（12 店 × 2.5 万快照）实测：
+（12 店 × 2.5 万 = 30 万快照 **+ 30 万榜单行**；`tools/bench_refresh.py` 的合成库现在两类
+都写，否则 `discovered` 恒为 0）实测：
 
 | 查询 | 实测 |
 | --- | --- |
@@ -74,6 +84,33 @@ failed_offers=2, success_offers=1, success_skus=2, orphans=1`。
   （接进刷新路径后实测 1.3 秒，撞上 IS-38 的护栏）。
 - **把近似索引的建法写进 SCHEMA**：老库（`snapshots` 没有 `page_status`）开库直接报
   `no such column`。
+
+两轴审查（成文标准硬违规 0；另一轴的独立核对见下）另抓到几处，都已收口：
+
+1. 「成功或跳过」与「成功库存快照」两个判据在 `_SNAPSHOT_TALLY_SQL` / `_ORPHAN_TALLY_SQL`
+   里各写两遍，`round_tally()` 里第三条查询还内联着——「判据只定义一次」当时只兑现到 module
+   边界。现在两个判据是模块常量（`_TALLY_HANDLED_WHEN` / `_TALLY_SUCCESS_WHEN`），三条查询
+   拼同一份 `_tally_columns()`，榜单侧那条也收成 `_DISCOVERED_TALLY_SQL`。
+2. `click_card_failures(round_id, shop_key=None)` 的按店铺参数全仓零调用，而本 ADR 正是把
+   「逐店切片」列为被否方向——形状却从旁边的参数漏了进来。参数删掉，它只管整轮。
+3. `_tally_by_shop(round_id, width, sql)` 的 `width` 是要与 SELECT 列数对齐的魔术数，返回
+   无列名的 `tuple`、由 `_shop_tally` 按位置解包（改一条 SQL 的列数就静默错位）。改成
+   `_counts_by_shop(round_id, sql)`：列名取查询自己的 `AS` 别名，交回
+   `{店铺编号: {列名: 计数}}`。
+4. 整轮合计原先写作 `ShopTally(shop_key="")`——空串当「整轮」哨兵，`shop("")` 会把它当成
+   一家店返回。改成 `shop_key=None`（字段类型跟着变成 `str | None`）；`RoundTally.shop()`
+   对本轮没出现过的店铺返回零计数而不是 `None`，调用方不用自己补默认
+   （`views._shop_breakdown` 因此少一处 `or ShopTally(...)`）。
+5. **规格轴**：摘要那两处口径变化原先只在正文里含糊带过，与「除孤儿那处外行为零变化」的
+   说法打架。现在「结果」段把三处变化逐条写明，并点出失败率那一路是不变的那条。
+6. **规格轴**：`tools/bench_refresh.py` 补写 30 万榜单行是必要的（不补 `discovered` 恒为
+   0），但它换了护栏的测量对象；「性能」段已写明合成库是「30 万快照 + 30 万榜单行」。
+7. **规格轴**：规格里「结果页 / 摘要 / 失败率三处都会变小」的说法不成立——失败率那一路
+   本来就只数榜单行（新旧都是 `(2, 1)`），本 ADR 没这么写过，记一笔免得再被引用。
+
+规格轴另做了一次独立核对：`work/oracle_tally.py` 造 60 轮随机库（每店 0–6 条榜单行、
+0–2 个孤儿、成功/跳过/失败/不完整四种状态），把 `round_tally()` 与「按定义手算的集合」
+逐店、逐整轮对照，**0 处不一致**——「榜单口径 = 快照侧 − 孤儿那一份」这个式子成立。
 
 相关词汇见 [CONTEXT.md](../../CONTEXT.md) 的「本轮计数」「失败率」「跳过」「成功库存快照」；
 来源是 `docs/reviews/architecture-review-2026-09-13-r2.html` 候选 01，规格在

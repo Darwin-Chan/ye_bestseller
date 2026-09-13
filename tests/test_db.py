@@ -10,6 +10,7 @@ from bestseller_monitor.db import (
     ROUND_TALLY_INDEX,
     SCHEMA,
     SNAPSHOT_SUCCESS_INDEX,
+    ShopTally,
     connect,
     cst_date,
 )
@@ -533,7 +534,8 @@ class DbTests(unittest.TestCase):
         self.assertEqual((whole.discovered, whole.success_offers), (2, 1))
         self.assertEqual((first.discovered, first.success_offers), (1, 0))
         self.assertEqual((second.discovered, second.success_offers), (1, 1))
-        self.assertIsNone(whole.shop("A03"), "本轮没出现过的店铺没有这一片")
+        self.assertEqual(whole.shop("A03"), ShopTally(shop_key="A03"),
+                         "本轮没出现过的店铺给零计数，调用方不用自己补默认")
 
     def test_success_snapshot_requires_stock_and_id(self):
         rid = new_round(self.db)

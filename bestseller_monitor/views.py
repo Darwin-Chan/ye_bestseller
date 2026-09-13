@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from . import rounds
 from .config import effective_pages_limit
-from .db import CST, Database, RoundTally, ShopTally, cst_date
+from .db import CST, Database, RoundTally, cst_date
 
 
 @dataclass(frozen=True)
@@ -248,7 +248,7 @@ def _shop_breakdown(conn: sqlite3.Connection, round_id: int,
     done = []
     for row in done_rows:
         shop_key = row["shop_key"]
-        one = tally.shop(shop_key) or ShopTally(shop_key=shop_key)
+        one = tally.shop(shop_key)
         deny, duration = _shop_span(conn, round_id, shop_key)
         done.append({
             "key": shop_key,
