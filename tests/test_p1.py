@@ -166,6 +166,31 @@ class P1Tests(unittest.TestCase):
         self.assertIn("原始页面：", note)
         self.assertTrue(Path(note.split("原始页面：")[1]).exists(), "原始页要存下来供校准")
 
+    def test_the_backfill_event_sequence_is_unchanged(self):
+        """补采一次成功的事件与改前一致：`detail_nav` → `detail_parse`（名字、顺序、归属）。"""
+        round_id = new_round(self.db)
+        offer = {
+            "shop_key": "A01",
+            "shop_url": "https://shop.example/",
+            "shop_name": "店铺A",
+            "offer_id": "111",
+            "product_url": "https://detail.1688.com/offer/111.html",
+            "list_title": "榜单标题",
+        }
+        events: list[str] = []
+        page = MagicMock()
+        page.content.return_value = DETAIL_HTML
+
+        # 走真的 open_detail（只有页面动作与等待被打桩），事件才真是生产路径发出来的。
+        with patch.object(browser_pw.time, "sleep"), \
+             patch.object(browser_pw, "intervention_kind", return_value=None):
+            pipeline._capture_one_pw(
+                self.db, self._cfg(), MagicMock(), round_id, offer, page,
+                emit=lambda event, **kw: events.append(event),
+            )
+
+        self.assertEqual(events, ["detail_nav", "detail_parse"])
+
     def test_failed_offer_with_many_skus_triggers_failure_rate_pause(self):
         round_id = new_round(self.db)
         self.db.add_shop(round_id, "A01", "https://shop.example/", "店铺A")
