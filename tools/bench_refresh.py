@@ -66,11 +66,15 @@ def build_dataset(conn: sqlite3.Connection, shops: int, rows_per_shop: int,
     db = Database(conn)
     rid = rounds.open(db, RoundRequest(run_date, scopes)).round.id
     base = datetime.fromisoformat(run_date + "T01:00:00")
-    snapshots, events = [], []
+    snapshots, events, listed = [], [], []
     for key in keys:
         db.add_shop(rid, key, f"https://{key}.example/", f"店铺{key}")
         for i in range(rows_per_shop):
             ts = (base + timedelta(seconds=i)).isoformat()
+            listed.append(
+                (rid, key, f"https://{key}.example/", f"店铺{key}", i,
+                 f"offer-{key}-{i}", "https://detail.example/x", "商品", "")
+            )
             snapshots.append(
                 (rid, key, f"https://{key}.example/", f"店铺{key}", f"offer-{key}-{i}",
                  "https://detail.example/x", "商品", f"sku-{i}", "规格", 1.0, 5, ts, "成功", 1)
@@ -79,6 +83,11 @@ def build_dataset(conn: sqlite3.Connection, shops: int, rows_per_shop: int,
                 (rid, key, f"offer-{key}-{i}", "detail",
                  "click_deny" if i % 500 == 0 else "detail_ok", ts)
             )
+    conn.executemany(
+        "INSERT INTO shop_offers(round_id, shop_key, shop_url, shop_name, rank, "
+        "offer_id, product_url, list_title, list_price) VALUES (?,?,?,?,?,?,?,?,?)",
+        listed,
+    )
     conn.executemany(
         "INSERT INTO snapshots (round_id, shop_key, shop_url, shop_name, offer_id, "
         "product_url, product_name, sku_id, sku_name, sku_price, sku_stock, collected_at, "

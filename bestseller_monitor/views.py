@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from . import rounds
 from .config import effective_pages_limit
-from .db import CST, Database, cst_date
+from .db import CST, Database, RoundTally, ShopTally, cst_date
 
 
 @dataclass(frozen=True)
@@ -139,21 +139,6 @@ def _inventory_counts(conn: sqlite3.Connection, date: str,
     return int(row["products"]), int(row["skus"])
 
 
-def _snapshot_counts(conn: sqlite3.Connection, round_id: int,
-                     shop_key: str | None = None) -> tuple[int, int]:
-    """本轮（可选某店）的（成功商品数、成功 SKU 行数）；过程页与结果页共用。"""
-    where = "round_id=? AND page_status='成功' AND sku_id IS NOT NULL"
-    params: list = [round_id]
-    if shop_key is not None:
-        where += " AND shop_key=?"
-        params.append(shop_key)
-    row = conn.execute(
-        f"SELECT COUNT(DISTINCT offer_id) products, COUNT(*) skus FROM snapshots WHERE {where}",
-        params,
-    ).fetchone()
-    return int(row["products"]), int(row["skus"])
-
-
 # ---------- 开始页 ----------
 
 def _start_summary(conn: sqlite3.Connection, today: str) -> dict:
@@ -245,8 +230,13 @@ def _shop_span(conn: sqlite3.Connection, round_id: int,
     return int(deny), (_duration_seconds(span[0], span[1]) if span else None)
 
 
-def _shop_breakdown(conn: sqlite3.Connection, round_id: int) -> tuple[list[dict], list[dict]]:
-    """本轮各店的（已完成明细、未完成清单），按店铺编号排序。"""
+def _shop_breakdown(conn: sqlite3.Connection, round_id: int,
+                    tally: RoundTally) -> tuple[list[dict], list[dict]]:
+    """本轮各店的（已完成明细、未完成清单），按店铺编号排序。
+
+    每店的商品数/SKU 行数从整轮 tally 里切片取（`RoundTally.shop()`）：口径在
+    数据层一处定义，且不给每家店各跑一遍查询（IS-38 的护栏）。
+    """
     done_rows = conn.execute(
         "SELECT * FROM shop_rounds WHERE round_id=? AND list_status='完成' ORDER BY shop_key",
         (round_id,),
@@ -258,13 +248,13 @@ def _shop_breakdown(conn: sqlite3.Connection, round_id: int) -> tuple[list[dict]
     done = []
     for row in done_rows:
         shop_key = row["shop_key"]
-        products, skus = _snapshot_counts(conn, round_id, shop_key)
+        one = tally.shop(shop_key) or ShopTally(shop_key=shop_key)
         deny, duration = _shop_span(conn, round_id, shop_key)
         done.append({
             "key": shop_key,
             "name": row["shop_name"],
-            "products": products,
-            "skus": skus,
+            "products": one.success_offers,
+            "skus": one.success_skus,
             "duration": _fmt_minutes(duration),
             "deny": deny,
         })
@@ -312,7 +302,8 @@ def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str) -> di
             "stop_grace_sec": state.stop_grace_sec,
         }
     round_id = active.id
-    done, todo = _shop_breakdown(conn, round_id)
+    tally = Database(conn).round_tally(round_id)
+    done, todo = _shop_breakdown(conn, round_id, tally)
     total, deny = _round_counts(conn, round_id)
     return {
         "running": state.crawler_running,
@@ -362,9 +353,10 @@ def result_view(conn: sqlite3.Connection, *, state: UiState, now: str) -> dict:
         # 榜单未完成时轮次保持进行中、没有 finished_at，
         # 即便抓取进程已经停下也仍可续跑，所以用当前已抓时长。
         duration = state.elapsed_sec
-    done, todo = _shop_breakdown(conn, round_id)
+    tally = db.round_tally(round_id)
+    done, todo = _shop_breakdown(conn, round_id, tally)
     total, deny = _round_counts(conn, round_id)
-    products_total, skus_total = _snapshot_counts(conn, round_id)
+    products_total, skus_total = tally.success_offers, tally.success_skus
     tag, note = _terminal_text(run.reason)
     return {
         "has_round": True,

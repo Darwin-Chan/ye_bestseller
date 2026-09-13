@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>架构审查（第二轮）· bestseller（1688 库存快照）</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+    </script>
+    <style>
+      .seam { stroke-dasharray: 5 4; }
+      .leak { stroke: #dc2626; }
+      .deep { background: linear-gradient(135deg, #0f172a, #1e293b); }
+      .badge { display: inline-block; border-radius: 9999px; padding: 2px 10px; font-size: 11px;
+               letter-spacing: .06em; text-transform: uppercase; border: 1px solid #cbd5e1; color: #475569; }
+      .badge.strong { background: #ecfdf5; border-color: #6ee7b7; color: #047857; }
+      .badge.worth { background: #fffbeb; border-color: #fcd34d; color: #b45309; }
+      .badge.spec { background: #f1f5f9; border-color: #cbd5e1; color: #475569; }
+      .lab { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: #64748b; }
+      .box { border: 1px solid #cbd5e1; background: #fff; border-radius: 6px; }
+      .box-dash { border: 1px dashed #94a3b8; border-radius: 6px; }
+      .step { border: 1px solid #e2e8f0; background: #f8fafc; border-radius: 4px;
+              font-size: 11px; padding: 3px 6px; color: #334155; font-family: ui-monospace, monospace; }
+      pre.mermaid { background: transparent; margin: 0; text-align: center; }
+    </style>
+  </head>
+  <body class="bg-stone-50 text-slate-900 font-sans antialiased">
+    <main class="max-w-5xl mx-auto px-6 py-12 space-y-12">
+
+      <header class="space-y-4">
+        <p class="text-xs uppercase tracking-[0.2em] text-slate-400">架构审查 · 第二轮 · 加深机会</p>
+        <h1 class="text-4xl font-serif">bestseller / 1688 库存快照</h1>
+        <p class="text-sm text-slate-500">2026-09-13 · HEAD 46b20d7 · 上一轮（<a class="underline" href="file:///F:/AI/projects/bestseller/docs/reviews/architecture-review-2026-09-13.html">候选 01–06</a>）已全部落地，本轮扫它之后又改的 14 个提交</p>
+        <p class="text-sm text-slate-600 border-l-4 border-amber-300 bg-amber-50 px-4 py-3 rounded">归档说明：本报告是 2026-09-13 第二轮审查的快照（当时 HEAD <code>46b20d7</code>），文中的行号与数字指向当时的工作区，之后已位移；正文保持快照原样，不随实现更新。候选 01「本轮计数收成一份 round_tally」同日落地：新增 <code>Database.round_tally()</code> / <code>ShopTally</code> / <code>RoundTally</code>，删掉 <code>success_rows</code> / <code>failed_rows</code> / <code>offer_counts</code>，见 <code>docs/adr/0017-round-counts-in-one-place.md</code> 与 <code>.scratch/round-tally/spec.md</code>。候选 02–06 仍未做。</p>
+        <div class="flex flex-wrap gap-x-6 gap-y-2 text-xs text-slate-500 border-t border-slate-200 pt-4">
+          <span><span class="inline-block w-4 h-3 border border-slate-400 align-middle mr-1"></span>module</span>
+          <span><span class="inline-block w-4 h-0 border-t border-dashed border-slate-500 align-middle mr-1"></span>seam</span>
+          <span><span class="inline-block w-4 h-0 border-t-2 border-red-600 align-middle mr-1"></span>接缝在漏</span>
+          <span><span class="inline-block w-4 h-3 deep rounded-sm align-middle mr-1"></span>deep module</span>
+          <span class="text-slate-400">用词按 codebase-design 词汇表；领域名词按 CONTEXT.md</span>
+        </div>
+      </header>
+
+      <section id="candidates" class="space-y-12">
+
+        <!-- ============ 候选 01 ============ -->
+        <article id="c1" class="rounded-2xl border border-slate-200 bg-white p-8 space-y-6">
+          <div class="flex items-start justify-between gap-4">
+            <div>
+              <p class="text-xs uppercase tracking-wider text-slate-400">候选 01</p>
+              <h2 class="text-2xl font-serif">本轮计数收成一份 round_tally</h2>
+            </div>
+            <div class="flex flex-wrap gap-2 justify-end">
+              <span class="badge strong">Strong</span>
+              <span class="badge">local-substitutable</span>
+            </div>
+          </div>
+          <p class="font-mono text-xs text-slate-500">db.py:773 · :1028 · :1129 · :1158 · :1166 · :1173 · views.py:142 · tools/summary.py:33</p>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <div class="rounded-lg border border-slate-200 bg-white p-3" style="min-height:320px">
+              <p class="lab mb-2">现状 · 同一件事，四个写点</p>
+              <pre class="mermaid">
+flowchart LR
+  V["views 过程页 / 结果页"] --> Q1["COUNT ... page_status='成功'<br/>AND sku_id IS NOT NULL"]
+  S["tools/summary.py"] --> Q1
+  S --> Q2["COUNT DISTINCT offer_id<br/>page_status IN ('成功','跳过')"]
+  D["db.offer_counts"] --> Q2
+  D --> Q3["pending / mark_skipped / 粒度清理<br/>各自再写一遍谓词"]
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class Q1,Q2,Q3 leak
+              </pre>
+              <p class="text-xs text-red-700">同一个「成功库存快照」判据三份手写；「成功或跳过」在 db.py 里三处</p>
+            </div>
+            <div class="rounded-lg border border-slate-200 bg-white p-3" style="min-height:320px">
+              <p class="lab mb-2">加深后 · 一份计数</p>
+              <pre class="mermaid">
+flowchart LR
+  V["views 三个页面"] --> T
+  S["tools/summary.py"] --> T
+  F["pipeline 失败率"] --> T
+  T["Database.round_tally(round_id)<br/>已发现 / 已处理 / 失败 / 成功 SKU / 点击未得卡片"]
+  classDef deep fill:#0f172a,color:#fff,stroke:#0f172a;
+  class T deep
+              </pre>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-3 gap-6">
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-slate-400 mb-1">现状</h3>
+              <p class="text-sm text-slate-700">回答「这一轮有多少商品、多少成功快照」要跨三个 module 看三份手写 SQL；为它写的方法一个没人调、一个只有测试在调。</p>
+            </div>
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-slate-400 mb-1">改法</h3>
+              <p class="text-sm text-slate-700">把「一轮怎么数」收成 <span class="font-mono text-xs">Database.round_tally(round_id)</span> 一份不可变计数，谓词只留在这一个 implementation 里。</p>
+            </div>
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-slate-400 mb-1">收益</h3>
+              <ul class="text-sm text-slate-700 space-y-1">
+                <li>locality：判据只定义一次</li>
+                <li>leverage：页面、失败率、摘要同源</li>
+                <li>depth：调用方不再拼 WHERE</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="rounded-lg bg-slate-50 border border-slate-200 p-4 text-sm text-slate-700">
+            <p class="lab mb-1">证据</p>
+            <p><span class="font-mono text-xs">success_rows()</span>（<span class="font-mono text-xs">db.py:1158</span>）**全仓零调用**——删掉它复杂度是消失的；<span class="font-mono text-xs">failed_rows()</span>（<span class="font-mono text-xs">:1166</span>）只有 <span class="font-mono text-xs">test_db.py:441/:778</span> 在调。三份手写谓词：<span class="font-mono text-xs">db.py:1160</span>、<span class="font-mono text-xs">views.py:145</span>、<span class="font-mono text-xs">summary.py:47</span>；「成功或跳过」还有三处（<span class="font-mono text-xs">:781</span>、<span class="font-mono text-xs">:1129</span>、<span class="font-mono text-xs">:1186</span>）。口径已经有分歧：<span class="font-mono text-xs">db.offer_counts</span> 数的是「榜单行里有过快照的」，<span class="font-mono text-xs">summary.summarize</span> 数的是「快照里出现过的商品」——IS-49 那种孤儿快照会让两个答案不一样。</p>
+            <p class="mt-2">这条同时收掉上一轮报告点名允许重提的遗留：<span class="font-mono text-xs">tools/summary.py</span> 的第三种计数写法。</p>
+          </div>
+        </article>
+
+        <!-- ============ 候选 02 ============ -->
+        <article id="c2" class="rounded-2xl border border-slate-200 bg-white p-8 space-y-6">
+          <div class="flex items-start justify-between gap-4">
+            <div>
+              <p class="text-xs uppercase tracking-wider text-slate-400">候选 02</p>
+              <h2 class="text-2xl font-serif">「页面 → 观测」的翻译收进 detail</h2>
+            </div>
+            <div class="flex flex-wrap gap-2 justify-end">
+              <span class="badge strong">Strong</span>
+              <span class="badge">in-process</span>
+            </div>
+          </div>
+          <p class="font-mono text-xs text-slate-500">click_listing.py:442-448 · pipeline.py:438-449 · detail.py:73-96（Observation 的四个构造子）</p>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <div>
+              <p class="lab mb-2">现状 · 两条 adapter 各拼一遍，已经走歪</p>
+              <div class="box p-3 space-y-2" style="min-height:320px">
+                <div class="box-dash p-2">
+                  <p class="lab">点击路径 click_listing.py:442</p>
+                  <div class="step mt-1">content() → parse_detail_html → extract_main_image</div>
+                  <div class="step">解析失败 → parse_failed（带原始页）</div>
+                  <div class="step">主图异常 → parse_crashed（带原始页）</div>
+                </div>
+                <div class="box-dash p-2">
+                  <p class="lab">补采路径 pipeline.py:438</p>
+                  <div class="step mt-1">capture_detail() → extract_main_image</div>
+                  <div class="step">解析失败 → parse_failed</div>
+                  <div class="step" style="border-color:#dc2626;color:#b91c1c">主图异常 → access_failed（不留原始页）</div>
+                </div>
+                <p class="text-xs text-red-700">同一个失败，两条路两种分类；ADR-0013 承诺「两条路一致」</p>
+              </div>
+            </div>
+            <div>
+              <p class="lab mb-2">加深后 · 一条翻译</p>
+              <div class="box p-3" style="min-height:320px">
+                <div class="deep text-white rounded-md p-4">
+                  <p class="lab !text-slate-300">detail</p>
+                  <p class="font-mono text-sm mt-1">observe_page(read_html, url)</p>
+                  <div class="mt-3 space-y-1 opacity-60">
+                    <div class="step">读内容 → 解析 → 取主图</div>
+                    <div class="step">按失败种类造 Observation</div>
+                  </div>
+                </div>
+                <div class="grid grid-cols-2 gap-2 mt-3">
+                  <div class="box-dash p-2 text-center"><p class="lab">点击：读弹窗内容</p></div>
+                  <div class="box-dash p-2 text-center"><p class="lab">补采：capture_detail</p></div>
+                </div>
+                <p class="text-xs text-slate-500 mt-3">两条路只交「怎么拿到 html」，规则只写一份</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-3 gap-6">
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-slate-400 mb-1">现状</h3>
+              <p class="text-sm text-slate-700">候选 02 把 <span class="font-mono text-xs">read</span> 抽成 adapter 之后，「读到什么算失败、留不留原始页」被推到两个调用点各写一遍。</p>
+            </div>
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-slate-400 mb-1">改法</h3>
+              <p class="text-sm text-slate-700">在 <span class="font-mono text-xs">detail</span> 里收一条 <span class="font-mono text-xs">observe_page()</span>：接一个「读 html」的 adapter，返回 <span class="font-mono text-xs">Observation</span>；两条路径都穿过它。</p>
+            </div>
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-slate-400 mb-1">收益</h3>
+              <ul class="text-sm text-slate-700 space-y-1">
+                <li>locality：失败分类只写一次</li>
+                <li>补采也留住原始页</li>
+                <li>文档与代码重新对齐</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="rounded-lg bg-slate-50 border border-slate-200 p-4 text-sm text-slate-700">
+            <p class="lab mb-1">证据</p>
+            <p>两处是同一件事的两份写法：<span class="font-mono text-xs">click_listing.py:443-444</span> 与 <span class="font-mono text-xs">pipeline.py:442</span> 都做「解析 + 取主图」，失败分类却分别落 <span class="font-mono text-xs">parse_crashed(…, html)</span>（<span class="font-mono text-xs">click_listing.py:448</span>，有原始页、有用例钉住）与 <span class="font-mono text-xs">access_failed(exc)</span>（<span class="font-mono text-xs">pipeline.py:449</span>，没有原始页、没有用例）。ADR-0013 写的是「两条路共用同一份失败记录与文案」，代码已经不是了——**这是「为可测性抽出来的 adapter 把 bug 藏到调用处」的活例子**。</p>
+          </div>
+        </article>
+
+        <!-- ============ 候选 03 ============ -->
+        <article id="c3" class="rounded-2xl border border-slate-200 bg-white p-8 space-y-6">
+          <div class="flex items-start justify-between gap-4">
+            <div>
+              <p class="text-xs uppercase tracking-wider text-slate-400">候选 03</p>
+              <h2 class="text-2xl font-serif">诊断工具改用 browser_pw.open_session</h2>
+            </div>
+            <div class="flex flex-wrap gap-2 justify-end">
+              <span class="badge strong">Strong</span>
+              <span class="badge">ports &amp; adapters</span>
+            </div>
+          </div>
+          <p class="font-mono text-xs text-slate-500">tools/diag_card_selector.py:22 · diag_list_dom.py:22 · diag_offer_id_presolve.py:96 · diag_card_urls.py:38 · diag_verify_state.py:34 · _shot_live.py:52 · browser_pw.py:56 · :115</p>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <div>
+              <p class="lab mb-2">现状 · 六份副本</p>
+              <div class="box p-3 space-y-2" style="min-height:320px">
+                <div class="grid grid-cols-3 gap-2">
+                  <div class="step">diag_card_selector</div>
+                  <div class="step">diag_list_dom</div>
+                  <div class="step">diag_offer_id_presolve</div>
+                  <div class="step">diag_card_urls</div>
+                  <div class="step">diag_verify_state</div>
+                  <div class="step">_shot_live</div>
+                </div>
+                <div class="box-dash p-2 mt-2">
+                  <p class="lab">每份都写</p>
+                  <div class="space-y-1 mt-1">
+                    <div class="step">Popen(EDGE, --remote-debugging-port=9222, --user-data-dir=PROFILE)</div>
+                    <div class="step">time.sleep(9)</div>
+                    <div class="step">sync_playwright().start() + connect_over_cdp + contexts[0].new_page()</div>
+                    <div class="step">close() + stop() + taskkill /IM msedge.exe /F</div>
+                  </div>
+                </div>
+                <p class="text-xs text-red-700">「9222 / profile / Edge 路径 / 等多久 / 怎么收尾」五个事实六个副本；<span class="font-mono">taskkill /IM</span> 会关掉机器上所有 Edge</p>
+              </div>
+            </div>
+            <div>
+              <p class="lab mb-2">加深后 · 一条会话</p>
+              <div class="box p-3" style="min-height:320px">
+                <div class="deep text-white rounded-md p-4">
+                  <p class="lab !text-slate-300">browser_pw</p>
+                  <p class="font-mono text-sm mt-1">open_session(cfg) / close_session(pw, br)</p>
+                  <div class="mt-2 text-xs opacity-70">端口能连上即就绪（不再是睡 9 秒）；收尾先问 CDP 要真实 browser PID</div>
+                </div>
+                <div class="mt-3 space-y-1">
+                  <div class="step">工具只提供：读哪个页面、打印什么</div>
+                  <div class="step">已有 8 条用例守着这一条实现</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-3 gap-6">
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-slate-400 mb-1">现状</h3>
+              <p class="text-sm text-slate-700">每个诊断脚本自己起浏览器、自己睡 9 秒、自己收尾；<span class="font-mono text-xs">browser_pw</span> 里那条现成的实现没人用。</p>
+            </div>
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-slate-400 mb-1">改法</h3>
+              <p class="text-sm text-slate-700">工具改成 <span class="font-mono text-xs">open_session(cfg)</span> + <span class="font-mono text-xs">close_session(...)</span>；等待与收尾都归那一条实现。</p>
+            </div>
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-slate-400 mb-1">收益</h3>
+              <ul class="text-sm text-slate-700 space-y-1">
+                <li>locality：改一处，六个工具受益</li>
+                <li>leverage：条件等待替代固定睡眠</li>
+                <li>收尾不再误杀别人的 Edge</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="rounded-lg bg-slate-50 border border-slate-200 p-4 text-sm text-slate-700">
+            <p class="lab mb-1">证据</p>
+            <p><span class="font-mono text-xs">diag_card_selector.py:22-30</span> 与 <span class="font-mono text-xs">diag_list_dom.py:22-30</span> 逐字相同（含硬编码的 Edge 路径、<span class="font-mono text-xs">PORT=9222</span>、<span class="font-mono text-xs">time.sleep(9)</span>），<span class="font-mono text-xs">diag_offer_id_presolve.py:96-104</span> 是第三份。deletion test：删掉这些副本，复杂度**不会消失**——它得回到 <span class="font-mono text-xs">browser_pw</span>，说明它本来就该在那里。ADR-0008 自己留了一句「<span class="font-mono text-xs">tools/diag_*.py</span> 也抢 9222……另行处理」，这条就是那句「另行处理」。六个工具目前一条测试都没有。</p>
+          </div>
+        </article>
+
+        <!-- ============ 候选 04 ============ -->
+        <article id="c4" class="rounded-2xl border border-slate-200 bg-white p-8 space-y-6">
+          <div class="flex items-start justify-between gap-4">
+            <div>
+              <p class="text-xs uppercase tracking-wider text-slate-400">候选 04</p>
+              <h2 class="text-2xl font-serif">补采那条详情访问是第二个家</h2>
+            </div>
+            <div class="flex flex-wrap gap-2 justify-end">
+              <span class="badge worth">Worth exploring</span>
+              <span class="badge">mock</span>
+            </div>
+          </div>
+          <p class="font-mono text-xs text-slate-500">browser_pw.py:142-156 · click_listing.py:63-84 · :206-237 · guard.py（deny_resolved 零调用）</p>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <div>
+              <p class="lab mb-2">现状 · 两条详情访问，待遇不同</p>
+              <div class="box p-3" style="min-height:320px">
+                <div class="box-dash p-2">
+                  <p class="lab">点击路径（有主人）</p>
+                  <div class="step mt-1">响应监听 → punish 信号</div>
+                  <div class="step">deny 记进 DenyTracker → 超阈值抛异常</div>
+                  <div class="step">等条件满足 / 人工介入 / 关弹窗</div>
+                </div>
+                <div class="box-dash p-2 mt-2">
+                  <p class="lab">补采路径 capture_detail:142</p>
+                  <div class="step mt-1" style="border-color:#dc2626;color:#b91c1c">page.goto → time.sleep(2)（全仓唯一固定睡眠）</div>
+                  <div class="step">intervention_kind(page, False)：punish 写死为假</div>
+                  <div class="step">不算 deny、不记 DenyTracker、无人工介入窗口外的等待</div>
+                  <div class="step">human 形参从头到尾没被用过</div>
+                </div>
+              </div>
+            </div>
+            <div>
+              <p class="lab mb-2">加深后 · 一条详情访问</p>
+              <div class="box p-3" style="min-height:320px">
+                <div class="deep text-white rounded-md p-4">
+                  <p class="lab !text-slate-300">详情访问 module</p>
+                  <p class="font-mono text-sm mt-1">open_detail(…, emit, deny_tracker)</p>
+                </div>
+                <div class="mt-3 space-y-1">
+                  <div class="step">等待与人工介入一处</div>
+                  <div class="step">deny 账目两条路都喂</div>
+                  <div class="step">punish 信号由监听传入，不写死</div>
+                </div>
+                <p class="text-xs text-amber-700 mt-3">需要先定一件事：补采期间命中 deny，算不算进店铺/整轮阈值</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-3 gap-6">
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-slate-400 mb-1">现状</h3>
+              <p class="text-sm text-slate-700"><span class="font-mono text-xs">capture_detail</span> 是「导航 + 固定睡 2 秒 + 读页面」的一层薄壳：<span class="font-mono text-xs">human</span> 形参从未被用到，punish 写死，deny 账目两条路只喂一条。</p>
+            </div>
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-slate-400 mb-1">改法</h3>
+              <p class="text-sm text-slate-700">把「打开一个详情页并等它可读」收成一处，点击与补采各提供「怎么打开」（弹窗 / goto），等待、人工介入与 deny 账目共用。</p>
+            </div>
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-slate-400 mb-1">收益</h3>
+              <ul class="text-sm text-slate-700 space-y-1">
+                <li>locality：反爬应对只写一次</li>
+                <li>固定 2 秒 → 条件等待</li>
+                <li>deny 阈值不再漏掉半条路</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="rounded-lg bg-amber-50 border border-amber-200 p-4 text-sm text-amber-900">
+            这条要先拍一个板：补采期间命中 deny 到底算不算进 <span class="font-mono text-xs">deny_shop_limit</span> / <span class="font-mono text-xs">deny_round_limit</span>。算，整轮会更早被判成被限流；不算，就得在 interface 上明说「补采的 deny 只记事件」。另外 <span class="font-mono text-xs">guard.deny_resolved()</span> 现在零调用，是这条没走通的旁证。
+          </div>
+        </article>
+
+        <!-- ============ 候选 05 ============ -->
+        <article id="c5" class="rounded-2xl border border-slate-200 bg-white p-8 space-y-6">
+          <div class="flex items-start justify-between gap-4">
+            <div>
+              <p class="text-xs uppercase tracking-wider text-slate-400">候选 05</p>
+              <h2 class="text-2xl font-serif">采集进程身份收成一个 module</h2>
+            </div>
+            <div class="flex flex-wrap gap-2 justify-end">
+              <span class="badge worth">Worth exploring</span>
+              <span class="badge">local-substitutable</span>
+            </div>
+          </div>
+          <p class="font-mono text-xs text-slate-500">gui.py:188 · :209 · :218 · :226 · :450 · db.py:609-617 · single_instance.py:57</p>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <div class="rounded-lg border border-slate-200 bg-white p-3" style="min-height:320px">
+              <p class="lab mb-2">现状 · 一个领域问题，四个方法 + 一条私写 SQL</p>
+              <pre class="mermaid">
+flowchart TB
+  Q["现在是谁在跑？<br/>他算不算在跑？"] --> A1["Api.any_crawler_running"]
+  Q --> A2["Api.crawler_identity<br/>（锁不在就顺手清残留）"]
+  Q --> A3["Api._stop_target<br/>自己 SELECT pid, started_at"]
+  Q --> A4["Api._stop_crawler_process"]
+  A1 --> L["会话锁 single_instance"]
+  A2 --> L
+  A2 --> R[("crawler_process 行")]
+  A3 --> R
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class A3 leak
+              </pre>
+            </div>
+            <div class="rounded-lg border border-slate-200 bg-white p-3" style="min-height:320px">
+              <p class="lab mb-2">加深后 · 两个问题，一条 interface</p>
+              <pre class="mermaid">
+flowchart TB
+  Q["现在是谁在跑？<br/>他算不算在跑？"] --> M
+  M["crawler_identity<br/>current(conn) / is_running()"]
+  M --> L["会话锁"]
+  M --> R[("crawler_process 行")]
+  S["StopWatch（已注入）"] --> M
+  classDef deep fill:#0f172a,color:#fff,stroke:#0f172a;
+  class M deep
+              </pre>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-3 gap-6">
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-slate-400 mb-1">现状</h3>
+              <p class="text-sm text-slate-700">「锁是权威、身份行只负责显示、锁不在就清残留」这条 ADR-0008 的规则长在 <span class="font-mono text-xs">Api</span> 上；四个方法各拿一块判据，其中一个还直接 <span class="font-mono text-xs">SELECT</span> 物理列名。</p>
+            </div>
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-slate-400 mb-1">改法</h3>
+              <p class="text-sm text-slate-700">收成两条 interface：<span class="font-mono text-xs">current(conn)</span>（含清残留）与 <span class="font-mono text-xs">is_running()</span>；<span class="font-mono text-xs">Api</span> 只接线。</p>
+            </div>
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-slate-400 mb-1">收益</h3>
+              <ul class="text-sm text-slate-700 space-y-1">
+                <li>locality：三态判据一处</li>
+                <li>不构造 Api 也能测清残留</li>
+                <li>物理列名不再漏到界面</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="rounded-lg bg-slate-50 border border-slate-200 p-4 text-sm text-slate-700">
+            <p class="lab mb-1">证据</p>
+            <p>同一个数据层事实两条读法：<span class="font-mono text-xs">gui.py:226</span> 用 <span class="font-mono text-xs">any_crawler_running()</span> 折身份，而 <span class="font-mono text-xs">gui.py:450</span> 的 <span class="font-mono text-xs">_stop_target</span> 自己写 <span class="font-mono text-xs">SELECT pid, started_at FROM crawler_process WHERE id=1</span>。deletion test：删掉 <span class="font-mono text-xs">crawler_identity()</span>，复杂度会转移到四个调用方（开始页提示、开始前的拒绝判据、中止选哪一轮、<span class="font-mono text-xs">StopWatch</span> 的 <span class="font-mono text-xs">identity_of</span>）——它该留，但该长在更窄的地方。不对称是现成的旁证：<span class="font-mono text-xs">StopWatch</span> 那边注入 <span class="font-mono text-xs">identity_of</span> 就能测（<span class="font-mono text-xs">tests/test_stop_request.py:189</span>），而清残留那条规则只有构造一个 <span class="font-mono text-xs">Api</span> 才碰得到（唯一用例 <span class="font-mono text-xs">test_gui.py::test_a_stale_identity_row_is_ignored_and_cleaned</span>）。</p>
+          </div>
+        </article>
+
+        <!-- ============ 候选 06 ============ -->
+        <article id="c6" class="rounded-2xl border border-slate-200 bg-white p-8 space-y-6">
+          <div class="flex items-start justify-between gap-4">
+            <div>
+              <p class="text-xs uppercase tracking-wider text-slate-400">候选 06</p>
+              <h2 class="text-2xl font-serif">测试夹具的采集配置抄了九份</h2>
+            </div>
+            <div class="flex flex-wrap gap-2 justify-end">
+              <span class="badge worth">Worth exploring</span>
+              <span class="badge">in-process</span>
+            </div>
+          </div>
+          <p class="font-mono text-xs text-slate-500">test_click_listing.py:23 · test_listing.py:16 · test_detail.py:17 · test_listing_resume.py:19 · test_p1.py:63 · test_round_stop.py:65 · test_round_wiring.py:35 · :176 · test_run_cli.py:64 · helpers.py</p>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <div>
+              <p class="lab mb-2">现状 · 九份 _cfg</p>
+              <div class="box p-3" style="min-height:320px">
+                <div class="grid grid-cols-3 gap-2">
+                  <div class="step">test_p1</div>
+                  <div class="step">test_round_stop</div>
+                  <div class="step">test_round_wiring ×2</div>
+                  <div class="step">test_click_listing</div>
+                  <div class="step">test_detail</div>
+                  <div class="step">test_listing</div>
+                  <div class="step">test_listing_resume</div>
+                  <div class="step">test_run_cli</div>
+                  <div class="step">bench_refresh</div>
+                </div>
+                <p class="text-xs text-red-700 mt-3">每份写自己关心的那几个键（<span class="font-mono">max_pages_per_shop</span>/<span class="font-mono">max_attempts_per_page</span>/<span class="font-mono">deny_*</span>…），九份重叠但都不完整</p>
+              </div>
+            </div>
+            <div>
+              <p class="lab mb-2">加深后 · 一份配置</p>
+              <div class="box p-3" style="min-height:320px">
+                <div class="deep text-white rounded-md p-4">
+                  <p class="lab !text-slate-300">helpers</p>
+                  <p class="font-mono text-sm mt-1">crawler_cfg(**overrides)</p>
+                  <div class="mt-2 text-xs opacity-70">一处说清「一个采集配置包含什么」</div>
+                </div>
+                <div class="mt-3 space-y-1">
+                  <div class="step">测试只覆盖自己关心的键</div>
+                  <div class="step">新增配置键只改一处</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-3 gap-6">
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-slate-400 mb-1">现状</h3>
+              <p class="text-sm text-slate-700">「一个采集配置长什么样」在九个文件里有九个版本；加一个配置键要记得改哪几份，漏一份的表现是 <span class="font-mono text-xs">AttributeError</span> 或静默用错默认值。</p>
+            </div>
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-slate-400 mb-1">改法</h3>
+              <p class="text-sm text-slate-700">在 <span class="font-mono text-xs">tests/helpers.py</span> 收一个 <span class="font-mono text-xs">crawler_cfg(**overrides)</span>（全套默认值），各测试只写自己覆盖的那几个键。</p>
+            </div>
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-slate-400 mb-1">收益</h3>
+              <ul class="text-sm text-slate-700 space-y-1">
+                <li>locality：配置形状一处</li>
+                <li>leverage：九个文件共用</li>
+                <li>测试读起来只剩「在意的那件事」</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="rounded-lg bg-slate-50 border border-slate-200 p-4 text-sm text-slate-700">
+            <p class="lab mb-1">证据</p>
+            <p>九个 <span class="font-mono text-xs">_cfg</span>（上一轮的测试扫描就点过这一条，当时是五份）：<span class="font-mono text-xs">rg "def _cfg\(" tests</span> 命中 <span class="font-mono text-xs">test_click_listing.py:23</span>、<span class="font-mono text-xs">test_listing.py:16</span>、<span class="font-mono text-xs">test_detail.py:17</span>、<span class="font-mono text-xs">test_listing_resume.py:19</span>、<span class="font-mono text-xs">test_p1.py:63</span>、<span class="font-mono text-xs">test_round_stop.py:65</span>、<span class="font-mono text-xs">test_round_wiring.py:35</span> 与 <span class="font-mono text-xs">:176</span>、<span class="font-mono text-xs">test_run_cli.py:64</span>，另有 <span class="font-mono text-xs">tools/bench_refresh.py</span> 自己拼的一份。<span class="font-mono text-xs">helpers.py</span> 里已经有 <span class="font-mono text-xs">new_round()</span>/<span class="font-mono text-xs">isolated_locks()</span>/<span class="font-mono text-xs">FakeCard</span>/<span class="font-mono text-xs">ScriptedListing</span> —— 配置这一件是唯一漏在外面的共用件。</p>
+          </div>
+        </article>
+
+      </section>
+
+      <section id="top-recommendation" class="rounded-2xl border-2 border-slate-900 bg-white p-8 space-y-4">
+        <p class="text-xs uppercase tracking-wider text-slate-400">先做哪个</p>
+        <h2 class="text-2xl font-serif">候选 01：本轮计数收成一份 round_tally</h2>
+        <p class="text-slate-700">它是六条里唯一带着「删掉即消失」证据的：<span class="font-mono text-xs">success_rows()</span> 全仓零调用，<span class="font-mono text-xs">failed_rows()</span> 只有测试在调，而「成功库存快照」的判据已经在三个 module 里手写了三遍——改一处漏两处，一条用例都不会红。</p>
+        <p class="text-slate-700">紧接着做 <a href="#c2" class="underline decoration-slate-400">候选 02</a>（同一个功能的两条路已经在分类上走歪，是**文档说一致、代码不一致**那类问题）与 <a href="#c3" class="underline decoration-slate-400">候选 03</a>（最机械、零行为风险，顺手收掉 ADR-0008 留下的「另行处理」）。<a href="#c4" class="underline decoration-slate-400">候选 04</a> 要先拍一个行为决策（补采的 deny 算不算进阈值），<a href="#c5" class="underline decoration-slate-400">候选 05</a> 动 <span class="font-mono text-xs">Api</span> 的形状，<a href="#c6" class="underline decoration-slate-400">候选 06</a> 是测试面整理——都排后面。</p>
+      </section>
+
+    </main>
+  </body>
+</html>

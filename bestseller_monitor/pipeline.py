@@ -336,14 +336,14 @@ def _finalize_round(db: Database, cfg: Config, run: Round) -> None:
     if incomplete:
         keys = ", ".join(row["shop_key"] for row in incomplete)
         raise RoundPauseRequired(f"榜单阶段未完成：{keys}；请检查存档页面后续跑")
-    total, succeeded = db.offer_counts(round_id)
-    click_fail = db.click_card_failures(round_id)   # 点击后未得到商品编号的卡片
-    attempted = total + click_fail
-    failed = (total - succeeded) + click_fail
+    tally = db.round_tally(round_id)
+    click_fail = tally.click_card_failures        # 点击后未得到商品编号的卡片
+    attempted = tally.discovered + click_fail
+    failed = tally.failed_offers + click_fail
     fail_rate = failed / attempted if attempted else 0.0
     if attempted and fail_rate > cfg.fail_rate_limit:
         note = (f"失败率 {fail_rate:.1%} 超过阈值 {cfg.fail_rate_limit:.0%}"
-                f"（快照失败 {total - succeeded}，点击未得商品 {click_fail}），需人工决策")
+                f"（快照失败 {tally.failed_offers}，点击未得商品 {click_fail}），需人工决策")
         settled = rounds.finish_if_open(db, run, TerminalReason.FAIL_RATE_EXCEEDED, note=note)
         if settled.reason is TerminalReason.FAIL_RATE_EXCEEDED:
             log.warning("轮次 #%s：%s", round_id, note)
@@ -354,7 +354,7 @@ def _finalize_round(db: Database, cfg: Config, run: Round) -> None:
         settled = rounds.finish_if_open(db, run, TerminalReason.COMPLETED)
         if settled.reason is TerminalReason.COMPLETED:
             log.info("轮次 #%s 完成（尝试 %s，成功 %s，点击未得商品 %s）",
-                     round_id, attempted, succeeded, click_fail)
+                     round_id, attempted, tally.handled, click_fail)
         else:
             _report_late_stop(settled, TerminalReason.COMPLETED)
     db.commit()

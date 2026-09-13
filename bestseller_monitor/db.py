@@ -60,6 +60,9 @@ CREATE TABLE IF NOT EXISTS shop_offers (
     list_price TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_shop_offers_round ON shop_offers(round_id, shop_key);
+-- 本轮计数要按店铺数「榜单里发现过哪些商品」，孤儿也是按这个三元组去认：
+-- 少了这条，每次界面刷新都得为整轮榜单行回表（IS-38 同类问题）。
+CREATE INDEX IF NOT EXISTS idx_shop_offers_key ON shop_offers(round_id, shop_key, offer_id);
 
 CREATE TABLE IF NOT EXISTS products (
     offer_id TEXT PRIMARY KEY,
@@ -185,6 +188,12 @@ CREATE TABLE IF NOT EXISTS stop_requests (
 # 同一轮、店铺、商品和 SKU 至多一条成功快照：靠唯一索引保证（见 connect() 的迁移）。
 SNAPSHOT_SUCCESS_INDEX = "idx_snapshots_success_key"
 
+# 本轮计数按店铺分组时还要看状态与 sku：这条覆盖索引让两条聚合各扫一遍索引就够
+# （30 万行实测 0.19 / 0.20 秒），不用为每一行回表取 page_status/sku_id（+0.25 秒），
+# 更不用把两张表 JOIN 起来逐行核对（1.5 秒）。它引用后加的两列，所以只能由迁移建
+# ——SCHEMA 比迁移先跑，老库的 snapshots 可能还没有这两列。
+ROUND_TALLY_INDEX = "idx_snapshots_round_counts"
+
 # 过程页刷新的两条索引：逐店 deny 计数、逐店时间跨度（名字要与上面 SCHEMA 里的
 # 两条 CREATE INDEX 一致，tests/test_db.py 有用例守着）。
 EVENT_REFRESH_INDEXES = (
@@ -193,12 +202,15 @@ EVENT_REFRESH_INDEXES = (
 )
 
 
+def _has_index(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", (name,)
+    ).fetchone() is not None
+
+
 def _has_snapshot_success_index(conn: sqlite3.Connection) -> bool:
     """唯一索引在不在——在，就说明这个库已经过了那次整表去重。"""
-    return conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
-        (SNAPSHOT_SUCCESS_INDEX,),
-    ).fetchone() is not None
+    return _has_index(conn, SNAPSHOT_SUCCESS_INDEX)
 
 
 def utcnow() -> str:
@@ -502,6 +514,27 @@ def _snapshot_success_index(conn: sqlite3.Connection, out: _ReportBuilder) -> bo
     return True
 
 
+def _round_tally_index(conn: sqlite3.Connection, out: _ReportBuilder) -> bool:
+    """迁移：补上本轮计数的覆盖索引（老库第一次开连接时建一次）。
+
+    索引引用 page_status/sku_id，而老库的 snapshots 可能还没有这两列（SCHEMA 先跑、
+    迁移后跑），所以不能直接写进 SCHEMA；建好之后 `_has_index()` 就不再动手，界面每次
+    刷新不会重复付建索引的钱（IS-38）。
+    """
+    columns = {row[1] for row in conn.execute('PRAGMA table_info("snapshots")').fetchall()}
+    if not {"round_id", "shop_key", "offer_id", "page_status", "sku_id"} <= columns:
+        return False
+    if _has_index(conn, ROUND_TALLY_INDEX):
+        return False
+    conn.execute(
+        f"CREATE INDEX {ROUND_TALLY_INDEX} ON snapshots"
+        "(round_id, shop_key, offer_id, page_status, sku_id)"
+    )
+    out.created_indexes.append(ROUND_TALLY_INDEX)
+    log.info("本轮计数迁移：建立覆盖索引 %s", ROUND_TALLY_INDEX)
+    return True
+
+
 _MIGRATIONS: tuple[_Migration, ...] = (
     _Migration("drop_shops_active", _drop_shops_active),
     _Migration("skus_primary_key_on_sku_id", _skus_primary_key_on_sku_id),
@@ -516,6 +549,7 @@ _MIGRATIONS: tuple[_Migration, ...] = (
     _drop_column("skus", "main_image_url"),
     _drop_column("snapshots", "stock_delta"),
     _Migration("snapshot_success_index", _snapshot_success_index),
+    _Migration("round_tally_index", _round_tally_index),
 )
 
 
@@ -545,6 +579,102 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn = open(db_path)
     migrate(conn)
     return conn
+
+
+# 本轮计数的两条聚合查询：都按店铺编号分组、长度对得上 `_tally_by_shop()` 的 width。
+#
+# 快照侧：整轮里「已处理」「成功商品」「成功 SKU 行」三个数（走 idx_snapshots_round_counts）。
+_SNAPSHOT_TALLY_SQL = (
+    "SELECT shop_key, "
+    "COUNT(DISTINCT CASE WHEN page_status IN ('成功', '跳过') THEN offer_id END), "
+    "COUNT(DISTINCT CASE WHEN page_status='成功' AND sku_id IS NOT NULL "
+    "THEN offer_id END), "
+    "SUM(CASE WHEN page_status='成功' AND sku_id IS NOT NULL THEN 1 ELSE 0 END) "
+    "FROM snapshots WHERE round_id=? GROUP BY shop_key")
+# 孤儿侧：同一组数，但只看「有快照、无榜单行」的商品（IS-49；通常是零行）。
+_ORPHAN_TALLY_SQL = (
+    "SELECT s.shop_key, "
+    "COUNT(DISTINCT CASE WHEN s.page_status IN ('成功', '跳过') THEN s.offer_id END), "
+    "COUNT(DISTINCT CASE WHEN s.page_status='成功' AND s.sku_id IS NOT NULL "
+    "THEN s.offer_id END), "
+    "SUM(CASE WHEN s.page_status='成功' AND s.sku_id IS NOT NULL THEN 1 ELSE 0 END), "
+    "COUNT(DISTINCT s.offer_id) "
+    "FROM snapshots s WHERE s.round_id=? AND NOT EXISTS ("
+    "SELECT 1 FROM shop_offers so WHERE so.round_id=s.round_id "
+    "AND so.shop_key=s.shop_key AND so.offer_id=s.offer_id) "
+    "GROUP BY s.shop_key")
+
+
+@dataclass(frozen=True)
+class ShopTally:
+    """一家店（或整轮合计）的计数：**商品数一律按榜单行去重**（IS-49 判定
+    「有快照、无榜单行」是异常）。
+
+    - `discovered`：榜单里发现过的商品（榜单行去重）
+    - `handled`：其中有成功或跳过快照的——跳过算已处理、不算失败（ADR-0002）
+    - `failed_offers`：`discovered - handled`，含「只有榜单行、本轮没抓到」的商品
+    - `success_offers` / `success_skus`：成功快照的商品数与 SKU 行数，只数榜单行里有的商品
+    - `orphans`：有快照、没有榜单行的商品数——单列出来，不算成功商品（IS-49；
+      `tools/check_orphans.py` 查同一件事）
+    """
+
+    shop_key: str
+    discovered: int = 0
+    handled: int = 0
+    success_offers: int = 0
+    success_skus: int = 0
+    orphans: int = 0
+
+    @property
+    def failed_offers(self) -> int:
+        return self.discovered - self.handled
+
+
+@dataclass(frozen=True)
+class RoundTally:
+    """一轮的计数：整轮合计 + 按店铺切片 + 点击未得卡片。
+
+    整轮一次算全（榜单行、快照、孤儿各一条 GROUP BY shop_key 的聚合），页面按店铺切片
+    取自己那家——界面每约 2 秒刷新一次，不能为每家店各跑一遍（IS-38 的护栏：实测逐店
+    算 12 家要 1.3 秒，超了 1 秒上限）。
+
+    失败率那两条算式不在这里：它是 CONTEXT.md 定义的领域词，计数只是它的输入。
+    """
+
+    total: ShopTally
+    per_shop: tuple[ShopTally, ...] = ()
+    click_card_failures: int = 0
+
+    @property
+    def discovered(self) -> int:
+        return self.total.discovered
+
+    @property
+    def handled(self) -> int:
+        return self.total.handled
+
+    @property
+    def failed_offers(self) -> int:
+        return self.total.failed_offers
+
+    @property
+    def success_offers(self) -> int:
+        return self.total.success_offers
+
+    @property
+    def success_skus(self) -> int:
+        return self.total.success_skus
+
+    @property
+    def orphans(self) -> int:
+        return self.total.orphans
+
+    def shop(self, shop_key: str) -> ShopTally | None:
+        """按店铺切片；这家店本轮一行榜单行都没有时返回 None。"""
+        for one in self.per_shop:
+            if one.shop_key == shop_key:
+                return one
+        return None
 
 
 class Database:
@@ -1155,41 +1285,74 @@ class Database:
             (offer_id, product_url, product_name, main_image_url, now, now),
         )
 
-    def success_rows(self, round_id: int) -> list[sqlite3.Row]:
-        cur = self.conn.execute(
-            "SELECT * FROM snapshots WHERE round_id=? AND page_status='成功' "
-            "AND sku_id IS NOT NULL",
-            (round_id,),
+    def round_tally(self, round_id: int) -> RoundTally:
+        """一轮的计数：整轮合计 + 按店铺切片。
+
+        「成功库存快照」「已处理」「孤儿」这些判据只在这一个 implementation 里定义；
+        失败率、三个页面与摘要工具都从这里读同一份口径。
+
+        三条 GROUP BY shop_key 的聚合（榜单行、快照、孤儿各一条）整轮一次算全；要某
+        一家店时用 `RoundTally.shop()` 切片——界面每约 2 秒刷新一次，不能为每家店各跑
+        一遍（IS-38 的护栏：实测逐店算 12 家要 1.3 秒，超了 1 秒上限）。三条都走覆盖
+        索引，30 万行的合成库上整轮 0.46 秒；把两张表 JOIN 起来逐行核对是 1.5 秒，写
+        成相关 EXISTS 更慢（46 秒）。
+        """
+        discovered = self._tally_by_shop(
+            round_id, 1,
+            "SELECT shop_key, COUNT(DISTINCT offer_id) FROM shop_offers "
+            "WHERE round_id=? GROUP BY shop_key")
+        snapped = self._tally_by_shop(round_id, 3, _SNAPSHOT_TALLY_SQL)
+        orphaned = self._tally_by_shop(round_id, 4, _ORPHAN_TALLY_SQL)
+
+        per_shop = tuple(
+            self._shop_tally(key, discovered, snapped, orphaned)
+            for key in sorted(set(discovered) | set(snapped) | set(orphaned))
         )
-        return cur.fetchall()
-
-    def failed_rows(self, round_id: int) -> list[sqlite3.Row]:
-        cur = self.conn.execute(
-            "SELECT * FROM snapshots WHERE round_id=? AND page_status NOT IN ('成功', '跳过')",
-            (round_id,),
+        # 整轮合计就是各店相加：店铺编号互不重叠，没有跨店的商品。
+        return RoundTally(
+            total=ShopTally(
+                shop_key="",
+                discovered=sum(one.discovered for one in per_shop),
+                handled=sum(one.handled for one in per_shop),
+                success_offers=sum(one.success_offers for one in per_shop),
+                success_skus=sum(one.success_skus for one in per_shop),
+                orphans=sum(one.orphans for one in per_shop),
+            ),
+            per_shop=per_shop,
+            click_card_failures=self.click_card_failures(round_id),
         )
-        return cur.fetchall()
 
-    def offer_counts(self, round_id: int) -> tuple[int, int]:
-        total = self.conn.execute(
-            "SELECT COUNT(*) AS c FROM ("
-            "SELECT shop_key, offer_id FROM shop_offers WHERE round_id=? "
-            "GROUP BY shop_key, offer_id)",
-            (round_id,),
-        ).fetchone()["c"]
-        ok = self.conn.execute(
-            "SELECT COUNT(*) AS c FROM ("
-            "SELECT so.shop_key, so.offer_id FROM shop_offers so "
-            "WHERE so.round_id=? AND EXISTS ("
-            "SELECT 1 FROM snapshots s WHERE s.round_id=so.round_id "
-            "AND s.shop_key=so.shop_key AND s.offer_id=so.offer_id "
-            "AND s.page_status IN ('成功', '跳过')) "
-            "GROUP BY so.shop_key, so.offer_id)",
-            (round_id,),
-        ).fetchone()["c"]
-        return int(total), int(ok)
+    def _tally_by_shop(self, round_id: int, width: int,
+                       sql: str) -> dict[str, tuple[int, ...]]:
+        """跑一条按店铺编号分组的聚合，交回 {店铺编号: 一列一列的计数}。
 
-    def click_card_failures(self, round_id: int) -> int:
+        没抓到的列（COUNT 遇不到行、SUM 全是 NULL）一律补 0，调用方只管按位置取值。
+        """
+        return {
+            str(row[0]): tuple(int(value or 0) for value in row[1:width + 1])
+            for row in self.conn.execute(sql, (round_id,)).fetchall()
+        }
+
+    @staticmethod
+    def _shop_tally(shop_key: str, discovered, snapped, orphaned) -> ShopTally:
+        """一家店的计数：榜单行给商品数，快照侧减去孤儿那一份就是榜单口径。
+
+        「快照里有、榜单行里没有」的商品不算榜单里的商品（IS-49），所以减掉它之后
+        剩下的正好是「榜单行里的商品」那份数——不需要把两张表 JOIN 起来逐行核对。
+        """
+        handled, success_offers, success_skus = snapped.get(shop_key, (0, 0, 0))
+        lonely_handled, lonely_offers, lonely_skus, orphans = orphaned.get(
+            shop_key, (0, 0, 0, 0))
+        return ShopTally(
+            shop_key=shop_key,
+            discovered=discovered.get(shop_key, (0,))[0],
+            handled=handled - lonely_handled,
+            success_offers=success_offers - lonely_offers,
+            success_skus=success_skus - lonely_skus,
+            orphans=orphans,
+        )
+
+    def click_card_failures(self, round_id: int, shop_key: str | None = None) -> int:
         """统计「点击后从未抓到任何 SKU」的失败卡片数（按 shop+page+idx 去重）。
 
         判定：
@@ -1201,8 +1364,9 @@ class Database:
         rows = self.conn.execute(
             "SELECT shop_key, event, note FROM event_log "
             "WHERE round_id=? AND event IN "
-            "('click_ok','click_skipped','click_no_popup','click_url_notoffer','click_deny')",
-            (round_id,),
+            "('click_ok','click_skipped','click_no_popup','click_url_notoffer','click_deny')"
+            + (" AND shop_key=?" if shop_key is not None else ""),
+            (round_id, *((shop_key,) if shop_key is not None else ())),
         ).fetchall()
         ok_keys: set[tuple] = set()
         fail_keys: set[tuple] = set()

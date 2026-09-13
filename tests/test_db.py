@@ -7,6 +7,7 @@ from unittest.mock import patch
 from bestseller_monitor.db import (
     Database,
     EVENT_REFRESH_INDEXES,
+    ROUND_TALLY_INDEX,
     SCHEMA,
     SNAPSHOT_SUCCESS_INDEX,
     connect,
@@ -436,9 +437,9 @@ class DbTests(unittest.TestCase):
             collected_at="2026-09-04T00:00:00+00:00",
             attempt=2,
         )
-        total, ok = self.db.offer_counts(rid)
-        self.assertEqual((total, ok), (1, 1))
-        self.assertEqual(len(self.db.failed_rows(rid)), 0)
+        tally = self.db.round_tally(rid)
+        self.assertEqual((tally.discovered, tally.handled), (1, 1))
+        self.assertEqual(tally.failed_offers, 0)
 
     def test_offer_counts_are_per_offer_not_per_sku(self):
         rid = new_round(self.db)
@@ -467,7 +468,72 @@ class DbTests(unittest.TestCase):
         )
         for offer_id in map(str, range(2, 11)):
             self.db.mark_failure(rid, "A01", offer_id, 1, "解析失败")
-        self.assertEqual(self.db.offer_counts(rid), (10, 1))
+        tally = self.db.round_tally(rid)
+        self.assertEqual((tally.discovered, tally.handled), (10, 1))
+
+
+    def test_round_tally_counts_every_question_in_one_place(self):
+        """一轮的计数口径只在一处：商品数按榜单行，成功/跳过算已处理，孤儿单列。"""
+        rid = new_round(self.db)
+        self._add_shop(rid)
+        offers = [
+            (i, offer_id, f"https://detail.1688.com/offer/{offer_id}.html", f"商品{offer_id}", "")
+            for i, offer_id in enumerate(["11", "22", "33", "44"], start=1)
+        ]
+        self.db.save_shop_offers(rid, "A01", "https://a.example/", "店铺A", offers, 1)
+        # 11 成功（两行 SKU）、22 跳过、33 失败、44 只有榜单行（本轮没抓到）
+        self.db.submit_inventory_snapshot(
+            round_id=rid, shop_key="A01", shop_url="https://a.example/", shop_name="店铺A",
+            offer_id="11", product_url="https://detail.1688.com/offer/11.html",
+            list_title="商品11", detail_title="商品11详情", main_image_url=None,
+            sku_rows=[{"sku_id": "11:1", "sku_name": "小号", "sku_price": 1.0, "sku_stock": 5},
+                      {"sku_id": "11:2", "sku_name": "大号", "sku_price": 2.0, "sku_stock": 7}],
+            collected_at="2026-09-04T00:00:00+00:00", attempt=1,
+        )
+        self.db.mark_skipped(rid, "A01", "https://a.example/", "店铺A", "22",
+                             "https://detail.1688.com/offer/22.html", "商品22")
+        self.db.mark_failure(rid, "A01", "33", 1, "解析失败")
+        # 孤儿：快照里有、榜单行里没有的商品
+        self.db.submit_inventory_snapshot(
+            round_id=rid, shop_key="A01", shop_url="https://a.example/", shop_name="店铺A",
+            offer_id="99", product_url="https://detail.1688.com/offer/99.html",
+            list_title="商品99", detail_title="商品99详情", main_image_url=None,
+            sku_rows=[{"sku_id": "99:1", "sku_name": "默认", "sku_price": 1.0, "sku_stock": 3}],
+            collected_at="2026-09-04T00:00:00+00:00", attempt=1,
+        )
+
+        tally = self.db.round_tally(rid)
+
+        self.assertEqual(tally.discovered, 4, "商品数按榜单行去重")
+        self.assertEqual(tally.handled, 2, "成功与跳过都算已处理")
+        self.assertEqual(tally.failed_offers, 2, "失败 + 只有榜单行没抓到的")
+        self.assertEqual(tally.success_offers, 1)
+        self.assertEqual(tally.success_skus, 2, "只有榜单行里那个商品的 SKU 行")
+        self.assertEqual(tally.orphans, 1, "有快照、无榜单行：单列出来，不算成功商品")
+
+    def test_round_tally_can_be_asked_per_shop(self):
+        rid = new_round(self.db, "A01", "A02")
+        for key in ("A01", "A02"):
+            self.db.add_shop(rid, key, f"https://{key}.example/", f"店铺{key}")
+            self.db.save_shop_offers(
+                rid, key, f"https://{key}.example/", f"店铺{key}",
+                [(1, "11", f"https://detail.1688.com/offer/11.html", "商品", "")], 1)
+        self.db.submit_inventory_snapshot(
+            round_id=rid, shop_key="A02", shop_url="https://A02.example/", shop_name="店铺A02",
+            offer_id="11", product_url="https://detail.1688.com/offer/11.html",
+            list_title="商品", detail_title="商品详情", main_image_url=None,
+            sku_rows=[{"sku_id": "11:1", "sku_name": "默认", "sku_price": 1.0, "sku_stock": 3}],
+            collected_at="2026-09-04T00:00:00+00:00", attempt=1,
+        )
+
+        whole = self.db.round_tally(rid)
+        first = whole.shop("A01")
+        second = whole.shop("A02")
+
+        self.assertEqual((whole.discovered, whole.success_offers), (2, 1))
+        self.assertEqual((first.discovered, first.success_offers), (1, 0))
+        self.assertEqual((second.discovered, second.success_offers), (1, 1))
+        self.assertIsNone(whole.shop("A03"), "本轮没出现过的店铺没有这一片")
 
     def test_success_snapshot_requires_stock_and_id(self):
         rid = new_round(self.db)
@@ -774,8 +840,9 @@ class DbTests(unittest.TestCase):
             "https://detail.1688.com/offer/111.html", "商品",
         )
         # 跳过是已处理结果：计入成功、不算失败
-        self.assertEqual(self.db.offer_counts(rid), (1, 1))
-        self.assertEqual(self.db.failed_rows(rid), [])
+        tally = self.db.round_tally(rid)
+        self.assertEqual((tally.discovered, tally.handled), (1, 1))
+        self.assertEqual(tally.failed_offers, 0)
 
     def test_skip_is_not_inventory_evidence(self):
         rid = new_round(self.db)
@@ -983,7 +1050,9 @@ class SnapshotDedupeMigrationTests(unittest.TestCase):
             try:
                 self.assertEqual(report.deduped_snapshot_rows, 1,
                                  "缺索引的老库要靠这次去重才建得起唯一索引")
-                self.assertEqual(report.created_indexes, (SNAPSHOT_SUCCESS_INDEX,))
+                self.assertEqual(
+                    report.created_indexes, (SNAPSHOT_SUCCESS_INDEX, ROUND_TALLY_INDEX),
+                    "去重建起唯一索引之后，本轮计数的覆盖索引也一并补上")
                 self.assertIn("snapshot_success_index", report.applied)
                 self.assertEqual(conn.execute(
                     "SELECT COUNT(*) FROM snapshots WHERE round_id=1 AND sku_id='red'"
@@ -1015,7 +1084,9 @@ class SnapshotDedupeMigrationTests(unittest.TestCase):
 
             try:
                 self.assertEqual(report.deduped_snapshot_rows, 0)
-                self.assertEqual(report.created_indexes, (SNAPSHOT_SUCCESS_INDEX,))
+                self.assertEqual(
+                    report.created_indexes, (SNAPSHOT_SUCCESS_INDEX, ROUND_TALLY_INDEX),
+                    "新库也在这次开库里建起本轮计数的覆盖索引")
             finally:
                 conn.close()
 

@@ -30,28 +30,17 @@ def default_db_path() -> Path:
 
 
 def summarize(con: sqlite3.Connection, round_id: int) -> dict:
-    """汇总某一轮的抓取结果；跳过属于已处理，不计失败也不计入 SKU 行。"""
-    offers = con.execute(
-        "SELECT COUNT(*) FROM shop_offers WHERE round_id=?", (round_id,)
-    ).fetchone()[0]
-    ok_offers = con.execute(
-        "SELECT COUNT(DISTINCT offer_id) FROM snapshots WHERE round_id=? "
-        "AND page_status IN ('成功', '跳过')",
-        (round_id,),
-    ).fetchone()[0]
-    fail_offers = con.execute(
-        "SELECT COUNT(DISTINCT offer_id) FROM snapshots WHERE round_id=? AND page_status='失败'",
-        (round_id,),
-    ).fetchone()[0]
-    sku_rows = con.execute(
-        "SELECT COUNT(*) FROM snapshots WHERE round_id=? AND page_status='成功' AND sku_id IS NOT NULL",
-        (round_id,),
-    ).fetchone()[0]
+    """汇总某一轮的抓取结果；跳过属于已处理，不计失败也不计入 SKU 行。
+
+    数字全部来自数据层的同一份口径（`Database.round_tally()`）：商品数按榜单行去重，
+    「有快照、无榜单行」的孤儿不算成功商品（IS-49），要看孤儿用 `tools/check_orphans.py`。
+    """
+    tally = Database(con).round_tally(round_id)
     return {
-        "shop_offers": offers,
-        "ok_offers": ok_offers,
-        "fail_offers": fail_offers,
-        "sku_rows": sku_rows,
+        "shop_offers": tally.discovered,
+        "ok_offers": tally.handled,
+        "fail_offers": tally.failed_offers,
+        "sku_rows": tally.success_skus,
     }
 
 
