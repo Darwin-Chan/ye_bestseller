@@ -68,6 +68,16 @@ adapter，两条 adapter 就会各自决定「它崩了算什么失败、留不�
   `capture_detail` 改成 `open_detail`（返回 html），`test_click_listing.py` 两处打桩目标从
   `click_listing.extract_main_image` 改成 `detail.extract_main_image`。全套 356 条通过、1 条跳过。
 
+两轴审查的收口又补了三处：`Observation.ok` / `Observation.sku_count` 替掉两条路径各写一遍的
+「这次读成了吗、几行 SKU」判据；`browser_pw` 与 `pipeline` 里两处还写着 `capture_detail` /
+「adapter 负责取一次详情」的旧 docstring；ADR-0013 那条被推翻的决策与 ADR-0014 的两处描述
+在状态行上注明失效。收尾后又补了一条「补采事件顺序仍是 `detail_nav` → `detail_parse`」的用例
+（改前这条由 adapter 用例钉着，拆开后没人钉了）。全套 364 条通过、1 条跳过。
+
+**一处提交卫生上的瑕疵**：这份收口与候选 03 的收口落在同一个提交 `c7a0d8d` 里——同一工作区
+当时有第二个会话在跑同一份计划，它 `git add` 时把本候选尚未提交的收口改动一起带走了。内容正确、
+已复核（`git show c7a0d8d -- bestseller_monitor/detail.py`），只是提交信息讲的不是这件事。
+
 被否掉的方向：
 
 - **留着 `ACCESS`**：没有生产者也没有消费者，而它正是两条路走歪的那一格；留着只会再分叉。
