@@ -1,6 +1,6 @@
 # 0014. 点击式列表：卡片层 adapter + 遍历上下文
 
-- 状态：已接受（两处描述被 [ADR-0018](0018-page-to-observation-in-detail.md) 更新：补采 adapter 改名 `open_detail` 且只交 html；`FailureKind` 去掉「访问异常」）
+- 状态：已接受（描述被后续两条更新：[ADR-0018](0018-page-to-observation-in-detail.md) 把补采 adapter 改名 `open_detail` 且只交 html、`FailureKind` 去掉「访问异常」；[ADR-0020](0020-detail-visit-shared-across-paths.md) 把卡片句柄的 `denied` 换成 `page`（deny 判定归 `guard.ready_detail_page()`），`DenyTracker` 与两个 deny 异常也从 `click_listing` 搬进 `guard`）
 - 日期：2026-09-13
 
 ## 背景

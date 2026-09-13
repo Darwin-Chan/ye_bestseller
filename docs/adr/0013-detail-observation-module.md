@@ -1,6 +1,6 @@
 # 0013. 详情观测收成一个 module：接缝从 fetch() 挪到「读一次详情观测」
 
-- 状态：已接受（一处决策被 [ADR-0018](0018-page-to-observation-in-detail.md) 取代：「取主图留在 adapter 里」——`detail.observe_page()` 把它收进 detail）
+- 状态：已接受（决策与描述被后续两条更新：[ADR-0018](0018-page-to-observation-in-detail.md) 取代「取主图留在 adapter 里」，并把 `Observation` 的构造子从四个收成三个（去掉「访问异常」）；[ADR-0020](0020-detail-visit-shared-across-paths.md) 又加了 `Observation.denied()`，失败种类仍是读不到页 / 解析失败两种）
 - 日期：2026-09-13
 
 ## 背景

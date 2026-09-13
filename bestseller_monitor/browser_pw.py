@@ -25,9 +25,11 @@ from .delay import Humanizer
 from .detail import readable
 from .guard import (DenyTracker, RoundDenyExceeded,  # noqa: F401  旧名兼容
                     ShopDenyExceeded)
-from .guard import (
-    body_text, captcha_visible, intervention_kind,
-    is_deny_url, is_punish_url, resolved, vtype, wait_for_resolution,
+# 本文件内部要用的（等详情页可读时判 deny / punish）。
+from .guard import is_deny_url, is_punish_url
+# 诊断工具的兼容名：它们按旧名从 browser_pw 取这些，别删（见下面的 `_*` 别名与工具用例）。
+from .guard import (  # noqa: F401
+    body_text, captcha_visible, intervention_kind, resolved, vtype,
 )
 
 log = logging.getLogger(__name__)

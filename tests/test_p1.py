@@ -51,8 +51,8 @@ class P1Tests(unittest.TestCase):
             '<script>{"skuInfoMap":{"A":{"skuId":1,"canBookCount":2}}}</script>')
         events: list[tuple[str, dict]] = []
 
-        with patch.object(browser_pw.time, "sleep"), \
-             patch.object(browser_pw, "intervention_kind", return_value=None):
+        # 页面内容一次就解析得出来，等可读那一步不会真的 sleep；打桩只为万一是等待。
+        with patch.object(browser_pw.time, "sleep"):
             html = browser_pw.open_detail(
                 page, "https://detail.1688.com/offer/111.html", self._cfg(),
                 emit=lambda event, **kw: events.append((event, kw)))

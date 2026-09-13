@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import logging
 import re
-import time
 
 from playwright.sync_api import Error as PlaywrightError
 
@@ -26,8 +25,7 @@ from . import dedupe, detail, listing, rounds
 from .config import Config, Shop, effective_pages_limit
 from .db import cst_date, utcnow
 from .delay import Humanizer
-from .guard import (RoundDenyExceeded, ShopDenyExceeded, is_deny_url, is_punish_url,
-                    ready_detail_page)
+from .guard import RoundDenyExceeded, ShopDenyExceeded, is_punish_url, ready_detail_page
 
 log = logging.getLogger(__name__)
 
