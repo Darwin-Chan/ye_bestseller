@@ -240,7 +240,15 @@ class ProcessStopRuntime:
     def observe(self, conn, bound: BoundTarget) -> RuntimeFacts:
         identity = crawler_identity.registered(conn)
         if identity is None:
-            return RuntimeFacts(None, None, error="identity_missing")
+            handle = bound.capability
+            if handle is not None:
+                alive = handle.poll() is None
+            else:
+                from . import browser_proc
+                image = browser_proc.process_image_name(bound.target.pid)
+                alive = bool(image) if image else None
+            return RuntimeFacts(None, alive,
+                                error="identity_missing" if alive is not False else None)
         if identity.pid != bound.target.pid or identity.started_at != bound.target.started_at:
             return RuntimeFacts(identity, False)
         handle = bound.capability
