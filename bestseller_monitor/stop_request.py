@@ -447,14 +447,20 @@ class StopWatch:
         if stop is None:
             return self.status
         db = Database(conn)
-        stop = self._note_ack(db, stop)
+        try:
+            stop = self._note_ack(db, stop)
+        except Exception as exc:  # noqa: BLE001
+            return self._verify(stop, "database_unavailable", str(exc))
         try:
             facts = self._runtime.observe(conn, stop.bound)
         except Exception as exc:  # noqa: BLE001
             return self._verify(stop, "observation_failed", str(exc))
         relation = self._relation(stop.command.target, facts)
         if relation in (StopRelation.REPLACED, StopRelation.GONE):
-            self._cleanup_target(db, stop.command.target)
+            try:
+                self._cleanup_target(db, stop.command.target)
+            except Exception as exc:  # noqa: BLE001
+                return self._verify(stop, "database_unavailable", str(exc))
             self._finish(stop)
             return self.status
         if relation is StopRelation.UNVERIFIABLE:
@@ -521,7 +527,13 @@ class StopWatch:
                 self._in_flight = replace(stop, phase=StopPhase.CLEANUP_PENDING,
                                           code=closed.code or "browser_close_failed")
                 return self.status
-        self._cleanup_target(db, stop.command.target)
+        try:
+            self._cleanup_target(db, stop.command.target)
+        except Exception as exc:  # noqa: BLE001
+            self._in_flight = replace(stop, phase=StopPhase.CLEANUP_PENDING,
+                                      code="database_unavailable")
+            log.warning("停止目标清理暂不可用：%s", exc)
+            return self.status
         self._finish(stop)
         return self.status
 
