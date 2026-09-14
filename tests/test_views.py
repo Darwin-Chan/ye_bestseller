@@ -6,7 +6,6 @@
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 
 from bestseller_monitor import rounds, views
 from bestseller_monitor.config import Shop

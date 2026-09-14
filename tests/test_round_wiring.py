@@ -2,7 +2,6 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from bestseller_monitor import browser_pw, pipeline, rounds
