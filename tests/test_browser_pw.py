@@ -1,8 +1,8 @@
-"""补采那条详情访问的页面节拍：等页面可读，而不是固定睡 2 秒（候选 04）。"""
+"""详情页 parser 判据与导航 adapter。"""
 import unittest
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_pw, detail
+from bestseller_monitor import browser_pw, detail, detail_visit
 
 READY = '<script>{"skuInfoMap":{"A":{"skuId":1,"canBookCount":2}}}</script>'
 LOADING = "<html><body>加载中</body></html>"
@@ -17,53 +17,21 @@ class ReadableTests(unittest.TestCase):
         self.assertFalse(detail.readable(""), "空页不算读到")
 
 
-class WaitUntilDetailReadableTests(unittest.TestCase):
-    def page(self, url: str = "https://detail.1688.com/offer/11.html"):
+class NavigateDetailTests(unittest.TestCase):
+    def test_navigation_returns_the_opened_detail_without_reading_html(self):
         page = MagicMock()
-        page.url = url
-        return page
+        events = []
 
-    def test_it_returns_as_soon_as_the_page_is_readable(self):
-        page = self.page()
-        page.content.side_effect = [LOADING, READY]
+        opened = browser_pw.navigate_detail(
+            page, "https://detail.1688.com/offer/11.html", MagicMock(),
+            emit=lambda event, **kw: events.append((event, kw)),
+        )
 
-        with patch.object(browser_pw.time, "sleep"):
-            html = browser_pw.wait_until_detail_readable(page)
-
-        self.assertEqual(html, READY)
-        self.assertEqual(page.content.call_count, 2, "第一遍没读到就再问一次")
-
-    def test_it_gives_up_after_the_timeout_and_hands_back_the_html(self):
-        """等不到就把当前 html 交出去：判失败是解析那一侧的事，这里只负责别干等。"""
-        page = self.page()
-        page.content.return_value = LOADING
-
-        with patch.object(browser_pw.time, "sleep") as sleep:
-            html = browser_pw.wait_until_detail_readable(page, timeout=0)
-
-        self.assertEqual(html, LOADING)
-        sleep.assert_not_called()
-
-    def test_a_deny_page_returns_at_once(self):
-        """deny 页不该在这儿干等：它是限流，要尽快交给 guard 记账（候选 04）。"""
-        page = self.page("https://s.1688.com/bsop-punish?x=1")
-        page.content.return_value = LOADING
-
-        with patch.object(browser_pw.time, "sleep") as sleep:
-            html = browser_pw.wait_until_detail_readable(page, timeout=0)
-
-        self.assertEqual(html, LOADING)
-        sleep.assert_not_called()
-        self.assertEqual(page.content.call_count, 1)
-
-    def test_a_punish_page_returns_at_once(self):
-        page = self.page("https://x/punish?x5secdata=1")
-        page.content.return_value = LOADING
-
-        with patch.object(browser_pw.time, "sleep"):
-            browser_pw.wait_until_detail_readable(page, timeout=0)
-
-        self.assertEqual(page.content.call_count, 1)
+        self.assertIsInstance(opened, detail_visit.OpenedDetail)
+        self.assertIs(opened.page, page)
+        self.assertTrue(opened.punished)
+        page.content.assert_not_called()
+        self.assertEqual([event for event, _ in events], ["detail_nav"])
 
 
 if __name__ == "__main__":

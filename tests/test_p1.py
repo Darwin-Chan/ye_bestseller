@@ -5,7 +5,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_pw, click_listing, detail, guard, pipeline, rounds
+from playwright.sync_api import Error as PlaywrightError
+
+from bestseller_monitor import (browser_pw, click_listing, detail, detail_visit,
+                                guard, pipeline, rounds)
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import (
     CST,
@@ -24,8 +27,7 @@ from helpers import crawler_cfg, isolated_locks, new_round
 from tools import check_orphans
 
 
-# 一次「读到了页面」的补采：真 html，交给 detail.observe_page 翻译（候选 02 之后
-# 补采 adapter 只交 html，不自己解析）。
+# 一次「读到了页面」的补采：真实页面交给 detail_visit，当前 HTML 再由 detail 翻译。
 DETAIL_HTML = ('<script>{"skuInfoMap":{"红色":{"skuId":"red","name":"红色",'
                '"price":10,"canBookCount":3}}}</script>')
 
@@ -40,28 +42,84 @@ class P1Tests(unittest.TestCase):
         self.conn = connect(Path(self.tmp.name) / "test.db")
         self.db = Database(self.conn)
 
-    def test_open_detail_reads_a_real_page_and_announces_the_offer(self):
-        """补采 adapter 的真实路径：导航、认商品编号、把页面读成 html。
-
-        这条守的是「`open_detail` 本身还能跑」——候选 03 收口时它（当时叫 `capture_detail`）
-        一度因为少了一个 import 每次都抛 NameError，而所有用例都把函数打了桩，谁也没发现。
-        """
+    def test_navigate_detail_announces_the_offer_without_reading_html(self):
+        """补采 adapter 只负责导航；当前 HTML 由 detail_visit 在 guard 后读取。"""
         page = MagicMock()
-        page.content.return_value = (
-            '<script>{"skuInfoMap":{"A":{"skuId":1,"canBookCount":2}}}</script>')
         events: list[tuple[str, dict]] = []
 
-        # 页面内容一次就解析得出来，等可读那一步不会真的 sleep；打桩只为万一是等待。
-        with patch.object(browser_pw.time, "sleep"):
-            html = browser_pw.open_detail(
-                page, "https://detail.1688.com/offer/111.html", crawler_cfg(),
-                emit=lambda event, **kw: events.append((event, kw)))
+        opened = browser_pw.navigate_detail(
+            page, "https://detail.1688.com/offer/111.html", crawler_cfg(),
+            emit=lambda event, **kw: events.append((event, kw)))
 
         self.assertEqual([event for event, _ in events], ["detail_nav"],
-                         "读成 html 就交回去，解析与事件交给 observe_page 那一侧")
+                         "导航交回页面，解析与事件交给 detail_visit 那一侧")
         self.assertEqual(events[0][1]["offer_id"], "111")
-        self.assertEqual(
-            [row["sku_stock"] for row in parse_detail_html(html, "u")["rows"]], [2])
+        self.assertIs(opened.page, page)
+        page.content.assert_not_called()
+
+    def test_backfill_submits_html_read_after_verification_changes_the_page(self):
+        round_id = new_round(self.db)
+        offer = {
+            "shop_key": "A01",
+            "shop_url": "https://shop.example/",
+            "shop_name": "店铺A",
+            "offer_id": "111",
+            "product_url": "https://detail.1688.com/offer/111.html",
+            "list_title": "榜单标题",
+        }
+        page = MagicMock()
+        page.url = offer["product_url"]
+        page.content.side_effect = ["<html>登录墙</html>", DETAIL_HTML]
+
+        with patch.object(browser_pw, "navigate_detail",
+                          return_value=detail_visit.OpenedDetail(page, punished=True)), \
+             patch.object(detail_visit, "ready_detail_page", return_value=False), \
+             patch.object(detail_visit, "intervention_kind", return_value=None), \
+             patch.object(detail_visit, "is_deny_url", return_value=False), \
+             patch.object(detail, "extract_main_image", return_value=None):
+            pipeline._capture_one_pw(
+                self.db, crawler_cfg(), MagicMock(), round_id, offer, MagicMock(),
+            )
+
+        row = self.conn.execute(
+            "SELECT page_status, attempt, sku_stock FROM snapshots "
+            "WHERE round_id=? ORDER BY id DESC LIMIT 1", (round_id,),
+        ).fetchone()
+        self.assertEqual(tuple(row), ("成功", 1, 3))
+        self.assertEqual(page.content.call_count, 2)
+
+    def test_backfill_navigation_failure_uses_the_next_attempt(self):
+        round_id = new_round(self.db)
+        offer = {
+            "shop_key": "A01",
+            "shop_url": "https://shop.example/",
+            "shop_name": "店铺A",
+            "offer_id": "111",
+            "product_url": "https://detail.1688.com/offer/111.html",
+            "list_title": "榜单标题",
+        }
+        page = MagicMock()
+        page.url = offer["product_url"]
+        page.content.return_value = DETAIL_HTML
+        opened = detail_visit.OpenedDetail(page, punished=True)
+
+        with patch.object(browser_pw, "navigate_detail",
+             side_effect=[PlaywrightError("第一次导航失败"), opened]) as navigate, \
+             patch.object(detail_visit, "ready_detail_page", return_value=False), \
+             patch.object(detail_visit, "intervention_kind", return_value=None), \
+             patch.object(detail_visit, "is_deny_url", return_value=False), \
+             patch.object(detail, "extract_main_image", return_value=None):
+            pipeline._capture_one_pw(
+                self.db, crawler_cfg(max_attempts_per_page=2), MagicMock(),
+                round_id, offer, MagicMock(),
+            )
+
+        self.assertEqual(navigate.call_count, 2)
+        row = self.conn.execute(
+            "SELECT page_status, attempt FROM snapshots "
+            "WHERE round_id=? ORDER BY id DESC LIMIT 1", (round_id,),
+        ).fetchone()
+        self.assertEqual(tuple(row), ("成功", 2))
 
     def tearDown(self):
         self.conn.close()
@@ -101,7 +159,8 @@ class P1Tests(unittest.TestCase):
             "product_url": "https://detail.1688.com/offer/111.html",
             "list_title": "榜单标题",
         }
-        with patch.object(browser_pw, "open_detail", return_value=DETAIL_HTML), \
+        with patch.object(browser_pw, "navigate_detail",
+                          return_value=self._opened_detail(DETAIL_HTML)), \
              patch.object(detail, "extract_main_image", return_value=None):
             pipeline._capture_one_pw(
                 self.db, crawler_cfg(), MagicMock(), round_id, offer, MagicMock(),
@@ -127,7 +186,8 @@ class P1Tests(unittest.TestCase):
             "product_url": "https://detail.1688.com/offer/111.html",
             "list_title": "榜单标题",
         }
-        with patch.object(browser_pw, "open_detail", return_value=DETAIL_HTML), \
+        with patch.object(browser_pw, "navigate_detail",
+                          return_value=self._opened_detail(DETAIL_HTML)), \
              patch.object(detail, "extract_main_image",
                           side_effect=ValueError("图片字段异常")):
             pipeline._capture_one_pw(
@@ -158,7 +218,7 @@ class P1Tests(unittest.TestCase):
         page = MagicMock()
         page.content.return_value = DETAIL_HTML
 
-        # 走真的 open_detail（只有页面动作与等待被打桩），事件才真是生产路径发出来的。
+        # 走真的 navigate_detail 与 detail_visit，事件才真是生产路径发出来的。
         with patch.object(browser_pw.time, "sleep"), \
              patch.object(browser_pw, "intervention_kind", return_value=None):
             pipeline._capture_one_pw(
@@ -181,7 +241,8 @@ class P1Tests(unittest.TestCase):
         tracker = guard.DenyTracker(600)
         page = SimpleNamespace(url="https://s.1688.com/bsop-punish?x=1")
 
-        with patch.object(browser_pw, "open_detail", return_value="<html>deny</html>"):
+        with patch.object(browser_pw, "navigate_detail",
+                          return_value=self._opened_detail("<html>deny</html>", deny=True)):
             pipeline._capture_one_pw(
                 self.db, crawler_cfg(raw_page_dir=Path(self.tmp.name) / "raw"),
                 MagicMock(), round_id, offer, page, deny_tracker=tracker)
@@ -231,7 +292,8 @@ class P1Tests(unittest.TestCase):
 
         tracker = guard.DenyTracker(600)
         with patch.object(click_listing, "crawl_store_by_click", side_effect=fake_crawl), \
-             patch.object(browser_pw, "open_detail", return_value="<html>deny</html>"):
+             patch.object(browser_pw, "navigate_detail",
+                          return_value=self._opened_detail("<html>deny</html>", deny=True)):
             pipeline._run_listing_pw(self.db, cfg, round_id, shops, page,
                                      deny_tracker=tracker)
 
@@ -376,14 +438,22 @@ class P1Tests(unittest.TestCase):
 
     @staticmethod
     def _detail_html() -> str:
-        """补采 adapter 交回的真 html（解析、取主图都在 `detail.observe_page` 里）。"""
+        """补采页面的真 HTML（读取时机由 detail_visit 保证，解析归 detail）。"""
         return DETAIL_HTML
+
+    @staticmethod
+    def _opened_detail(html: str, *, deny: bool = False):
+        page = MagicMock()
+        page.url = ("https://s.1688.com/bsop-punish?x=1" if deny
+                    else "https://detail.1688.com/offer/111.html")
+        page.content.return_value = html
+        return detail_visit.OpenedDetail(page, punished=True)
 
     def test_same_name_inventory_does_not_block_failed_offer_detail(self):
         round_id, offer = self._seed_same_name_failed_offer()
         cfg = crawler_cfg()
-        with patch.object(browser_pw, "open_detail",
-                          return_value=self._detail_html()) as capture:
+        with patch.object(browser_pw, "navigate_detail",
+                          return_value=self._opened_detail(self._detail_html())) as capture:
             pipeline._capture_one_pw(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
 
         self.assertEqual(capture.call_count, 1, "同名库存不应阻止已知 offer_id 的补采")
@@ -402,8 +472,8 @@ class P1Tests(unittest.TestCase):
         self.db.mark_failure(round_id, shop.key, "22", 1, "解析失败")
         cfg = crawler_cfg(max_detail_opportunities_per_round=1)
 
-        with patch.object(browser_pw, "open_detail",
-                          return_value=self._detail_html()) as capture:
+        with patch.object(browser_pw, "navigate_detail",
+                          return_value=self._opened_detail(self._detail_html())) as capture:
             with self.assertRaises(pipeline.DetailBudgetExhausted):
                 pipeline._retry_shop_pending_pw(
                     self.db, cfg, round_id, shop, MagicMock(), Humanizer(cfg),
@@ -491,7 +561,7 @@ class P1Tests(unittest.TestCase):
         ).fetchone()
         cfg = crawler_cfg(max_detail_opportunities_per_round=1)
 
-        with patch.object(browser_pw, "open_detail") as capture:
+        with patch.object(browser_pw, "navigate_detail") as capture:
             pipeline._capture_one_pw(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
 
         capture.assert_not_called()
@@ -502,8 +572,8 @@ class P1Tests(unittest.TestCase):
         round_id, offer = self._seed_same_name_failed_offer()   # 商品 22 已有 attempt=1 的失败记录
         cfg = crawler_cfg(max_attempts_per_page=2)
 
-        with patch.object(browser_pw, "open_detail",
-                          return_value=self._detail_html()) as capture:
+        with patch.object(browser_pw, "navigate_detail",
+                          return_value=self._opened_detail(self._detail_html())) as capture:
             pipeline._capture_one_pw(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
 
         self.assertEqual(capture.call_count, 1)
@@ -520,7 +590,7 @@ class P1Tests(unittest.TestCase):
         self.db.mark_failure(round_id, offer["shop_key"], "22", 2, "第二次也失败")
         cfg = crawler_cfg(max_attempts_per_page=2)
 
-        with patch.object(browser_pw, "open_detail") as capture:
+        with patch.object(browser_pw, "navigate_detail") as capture:
             pipeline._capture_one_pw(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
 
         capture.assert_not_called()

@@ -52,7 +52,7 @@ def save_raw_page(cfg: Config, round_id: int, offer_id: str, html: str) -> Path:
 def readable(html: str) -> bool:
     """这份 html 已经能读出 SKU 行了吗——详情页「可读」的判据。
 
-    等页面可读（`browser_pw.wait_until_detail_readable()`）与判解析失败用的是同一个判据：
+    等页面可读（`detail_visit.ReadyDetailVisit`）与判解析失败用的是同一个判据：
     有 SKU 行才叫读到了，页面还在渲染、或者压根是拦截页时都不是。
     """
     try:
@@ -102,8 +102,7 @@ class DetailTarget:
 class Observation:
     """adapter 交回的一次观测：成功 payload，或失败原因。
 
-    失败文案的用词收在这里（读不到页 / 解析失败 / 解析崩了），由 `observe_page` 挑，
-    adapter 只管把 html 交回来。
+    失败文案的用词收在这里（读不到页 / 解析失败 / 解析崩了），由 `observe_html` 挑。
     """
 
     payload: dict | None = None
@@ -142,24 +141,13 @@ class Observation:
         return cls(failure=f"详情页解析异常：{exc}", raw_html=html, kind=FailureKind.PARSE)
 
 
-def observe_page(read_html, product_url: str, *,
-                 reraise: tuple[type[BaseException], ...] = ()) -> Observation:
-    """读一次详情页并翻译成一次观测：读 html → 解析 → 取主图。
+def observe_html(html: str, product_url: str) -> Observation:
+    """把已经取得的详情 HTML 翻译成一次观测：解析 → 取主图。
 
-    点击式列表的弹窗与逐店补采的详情页都穿过这里，「读到什么算失败、留不留原始页」只写
-    一份（候选 02）：读不到 html 是读取失败（没有原始页可留）；解析失败与解析崩了都算解析
-    失败，**都留原始页**供校准。
-
-    `read_html` 是 adapter：打开页面或读弹窗内容，返回 html 字符串，读不到就抛。`reraise`
-    是「不许当成读取失败、要原样上抛」的异常（停止判定那一族，见 ADR-0009）；它只圈住读
-    html 那一段——解析段没有这类异常。
+    页面读取、等待和异常重试由 `detail_visit` 负责；这里的 interface 只接收当前 HTML，
+    因此不会再让调用方缓存 guard 之前的旧页面。解析失败与解析崩了都算解析失败，并保留
+    原始页供校准。
     """
-    try:
-        html = read_html()
-    except reraise:
-        raise
-    except Exception as exc:  # noqa: BLE001 —— 读不到就是读取失败，原因留给调用方看
-        return Observation.read_failed(exc)
     try:
         payload = parse_detail_html(html, product_url)
         payload["main_image_url"] = extract_main_image(html)
@@ -190,7 +178,8 @@ def capture_observation(db: Database, cfg: Config, human, round_id: int,
       `attempts=1`（点击式列表）这一次既然已经点开，读一次就够，失败交给随后的补采接手。
     - 提交之后再看一次停止判定：已提交的数据保留，判定不回滚它。
 
-    `read` 是 adapter：打开页面或读弹窗内容并自己负责关掉它们，返回 `Observation`。
+    `read` 是调用方提供的当前详情观测回调；页面取得、验证、等待与关闭都由详情访问 seam
+    及其所属调用方负责，回调只返回一次 `Observation`。
     失败记录与文案、成功提交都在这里；事件由调用方按 `CaptureResult` 记。
     """
     shop_key = target.shop_key

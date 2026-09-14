@@ -10,8 +10,9 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from . import browser_pw, click_listing, dedupe, detail, rounds, single_instance, stop_request
-from .guard import DenyTracker, RoundDenyExceeded, ShopDenyExceeded, ready_detail_page
+from . import (browser_pw, click_listing, dedupe, detail, detail_visit, rounds,
+               single_instance, stop_request)
+from .guard import DenyTracker, RoundDenyExceeded, ShopDenyExceeded
 from .config import Config, Shop, load_shops
 from .db import (
     Database,
@@ -441,30 +442,37 @@ def _retry_shop_pending_pw(db: Database, cfg: Config, round_id: int, shop: Shop,
 
 def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, offer, page,
                     emit=None, deny_tracker=None) -> None:
-    """逐店补采一个商品：adapter 只把页面读成 html，其余规则在 detail 里。
+    """逐店补采一个商品：共享详情访问交回验证后的当前观测。
 
     编号在取观测前就已知，所以「今天采过就不打开页面、额度用尽就不进详情」这条省事的路
-    在这里成立（候选 02 / ADR-0013）；读到什么算失败由 `detail.observe_page` 判
-    （候选 02 / ADR-0018），规则在 `detail.capture_observation`。补采命中的 deny 与点击
-    路径共用一个账目（候选 04）。
+    在这里成立（候选 02 / ADR-0013）；访问顺序由 `detail_visit` 统一，规则仍在
+    `detail.capture_observation`。补采命中的 deny 与点击路径共用一个账目（候选 04）。
     """
     def emit_detail(event: str, **kw: object) -> None:
         if emit is not None:
             emit(event, shop_key=offer["shop_key"], **kw)
 
     def observe() -> detail.Observation:
-        """补采的详情访问：怎么打开归 browser_pw，读到什么算失败归 detail.observe_page。"""
-        html = browser_pw.open_detail(page, offer["product_url"], cfg, emit=emit_detail)
-        # `punished=True`：补采这条没有点击路径那份响应监听，punish 只按地址认
-        # （`is_punish_url`，ADR-0020 记下了这点差别）。
-        if ready_detail_page(page, cfg, emit=emit_detail, punished=True,
-                             deny_tracker=deny_tracker, shop_key=offer["shop_key"]):
-            # 命中 deny：账目已经记在 guard，这一单按「没读到商品」记失败（理由写清是 deny）。
+        """补采的详情访问：adapter 只导航，访问 module 负责当前页面的读取。"""
+        visit = detail_visit.begin_detail_visit(
+            lambda: browser_pw.navigate_detail(
+                page, offer["product_url"], cfg, emit=emit_detail),
+            cfg, emit=emit_detail, deny_tracker=deny_tracker,
+            shop_key=offer["shop_key"], reraise=STOP_WITH_OUTCOME,
+        )
+        if isinstance(visit, detail_visit.NotOpenedVisit):
+            raise RuntimeError("逐店补采的导航 adapter 不应返回 NotOpenedVisit")
+        if isinstance(visit, detail_visit.ReadFailedVisit):
+            return visit.observation
+        if isinstance(visit, detail_visit.DeniedVisit):
             log.warning("店铺 %s 商品 %s 补采命中 deny 页", offer["shop_key"],
                         offer["offer_id"])
-            return detail.Observation.denied(html)
-        observation = detail.observe_page(lambda: html, offer["product_url"],
-                                          reraise=STOP_EXCEPTIONS)
+            return detail.Observation.denied(visit.raw_html)
+        observation = visit.observe(offer["product_url"])
+        if isinstance(observation, detail_visit.DeniedVisit):
+            log.warning("店铺 %s 商品 %s 补采等待中命中 deny 页", offer["shop_key"],
+                        offer["offer_id"])
+            return detail.Observation.denied(observation.raw_html)
         if observation.ok:
             emit_detail("detail_parse", phase="detail",
                         note=f"sku_count={observation.sku_count}")

@@ -4,8 +4,7 @@
 详情观测规则在 detail.py；这里只剩：
 
 - 用普通进程拉起浏览器、经调试端口接管、按归属收尾（IS-43）；
-- 逐店补采用的 `open_detail`（打开一个详情页、把页面读成 html；读到什么算失败归
-  `detail.observe_page`，见 ADR-0018）。
+- 逐店补采的详情导航 adapter（交回 `detail_visit.OpenedDetail`，见 ADR-0023）。
 
 `DenyTracker` 与那两个 deny 异常现在长在 guard.py（deny 判定的家），这里替沿用旧 import 的
 调用方转出来；详情页「打开之后怎么安顿」也归 `guard.ready_detail_page()`（候选 04）。
@@ -22,10 +21,10 @@ from . import browser_proc, listing
 from .click_listing import WAIT_POPUP_MS
 from .config import Config
 from .delay import Humanizer
-from .detail import readable
+from .detail_visit import OpenedDetail
 from .guard import (DenyTracker, RoundDenyExceeded,  # noqa: F401  旧名兼容
                     ShopDenyExceeded)
-# 本文件内部要用的（等详情页可读时判 deny / punish）。
+# 诊断工具仍按旧私有名读取这两个 guard 谓词。
 from .guard import is_deny_url, is_punish_url
 # 诊断工具的兼容名：它们按旧名从 browser_pw 取这些，别删（见下面的 `_*` 别名与工具用例）。
 from .guard import (  # noqa: F401
@@ -164,39 +163,11 @@ def close_session(pw, br) -> None:
                                browser_pid=browser_pid, own_pid=own_pid)
 
 
-# 等详情页给出能解析的 html 的上限（秒）：与列表首屏同量级，超了就把当前 html 交出去。
-DETAIL_READY_TIMEOUT_SEC = 10.0
-DETAIL_READY_POLL_SEC = 0.25
-
-
-def wait_until_detail_readable(page, timeout: float = DETAIL_READY_TIMEOUT_SEC) -> str:
-    """等到详情页的 html 能读出 SKU 行（或等够 timeout），交回最后一次读到的 html。
-
-    改前这里是固定的 `time.sleep(2)`：拿时间赌「渲染完了」。等真正的判据既更快（通常第一个
-    轮询就命中）也更稳；等不到就把当前 html 交出去，由 `detail.observe_page()` 判失败。
-    落在 deny / punish 页上立刻返回——那是要按限流处理的页面，不该在这儿干等（候选 04）。
-    """
-    deadline = time.time() + timeout
-    html = page.content()
-    while True:
-        if readable(html) or is_deny_url(page.url or "") or is_punish_url(page.url or ""):
-            return html
-        if time.time() >= deadline:
-            log.warning("详情页 %s 等了 %.0f 秒仍读不出 SKU 行，按当前内容交给解析",
-                        page.url, timeout)
-            return html
-        time.sleep(DETAIL_READY_POLL_SEC)
-        html = page.content()
-
-
-def open_detail(page, product_url: str, cfg: Config, emit=None) -> str:
-    """打开一个详情页并把它读成 html（补采路径的那半条 adapter）。
-
-    只负责「把页面打开、等到可读」；deny 账目、人工介入与「读到什么算失败」都不在这里
-    （分别归 `guard.ready_detail_page()` 与 `detail.observe_page()`，候选 02 / 04）。
-    """
+def navigate_detail(page, product_url: str, cfg: Config, emit=None) -> OpenedDetail:
+    """导航到详情页并交回页面句柄；等待、guard 与读取由 detail_visit 负责。"""
     if emit:
         m = re.search(r"/(?:offer|item)/(\d+)\.html", product_url)
         emit("detail_nav", offer_id=m.group(1) if m else None, phase="detail")
     page.goto(product_url, wait_until="domcontentloaded")
-    return wait_until_detail_readable(page)
+    # 补采没有点击路径的响应监听，沿用旧路径的地址级 punish 判定信号。
+    return OpenedDetail(page, punished=True)

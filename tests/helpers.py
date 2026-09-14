@@ -111,15 +111,16 @@ def new_round(db, *shops, run_date: str | None = None) -> int:
 class FakeCard:
     """脚本化的一张商品卡：标题、打开后读到什么、是不是 deny。
 
-    遍历只看这几件事（`title` / `open` / `opened` / `page` / `url` / `offer_id` / `read` /
-    `close`）；`page` 是给 `guard.ready_detail_page()` 看的假页面句柄，deny 判定看它的 url。
+    遍历只看这几件事（`title` / `acquire` / `url` / `offer_id` / `close`）；页面句柄交给
+    `detail_visit`，deny、等待与 HTML 读取都通过共享 seam 验证。
     """
 
     DENY_URL = "https://s.1688.com/bsop-punish?x=1"
 
     def __init__(self, title: str = "", *, offer_id: str | None = "11",
                  observation=None, denied: bool = False, opened: bool = True,
-                 read_error: Exception | None = None):
+                 read_error: Exception | None = None,
+                 content_values: list[str] | None = None):
         from bestseller_monitor import detail
 
         self._title = title
@@ -132,6 +133,7 @@ class FakeCard:
         self._denied = denied
         self._opened = opened
         self._read_error = read_error
+        self._content_values = iter(content_values) if content_values is not None else None
         self.note = ""          # 由 adapter 按当前页号填
         self.ref = ""
         self.opens = 0
@@ -140,21 +142,36 @@ class FakeCard:
     def title(self) -> str:
         return self._title
 
-    def open(self) -> None:
+    def acquire(self):
+        from bestseller_monitor import detail, detail_visit
+
         self.opens += 1
+        if not self._opened:
+            return None
 
-    def opened(self) -> bool:
-        return self._opened
+        def content():
+            if self._read_error is not None:
+                raise self._read_error
+            if self._denied:
+                return "<html>deny</html>"
+            if self._content_values is not None:
+                try:
+                    return next(self._content_values)
+                except StopIteration:
+                    return "<html>加载中</html>"
+            if self.observation.kind is detail.FailureKind.READ:
+                from playwright.sync_api import Error as PlaywrightError
+                raise PlaywrightError(self.observation.failure or "页面没了")
+            if self.observation.kind is detail.FailureKind.PARSE:
+                return self.observation.raw_html or "<html>没有 SKU</html>"
+            return ('<script>{"skuInfoMap":{"A":{"skuId":"A",'
+                    '"name":"默认","price":1,"canBookCount":3}}}</script>')
 
-    @property
-    def page(self):
-        """这次的详情页句柄：deny 的那种给 deny 地址（`is_deny_url` 认 bsop-punish）。"""
-        return SimpleNamespace(url=self.DENY_URL if self._denied else self.url)
-
-    def read(self):
-        if self._read_error is not None:
-            raise self._read_error
-        return self.observation
+        page = SimpleNamespace(
+            url=self.DENY_URL if self._denied else self.url,
+            content=content,
+        )
+        return detail_visit.OpenedDetail(page)
 
     def close(self) -> None:
         self.closes += 1

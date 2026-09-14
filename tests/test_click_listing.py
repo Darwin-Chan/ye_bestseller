@@ -11,7 +11,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_pw, click_listing, detail, listing, rounds, stop_request
+from playwright.sync_api import Error as PlaywrightError
+
+from bestseller_monitor import (browser_pw, click_listing, detail, detail_visit,
+                                listing, rounds, stop_request)
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import (Database, DayBoundaryReached, DetailBudgetExhausted,
                                    connect, utcnow)
@@ -109,6 +112,23 @@ class WalkTests(ClickListingTestCase):
             "list_page", "product_open", "popup_open", "detail_parse", "click_ok",
             "popup_close"])
 
+    def test_a_slow_detail_page_is_waited_for_before_the_existing_events_are_emitted(self):
+        card = FakeCard(
+            "商品1", offer_id="11",
+            content_values=[
+                "<html>仍在渲染</html>",
+                '<script>{"skuInfoMap":{"A":{"skuId":1,"canBookCount":3}}}</script>',
+            ],
+        )
+
+        with patch.object(detail_visit.time, "sleep"):
+            self.crawl([[card]])
+
+        self.assertEqual(self.event_names(), [
+            "list_page", "product_open", "popup_open", "detail_parse", "click_ok",
+            "popup_close"])
+        self.assertEqual(card.closes, 1)
+
     def test_the_event_sequence_of_a_parse_failure_is_unchanged(self):
         card = FakeCard("商品1", offer_id="11", observation=detail.Observation.parse_failed(
             RuntimeError("页面结构变了"), "<html></html>"))
@@ -137,6 +157,18 @@ class WalkTests(ClickListingTestCase):
 
         self.assertIsNone(result)
         self.assertIn("click_no_popup", self.event_names())
+        self.assertEqual(self.snapshots("失败"), [])
+
+    def test_a_guard_read_failure_closes_the_opened_detail(self):
+        card = FakeCard("商品1", offer_id="11")
+        error = PlaywrightError("guard 读取失败")
+
+        with patch.object(detail_visit, "ready_detail_page", side_effect=error):
+            with self.assertRaises(PlaywrightError) as raised:
+                self.walk(ScriptedListing([[card]])).capture(card, "商品1")
+
+        self.assertIs(raised.exception, error)
+        self.assertEqual(card.closes, 1)
         self.assertEqual(self.snapshots("失败"), [])
 
 
@@ -217,6 +249,81 @@ class SameNameTests(ClickListingTestCase):
 
 
 class DenyTests(ClickListingTestCase):
+    def test_late_deny_retries_the_known_product_instead_of_treating_it_as_duplicate(self):
+        class LateDenyCard(FakeCard):
+            def __init__(self):
+                super().__init__("商品1", offer_id="11")
+                self._acquires = 0
+
+            def acquire(self):
+                opened = super().acquire()
+                self._acquires += 1
+                if opened is not None and self._acquires == 1:
+                    page = opened.page
+                    reads = 0
+
+                    def content():
+                        nonlocal reads
+                        reads += 1
+                        if reads == 1:
+                            page.url = self.DENY_URL
+                            return "<html>仍在渲染</html>"
+                        return "<html>deny</html>"
+
+                    page.content = content
+                return opened
+
+        card = LateDenyCard()
+        with patch.object(detail_visit.time, "sleep"):
+            result = self.walk(ScriptedListing([[card]]),
+                               deny_tracker=guard.DenyTracker(600)).capture(card, "商品1")
+
+        self.assertEqual(result, "11")
+        self.assertEqual(card.opens, 2)
+        self.assertEqual(card.closes, 2, "晚到 deny 每次打开的页面只关闭一次")
+        self.assertEqual(len(self.snapshots("成功")), 1)
+        self.assertTrue(any("&n=1" in kw.get("note", "")
+                            for event, kw in self.events if event == "click_deny"))
+
+    def test_late_deny_does_not_skip_closing_a_newly_denied_retry(self):
+        class LateThenDeniedCard(FakeCard):
+            def __init__(self):
+                super().__init__("商品1", offer_id="11")
+                self._acquires = 0
+
+            def acquire(self):
+                self._acquires += 1
+                if self._acquires == 1:
+                    page = super().acquire().page
+                    reads = 0
+
+                    def content():
+                        nonlocal reads
+                        reads += 1
+                        if reads == 1:
+                            page.url = self.DENY_URL
+                            return "<html>仍在渲染</html>"
+                        return "<html>deny</html>"
+
+                    page.content = content
+                    return detail_visit.OpenedDetail(page)
+                if self._acquires == 2:
+                    self.opens += 1
+                    return detail_visit.OpenedDetail(
+                        SimpleNamespace(url=self.DENY_URL,
+                                        content=lambda: "<html>deny</html>")
+                    )
+                return super().acquire()
+
+        card = LateThenDeniedCard()
+        with patch.object(detail_visit.time, "sleep"):
+            result = self.walk(ScriptedListing([[card]]),
+                               deny_tracker=guard.DenyTracker(600)).capture(card, "商品1")
+
+        self.assertEqual(result, "11")
+        self.assertEqual(card.opens, 3)
+        self.assertEqual(card.closes, 3, "每个新打开的详情页都应只关闭一次")
+
     def test_the_third_deny_closes_the_card_and_skips_the_product(self):
         card = FakeCard("商品1", offer_id="11", denied=True)
         tracker = guard.DenyTracker(600)
@@ -350,10 +457,13 @@ class PlaywrightAdapterTests(ClickListingTestCase):
         detail_page.content.return_value = (
             '<script>{"skuInfoMap":{"A":{"skuId":1,"canBookCount":1}}}</script>')
 
-        with patch.object(click_listing, "click_card", return_value=(detail_page, MagicMock())):
-            card.open()
-        with patch.object(detail, "extract_main_image", return_value="https://img/1.png"):
-            observation = card.read()
+        with patch.object(click_listing, "click_card", return_value=(detail_page, MagicMock())), \
+             patch.object(detail_visit, "ready_detail_page", return_value=False), \
+             patch.object(detail_visit, "intervention_kind", return_value=None), \
+             patch.object(detail_visit, "is_deny_url", return_value=False):
+            visit = detail_visit.begin_detail_visit(card.acquire, crawler_cfg())
+            with patch.object(detail, "extract_main_image", return_value="https://img/1.png"):
+                observation = visit.observe(card.url)
 
         self.assertEqual(card.offer_id, "11")
         self.assertIn("main_image_url", observation.payload)
@@ -367,11 +477,14 @@ class PlaywrightAdapterTests(ClickListingTestCase):
         detail_page.content.return_value = (
             '<script>{"skuInfoMap":{"A":{"skuId":1,"canBookCount":1}}}</script>')
 
-        with patch.object(click_listing, "click_card", return_value=(detail_page, MagicMock())):
-            card.open()
-        with patch.object(detail, "extract_main_image",
-                          side_effect=ValueError("图片字段异常")):
-            observation = card.read()
+        with patch.object(click_listing, "click_card", return_value=(detail_page, MagicMock())), \
+             patch.object(detail_visit, "ready_detail_page", return_value=False), \
+             patch.object(detail_visit, "intervention_kind", return_value=None), \
+             patch.object(detail_visit, "is_deny_url", return_value=False):
+            visit = detail_visit.begin_detail_visit(card.acquire, crawler_cfg())
+            with patch.object(detail, "extract_main_image",
+                              side_effect=ValueError("图片字段异常")):
+                observation = visit.observe(card.url)
 
         self.assertEqual(observation.kind, detail.FailureKind.PARSE)
         self.assertIn("图片字段异常", observation.failure)

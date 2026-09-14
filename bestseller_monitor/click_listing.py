@@ -5,10 +5,9 @@
 
 - **页面 adapter**（`PlaywrightListing`）：把页面动作翻译成遍历要的几件事——打开并准备、
   滚动取卡片数、拿第 i 张卡的句柄、推进到下一批。测试注一个脚本化实现就能跑完整条遍历。
-- **卡片句柄**：`title` / `open` / `opened` / `page` / `url` / `offer_id` / `read` / `close`。
-  `read` 就是 `detail.capture_observation` 要的那道 adapter（候选 02 立的接缝），弹窗谁开谁关；
-  `page` 是这次打开的详情页句柄——它是 deny 还是滑块由 `guard.ready_detail_page()` 判
-  （候选 04，卡片自己不再判 deny）。
+- **卡片句柄**：`title` / `acquire` / `url` / `offer_id` / `close`。
+  `acquire` 交回详情访问 module 所需的页面句柄，弹窗谁开谁关；deny、人工介入、等待可读和
+  HTML 翻译由 `detail_visit` 统一处理。
 - **遍历上下文**（`ShopWalk`）：这家店这次遍历的账本、事件与每张卡的处理。
 
 浏览器会话与逐卡详情机制仍留在 browser_pw.py；榜单页本身的行为（准备、推进、列表身份）
@@ -21,13 +20,17 @@ import re
 
 from playwright.sync_api import Error as PlaywrightError
 
-from . import dedupe, detail, listing, rounds
+from . import dedupe, detail, detail_visit, listing, rounds
 from .config import Config, Shop, effective_pages_limit
 from .db import cst_date, utcnow
 from .delay import Humanizer
-from .guard import RoundDenyExceeded, ShopDenyExceeded, is_punish_url, ready_detail_page
+from .guard import RoundDenyExceeded, ShopDenyExceeded, is_punish_url
 
 log = logging.getLogger(__name__)
+
+
+class _LateDenied(Exception):
+    """详情已知后在可读等待中再次命中 deny，交回当前商品的 deny 阶梯。"""
 
 # 条件等待的上限兜底（秒）
 WAIT_POPUP_MS = 2500       # 点击后等待新标签页；有效弹窗通常在 2 秒内出现
@@ -154,54 +157,85 @@ class ShopWalk:
     def capture(self, card, list_title: str) -> str | None:
         """点开一张卡、取一次详情观测、按结果记事件；成功返回商品编号。
 
-        打开之后先问 `guard.ready_detail_page()`（deny 记账、阈值、人工介入都在那儿，候选 04）：
-        命中 deny 按第 1/2 次退避重试、第 3 次关掉详情跳过当前商品；
-        阈值越界抛 ShopDenyExceeded / RoundDenyExceeded（收尾见 pipeline._STOP_OUTCOMES）。
+        访问顺序与晚到 deny 由 `detail_visit` 统一，命中 deny 仍按第 1/2 次退避重试、
+        第 3 次关掉详情跳过当前商品。
         """
         note = card.note
         per_product_denies = 0
+        retry_after_late_deny = False
+        # 延迟导入避免 click_listing 与 pipeline 的停止分类形成 import 环。
+        from .pipeline import STOP_WITH_OUTCOME
+
         for _ in range(3):
+            closed_for_deny = False
             # 打开卡片就是进详情：先问轮次，跨天或已过截止线就不再开始。
             rounds.ensure_workable(self.db, self.round_id, utcnow())
-            card.open()
-            if not card.opened():
-                self.emit("click_no_popup", note=note)
-                return None
             try:
-                denied = ready_detail_page(card.page, self.cfg, emit=self.emit,
-                                           punished=getattr(self.listing_page, "punished",
-                                                            False),
-                                           deny_tracker=self.deny_tracker,
-                                           shop_key=self.shop.key)
+                visit = detail_visit.begin_detail_visit(
+                    card.acquire, self.cfg, emit=self.emit,
+                    deny_tracker=self.deny_tracker, shop_key=self.shop.key,
+                    reraise=STOP_WITH_OUTCOME,
+                )
             except (ShopDenyExceeded, RoundDenyExceeded) as exc:
-                # 账目与判据都在 guard，这里只把它记成事件再上抛（收尾见 _STOP_OUTCOMES）。
+                # 账目与判据都在 guard，这里只把它记成事件再上抛。
                 flag = ("round_abort" if isinstance(exc, RoundDenyExceeded)
                         else "shop_skip")
                 self.emit("click_deny", phase="detail",
-                        note=note + f"&n={per_product_denies + 1}&{flag}")
+                          note=note + f"&n={per_product_denies + 1}&{flag}")
                 raise
+
+            if isinstance(visit, detail_visit.NotOpenedVisit):
+                self.emit("click_no_popup", note=note)
+                return None
+            if isinstance(visit, detail_visit.ReadFailedVisit):
+                # 取得或初次 guard 失败时，已打开的弹窗仍由点击调用方关闭。
+                card.close()
+                # 商品编号尚未可靠取得，点击路径没有商品可记；保留原异常。
+                raise visit.error
+
+            denied = isinstance(visit, detail_visit.DeniedVisit)
+            if not denied:
+                try:
+                    return self._ingest(card, list_title, visit,
+                                        retry=retry_after_late_deny)
+                except (ShopDenyExceeded, RoundDenyExceeded) as exc:
+                    flag = ("round_abort" if isinstance(exc, RoundDenyExceeded)
+                            else "shop_skip")
+                    self.emit("click_deny", phase="detail",
+                              note=note + f"&n={per_product_denies + 1}&{flag}")
+                    raise
+                except _LateDenied:
+                    self.emit("popup_close", offer_id=card.offer_id)
+                    card.close()
+                    closed_for_deny = True
+                    retry_after_late_deny = True
+                    denied = True
+
             if denied:
                 per_product_denies += 1
                 log.warning("店铺 %s 商品命中 deny（该商品第 %s 次）",
                             self.shop.key, per_product_denies)
                 if per_product_denies == 1:
                     self.emit("click_deny", phase="detail", note=note + "&n=1")
-                    card.close()
+                    if not closed_for_deny:
+                        card.close()
                     self.human.sleep(self.cfg.deny_backoff_sec)
                     continue
                 if per_product_denies == 2:
                     self.emit("click_deny", phase="detail", note=note + "&n=2")
-                    card.close()
+                    if not closed_for_deny:
+                        card.close()
                     self.human.sleep(self.cfg.deny_retry2_backoff_sec)
                     continue
                 self.emit("click_deny", phase="detail", note=note + "&n=3&skip")
                 log.warning("店铺 %s 商品第 3 次命中 deny，跳过当前商品", self.shop.key)
-                card.close()
+                if not closed_for_deny:
+                    card.close()
                 return None
-            return self._ingest(card, list_title)
         return None
 
-    def _ingest(self, card, list_title: str) -> str | None:
+    def _ingest(self, card, list_title: str,
+                visit: detail_visit.ReadyDetailVisit, *, retry: bool = False) -> str | None:
         """一张卡的详情观测：认领商品、按结果记事件、把卡片关掉。"""
         offer_id = card.offer_id
         if offer_id is None:
@@ -222,8 +256,10 @@ class ShopWalk:
                     shop_key=self.shop.key, shop_url=self.shop.url,
                     shop_name=self.shop.name, product_url=card.url,
                     slot_key=card.ref, offer_id=offer_id, list_title=list_title,
-                    duplicate=not first_time),
-                lambda: self._read(card, offer_id), attempts=1)
+                    duplicate=not first_time and not retry),
+                lambda: self._read(visit, card, card.url, offer_id), attempts=1)
+        except _LateDenied:
+            raise
         except BaseException:
             # 停止判定（跨天／暂停／预算）从规则里抛出来：弹窗照常关掉再上抛。
             self.emit("popup_close", offer_id=offer_id)
@@ -246,9 +282,12 @@ class ShopWalk:
         # 失败与「没读到编号」一样：对调用方来说这张卡没有拿到商品（只留了失败行）。
         return None if result.outcome is detail.Outcome.FAILED else result.offer_id
 
-    def _read(self, card, offer_id: str) -> detail.Observation:
-        """读一次观测，并按「这次读成什么样」记事件（事件顺序与改前一致）。"""
-        observation = card.read()
+    def _read(self, visit: detail_visit.ReadyDetailVisit, card, product_url: str,
+              offer_id: str) -> detail.Observation:
+        """读取当前详情，并按「这次读成什么样」记事件。"""
+        observation = visit.observe(product_url)
+        if isinstance(observation, detail_visit.DeniedVisit):
+            raise _LateDenied()
         if observation.ok:
             self.emit("detail_parse", offer_id=offer_id,
                     note=f"sku_count={observation.sku_count}")
@@ -353,7 +392,7 @@ class PlaywrightListing:
 
 
 class PlaywrightCard:
-    """Playwright 里的一张商品卡：点开、读它打开的那个页面、关掉。"""
+    """Playwright 里的一张商品卡：点开详情、交回页面、关掉。"""
 
     def __init__(self, owner: PlaywrightListing, index: int):
         self._owner = owner
@@ -376,7 +415,7 @@ class PlaywrightCard:
     def title(self) -> str:
         return read_card_title(self._owner.page, self.index)
 
-    def open(self) -> None:
+    def acquire(self) -> detail_visit.OpenedDetail | None:
         owner = self._owner
         image = owner.page.locator(listing.PRODUCT_IMG_SEL).nth(self.index)
         self._detail_page, self._popup = click_card(
@@ -385,22 +424,14 @@ class PlaywrightCard:
         if self._detail_page is None:
             self.url = ""
             self.offer_id = None
-            return
+            return None
         self.url = self._detail_page.url or ""
         found = re.search(r"/(?:offer|item)/(\d+)\.html", self.url)
         self.offer_id = found.group(1) if found else None
-
-    def opened(self) -> bool:
-        return self._detail_page is not None
-
-    @property
-    def page(self):
-        """这次打开的详情页句柄；安顿它（deny / 人工介入）交给 `guard.ready_detail_page()`。"""
-        return self._detail_page
-
-    def read(self) -> detail.Observation:
-        """读一次详情观测：怎么拿到 html 归弹窗，读到什么算失败归 `detail.observe_page`。"""
-        return detail.observe_page(self._detail_page.content, self.url)
+        return detail_visit.OpenedDetail(
+            self._detail_page,
+            punished=getattr(owner, "punished", False),
+        )
 
     def close(self) -> None:
         close_popup_or_back(self._detail_page, self._popup, self._owner.page)
@@ -460,9 +491,9 @@ def read_card_title(page, idx: int) -> str:
 def click_card(page, image, cfg: Config, punished: bool, on_response, emit=None):
     """点商品图的「可点击父元素」并等详情打开；返回 (详情页, 弹窗)。
 
-    弹窗没出现时，页面可能就地跳到了详情。这里只负责「把页面打开」；打开之后怎么安顿
-    （deny 记账、滑块等人）由调用方走 `guard.ready_detail_page()`（候选 04）——
-    诊断工具因此拿到的是页面的原始状态，不再被隐式的等待挡住。
+    弹窗没出现时，页面可能就地跳到了详情。这里只负责「把页面打开」；打开之后的 deny
+    记账、人工介入、可读等待和 HTML 翻译由 `detail_visit` 统一负责——诊断工具因此拿到的
+    是页面的原始状态，不再被隐式的等待挡住。
     """
     popup = None
     try:
