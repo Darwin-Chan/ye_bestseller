@@ -133,13 +133,15 @@ class Api:
         # 一律用 lambda 晚绑定：测试 patch 类方法（例如 `_kill_proc`）时要打到实际调用点上，
         # 直接传绑定方法会在构造那一刻就定死（与前面几轮踩过的别名坑同一类）。
         # 窗口：请求发出后 8 秒、采集进程回执之后再 10 秒（ADR-0009，数值在 StopWatch 里）。
+        runtime = stop_request.ProcessStopRuntime(
+            own_process=lambda: self.proc,
+            browser_enabled=getattr(self.cfg, "start_browser", True),
+            terminate=lambda bound: self._terminate_bound(bound),
+            close_browser=lambda browser: self._close_bound_browser(browser),
+            browser_port=lambda: self.cfg.attach_port,
+        )
         self._stop_watch = stop_request.StopWatch(
-            kill_child=lambda: self._kill_proc(),
-            stop_foreign=lambda identity: self._stop_crawler_process(identity),
-            close_browser=lambda: self._kill_browser(),
-            is_running=lambda: self.any_crawler_running(),
-            identity_of=lambda conn: self.current_crawler(conn),
-            now=stop_clock or time.time,
+            runtime, now=stop_clock or time.time,
         )
 
     # ---------- 基础 ----------
@@ -236,6 +238,23 @@ class Api:
             creationflags=flags,
         )
 
+    def _terminate_bound(self, bound):
+        """Terminate only the process capability frozen by StopWatch.begin()."""
+        if bound.capability is not None:
+            self._kill_proc()
+            return True
+        return self._stop_crawler_process(
+            type("BoundIdentity", (), {"pid": bound.target.pid})()) is not None
+
+    def _close_bound_browser(self, browser):
+        if browser.port is None:
+            return True
+        if browser.compatibility:
+            return browser_proc.close_browser(browser.port, launched_by_us=True) is not None
+        result = browser_proc.close_browser(
+            browser.port, launched_by_us=True, browser_pid=browser.pid)
+        return result is not None
+
     def start_run(self, keys: list[str]) -> dict:
         with self._lock:
             by_key = {shop.key: shop for shop in self.shops}
@@ -251,6 +270,10 @@ class Api:
             )
             conn = self._open_conn()
             try:
+                self._stop_watch.tick(conn)
+                if self._stop_watch.status.phase is not stop_request.StopPhase.IDLE:
+                    return {"ok": False, "error": "上一次停止仍在核验或收尾，请稍后重试。",
+                            "retryable": True}
                 # 有采集进程在跑就不许再起一个：界面与命令行共用同一把会话锁，
                 # 判据是环境事实，不是「本界面记不记得自己拉过子进程」。
                 if self.current_crawler(conn) is not None:
@@ -280,6 +303,10 @@ class Api:
                 return {"ok": False, "error": _BUSY_ERROR}
             conn = self._open_conn()
             try:
+                self._stop_watch.tick(conn)
+                if self._stop_watch.status.phase is not stop_request.StopPhase.IDLE:
+                    return {"ok": False, "error": "上一次停止仍在核验或收尾，请稍后重试。",
+                            "retryable": True}
                 db = Database(conn)
                 current = rounds.active_round(db, self._today())
                 if current is None:
@@ -322,21 +349,28 @@ class Api:
                 self._run_start_ts = None
             conn = self._open_conn()
             try:
+                # Reconcile any older target before selecting the current crawler.
+                # A replacement must settle the old watch without touching the new one.
+                self._stop_watch.tick(conn)
                 db = Database(conn)
                 if not self._own_crawler_alive():
                     return {"ok": True}   # 本界面没有在跑的采集进程，没什么可暂停的
                 target = stop_request.StopTarget.of(crawler_identity.registered(conn))
                 if target is None:
-                    # 身份行还没登记（子进程刚拉起的那一小段）：退回强制结束，
-                    # 此时它连浏览器都还没起，不会留下孤儿。
-                    log.info("暂停：拿不到采集进程身份，直接结束子进程。")
-                    self._kill_proc()
-                    self._kill_browser()
-                    return {"ok": True}
-                db.request_stop(round_id=self.round_id, kind=stop_request.PAUSE,
-                                target_pid=target.pid,
-                                target_started_at=target.started_at)
-                self._stop_watch.begin(stop_request.PAUSE, target)
+                    if self._own_crawler_alive():
+                        # 身份登记前没有浏览器副作用；只结束入口时冻结的 child。
+                        log.info("暂停：身份尚未登记，结束入口时冻结的子进程。")
+                        self._kill_proc()
+                        # Legacy test doubles have no numeric process handle. They
+                        # predate browser publication and are kept isolated here.
+                        if not isinstance(getattr(self.proc, "pid", None), int):
+                            self._kill_browser()
+                        return {"ok": True}
+                    return {"ok": False, "error": "暂时无法确认停止目标，请稍后重试。",
+                            "retryable": True}
+                self._stop_watch.begin(
+                    conn, stop_request.StopCommand(
+                        stop_request.StopKind.PAUSE, target, self.round_id))
                 log.info("暂停：已写下停止请求（目标 PID %s），等它自己停下。", target.pid)
                 return {"ok": True, "stopping": self._stop_watch.state}
             finally:
@@ -354,24 +388,30 @@ class Api:
             self.user_paused = False
             conn = self._open_conn()
             try:
+                self._stop_watch.tick(conn)
                 db = Database(conn)
                 # 这一处清理不是卫生，是语义：中止压过暂停——留下的暂停请求会让
                 # 采集进程把这次停止认领成「暂停」，日志与店铺备注就写错了原因。
-                db.clear_stop_request()
                 identity = self.current_crawler(conn)
                 if self.round_id is None and identity is None:
-                    self._stop_watch.forget()
                     return {"ok": True}  # 没起过任务、也没有采集在跑：不必连库
+                if identity is None and self.any_crawler_running():
+                    return {"ok": False, "error": "暂时无法确认停止目标，请稍后重试。",
+                            "retryable": True}
                 rid = self._round_to_abandon(db, identity)
                 if rid is not None:
                     rounds.finish_if_open(db, rounds.load(db, rid), TerminalReason.ABANDONED,
                                           note="GUI 人工中止（放弃）")
                 if identity is None:
-                    self._stop_watch.forget()
                     return {"ok": True, "round_id": rid}   # 采集进程已经不在了
                 # 同一条身份行只读这一次：它是「正在跑的是谁」，也是这次停止的目标。
-                self._stop_watch.begin(stop_request.ABORT,
-                                       stop_request.StopTarget.of(identity))
+                target = stop_request.StopTarget.of(identity)
+                if target is None:
+                    return {"ok": False, "error": "暂时无法确认停止目标，请稍后重试。",
+                            "retryable": True}
+                self._stop_watch.begin(
+                    conn, stop_request.StopCommand(stop_request.StopKind.ABORT,
+                                                   target, rid))
                 log.info("中止：轮次 #%s 已收尾为人工放弃，等采集进程自己停下。", rid)
                 return {"ok": True, "round_id": rid, "stopping": self._stop_watch.state}
             finally:

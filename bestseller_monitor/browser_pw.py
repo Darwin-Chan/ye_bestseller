@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import time
+from datetime import datetime, timezone
 
 from . import browser_proc, listing
 from .click_listing import WAIT_POPUP_MS
@@ -37,6 +38,7 @@ log = logging.getLogger(__name__)
 # 收尾只结束本任务启动的浏览器，绝不波及用户其它 Edge 窗口。
 _launched_proc = None
 _launched_port = None
+_launched_os_started = None
 
 # 兼容旧私有名/旧名（本文件内部与诊断工具仍引用）
 _body_text = body_text
@@ -57,13 +59,17 @@ _PRODUCT_IMG_SEL = listing.PRODUCT_IMG_SEL
 _click_text_in_frames = listing.click_text_in_frames
 
 
-def open_session(cfg: Config):
-    global _launched_proc, _launched_port
+def open_session(cfg: Config, *, publish_browser=None):
+    global _launched_proc, _launched_port, _launched_os_started
     from playwright.sync_api import sync_playwright
 
     edge = cfg.chrome_path or r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
     proc = None
+    launch_proof = None
+    if publish_browser is not None and getattr(cfg, "start_browser", True):
+        publish_browser("STARTING", cfg.attach_port, None, None)
     if getattr(cfg, "start_browser", True) and os.path.exists(edge):
+        launch_proof = datetime.now(timezone.utc).isoformat(timespec="microseconds")
         proc = subprocess.Popen([
             edge,
             f"--remote-debugging-port={cfg.attach_port}",
@@ -75,6 +81,7 @@ def open_session(cfg: Config):
         log.info("已用普通进程启动浏览器（调试端口 %s，PID %s）。", cfg.attach_port, proc.pid)
     _launched_proc = proc
     _launched_port = cfg.attach_port
+    _launched_os_started = launch_proof
 
     pw = sync_playwright().start()
     # 用「能连上调试端口」作为浏览器就绪条件，替代固定 8 秒（超时兜底）
@@ -94,10 +101,20 @@ def open_session(cfg: Config):
         except Exception:
             pass
         _abandon_launched_browser()
+        if publish_browser is not None:
+            publish_browser("UNKNOWN", cfg.attach_port, None, None)
         raise RuntimeError(f"无法连接浏览器调试端口 {cfg.attach_port}（{last_exc}）")
     ctx = br.contexts[0]
     page = ctx.new_page()
     page.set_default_timeout(cfg.timeout_ms)
+    if publish_browser is not None:
+        browser_pid = cdp_browser_pid(br)
+        if getattr(cfg, "start_browser", True) and browser_pid:
+            publish_browser("OWNED", cfg.attach_port, browser_pid, launch_proof)
+        elif not getattr(cfg, "start_browser", True):
+            publish_browser("BORROWED", cfg.attach_port, None, None)
+        else:
+            publish_browser("UNKNOWN", cfg.attach_port, None, None)
     return pw, br, page, ctx
 
 
@@ -108,10 +125,11 @@ def _abandon_launched_browser() -> None:
     已经有实例时，本次 msedge.exe 交接后立刻退出、`poll()` 有值——这时端口上那个是用户
     自己的浏览器，绝不能按端口占用者去关它。
     """
-    global _launched_proc, _launched_port
+    global _launched_proc, _launched_port, _launched_os_started
     proc = _launched_proc
     _launched_proc = None
     _launched_port = None
+    _launched_os_started = None
     if proc is None:
         return
     if proc.poll() is None:
@@ -136,8 +154,8 @@ def cdp_browser_pid(br) -> int | None:
     return None
 
 
-def close_session(pw, br) -> None:
-    global _launched_proc, _launched_port
+def close_session(pw, br, *, publish_browser=None) -> None:
+    global _launched_proc, _launched_port, _launched_os_started
     # 先问 CDP，再断开：交接场景里这个 PID 才是真正在跑的浏览器。
     browser_pid = cdp_browser_pid(br)
     try:
@@ -150,10 +168,14 @@ def close_session(pw, br) -> None:
         pass
     proc = _launched_proc
     port = _launched_port
+    launch_proof = _launched_os_started
     _launched_proc = None
     _launched_port = None
+    _launched_os_started = None
     if proc is None:
         log.info("本次未启动浏览器（接管既有实例），跳过关闭。")
+        if publish_browser is not None:
+            publish_browser("CLOSED", port, browser_pid, launch_proof)
         return
     own_pid = proc.pid if proc.poll() is None else None
     if own_pid is None:
@@ -161,6 +183,8 @@ def close_session(pw, br) -> None:
                     "改按调试端口 %s 的归属关闭。", proc.pid, port)
     browser_proc.close_browser(port, launched_by_us=True,
                                browser_pid=browser_pid, own_pid=own_pid)
+    if publish_browser is not None:
+        publish_browser("CLOSED", port, browser_pid, launch_proof)
 
 
 def navigate_detail(page, product_url: str, cfg: Config, emit=None) -> OpenedDetail:

@@ -34,6 +34,10 @@ class CrawlerProcess:
     round_id: int | None = None
     started_at: str | None = None
     note: str | None = None
+    browser_state: str = "UNKNOWN"
+    browser_port: int | None = None
+    browser_pid: int | None = None
+    browser_os_started: str | None = None
 
     def to_payload(self) -> dict:
         """界面 payload 要的形状：`docs/ui_live.html` 读 `d.crawler.round_id`，
@@ -59,7 +63,11 @@ def registered(conn) -> CrawlerProcess | None:
     if row is None:
         return None
     return CrawlerProcess(pid=int(row["pid"]), round_id=row["round_id"],
-                          started_at=row["started_at"], note=row["note"])
+                          started_at=row["started_at"], note=row["note"],
+                          browser_state=row["browser_state"] or "UNKNOWN",
+                          browser_port=row["browser_port"],
+                          browser_pid=row["browser_pid"],
+                          browser_os_started=row["browser_os_started"])
 
 
 def current(conn, *, own_alive: bool = False, own_pid: int | None = None,
@@ -72,7 +80,8 @@ def current(conn, *, own_alive: bool = False, own_pid: int | None = None,
     who = registered(conn)
     if not is_running(own_alive=own_alive):
         if who is not None:
-            Database(conn).clear_crawler_process()
+            Database(conn).clear_crawler_process(
+                target_pid=who.pid, target_started_at=who.started_at)
         return None
     if who is not None:
         return who

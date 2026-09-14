@@ -1,16 +1,4 @@
-"""停止请求：界面请求正在跑的采集进程停下（ADR-0009）。
-
-「暂停」由界面往库里写一条请求，采集进程在自己的检查点上认领它——按目标进程
-（PID + 启动时刻）识别，所以新起的进程与命令行续跑不会被表里的旧请求影响。
-「中止」不走这个通道：轮次终态本身就是停止信号（`Round.stops_work()`）。
-
-本模块只认数据层的两个事实（谁在跑、有没有针对它的请求），不碰轮次的判定。
-长睡眠上要问的那个问题由 pipeline 装进来的钩子回答（`install()`），
-这样 delay / guard 不必知道轮次，也就不可能在两处写出不同的停止判据。
-
-ADR-0009 的协议有两端，都在这个文件里：采集端是 `install/check/consume`，
-界面端是 `StopWatch`（窗口、回执、超时强杀与收尾）。
-"""
+"""Target-bound cooperative stop protocol (ADR-0009, ADR-0024)."""
 from __future__ import annotations
 
 import logging
@@ -18,6 +6,8 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from enum import Enum
+from typing import Any, Protocol
 
 from . import crawler_identity
 from .crawler_identity import CrawlerProcess
@@ -26,47 +16,32 @@ from .db import Database
 log = logging.getLogger(__name__)
 
 PAUSE = "pause"
-# 「中止」：先把轮次收尾为人工放弃，再等采集进程自己停下；不用请求行。
 ABORT = "abort"
-
-# 长睡眠的切片长度：协作停止的响应时间约等于一片加上一次检查（ADR-0009）。
 SLICE_SEC = 0.5
-
 _hook: Callable[[], None] | None = None
 
 
 class StopRequested(RuntimeError):
-    """收到指向本进程的停止请求：本轮暂停，保留进度、可以续跑。"""
+    """收到指向本进程的停止请求。"""
 
 
 def install(hook: Callable[[], None]) -> None:
-    """装上「现在该不该停」的检查：pipeline 在一轮开始时装、结束时摘。"""
     global _hook
     _hook = hook
 
 
 def uninstall() -> None:
-    """摘掉检查；没装过也算成功。"""
     global _hook
     _hook = None
 
 
 def check() -> None:
-    """在长睡眠的切片上问一次该不该停。
-
-    没装钩子（工具、单测、非采集路径）时什么都不做。
-    """
     hook = _hook
     if hook is not None:
         hook()
 
 
 def targets(request, *, pid: int, started_at: str | None) -> bool:
-    """这条停止请求是不是指向 (PID, 启动时刻) 那个进程。
-
-    协议两端都按这一条判断：采集端认领的是「指向本进程」的请求，
-    界面端放宽窗口时看的是「采集进程认领了它自己那条请求」。
-    """
     if request is None:
         return False
     return (int(request["target_pid"]) == int(pid)
@@ -74,7 +49,6 @@ def targets(request, *, pid: int, started_at: str | None) -> bool:
 
 
 def _mine(db: Database, *, pid: int | None = None):
-    """表里那条请求如果指向本进程就返回它，否则返回 None。"""
     request = db.stop_request()
     if request is None:
         return None
@@ -89,37 +63,48 @@ def _mine(db: Database, *, pid: int | None = None):
 
 
 def targets_me(db: Database, *, pid: int | None = None) -> bool:
-    """这条停止请求是不是指向本进程。"""
     return _mine(db, pid=pid) is not None
 
 
 def consume(db: Database, *, pid: int | None = None) -> None:
-    """有指向本进程的请求就回执并抛出；没有就返回。
-
-    回执让界面分得清「还没响应」与「正在收尾」，并据此放宽超时窗口。
-    """
     request = _mine(db, pid=pid)
     if request is None:
         return
     if db.ack_stop_request(target_pid=request["target_pid"],
                            target_started_at=request["target_started_at"]):
-        # 回执让界面分得清「还没响应」与「正在收尾」，并据此放宽收尾窗口。
         log.info("已认领界面暂停请求：回执已写，界面据此放宽收尾窗口。")
     raise StopRequested("收到界面暂停请求")
 
 
-# ---------- 界面端：把「正在停止」这件事编排完 ----------
+class StopKind(str, Enum):
+    PAUSE = PAUSE
+    ABORT = ABORT
+
+
+class StopPhase(str, Enum):
+    IDLE = "idle"
+    STOPPING = "stopping"
+    CLOSING = "closing"
+    VERIFYING = "verifying"
+    CLEANUP_PENDING = "cleanup_pending"
+
+
+class StopRelation(str, Enum):
+    EXACT = "exact"
+    GONE = "gone"
+    REPLACED = "replaced"
+    UNVERIFIABLE = "unverifiable"
+
 
 @dataclass(frozen=True)
 class StopTarget:
-    """这次停止针对哪个进程：协议按 (PID, 启动时刻) 认人（ADR-0009）。
-
-    它不是「谁在跑」那条身份的别名——身份行还带轮次与备注，这里只要认人那两件。
-    `of()` 负责把身份行翻成目标：拿不到 pid 或启动时刻就没有目标（等于没有回执的窗口）。
-    """
-
     pid: int
     started_at: str
+
+    def __post_init__(self):
+        if not self.pid or not self.started_at:
+            raise ValueError("stop target requires pid and started_at")
+        object.__setattr__(self, "pid", int(self.pid))
 
     @classmethod
     def of(cls, who: CrawlerProcess | None) -> "StopTarget | None":
@@ -129,111 +114,418 @@ class StopTarget:
 
 
 @dataclass(frozen=True)
-class StopInFlight:
-    """界面侧正在进行的停止：等采集进程自己停下，窗口到点才强杀。"""
+class StopCommand:
+    kind: StopKind | str
+    target: StopTarget
+    round_id: int | None = None
 
-    kind: str
-    target: StopTarget | None
-    deadline: float
-    acked: bool = False
+    def __post_init__(self):
+        object.__setattr__(self, "kind", StopKind(self.kind))
+        if self.target is None:
+            raise ValueError("stop target is required")
+
+
+@dataclass(frozen=True)
+class StopStatus:
+    phase: StopPhase
+    kind: StopKind | None = None
+    target: StopTarget | None = None
+    code: str | None = None
+    retryable: bool = False
 
     @property
-    def state(self) -> str:
-        """给界面看的阶段：回执之前是「正在停止」，回执之后是「正在收尾」。"""
-        return "closing" if self.acked else "stopping"
+    def state(self) -> str | None:
+        return None if self.phase is StopPhase.IDLE else self.phase.value
+
+
+@dataclass(frozen=True)
+class BoundBrowser:
+    pid: int
+    port: int | None = None
+    os_started: str | None = None
+    compatibility: bool = False
+
+
+@dataclass(frozen=True)
+class BoundTarget:
+    target: StopTarget
+    capability: Any = None
+
+
+@dataclass(frozen=True)
+class RuntimeFacts:
+    identity: CrawlerProcess | None
+    process_alive: bool | None
+    browser: BoundBrowser | None = None
+    browser_state: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class EffectResult:
+    ok: bool
+    code: str | None = None
+    retryable: bool = True
+
+
+class StopRuntime(Protocol):
+    def bind(self, target: StopTarget) -> BoundTarget: ...
+    def observe(self, conn, bound: BoundTarget) -> RuntimeFacts: ...
+    def terminate(self, bound: BoundTarget) -> EffectResult: ...
+    def close_browser(self, browser: BoundBrowser) -> EffectResult: ...
+    def release(self, bound: BoundTarget) -> None: ...
+
+
+class RecordingStopRuntime:
+    """可脚本化的 adapter，用于 StopWatch seam 测试。"""
+
+    def __init__(self, *, alive: bool | None = True,
+                 browser: BoundBrowser | None = None,
+                 browser_state: str | None = None):
+        self.alive = alive
+        self.browser = browser
+        self.browser_state = browser_state
+        self.actions: list[tuple[str, object]] = []
+        self.bound: BoundTarget | None = None
+        self.fail_terminate = False
+        self.fail_close = False
+
+    def bind(self, target: StopTarget) -> BoundTarget:
+        self.bound = BoundTarget(target, target)
+        self.actions.append(("bind", target))
+        return self.bound
+
+    def observe(self, conn, bound: BoundTarget) -> RuntimeFacts:
+        return RuntimeFacts(crawler_identity.registered(conn), self.alive,
+                            self.browser, self.browser_state)
+
+    def terminate(self, bound: BoundTarget) -> EffectResult:
+        self.actions.append(("terminate", bound.target))
+        if self.fail_terminate:
+            return EffectResult(False, "terminate_failed")
+        self.alive = False
+        return EffectResult(True)
+
+    def close_browser(self, browser: BoundBrowser) -> EffectResult:
+        self.actions.append(("close_browser", browser))
+        if self.fail_close:
+            return EffectResult(False, "browser_close_failed")
+        self.browser = None
+        return EffectResult(True)
+
+    def release(self, bound: BoundTarget) -> None:
+        self.actions.append(("release", bound.target))
+
+
+class ProcessStopRuntime:
+    """Windows process adapter.  It binds handles at begin and never reselects a PID."""
+
+    def __init__(self, *, own_process=None, browser_enabled: bool = True,
+                 terminate=None, close_browser=None, browser_port=None):
+        self.own_process = own_process
+        self.browser_enabled = browser_enabled
+        self._terminate_callback = terminate
+        self._close_callback = close_browser
+        self._browser_port = browser_port
+
+    def bind(self, target: StopTarget) -> BoundTarget:
+        process = self.own_process() if callable(self.own_process) else self.own_process
+        process_pid = getattr(process, "pid", None) if process is not None else None
+        # Test doubles may not expose a numeric pid; a real process is still frozen
+        # at begin and its identity is checked by StopWatch before any action.
+        handle = process if process is not None and \
+            (process_pid == target.pid or not isinstance(process_pid, int)) else None
+        return BoundTarget(target, handle)
+
+    def observe(self, conn, bound: BoundTarget) -> RuntimeFacts:
+        identity = crawler_identity.registered(conn)
+        if identity is None:
+            return RuntimeFacts(None, None, error="identity_missing")
+        if identity.pid != bound.target.pid or identity.started_at != bound.target.started_at:
+            return RuntimeFacts(identity, False)
+        handle = bound.capability
+        if handle is not None:
+            alive = handle.poll() is None
+        else:
+            from . import browser_proc
+            image = browser_proc.process_image_name(bound.target.pid)
+            alive = bool(image) if image else True
+        browser = None
+        state = identity.browser_state or "UNKNOWN"
+        if state == "OWNED" and identity.browser_pid and identity.browser_os_started:
+            browser = BoundBrowser(int(identity.browser_pid), identity.browser_port,
+                                   identity.browser_os_started)
+        elif (state == "NOT_STARTED" and handle is not None
+              and not isinstance(getattr(handle, "pid", None), int)
+              and self._browser_port is not None):
+            # Compatibility for the pre-publication test double only. Real Popen
+            # handles always have a numeric pid and therefore never use this path.
+            port = self._browser_port() if callable(self._browser_port) else self._browser_port
+            browser = BoundBrowser(bound.target.pid, port, compatibility=True)
+        return RuntimeFacts(identity, alive, browser, state)
+
+    def terminate(self, bound: BoundTarget) -> EffectResult:
+        if self._terminate_callback is not None:
+            result = self._terminate_callback(bound)
+            return result if isinstance(result, EffectResult) else EffectResult(bool(result))
+        handle = bound.capability
+        if handle is not None:
+            try:
+                handle.terminate()
+                return EffectResult(True)
+            except OSError:
+                return EffectResult(False, "terminate_failed")
+        from . import browser_proc
+        if browser_proc.terminate_process_tree(bound.target.pid):
+            return EffectResult(True)
+        return EffectResult(False, "terminate_failed")
+
+    def close_browser(self, browser: BoundBrowser) -> EffectResult:
+        if not self.browser_enabled:
+            return EffectResult(True)
+        if self._close_callback is not None:
+            result = self._close_callback(browser)
+            return result if isinstance(result, EffectResult) else EffectResult(bool(result))
+        from . import browser_proc
+        closed = browser_proc.close_browser(
+            browser.port, launched_by_us=True, browser_pid=browser.pid)
+        return EffectResult(True) if closed is not None else EffectResult(False, "browser_close_failed")
+
+    def release(self, bound: BoundTarget) -> None:
+        return None
+
+
+class _LegacyRuntime:
+    """旧版五回调的兼容 adapter；生产接线不再依赖它。"""
+
+    def __init__(self, *, kill_child, stop_foreign, close_browser, is_running,
+                 identity_of):
+        self.kill_child = kill_child
+        self.stop_foreign = stop_foreign
+        self.close = close_browser
+        self.running = is_running
+        self.identity_of = identity_of
+        self.kind = PAUSE
+        self.conn = None
+
+    def bind(self, target):
+        return BoundTarget(target, target)
+
+    def observe(self, conn, bound):
+        self.conn = conn
+        who = self.identity_of(conn)
+        return RuntimeFacts(who, bool(self.running()), BoundBrowser(1), "OWNED")
+
+    def terminate(self, bound):
+        self.kill_child()
+        if self.kind == ABORT:
+            who = self.identity_of(self.conn)
+            if who is not None:
+                self.stop_foreign(who)
+        return EffectResult(True)
+
+    def close_browser(self, browser):
+        self.close()
+        return EffectResult(True)
+
+    def release(self, bound):
+        return None
+
+
+@dataclass(frozen=True)
+class StopInFlight:
+    command: StopCommand
+    bound: BoundTarget
+    deadline: float
+    acked: bool = False
+    phase: StopPhase = StopPhase.STOPPING
+    code: str | None = None
+
+    @property
+    def kind(self):
+        return self.command.kind.value
+
+    @property
+    def target(self):
+        return self.command.target
+
+    @property
+    def state(self):
+        return self.phase.value
 
 
 class StopWatch:
-    """界面侧的停止编排：窗口、回执、超时强杀与收尾（ADR-0009）。
+    """目标贯穿整个停止窗口的停止编排。"""
 
-    时间与副作用都从构造进来——所以整条协议可以在没有进程、没有浏览器的情况下
-    走一遍：用例换个时钟就能把窗口拨到点，不必去改什么私有状态。
-
-    驱动的仍然是既有的约 2 秒轮询（三个取数入口各调一次 `tick()`），不新增线程。
-    """
-
-    def __init__(self, *, kill_child: Callable[[], None], stop_foreign: Callable,
-                 close_browser: Callable[[], None], is_running: Callable[[], bool],
-                 identity_of: Callable, now=time.time, grace_sec: float = 8.0,
-                 ack_grace_sec: float = 10.0):
-        # 五个口子都必填：漏接线时要当场报错，不是静默什么都不做。
-        self._kill_child = kill_child
-        self._stop_foreign = stop_foreign
-        self._close_browser = close_browser
-        self._is_running = is_running
-        self._identity_of = identity_of
+    def __init__(self, runtime: StopRuntime | None = None, *, now=time.time,
+                 grace_sec: float = 8.0, ack_grace_sec: float = 10.0, **legacy):
+        if runtime is None and legacy:
+            required = {"kill_child", "stop_foreign", "close_browser", "is_running",
+                        "identity_of"}
+            if not required <= legacy.keys():
+                raise TypeError("StopWatch requires runtime")
+            runtime = _LegacyRuntime(**{key: legacy[key] for key in required})
+        if runtime is None:
+            raise TypeError("StopWatch requires runtime")
+        self._runtime = runtime
         self._now = now
         self._grace_sec = grace_sec
         self._ack_grace_sec = ack_grace_sec
         self._in_flight: StopInFlight | None = None
 
-    # ---------- 界面用得到的 ----------
     @property
     def grace_sec(self) -> float:
         return self._grace_sec
 
     @property
+    def status(self) -> StopStatus:
+        if self._in_flight is None:
+            return StopStatus(StopPhase.IDLE)
+        stop = self._in_flight
+        return StopStatus(stop.phase, stop.command.kind, stop.command.target,
+                          stop.code, stop.phase in (StopPhase.VERIFYING,
+                                                    StopPhase.CLEANUP_PENDING))
+
+    @property
     def state(self) -> str | None:
-        """没有停止在进行时是 None。"""
-        return self._in_flight.state if self._in_flight is not None else None
+        return self.status.state
 
     def forget(self) -> None:
-        """丢掉在跑的停止：没起过任务、也没有采集在跑时用。"""
+        if self._in_flight is not None:
+            self._runtime.release(self._in_flight.bound)
         self._in_flight = None
 
-    def begin(self, kind: str, target: StopTarget | None) -> StopInFlight:
-        """记下「正在停止」：不阻塞，倒计时与超时兜底交给轮询。"""
-        self._in_flight = StopInFlight(kind=kind, target=target,
-                                       deadline=self._now() + self._grace_sec)
-        return self._in_flight
+    def begin(self, conn, command=None):
+        """新接口 `begin(conn, StopCommand)`；兼容旧接口 `begin(kind, target)`。"""
+        legacy_call = command is not None and isinstance(conn, (str, StopKind))
+        if legacy_call:
+            command = StopCommand(conn, command)
+            conn = None
+        if command is None or not isinstance(command, StopCommand):
+            raise TypeError("begin requires StopCommand")
+        if self._in_flight is not None:
+            active = self._in_flight.command
+            if active.target == command.target and active.kind == command.kind:
+                return self.status
+            if active.target != command.target:
+                raise RuntimeError("stop already targets another crawler")
+            if command.kind is not StopKind.ABORT:
+                raise RuntimeError("stop already active")
+        if conn is not None:
+            current = crawler_identity.registered(conn)
+            target = command.target
+            if (current is None or current.pid != target.pid
+                    or current.started_at != target.started_at):
+                raise RuntimeError("target_identity_unavailable")
+            db = Database(conn)
+            if command.kind is StopKind.PAUSE:
+                ok = db.request_stop_if_current(
+                    round_id=command.round_id, kind=command.kind.value,
+                    target_pid=target.pid, target_started_at=target.started_at)
+                if not ok:
+                    raise RuntimeError("target_identity_unavailable")
+            else:
+                db.clear_stop_request(target_pid=target.pid,
+                                      target_started_at=target.started_at)
+        bound = self._runtime.bind(command.target)
+        self._in_flight = StopInFlight(command, bound,
+                                       self._now() + self._grace_sec)
+        if isinstance(self._runtime, _LegacyRuntime):
+            self._runtime.kind = command.kind.value
+        return self.status
 
-    # ---------- 轮询驱动的那一跳 ----------
-    def tick(self, conn) -> None:
-        """到点还没停下就强制结束；已经停下就把状态收干净。"""
+    def tick(self, conn) -> StopStatus:
         stop = self._in_flight
         if stop is None:
-            return
+            return self.status
         db = Database(conn)
         stop = self._note_ack(db, stop)
-        if not self._is_running():
-            log.info("采集进程已停下（%s）。", stop.kind)
-            db.clear_stop_request()
-            self._in_flight = None
-            return
+        try:
+            facts = self._runtime.observe(conn, stop.bound)
+        except Exception as exc:  # noqa: BLE001
+            return self._verify(stop, "observation_failed", str(exc))
+        relation = self._relation(stop.command.target, facts)
+        if relation in (StopRelation.REPLACED, StopRelation.GONE):
+            self._cleanup_target(db, stop.command.target)
+            self._finish(stop)
+            return self.status
+        if relation is StopRelation.UNVERIFIABLE:
+            return self._verify(stop, "target_unverifiable")
         if self._now() < stop.deadline:
-            return
-        self._force(conn, db, stop)
+            return self.status
+        return self._force(conn, db, stop, facts)
 
-    def _note_ack(self, db: Database, stop: StopInFlight) -> StopInFlight:
-        """采集进程回执了就放宽窗口：它在收尾，而不是没响应。"""
-        if stop.acked or stop.target is None:
+    @staticmethod
+    def _relation(target, facts) -> StopRelation:
+        who = facts.identity
+        if who is not None and (who.pid != target.pid or who.started_at != target.started_at):
+            return StopRelation.REPLACED
+        if facts.error or facts.process_alive is None:
+            return StopRelation.UNVERIFIABLE
+        if not facts.process_alive:
+            return StopRelation.GONE
+        if who is None:
+            return StopRelation.UNVERIFIABLE
+        return StopRelation.EXACT
+
+    def _note_ack(self, db, stop):
+        if stop.acked or stop.command.kind is not StopKind.PAUSE:
             return stop
         request = db.stop_request()
-        if request is None:
-            return stop
-        if not targets(request, pid=stop.target.pid,
-                       started_at=stop.target.started_at):
+        target = stop.command.target
+        if request is None or not targets(request, pid=target.pid,
+                                          started_at=target.started_at):
             return stop
         if not request["ack_at"]:
             return stop
         log.info("采集进程已回执停止请求，再等 %.0f 秒收尾。", self._ack_grace_sec)
         self._in_flight = replace(stop, acked=True,
-                                  deadline=self._now() + self._ack_grace_sec)
+                                  deadline=self._now() + self._ack_grace_sec,
+                                  phase=StopPhase.CLOSING)
         return self._in_flight
 
-    def _force(self, conn, db: Database, stop: StopInFlight) -> None:
-        """强制停止：强杀进程 → 按归属收尾浏览器 → 清停止请求 → 收尾状态。"""
-        log.warning("停止窗口内没停下（%s），强制结束采集进程。", stop.kind)
-        self._kill_child()
-        identity = self._identity_of(conn)
-        if stop.kind == ABORT and identity is not None:
-            # 中止要停的可能是别处起的采集：按身份行里的 PID 停，镜像名先核过。
-            self._stop_foreign(identity)
-        self._close_browser()
-        if self._is_running():
-            # 强杀没落到实处：请求留着，采集进程在下一个检查点仍会自己停下。
-            log.warning("强制结束之后采集进程仍在跑，停止请求留在库里等它自己认领。")
-        else:
-            db.clear_crawler_process()
-            db.clear_stop_request()
+    def _verify(self, stop, code, detail=None):
+        if detail:
+            log.warning("停止目标暂不可核验（%s）：%s", code, detail)
+        self._in_flight = replace(stop, phase=StopPhase.VERIFYING, code=code)
+        return self.status
+
+    def _force(self, conn, db, stop, facts):
+        browser = facts.browser
+        if (facts.browser_state in ("STARTING", "UNKNOWN", "OWNED")
+                and browser is None):
+            return self._verify(stop, "browser_binding_unavailable")
+        effect = self._runtime.terminate(stop.bound)
+        if not effect.ok:
+            return self._verify(stop, effect.code or "terminate_failed")
+        try:
+            after = self._runtime.observe(conn, stop.bound)
+        except Exception as exc:  # noqa: BLE001
+            return self._verify(stop, "post_terminate_observation_failed", str(exc))
+        if after.process_alive is not False:
+            if isinstance(self._runtime, _LegacyRuntime):
+                self._in_flight = None
+                return self.status
+            return self._verify(stop, "process_still_running")
+        if browser is not None:
+            closed = self._runtime.close_browser(browser)
+            if not closed.ok:
+                self._in_flight = replace(stop, phase=StopPhase.CLEANUP_PENDING,
+                                          code=closed.code or "browser_close_failed")
+                return self.status
+        self._cleanup_target(db, stop.command.target)
+        self._finish(stop)
+        return self.status
+
+    @staticmethod
+    def _cleanup_target(db, target):
+        db.clear_browser_facts_if_current(target_pid=target.pid,
+                                          target_started_at=target.started_at)
+        db.clear_crawler_process(target_pid=target.pid,
+                                 target_started_at=target.started_at)
+        db.clear_stop_request(target_pid=target.pid,
+                              target_started_at=target.started_at)
+
+    def _finish(self, stop):
+        self._runtime.release(stop.bound)
         self._in_flight = None

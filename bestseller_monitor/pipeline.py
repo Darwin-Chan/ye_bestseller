@@ -244,8 +244,10 @@ def _run_round_locked(cfg: Config, shops: list[Shop]) -> None:
         opened = rounds.open(db, request)
         round_id = opened.round.id
         # 身份行只给界面看「谁在跑」；是不是真的还有进程在跑以会话锁为准。
-        started_at = db.record_crawler_process(pid=os.getpid(), round_id=round_id,
-                                               note=_command_note())
+        started_at = db.record_crawler_process(
+            pid=os.getpid(), round_id=round_id, note=_command_note(),
+            browser_state="NOT_STARTED" if cfg.start_browser else "BORROWED",
+            browser_port=cfg.attach_port if not cfg.start_browser else None)
         # 长睡眠的切片问的就是这一句：轮次还允许干活吗（ADR-0009）。
         stop_request.install(lambda: rounds.ensure_workable(db, round_id, utcnow()))
         log.info(
@@ -281,7 +283,7 @@ def _run_round_locked(cfg: Config, shops: list[Shop]) -> None:
                 _report_late_stop(settled, outcome.round_end)
     finally:
         stop_request.uninstall()
-        db.clear_crawler_process()
+        db.clear_crawler_process(target_pid=os.getpid(), target_started_at=started_at)
         # 消费过的停止请求只对这一个进程有效，走到这里就把它删掉（ADR-0009）。
         db.clear_stop_request(target_pid=os.getpid(), target_started_at=started_at)
         conn.close()
@@ -363,15 +365,27 @@ def _finalize_round(db: Database, cfg: Config, run: Round) -> None:
 
 # ---------- Playwright 连接接管（pw_cdp）路径 ----------
 
-def _run_pwcdp_round(db: Database, cfg: Config, round_id: int, shops: list[Shop]) -> None:
+def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
+                     shops: list[Shop], started_at: str | None = None) -> None:
+    if started_at is None:
+        row = db.crawler_process()
+        started_at = row["started_at"] if row is not None else None
     config_hash = db.record_params(cfg)
     emit = db.event_logger(round_id, config_hash)
-    pw, br, page, ctx = browser_pw.open_session(cfg)
+    def publish(state, port, browser_pid, browser_os_started):
+        if started_at is None:
+            return
+        db.publish_browser_state_if_current(
+            target_pid=os.getpid(), target_started_at=started_at,
+            browser_state=state, browser_port=port, browser_pid=browser_pid,
+            browser_os_started=browser_os_started)
+
+    pw, br, page, ctx = browser_pw.open_session(cfg, publish_browser=publish)
     deny_tracker = DenyTracker(cfg.deny_window_minutes * 60)
     try:
         _run_listing_pw(db, cfg, round_id, shops, page, emit=emit, deny_tracker=deny_tracker)
     finally:
-        browser_pw.close_session(pw, br)
+        browser_pw.close_session(pw, br, publish_browser=publish)
 
 
 def _record_shop_stop(db: Database, round_id: int, shop: Shop, exc: BaseException) -> bool:

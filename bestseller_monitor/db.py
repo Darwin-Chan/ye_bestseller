@@ -170,7 +170,11 @@ CREATE TABLE IF NOT EXISTS crawler_process (
     pid INTEGER NOT NULL,
     round_id INTEGER,
     started_at TEXT NOT NULL,
-    note TEXT
+    note TEXT,
+    browser_state TEXT NOT NULL DEFAULT 'UNKNOWN',
+    browser_port INTEGER,
+    browser_pid INTEGER,
+    browser_os_started TEXT
 );
 
 CREATE TABLE IF NOT EXISTS stop_requests (
@@ -550,6 +554,10 @@ _MIGRATIONS: tuple[_Migration, ...] = (
     _drop_column("snapshots", "stock_delta"),
     _Migration("snapshot_success_index", _snapshot_success_index),
     _Migration("round_tally_index", _round_tally_index),
+    _add_column("crawler_process", "browser_state", "TEXT NOT NULL DEFAULT 'UNKNOWN'"),
+    _add_column("crawler_process", "browser_port", "INTEGER"),
+    _add_column("crawler_process", "browser_pid", "INTEGER"),
+    _add_column("crawler_process", "browser_os_started", "TEXT"),
 )
 
 
@@ -728,7 +736,11 @@ class Database:
         self.conn.commit()
 
     def record_crawler_process(self, pid: int, round_id: int | None,
-                               note: str | None = None) -> str:
+                               note: str | None = None, *,
+                               browser_state: str = "NOT_STARTED",
+                               browser_port: int | None = None,
+                               browser_pid: int | None = None,
+                               browser_os_started: str | None = None) -> str:
         """登记正在跑的采集进程（单行），返回这行的启动时刻。
 
         这行只服务于「界面显示谁在跑、能不能中止它」；是不是真的有进程在跑，
@@ -738,9 +750,11 @@ class Database:
         """
         started_at = utcnow_us()
         self.conn.execute(
-            "INSERT OR REPLACE INTO crawler_process(id, pid, round_id, started_at, note) "
-            "VALUES (1, ?, ?, ?, ?)",
-            (int(pid), round_id, started_at, note),
+            "INSERT OR REPLACE INTO crawler_process"
+            "(id, pid, round_id, started_at, note, browser_state, browser_port, browser_pid, browser_os_started) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (int(pid), round_id, started_at, note, browser_state, browser_port,
+             browser_pid, browser_os_started),
         )
         self.conn.commit()
         return started_at
@@ -749,9 +763,42 @@ class Database:
         """正在跑的采集进程身份；没有登记时返回 None。"""
         return self.conn.execute("SELECT * FROM crawler_process WHERE id=1").fetchone()
 
-    def clear_crawler_process(self) -> None:
-        self.conn.execute("DELETE FROM crawler_process WHERE id=1")
+    def clear_crawler_process(self, *, target_pid: int | None = None,
+                              target_started_at: str | None = None) -> int:
+        """条件删除身份行；不给目标只保留迁移/人工工具的全删能力。"""
+        if target_pid is None:
+            cur = self.conn.execute("DELETE FROM crawler_process WHERE id=1")
+        else:
+            cur = self.conn.execute(
+                "DELETE FROM crawler_process WHERE id=1 AND pid=? AND started_at=?",
+                (int(target_pid), target_started_at),
+            )
         self.conn.commit()
+        return cur.rowcount
+
+    def publish_browser_state_if_current(self, *, target_pid: int,
+                                         target_started_at: str,
+                                         browser_state: str,
+                                         browser_port: int | None = None,
+                                         browser_pid: int | None = None,
+                                         browser_os_started: str | None = None) -> bool:
+        """只给仍属于 target 的身份行发布/补全浏览器事实。"""
+        cur = self.conn.execute(
+            "UPDATE crawler_process SET browser_state=?, browser_port=?, browser_pid=?, "
+            "browser_os_started=? WHERE id=1 AND pid=? AND started_at=?",
+            (browser_state, browser_port, browser_pid, browser_os_started,
+             int(target_pid), target_started_at),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def clear_browser_facts_if_current(self, *, target_pid: int,
+                                       target_started_at: str) -> bool:
+        return self.publish_browser_state_if_current(
+            target_pid=target_pid, target_started_at=target_started_at,
+            browser_state="CLOSED", browser_port=None, browser_pid=None,
+            browser_os_started=None,
+        )
 
     def request_stop(self, *, round_id: int | None, kind: str, target_pid: int,
                      target_started_at: str, note: str | None = None) -> None:
@@ -766,6 +813,20 @@ class Database:
             (round_id, kind, int(target_pid), target_started_at, utcnow(), note),
         )
         self.conn.commit()
+
+    def request_stop_if_current(self, *, round_id: int | None, kind: str,
+                                target_pid: int, target_started_at: str,
+                                note: str | None = None) -> bool:
+        """写暂停请求前再次确认身份仍是 target，避免覆盖 B 的请求。"""
+        cur = self.conn.execute(
+            "INSERT OR REPLACE INTO stop_requests"
+            "(id, round_id, kind, target_pid, target_started_at, requested_at, ack_at, note) "
+            "SELECT 1, ?, ?, pid, started_at, ?, NULL, ? FROM crawler_process "
+            "WHERE id=1 AND pid=? AND started_at=?",
+            (round_id, kind, utcnow(), note, int(target_pid), target_started_at),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
 
     def stop_request(self):
         """当前挂着的停止请求；没有就返回 None。"""
