@@ -34,6 +34,7 @@ class CrawlerProcess:
     round_id: int | None = None
     started_at: str | None = None
     note: str | None = None
+    process_os_started: str | None = None
     browser_state: str = "UNKNOWN"
     browser_port: int | None = None
     browser_pid: int | None = None
@@ -64,6 +65,7 @@ def registered(conn) -> CrawlerProcess | None:
         return None
     return CrawlerProcess(pid=int(row["pid"]), round_id=row["round_id"],
                           started_at=row["started_at"], note=row["note"],
+                          process_os_started=row["process_os_started"],
                           browser_state=row["browser_state"] or "UNKNOWN",
                           browser_port=row["browser_port"],
                           browser_pid=row["browser_pid"],

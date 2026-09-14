@@ -240,11 +240,10 @@ class Api:
 
     def _terminate_bound(self, bound):
         """Terminate only the process capability frozen by StopWatch.begin()."""
-        if bound.capability is not None:
+        if hasattr(bound.capability, "poll"):
             self._kill_proc()
             return True
-        return self._stop_crawler_process(
-            type("BoundIdentity", (), {"pid": bound.target.pid})()) is not None
+        return browser_proc.terminate_process_capability(bound.capability)
 
     def _close_bound_browser(self, browser):
         if browser.port is None:
@@ -252,7 +251,8 @@ class Api:
         if browser.compatibility:
             return browser_proc.close_browser(browser.port, launched_by_us=True) is not None
         result = browser_proc.close_browser(
-            browser.port, launched_by_us=True, browser_pid=browser.pid)
+            browser.port, launched_by_us=True, browser_pid=browser.pid,
+            browser_os_started=browser.os_started)
         return result is not None
 
     def start_run(self, keys: list[str]) -> dict:
@@ -438,28 +438,6 @@ class Api:
             return self.round_id
         current = rounds.active_round(db, self._today())
         return current.id if current is not None else None
-
-    @staticmethod
-    def _stop_crawler_process(identity) -> int | None:
-        """结束身份行里那个采集进程；拿不到可用 PID 就返回 None。
-
-        PID 会被系统回收，所以先认镜像名：不是 python 就不动它。拿不到时调用方仍旧
-        只写终态——采集进程会在下一个检查点自己停下（轮次已是终态，它也干不下去了）。
-        """
-        pid = identity.pid if identity is not None else None
-        if not pid:
-            return None
-        image = browser_proc.process_image_name(int(pid))
-        if not image:
-            log.info("身份行里的采集进程 PID %s 已经不在了。", pid)
-            return None
-        if not image.startswith("python"):
-            log.warning("身份行里的 PID %s 现在是 %s，不是采集进程，不动它。", pid, image)
-            return None
-        if browser_proc.terminate_process_tree(int(pid)):
-            log.info("已结束采集进程 PID %s。", pid)
-            return int(pid)
-        return None
 
     def _kill_proc(self):
         if self.proc is not None and self.proc.poll() is None:

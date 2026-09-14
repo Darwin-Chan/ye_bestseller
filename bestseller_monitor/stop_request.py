@@ -100,6 +100,7 @@ class StopRelation(str, Enum):
 class StopTarget:
     pid: int
     started_at: str
+    process_os_started: str | None = None
 
     def __post_init__(self):
         if not self.pid or not self.started_at:
@@ -110,7 +111,7 @@ class StopTarget:
     def of(cls, who: CrawlerProcess | None) -> "StopTarget | None":
         if who is None or not who.pid or not who.started_at:
             return None
-        return cls(int(who.pid), who.started_at)
+        return cls(int(who.pid), who.started_at, who.process_os_started)
 
 
 @dataclass(frozen=True)
@@ -241,6 +242,10 @@ class ProcessStopRuntime:
         capability = browser_proc.bind_process(target.pid)
         if capability is None:
             raise RuntimeError("process_binding_unavailable")
+        if (target.process_os_started is not None
+                and capability.created != target.process_os_started):
+            browser_proc.release_process_capability(capability)
+            raise RuntimeError("process_identity_mismatch")
         return BoundTarget(target, capability)
 
     def observe(self, conn, bound: BoundTarget) -> RuntimeFacts:
@@ -300,7 +305,8 @@ class ProcessStopRuntime:
             return result if isinstance(result, EffectResult) else EffectResult(bool(result))
         from . import browser_proc
         closed = browser_proc.close_browser(
-            browser.port, launched_by_us=True, browser_pid=browser.pid)
+            browser.port, launched_by_us=True, browser_pid=browser.pid,
+            browser_os_started=browser.os_started)
         return EffectResult(True) if closed is not None else EffectResult(False, "browser_close_failed")
 
     def release(self, bound: BoundTarget) -> None:

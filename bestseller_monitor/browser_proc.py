@@ -158,7 +158,8 @@ def terminate_process_tree(pid: int) -> bool:
 
 
 def close_browser(port: int, *, launched_by_us: bool, browser_pid: int | None = None,
-                  own_pid: int | None = None) -> int | None:
+                  own_pid: int | None = None,
+                  browser_os_started: str | None = None) -> int | None:
     """按归属关闭本任务启动的浏览器，返回被关闭的 PID。
 
     归属判定：本次由本程序启动过浏览器（launched_by_us）才关；接管既有实例
@@ -174,6 +175,11 @@ def close_browser(port: int, *, launched_by_us: bool, browser_pid: int | None = 
         log.info("调试端口 %s 上没有浏览器进程，无需关闭。", port)
         return None
     if own_pid is None or pid != own_pid:
+        if browser_os_started is not None:
+            proof = process_creation_proof(pid)
+            if proof is None or proof != browser_os_started:
+                log.warning("浏览器 PID %s 的创建证明不匹配，跳过关闭。", pid)
+                return None
         image = process_image_name(pid)
         if image not in BROWSER_IMAGES:
             log.warning("调试端口 %s 的占用者 PID %s（%s）不是浏览器，跳过关闭。",

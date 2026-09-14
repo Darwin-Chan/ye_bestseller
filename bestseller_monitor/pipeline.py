@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from . import (browser_pw, click_listing, dedupe, detail, detail_visit, rounds,
+from . import (browser_proc, browser_pw, click_listing, dedupe, detail, detail_visit, rounds,
                single_instance, stop_request)
 from .guard import DenyTracker, RoundDenyExceeded, ShopDenyExceeded
 from .config import Config, Shop, load_shops
@@ -246,6 +246,7 @@ def _run_round_locked(cfg: Config, shops: list[Shop]) -> None:
         # 身份行只给界面看「谁在跑」；是不是真的还有进程在跑以会话锁为准。
         started_at = db.record_crawler_process(
             pid=os.getpid(), round_id=round_id, note=_command_note(),
+            process_os_started=browser_proc.process_creation_proof(os.getpid()),
             browser_state="NOT_STARTED" if cfg.start_browser else "BORROWED",
             browser_port=cfg.attach_port if not cfg.start_browser else None)
         # 长睡眠的切片问的就是这一句：轮次还允许干活吗（ADR-0009）。

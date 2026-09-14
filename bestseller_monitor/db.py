@@ -171,6 +171,7 @@ CREATE TABLE IF NOT EXISTS crawler_process (
     round_id INTEGER,
     started_at TEXT NOT NULL,
     note TEXT,
+    process_os_started TEXT,
     browser_state TEXT NOT NULL DEFAULT 'UNKNOWN',
     browser_port INTEGER,
     browser_pid INTEGER,
@@ -554,6 +555,7 @@ _MIGRATIONS: tuple[_Migration, ...] = (
     _drop_column("snapshots", "stock_delta"),
     _Migration("snapshot_success_index", _snapshot_success_index),
     _Migration("round_tally_index", _round_tally_index),
+    _add_column("crawler_process", "process_os_started", "TEXT"),
     _add_column("crawler_process", "browser_state", "TEXT NOT NULL DEFAULT 'UNKNOWN'"),
     _add_column("crawler_process", "browser_port", "INTEGER"),
     _add_column("crawler_process", "browser_pid", "INTEGER"),
@@ -737,6 +739,7 @@ class Database:
 
     def record_crawler_process(self, pid: int, round_id: int | None,
                                note: str | None = None, *,
+                               process_os_started: str | None = None,
                                browser_state: str = "NOT_STARTED",
                                browser_port: int | None = None,
                                browser_pid: int | None = None,
@@ -751,10 +754,11 @@ class Database:
         started_at = utcnow_us()
         self.conn.execute(
             "INSERT OR REPLACE INTO crawler_process"
-            "(id, pid, round_id, started_at, note, browser_state, browser_port, browser_pid, browser_os_started) "
-            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (int(pid), round_id, started_at, note, browser_state, browser_port,
-             browser_pid, browser_os_started),
+            "(id, pid, round_id, started_at, note, process_os_started, browser_state, "
+            "browser_port, browser_pid, browser_os_started) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (int(pid), round_id, started_at, note, process_os_started, browser_state,
+             browser_port, browser_pid, browser_os_started),
         )
         self.conn.commit()
         return started_at
