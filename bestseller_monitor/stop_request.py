@@ -250,6 +250,10 @@ class ProcessStopRuntime:
             raise RuntimeError("process_identity_mismatch")
         return BoundTarget(target, capability)
 
+    def rebind(self, bound: BoundTarget) -> BoundTarget:
+        """Retry opening the frozen target handle after a transient OS denial."""
+        return self.bind(bound.target)
+
     def observe(self, conn, bound: BoundTarget) -> RuntimeFacts:
         identity = crawler_identity.registered(conn)
         if identity is None:
@@ -462,6 +466,14 @@ class StopWatch:
         if stop is None:
             return self.status
         db = Database(conn)
+        if stop.bound.capability is None and hasattr(self._runtime, "rebind"):
+            try:
+                rebound = self._runtime.rebind(stop.bound)
+            except Exception:
+                rebound = None
+            if rebound is not None and rebound.capability is not None:
+                stop = replace(stop, bound=rebound)
+                self._in_flight = stop
         try:
             stop = self._note_ack(db, stop)
         except Exception as exc:  # noqa: BLE001
