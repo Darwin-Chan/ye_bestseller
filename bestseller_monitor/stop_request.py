@@ -418,6 +418,10 @@ class StopWatch:
         return self.status.state
 
     def forget(self) -> None:
+        if self._in_flight is None:
+            return
+        if not isinstance(self._runtime, _LegacyRuntime):
+            raise RuntimeError("active stop targets cannot be forgotten")
         if self._in_flight is not None:
             self._runtime.release(self._in_flight.bound)
         self._in_flight = None
