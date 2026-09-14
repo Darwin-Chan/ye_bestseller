@@ -16,7 +16,6 @@ import os
 import re
 import subprocess
 import time
-from datetime import datetime, timezone
 
 from . import browser_proc, listing
 from .click_listing import WAIT_POPUP_MS
@@ -69,7 +68,6 @@ def open_session(cfg: Config, *, publish_browser=None):
     if publish_browser is not None and getattr(cfg, "start_browser", True):
         publish_browser("STARTING", cfg.attach_port, None, None)
     if getattr(cfg, "start_browser", True) and os.path.exists(edge):
-        launch_proof = datetime.now(timezone.utc).isoformat(timespec="microseconds")
         proc = subprocess.Popen([
             edge,
             f"--remote-debugging-port={cfg.attach_port}",
@@ -78,6 +76,7 @@ def open_session(cfg: Config, *, publish_browser=None):
             "--no-default-browser-check",
             "about:blank",
         ])
+        launch_proof = browser_proc.process_creation_proof(proc.pid)
         log.info("已用普通进程启动浏览器（调试端口 %s，PID %s）。", cfg.attach_port, proc.pid)
     _launched_proc = proc
     _launched_port = cfg.attach_port
@@ -110,6 +109,8 @@ def open_session(cfg: Config, *, publish_browser=None):
     if publish_browser is not None:
         browser_pid = cdp_browser_pid(br)
         if getattr(cfg, "start_browser", True) and browser_pid:
+            launch_proof = launch_proof or browser_proc.process_creation_proof(browser_pid)
+        if getattr(cfg, "start_browser", True) and browser_pid and launch_proof:
             publish_browser("OWNED", cfg.attach_port, browser_pid, launch_proof)
         elif not getattr(cfg, "start_browser", True):
             publish_browser("BORROWED", cfg.attach_port, None, None)

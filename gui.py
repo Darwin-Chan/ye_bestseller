@@ -368,9 +368,13 @@ class Api:
                         return {"ok": True}
                     return {"ok": False, "error": "暂时无法确认停止目标，请稍后重试。",
                             "retryable": True}
-                self._stop_watch.begin(
-                    conn, stop_request.StopCommand(
-                        stop_request.StopKind.PAUSE, target, self.round_id))
+                try:
+                    self._stop_watch.begin(
+                        conn, stop_request.StopCommand(
+                            stop_request.StopKind.PAUSE, target, self.round_id))
+                except RuntimeError as exc:
+                    return {"ok": False, "error": "暂时无法确认停止目标，请稍后重试。",
+                            "retryable": True, "code": str(exc)}
                 log.info("暂停：已写下停止请求（目标 PID %s），等它自己停下。", target.pid)
                 return {"ok": True, "stopping": self._stop_watch.state}
             finally:
@@ -409,9 +413,13 @@ class Api:
                 if target is None:
                     return {"ok": False, "error": "暂时无法确认停止目标，请稍后重试。",
                             "retryable": True}
-                self._stop_watch.begin(
-                    conn, stop_request.StopCommand(stop_request.StopKind.ABORT,
-                                                   target, rid))
+                try:
+                    self._stop_watch.begin(
+                        conn, stop_request.StopCommand(stop_request.StopKind.ABORT,
+                                                       target, rid))
+                except RuntimeError as exc:
+                    return {"ok": False, "error": "暂时无法确认停止目标，请稍后重试。",
+                            "retryable": True, "code": str(exc)}
                 log.info("中止：轮次 #%s 已收尾为人工放弃，等采集进程自己停下。", rid)
                 return {"ok": True, "round_id": rid, "stopping": self._stop_watch.state}
             finally:

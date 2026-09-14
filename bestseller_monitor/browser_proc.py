@@ -9,12 +9,24 @@
 from __future__ import annotations
 
 import logging
+import ctypes
+import os
 import subprocess
+from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
 # 端口占用者只在这些镜像名下才当作浏览器关闭，避免误杀占用同一端口的其它程序。
 BROWSER_IMAGES = ("msedge.exe", "msedge_proxy.exe", "chrome.exe", "chromium.exe")
+
+
+@dataclass
+class ProcessCapability:
+    """Opaque process handle plus the OS creation proof observed at bind time."""
+
+    pid: int
+    handle: int
+    created: str
 
 
 def image_name_for_pid(tasklist_csv: str, pid: int) -> str:
@@ -35,6 +47,86 @@ def process_image_name(pid: int) -> str:
         log.debug("查询进程镜像名失败：%s", exc)
         return ""
     return image_name_for_pid(out, pid)
+
+
+def process_creation_proof(pid: int) -> str | None:
+    """Return the Windows creation FILETIME for pid, or None when unverifiable."""
+    if os.name != "nt":
+        return None
+    try:
+        kernel = ctypes.windll.kernel32
+        access = 0x1000 | 0x0400  # QUERY_LIMITED_INFORMATION | QUERY_INFORMATION
+        handle = kernel.OpenProcess(access, False, int(pid))
+        if not handle:
+            return None
+        created = ctypes.c_ulonglong()
+        exited = ctypes.c_ulonglong()
+        kernel_time = ctypes.c_ulonglong()
+        user_time = ctypes.c_ulonglong()
+        ok = kernel.GetProcessTimes(
+            handle, ctypes.byref(created), ctypes.byref(exited),
+            ctypes.byref(kernel_time), ctypes.byref(user_time))
+        kernel.CloseHandle(handle)
+        return str(created.value) if ok else None
+    except Exception as exc:  # noqa: BLE001
+        log.debug("查询进程创建证明失败（PID %s）：%s", pid, exc)
+        return None
+
+
+def bind_process(pid: int) -> ProcessCapability | None:
+    """Open a target process handle and freeze its creation proof."""
+    if os.name != "nt":
+        return None
+    try:
+        kernel = ctypes.windll.kernel32
+        access = 0x1000 | 0x0001 | 0x0400
+        handle = kernel.OpenProcess(access, False, int(pid))
+        if not handle:
+            return None
+        created = ctypes.c_ulonglong()
+        exited = ctypes.c_ulonglong()
+        kernel_time = ctypes.c_ulonglong()
+        user_time = ctypes.c_ulonglong()
+        if not kernel.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited),
+                                      ctypes.byref(kernel_time), ctypes.byref(user_time)):
+            kernel.CloseHandle(handle)
+            return None
+        return ProcessCapability(int(pid), int(handle), str(created.value))
+    except Exception as exc:  # noqa: BLE001
+        log.debug("绑定进程失败（PID %s）：%s", pid, exc)
+        return None
+
+
+def process_capability_alive(capability: ProcessCapability) -> bool | None:
+    if os.name != "nt":
+        return None
+    try:
+        code = ctypes.c_ulong()
+        if not ctypes.windll.kernel32.GetExitCodeProcess(
+                capability.handle, ctypes.byref(code)):
+            return None
+        return int(code.value) == 259  # STILL_ACTIVE
+    except Exception as exc:  # noqa: BLE001
+        log.debug("查询绑定进程失败（PID %s）：%s", capability.pid, exc)
+        return None
+
+
+def terminate_process_capability(capability: ProcessCapability) -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        return bool(ctypes.windll.kernel32.TerminateProcess(capability.handle, 1))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("关闭绑定进程 PID %s 失败：%s", capability.pid, exc)
+        return False
+
+
+def release_process_capability(capability: ProcessCapability) -> None:
+    if os.name == "nt":
+        try:
+            ctypes.windll.kernel32.CloseHandle(capability.handle)
+        except Exception:
+            pass
 
 
 def listen_port_owner(port: int) -> int | None:

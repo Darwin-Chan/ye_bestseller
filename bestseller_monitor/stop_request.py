@@ -235,29 +235,33 @@ class ProcessStopRuntime:
         # at begin and its identity is checked by StopWatch before any action.
         handle = process if process is not None and \
             (process_pid == target.pid or not isinstance(process_pid, int)) else None
-        return BoundTarget(target, handle)
+        if handle is not None:
+            return BoundTarget(target, handle)
+        from . import browser_proc
+        capability = browser_proc.bind_process(target.pid)
+        if capability is None:
+            raise RuntimeError("process_binding_unavailable")
+        return BoundTarget(target, capability)
 
     def observe(self, conn, bound: BoundTarget) -> RuntimeFacts:
         identity = crawler_identity.registered(conn)
         if identity is None:
             handle = bound.capability
-            if handle is not None:
+            if hasattr(handle, "poll"):
                 alive = handle.poll() is None
             else:
                 from . import browser_proc
-                image = browser_proc.process_image_name(bound.target.pid)
-                alive = bool(image) if image else None
+                alive = browser_proc.process_capability_alive(handle)
             return RuntimeFacts(None, alive,
                                 error="identity_missing" if alive is not False else None)
         if identity.pid != bound.target.pid or identity.started_at != bound.target.started_at:
             return RuntimeFacts(identity, False)
         handle = bound.capability
-        if handle is not None:
+        if hasattr(handle, "poll"):
             alive = handle.poll() is None
         else:
             from . import browser_proc
-            image = browser_proc.process_image_name(bound.target.pid)
-            alive = bool(image) if image else True
+            alive = browser_proc.process_capability_alive(handle)
         browser = None
         state = identity.browser_state or "UNKNOWN"
         if state == "OWNED" and identity.browser_pid and identity.browser_os_started:
@@ -277,14 +281,14 @@ class ProcessStopRuntime:
             result = self._terminate_callback(bound)
             return result if isinstance(result, EffectResult) else EffectResult(bool(result))
         handle = bound.capability
-        if handle is not None:
+        if hasattr(handle, "poll"):
             try:
                 handle.terminate()
                 return EffectResult(True)
             except OSError:
                 return EffectResult(False, "terminate_failed")
         from . import browser_proc
-        if browser_proc.terminate_process_tree(bound.target.pid):
+        if browser_proc.terminate_process_capability(handle):
             return EffectResult(True)
         return EffectResult(False, "terminate_failed")
 
@@ -300,7 +304,10 @@ class ProcessStopRuntime:
         return EffectResult(True) if closed is not None else EffectResult(False, "browser_close_failed")
 
     def release(self, bound: BoundTarget) -> None:
-        return None
+        capability = bound.capability
+        if hasattr(capability, "handle"):
+            from . import browser_proc
+            browser_proc.release_process_capability(capability)
 
 
 class _LegacyRuntime:
@@ -505,31 +512,59 @@ class StopWatch:
         return self.status
 
     def _force(self, conn, db, stop, facts):
-        browser = facts.browser
-        if (facts.browser_state in ("STARTING", "UNKNOWN", "OWNED")
-                and browser is None):
-            return self._verify(stop, "browser_binding_unavailable")
-        effect = self._runtime.terminate(stop.bound)
-        if not effect.ok:
-            return self._verify(stop, effect.code or "terminate_failed")
         try:
+            conn.execute("BEGIN IMMEDIATE")
+        except Exception as exc:  # noqa: BLE001
+            return self._verify(stop, "database_unavailable", str(exc))
+        try:
+            # Re-read A while the write lock is held. No new identity/browser
+            # publication can interleave the process and browser actions.
+            current = crawler_identity.registered(conn)
+            target = stop.command.target
+            if (current is not None
+                    and (current.pid != target.pid or current.started_at != target.started_at)):
+                self._delete_target_in_transaction(conn, target)
+                conn.commit()
+                self._finish(stop)
+                return self.status
+            current_facts = self._runtime.observe(conn, stop.bound)
+            browser = current_facts.browser
+            if (current_facts.browser_state in ("STARTING", "UNKNOWN", "OWNED")
+                    and browser is None):
+                conn.rollback()
+                return self._verify(stop, "browser_binding_unavailable")
+            effect = self._runtime.terminate(stop.bound)
+            if not effect.ok:
+                conn.rollback()
+                return self._verify(stop, effect.code or "terminate_failed")
             after = self._runtime.observe(conn, stop.bound)
-        except Exception as exc:  # noqa: BLE001
-            return self._verify(stop, "post_terminate_observation_failed", str(exc))
-        if after.process_alive is not False:
-            if isinstance(self._runtime, _LegacyRuntime):
-                self._in_flight = None
+            if (after.identity is not None
+                    and (after.identity.pid != target.pid
+                         or after.identity.started_at != target.started_at)):
+                self._delete_target_in_transaction(conn, target)
+                conn.commit()
+                self._finish(stop)
                 return self.status
-            return self._verify(stop, "process_still_running")
-        if browser is not None:
-            closed = self._runtime.close_browser(browser)
-            if not closed.ok:
-                self._in_flight = replace(stop, phase=StopPhase.CLEANUP_PENDING,
-                                          code=closed.code or "browser_close_failed")
-                return self.status
-        try:
-            self._cleanup_target(db, stop.command.target)
+            if after.process_alive is not False:
+                conn.rollback()
+                if isinstance(self._runtime, _LegacyRuntime):
+                    self._in_flight = None
+                    return self.status
+                return self._verify(stop, "process_still_running")
+            if browser is not None:
+                closed = self._runtime.close_browser(browser)
+                if not closed.ok:
+                    conn.rollback()
+                    self._in_flight = replace(stop, phase=StopPhase.CLEANUP_PENDING,
+                                              code=closed.code or "browser_close_failed")
+                    return self.status
+            self._delete_target_in_transaction(conn, target)
+            conn.commit()
         except Exception as exc:  # noqa: BLE001
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             self._in_flight = replace(stop, phase=StopPhase.CLEANUP_PENDING,
                                       code="database_unavailable")
             log.warning("停止目标清理暂不可用：%s", exc)
@@ -545,6 +580,13 @@ class StopWatch:
                                  target_started_at=target.started_at)
         db.clear_stop_request(target_pid=target.pid,
                               target_started_at=target.started_at)
+
+    @staticmethod
+    def _delete_target_in_transaction(conn, target):
+        conn.execute("DELETE FROM crawler_process WHERE id=1 AND pid=? AND started_at=?",
+                     (target.pid, target.started_at))
+        conn.execute("DELETE FROM stop_requests WHERE id=1 AND target_pid=? "
+                     "AND target_started_at=?", (target.pid, target.started_at))
 
     def _finish(self, stop):
         self._runtime.release(stop.bound)
