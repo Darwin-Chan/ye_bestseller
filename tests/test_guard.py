@@ -14,6 +14,7 @@ from bestseller_monitor.guard import (
     ready_detail_page,
     vtype,
 )
+from helpers import crawler_cfg
 
 
 class GuardTests(unittest.TestCase):
@@ -44,8 +45,7 @@ class GuardTests(unittest.TestCase):
 class ReadyDetailPageTests(unittest.TestCase):
     """详情页打开之后怎么安顿：deny 记账优先、滑块等人次之（候选 04，两条路共用一份）。"""
 
-    CFG = SimpleNamespace(deny_window_minutes=10, deny_shop_limit=7, deny_round_limit=10,
-                          human_pause_minutes=1, intervention_confirmation_sec=0)
+    CFG = crawler_cfg()
     DENY = "https://s.1688.com/bsop-punish?x=1"
 
     @staticmethod
@@ -71,7 +71,7 @@ class ReadyDetailPageTests(unittest.TestCase):
 
     def test_the_shop_limit_raises_after_recording(self):
         tracker = DenyTracker(600)
-        cfg = SimpleNamespace(**{**vars(self.CFG), "deny_shop_limit": 2})
+        cfg = crawler_cfg(deny_shop_limit=2)
 
         ready_detail_page(self.page(self.DENY), cfg, deny_tracker=tracker, shop_key="A01")
         with self.assertRaises(ShopDenyExceeded):
@@ -81,8 +81,7 @@ class ReadyDetailPageTests(unittest.TestCase):
 
     def test_the_round_limit_raises_before_the_shop_limit(self):
         tracker = DenyTracker(600)
-        cfg = SimpleNamespace(**{**vars(self.CFG), "deny_shop_limit": 3,
-                                 "deny_round_limit": 2})
+        cfg = crawler_cfg(deny_shop_limit=3, deny_round_limit=2)
 
         ready_detail_page(self.page(self.DENY), cfg, deny_tracker=tracker, shop_key="A01")
         with self.assertRaises(RoundDenyExceeded):

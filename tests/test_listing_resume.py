@@ -15,8 +15,6 @@ COMPLETED_OFFERS = [(1, "11", "https://detail.1688.com/offer/11.html", "旧榜�
 UNFINISHED_OFFERS = [(1, "99", "https://detail.1688.com/offer/99.html", "新榜单标题", "")]
 
 
-
-
 class ListingResumeTests(unittest.TestCase):
     """IS-33：一条已完成、一条未完成的店铺范围，续跑只抓未完成的那条。"""
 

@@ -298,7 +298,7 @@ class GuiStopRequestTests(unittest.TestCase):
 class GuiLoggingTests(unittest.TestCase):
     def test_gui_records_its_own_actions_to_log_file(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = SimpleNamespace(logs_dir=Path(tmp))
+            cfg = crawler_cfg(logs_dir=Path(tmp))
             handler = gui._configure_gui_logging(cfg)
             try:
                 logging.getLogger("bestseller_monitor.browser_proc").warning("暂停后收尾浏览器")

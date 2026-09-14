@@ -13,8 +13,6 @@ from bestseller_monitor.db import Database, DayBoundaryReached, connect, cst_dat
 from helpers import crawler_cfg, new_round
 
 
-
-
 class DetailTestCase(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -27,7 +25,10 @@ class DetailTestCase(unittest.TestCase):
         # 本次观测发生在今天这一轮。
         self.past_round = new_round(self.db, "A01", run_date="2026-01-01")
         self.round_id = new_round(self.db, "A01")
-        self.cfg = crawler_cfg(raw_page_dir=self.tmp / "raw")
+        # 详情预算沿用这份用例原来的默认（10）：它靠「机会用尽」那一支说话，
+        # 吃采集配置替身的 1000 会让那条路够不着。
+        self.cfg = crawler_cfg(raw_page_dir=self.tmp / "raw",
+                               max_detail_opportunities_per_round=10)
         self.human = MagicMock()
         self.visits = 0
 

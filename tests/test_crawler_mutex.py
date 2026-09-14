@@ -12,7 +12,7 @@ from bestseller_monitor import pipeline, rounds, single_instance, stop_request
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import Database, DayBoundaryReached, connect, utcnow
 from bestseller_monitor.rounds import TerminalReason
-from helpers import isolated_locks
+from helpers import crawler_cfg, isolated_locks
 
 SHOPS = [Shop("A01", "店铺A", "https://shop.example/")]
 
@@ -21,8 +21,8 @@ class CrawlerMutexTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tmp.name) / "test.db"
-        self.cfg = SimpleNamespace(db_file=self.db_path, driver="pw_cdp",
-                                   ensure_dirs=MagicMock())
+        self.cfg = crawler_cfg(db_file=self.db_path, driver="pw_cdp",
+                               ensure_dirs=MagicMock())
 
     def tearDown(self):
         self.tmp.cleanup()

@@ -50,15 +50,31 @@ def crawler_cfg(**overrides):
         "batch_rest_sec": (0.0, 0.0),
         "retry_base_sec": 0.0,
         "retry_jitter_sec": 0.0,
-        # 存档目录给一个共享临时目录（与改前 test_click_listing 的默认一致）：
-        # 失败路径真的会往里写原始页，默认 None 会让它崩。要断言的用例自己覆盖成本地 tmp。
-        "raw_page_dir": _RAW_PAGE_DIR,
+        # 存档目录每次调用给一个**全新**的临时目录（不预先创建，`save_raw_page` 会 mkdir）：
+        # 失败路径真的会往里写原始页，默认 None 会让它崩；固定目录又会让「round_id 都从 1 起」
+        # 的不同用例互相留残留（`assertTrue(path.exists())` 会被别人的文件蒙过）。
+        # 要断言路径的用例自己覆盖成本地 tmp。
+        "raw_page_dir": _RAW_PAGE_DIR / uuid4().hex,
+        # 其余 `Config` 字段：给中性值，让替身与真配置同形（护栏见 test_helpers）。
+        "root": _RAW_PAGE_DIR,
+        "data_dir": _RAW_PAGE_DIR / "data",
+        "logs_dir": _RAW_PAGE_DIR / "logs",
+        "screenshot_dir": _RAW_PAGE_DIR / "shots",
+        "user_data_path": _RAW_PAGE_DIR / "profile",
+        "chrome_path": "",
+        "start_browser": True,
+        "attach_port": 9222,
+        "base_url": "",
+        "pages_per_shop_override": None,
         "alarm_on_intervention": False,
         "db_file": None,
         "shop_csv": None,
         "driver": "pw_cdp",
         "ensure_dirs": None,
     }
+    unknown = sorted(set(overrides) - set(values))
+    if unknown:
+        raise TypeError(f"crawler_cfg 不认识这些键：{unknown}")
     values.update(overrides)
     return SimpleNamespace(**values)
 

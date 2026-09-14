@@ -13,8 +13,6 @@ from bestseller_monitor.listing import ListingLoadFailed
 from helpers import crawler_cfg
 
 
-
-
 def _sequences(values):
     """按顺序取值，用完后一直返回最后一个值。"""
     seq = list(values)

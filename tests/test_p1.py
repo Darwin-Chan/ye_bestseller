@@ -301,11 +301,7 @@ class P1Tests(unittest.TestCase):
 
     def test_round_deny_exceeded_finishes_round_and_forces_new_round(self):
         db_path = Path(self.tmp.name) / "deny.db"
-        cfg = SimpleNamespace(
-            db_file=db_path,
-            driver="pw_cdp",
-            ensure_dirs=MagicMock(),
-        )
+        cfg = crawler_cfg(db_file=db_path, driver="pw_cdp", ensure_dirs=MagicMock())
         exc = browser_pw.RoundDenyExceeded("整轮 10 分钟内 deny≥10")
 
         with isolated_locks(), patch.object(pipeline, "_run_pwcdp_round", side_effect=exc):
@@ -327,11 +323,7 @@ class P1Tests(unittest.TestCase):
 
     def test_day_boundary_finishes_round_and_forces_new_round(self):
         db_path = Path(self.tmp.name) / "day.db"
-        cfg = SimpleNamespace(
-            db_file=db_path,
-            driver="pw_cdp",
-            ensure_dirs=MagicMock(),
-        )
+        cfg = crawler_cfg(db_file=db_path, driver="pw_cdp", ensure_dirs=MagicMock())
         with isolated_locks(), patch.object(pipeline, "_run_pwcdp_round",
                                             side_effect=DayBoundaryReached()):
             pipeline.run_round(cfg, [Shop("A01", "店铺A", "https://shop.example/")])

@@ -21,8 +21,6 @@ from bestseller_monitor.listing import ListingLoadFailed
 from helpers import crawler_cfg, FakeCard, ScriptedListing, new_round
 
 
-
-
 class ClickListingTestCase(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()

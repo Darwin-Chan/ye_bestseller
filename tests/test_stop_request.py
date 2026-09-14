@@ -11,7 +11,7 @@ from bestseller_monitor import crawler_identity, guard, rounds, stop_request
 from bestseller_monitor.db import Database, DayBoundaryReached, connect, utcnow
 from bestseller_monitor.delay import Humanizer
 from bestseller_monitor.rounds import TerminalReason
-from helpers import new_round
+from helpers import crawler_cfg, new_round
 
 
 class StopRequestStoreTests(unittest.TestCase):
@@ -126,7 +126,7 @@ class StopRequestHookTests(unittest.TestCase):
         hook.assert_called_once_with()
 
     def test_sleep_stops_within_one_slice_of_the_request(self):
-        cfg = SimpleNamespace(long_pause_interval=(12, 20), long_pause_sec=(10, 20))
+        cfg = crawler_cfg(long_pause_interval=(12, 20), long_pause_sec=(10, 20))
         human = Humanizer(cfg)
         stop_request.install(lambda: (_ for _ in ()).throw(stop_request.StopRequested("停")))
 
@@ -137,7 +137,7 @@ class StopRequestHookTests(unittest.TestCase):
         self.assertLess(time.time() - started, 1.0, "检查在每一片之前，长睡眠不该睡完再停")
 
     def test_sleep_wakes_up_between_slices_when_the_request_arrives_late(self):
-        cfg = SimpleNamespace(long_pause_interval=(12, 20), long_pause_sec=(10, 20))
+        cfg = crawler_cfg(long_pause_interval=(12, 20), long_pause_sec=(10, 20))
         human = Humanizer(cfg)
         seen = []
 
