@@ -19,6 +19,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
+from . import crawler_identity
+from .crawler_identity import CrawlerProcess
 from .db import Database
 
 log = logging.getLogger(__name__)
@@ -76,12 +78,12 @@ def _mine(db: Database, *, pid: int | None = None):
     request = db.stop_request()
     if request is None:
         return None
-    identity = db.crawler_process()
+    identity = crawler_identity.registered(db.conn)
     if identity is None:
         return None
-    if int(identity["pid"]) != (os.getpid() if pid is None else pid):
+    if int(identity.pid) != (os.getpid() if pid is None else pid):
         return None
-    if not targets(request, pid=identity["pid"], started_at=identity["started_at"]):
+    if not targets(request, pid=identity.pid, started_at=identity.started_at):
         return None
     return request
 
@@ -113,7 +115,7 @@ class StopInFlight:
     """界面侧正在进行的停止：等采集进程自己停下，窗口到点才强杀。"""
 
     kind: str
-    target: dict | None
+    target: CrawlerProcess | None
     deadline: float
     acked: bool = False
 
@@ -161,7 +163,7 @@ class StopWatch:
         """丢掉在跑的停止：没起过任务、也没有采集在跑时用。"""
         self._in_flight = None
 
-    def begin(self, kind: str, target: dict | None) -> StopInFlight:
+    def begin(self, kind: str, target: CrawlerProcess | None) -> StopInFlight:
         """记下「正在停止」：不阻塞，倒计时与超时兜底交给轮询。"""
         self._in_flight = StopInFlight(kind=kind, target=target,
                                        deadline=self._now() + self._grace_sec)
@@ -191,8 +193,8 @@ class StopWatch:
         request = db.stop_request()
         if request is None:
             return stop
-        if not targets(request, pid=stop.target["pid"],
-                       started_at=stop.target["started_at"]):
+        if not targets(request, pid=stop.target.pid,
+                       started_at=stop.target.started_at):
             return stop
         if not request["ack_at"]:
             return stop

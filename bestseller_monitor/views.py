@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 from . import rounds
 from .config import effective_pages_limit
+from .crawler_identity import CrawlerProcess
 from .db import CST, Database, RoundTally, cst_date
 
 
@@ -26,7 +27,7 @@ class UiState:
     """界面会话事实：界面自己记着的，既不是数据层事实，也不是采集进程身份。
 
     采集进程身份（库里那行 pid/轮次）不在这里——它由会话锁与身份行回答，
-    见 single_instance 与 gui.Api.crawler_identity()。
+    见 crawler_identity（`current()` / `is_running()`）。
     """
 
     round_id: int | None = None
@@ -172,12 +173,12 @@ def _start_shops(conn: sqlite3.Connection, shops, cfg, today: str) -> list[dict]
     return out
 
 
-def _crawler_hint(running: dict) -> str:
+def _crawler_hint(running: CrawlerProcess) -> str:
     """启动页在「已经有采集在跑」时说什么：谁在跑，以及点开始会被拒。"""
     parts = [
-        f"轮次 #{running['round_id']}" if running.get("round_id") is not None else None,
-        f"PID {running['pid']}" if running.get("pid") else None,
-        f"{_fmt_hhmm(running['started_at'])} 起" if running.get("started_at") else None,
+        f"轮次 #{running.round_id}" if running.round_id is not None else None,
+        f"PID {running.pid}" if running.pid else None,
+        f"{_fmt_hhmm(running.started_at)} 起" if running.started_at else None,
     ]
     who = "，".join(part for part in parts if part) or "身份未知"
     return (f"采集进程正在跑（{who}）：同一时刻只能有一个，现在点开始会被拒绝；"
@@ -185,7 +186,7 @@ def _crawler_hint(running: dict) -> str:
 
 
 def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
-               crawler: dict | None, now: str) -> dict:
+               crawler: CrawlerProcess | None, now: str) -> dict:
     """开始页取数：今日大盘、每店今日进度、以及「点开始会发生什么」的提示。"""
     today = cst_date(now)
     db = Database(conn)
@@ -208,7 +209,8 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
         "shops": _start_shops(conn, shops, cfg, today),
         "total_shops": len(shops),
         "start_hint": hint,
-        "crawler": crawler,
+        # 页面按 `d.crawler.round_id` 说话，跨 pywebview 那一步走 JSON：给回普通 dict。
+        "crawler": crawler.to_payload() if crawler is not None else None,
         "stopping": state.stopping,
         "stop_grace_sec": state.stop_grace_sec,
     }

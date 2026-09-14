@@ -36,6 +36,7 @@ from bestseller_monitor.rounds import (
 )
 from bestseller_monitor import rounds
 from bestseller_monitor import browser_proc
+from bestseller_monitor import crawler_identity
 from bestseller_monitor import single_instance
 from bestseller_monitor import stop_request
 from bestseller_monitor import views
@@ -207,34 +208,17 @@ class Api:
         return self.proc is not None and self.proc.poll() is None
 
     def any_crawler_running(self) -> bool:
-        """有采集进程在跑吗：会话锁是权威判据，自己的子进程兜住刚拉起那一小段窗口。
+        """有采集进程在跑吗（判据在 crawler_identity，这里只接线）。"""
+        return crawler_identity.is_running(own_alive=self._own_crawler_alive())
 
-        与「轮次是否进行中」是两件事：暂停后的轮次仍在进行中，但已经没有采集进程。
-        """
-        if self._own_crawler_alive():
-            return True
-        return single_instance.is_held(single_instance.CRAWLER_LOCK)
-
-    def crawler_identity(self, conn) -> dict | None:
-        """正在跑的采集进程身份；没有就返回 None。
-
-        锁不在而身份行还在，就是被强杀留下的残留——顺手清掉，免得启动页报一个
-        早就不存在的进程。
-        """
-        db = Database(conn)
-        row = db.crawler_process()
-        if not self.any_crawler_running():
-            if row is not None:
-                db.clear_crawler_process()
-            return None
-        if row is not None:
-            return dict(row)
-        return {
-            "pid": self.proc.pid if self._own_crawler_alive() else None,
-            "round_id": self.round_id,
-            "started_at": None,
-            "note": None,
-        }
+    def crawler_identity(self, conn):
+        """正在跑的采集进程身份；没有就返回 None（判据 + 顺手清残留在 crawler_identity）。"""
+        return crawler_identity.current(
+            conn,
+            own_alive=self._own_crawler_alive(),
+            own_pid=self.proc.pid if self.proc is not None else None,
+            own_round_id=self.round_id,
+        )
 
     def _spawn_crawler(self, keys: list[str] | None = None):
         """拉起采集子进程；keys 为空表示「开始或续跑」，范围由子进程按轮次决定。"""
@@ -341,7 +325,7 @@ class Api:
                 db = Database(conn)
                 if not self._own_crawler_alive():
                     return {"ok": True}   # 本界面没有在跑的采集进程，没什么可暂停的
-                target = self._stop_target(conn)
+                target = crawler_identity.registered(conn)
                 if target is None:
                     # 身份行还没登记（子进程刚拉起的那一小段）：退回强制结束，
                     # 此时它连浏览器都还没起，不会留下孤儿。
@@ -350,10 +334,10 @@ class Api:
                     self._kill_browser()
                     return {"ok": True}
                 db.request_stop(round_id=self.round_id, kind=stop_request.PAUSE,
-                                target_pid=target["pid"],
-                                target_started_at=target["started_at"])
+                                target_pid=target.pid,
+                                target_started_at=target.started_at)
                 self._stop_watch.begin(stop_request.PAUSE, target)
-                log.info("暂停：已写下停止请求（目标 PID %s），等它自己停下。", target["pid"])
+                log.info("暂停：已写下停止请求（目标 PID %s），等它自己停下。", target.pid)
                 return {"ok": True, "stopping": self._stop_watch.state}
             finally:
                 conn.close()
@@ -385,34 +369,35 @@ class Api:
                 if identity is None:
                     self._stop_watch.forget()
                     return {"ok": True, "round_id": rid}   # 采集进程已经不在了
-                self._stop_watch.begin(stop_request.ABORT, self._stop_target(conn))
+                self._stop_watch.begin(stop_request.ABORT,
+                                       crawler_identity.registered(conn))
                 log.info("中止：轮次 #%s 已收尾为人工放弃，等采集进程自己停下。", rid)
                 return {"ok": True, "round_id": rid, "stopping": self._stop_watch.state}
             finally:
                 conn.close()
 
-    def _round_to_abandon(self, db, identity: dict | None) -> int | None:
+    def _round_to_abandon(self, db, identity) -> int | None:
         """该收尾哪一轮：身份行里正在跑的 > 本界面记着的 > 今天进行中的。
 
         身份行优先，是因为界面记着的编号不会随轮次结束清零：那条路跑完一轮之后，
         别处又起了一轮的话，按旧编号收尾就会「杀了新进程、却把终态写给旧轮次」，
         真正在跑的那一轮于是永远留在「进行中」。
         """
-        if identity is not None and identity.get("round_id") is not None:
-            return identity["round_id"]
+        if identity is not None and identity.round_id is not None:
+            return identity.round_id
         if self.round_id is not None:
             return self.round_id
         current = rounds.active_round(db, self._today())
         return current.id if current is not None else None
 
     @staticmethod
-    def _stop_crawler_process(identity: dict | None) -> int | None:
+    def _stop_crawler_process(identity) -> int | None:
         """结束身份行里那个采集进程；拿不到可用 PID 就返回 None。
 
         PID 会被系统回收，所以先认镜像名：不是 python 就不动它。拿不到时调用方仍旧
         只写终态——采集进程会在下一个检查点自己停下（轮次已是终态，它也干不下去了）。
         """
-        pid = (identity or {}).get("pid")
+        pid = identity.pid if identity is not None else None
         if not pid:
             return None
         image = browser_proc.process_image_name(int(pid))
@@ -446,18 +431,6 @@ class Api:
             time.sleep(_BROWSER_CLOSE_RETRY_INTERVAL)
 
     # ---------- 停止：先请求，超时才强杀（ADR-0009） ----------
-    @staticmethod
-    def _stop_target(conn) -> dict | None:
-        """这次停止针对哪个进程：库里那条身份行（谁在跑由它说话）。
-
-        目标身份是 (PID, 启动时刻)，采集进程只认领对得上自己的请求——拿不到它
-        就退化成没有回执的窗口，到点强杀。
-        """
-        row = conn.execute("SELECT pid, started_at FROM crawler_process WHERE id=1").fetchone()
-        if row is None or not row["pid"] or not row["started_at"]:
-            return None
-        return {"pid": int(row["pid"]), "started_at": row["started_at"]}
-
     # ---------- 结果页 ----------
     def get_result(self) -> dict:
         with self._lock:

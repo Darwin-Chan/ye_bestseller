@@ -7,9 +7,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import guard, rounds, stop_request
+from bestseller_monitor import crawler_identity, guard, rounds, stop_request
 from bestseller_monitor.db import Database, DayBoundaryReached, connect, utcnow
 from bestseller_monitor.delay import Humanizer
+from bestseller_monitor.crawler_identity import CrawlerProcess
 from bestseller_monitor.rounds import TerminalReason
 from helpers import new_round
 
@@ -183,10 +184,10 @@ class StopWatchTests(unittest.TestCase):
         self.watch = stop_request.StopWatch(
             # 「强杀」真的生效：内核释放会话锁，进程随之不在。
             kill_child=self._kill_child,
-            stop_foreign=lambda identity: self.killed.append(f"foreign:{identity['pid']}"),
+            stop_foreign=lambda identity: self.killed.append(f"foreign:{identity.pid}"),
             close_browser=lambda: self.killed.append("browser"),
             is_running=lambda: self.running,
-            identity_of=lambda conn: self.db.crawler_process(),
+            identity_of=lambda conn: crawler_identity.registered(conn),
             now=lambda: self.now,
         )
 
@@ -195,7 +196,7 @@ class StopWatchTests(unittest.TestCase):
         self.running = False
 
     def begin(self, kind: str = stop_request.PAUSE) -> None:
-        self.watch.begin(kind, {"pid": os.getpid(), "started_at": self.started_at})
+        self.watch.begin(kind, CrawlerProcess(pid=os.getpid(), started_at=self.started_at))
 
     def test_nothing_happens_inside_the_window(self):
         self.begin()
@@ -249,7 +250,7 @@ class StopWatchTests(unittest.TestCase):
         self.db.clear_crawler_process()
         target_started_at = self.db.record_crawler_process(
             pid=4321, round_id=self.rid, note="别处起的")
-        self.watch.begin(stop_request.ABORT, {"pid": 4321, "started_at": target_started_at})
+        self.watch.begin(stop_request.ABORT, CrawlerProcess(pid=4321, started_at=target_started_at))
 
         self.now += 8.0
         self.watch.tick(self.conn)
@@ -267,7 +268,7 @@ class StopWatchTests(unittest.TestCase):
             stop_foreign=lambda identity: None,
             close_browser=lambda: self.killed.append("browser"),
             is_running=lambda: True,
-            identity_of=lambda conn: self.db.crawler_process(),
+            identity_of=lambda conn: crawler_identity.registered(conn),
             now=lambda: self.now,
         )
         self.begin()
