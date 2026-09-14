@@ -2,13 +2,12 @@
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from bestseller_monitor import browser_pw, click_listing, pipeline
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import Database, connect
-from helpers import new_round
+from helpers import crawler_cfg, new_round
 
 # 本轮已完成店铺（A01）的榜单行：续跑不该动它。
 COMPLETED_OFFERS = [(1, "11", "https://detail.1688.com/offer/11.html", "旧榜单标题", "")]
@@ -16,27 +15,6 @@ COMPLETED_OFFERS = [(1, "11", "https://detail.1688.com/offer/11.html", "旧榜�
 UNFINISHED_OFFERS = [(1, "99", "https://detail.1688.com/offer/99.html", "新榜单标题", "")]
 
 
-def _cfg(**overrides):
-    values = {
-        "raw_page_dir": None,
-        "timeout_ms": 1,
-        "fail_rate_limit": 0.1,
-        "max_attempts_per_page": 2,
-        "max_detail_opportunities_per_round": 1000,
-        "shuffle_within_shop": False,
-        "long_pause_interval": (1, 1),
-        "detail_delay_sec": (0.0, 0.0),
-        "long_pause_sec": (0.0, 0.0),
-        "batch_size": 1,
-        "batch_rest_sec": (0.0, 0.0),
-        "list_delay_sec": (0.0, 0.0),
-        "action_delay_sec": (0.0, 0.0),
-        "read_delay_sec": (0.0, 0.0),
-        "retry_base_sec": 0.0,
-        "retry_jitter_sec": 0.0,
-    }
-    values.update(overrides)
-    return SimpleNamespace(**values)
 
 
 class ListingResumeTests(unittest.TestCase):
@@ -85,7 +63,7 @@ class ListingResumeTests(unittest.TestCase):
                           return_value=(UNFINISHED_OFFERS, 1)) as crawl, \
              patch.object(pipeline, "_retry_shop_pending_pw"):
             pipeline._run_listing_pw(
-                self.db, _cfg(), self.round_id, self.shops, MagicMock(),
+                self.db, crawler_cfg(), self.round_id, self.shops, MagicMock(),
             )
 
         self._assert_only_the_unfinished_shop_was_crawled(crawl)

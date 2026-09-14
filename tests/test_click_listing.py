@@ -18,27 +18,9 @@ from bestseller_monitor.db import (Database, DayBoundaryReached, DetailBudgetExh
 from bestseller_monitor import guard
 from bestseller_monitor.guard import InterventionTimeout
 from bestseller_monitor.listing import ListingLoadFailed
-from helpers import FakeCard, ScriptedListing, new_round
+from helpers import crawler_cfg, FakeCard, ScriptedListing, new_round
 
 
-def _cfg(**overrides):
-    values = {
-        "max_pages_per_shop": 2,
-        "raw_page_dir": Path(tempfile.gettempdir()) / "click-listing-raw",
-        "timeout_ms": 1,
-        "max_attempts_per_page": 2,
-        "max_detail_opportunities_per_round": 1000,
-        "deny_window_minutes": 10,
-        "deny_shop_limit": 7,
-        "deny_round_limit": 10,
-        "deny_backoff_sec": 0.0,
-        "deny_retry2_backoff_sec": 0.0,
-        "human_pause_minutes": 1,
-        "intervention_confirmation_sec": 0,
-        "shuffle_within_shop": False,
-    }
-    values.update(overrides)
-    return SimpleNamespace(**values)
 
 
 class ClickListingTestCase(unittest.TestCase):
@@ -59,7 +41,7 @@ class ClickListingTestCase(unittest.TestCase):
     # ---------- 夹具 ----------
     def walk(self, listing_page, cfg=None, **kwargs):
         return click_listing.ShopWalk(
-            listing_page, self.shop, cfg or _cfg(), self.human,
+            listing_page, self.shop, cfg or crawler_cfg(), self.human,
             db=self.db, round_id=self.round_id, emit=self.emit, **kwargs)
 
     def emit(self, event: str, **kw: object) -> None:
@@ -110,7 +92,7 @@ class WalkTests(ClickListingTestCase):
     def test_the_page_limit_from_the_config_stops_the_walk(self):
         page, offers, pages_read = self.crawl(
             [[FakeCard("商品1", offer_id="11")], [FakeCard("商品2", offer_id="22")]],
-            cfg=_cfg(max_pages_per_shop=1))
+            cfg=crawler_cfg(max_pages_per_shop=1))
 
         self.assertEqual((len(offers), pages_read), (1, 1))
         self.assertEqual(page.scrolled, ["滚动加载新卡片"])
@@ -211,7 +193,7 @@ class SameNameTests(ClickListingTestCase):
         second = FakeCard("商品1", offer_id="12")
 
         with self.assertRaises(DetailBudgetExhausted):
-            self.crawl([[deferred, second]], cfg=_cfg(max_detail_opportunities_per_round=1))
+            self.crawl([[deferred, second]], cfg=crawler_cfg(max_detail_opportunities_per_round=1))
 
         self.assertEqual(deferred.opens, 0, "预算用尽时补抓也不该点开卡片")
         self.assertEqual(second.opens, 1)
@@ -255,7 +237,7 @@ class DenyTests(ClickListingTestCase):
 
     def test_the_shop_is_skipped_when_deny_hits_the_limit(self):
         card = FakeCard("商品1", offer_id="11", denied=True)
-        walk = self.walk(ScriptedListing([[card]]), cfg=_cfg(deny_shop_limit=1),
+        walk = self.walk(ScriptedListing([[card]]), cfg=crawler_cfg(deny_shop_limit=1),
                          deny_tracker=guard.DenyTracker(600))
 
         with self.assertRaises(guard.ShopDenyExceeded):
@@ -295,7 +277,7 @@ class StopAndBudgetTests(ClickListingTestCase):
         stale = new_round(self.db, "A01", run_date="2026-01-01")
         card = FakeCard("商品1", offer_id="11")
         page = ScriptedListing([[card]])
-        walk = click_listing.ShopWalk(page, self.shop, _cfg(), self.human,
+        walk = click_listing.ShopWalk(page, self.shop, crawler_cfg(), self.human,
                                       db=self.db, round_id=stale, emit=self.emit)
 
         with self.assertRaises(DayBoundaryReached):
@@ -321,7 +303,7 @@ class StopAndBudgetTests(ClickListingTestCase):
 
         with self.assertRaises(DetailBudgetExhausted):
             self.crawl([[first, second]],
-                      cfg=_cfg(max_detail_opportunities_per_round=1))
+                      cfg=crawler_cfg(max_detail_opportunities_per_round=1))
 
         self.assertEqual((first.opens, second.opens), (1, 0),
                          "预算用尽时第二张卡都不该点开")
@@ -343,7 +325,7 @@ class PlaywrightAdapterTests(ClickListingTestCase):
              patch.object(guard, "wait_for_resolution",
                           side_effect=InterventionTimeout("超时")) as wait:
             detail_page, again = click_listing.click_card(
-                page, MagicMock(), _cfg(), False, MagicMock())
+                page, MagicMock(), crawler_cfg(), False, MagicMock())
 
         self.assertIs(detail_page, popup)
         self.assertIs(again, popup)
@@ -363,7 +345,7 @@ class PlaywrightAdapterTests(ClickListingTestCase):
         page.mouse.wheel.assert_called_once_with(0, 6000)
 
     def test_a_page_is_read_into_an_observation_with_its_main_image(self):
-        owner = click_listing.PlaywrightListing(MagicMock(), self.shop, _cfg(), self.human)
+        owner = click_listing.PlaywrightListing(MagicMock(), self.shop, crawler_cfg(), self.human)
         card = owner.card(0)
         detail_page = MagicMock()
         detail_page.url = "https://detail.1688.com/offer/11.html"
@@ -380,7 +362,7 @@ class PlaywrightAdapterTests(ClickListingTestCase):
 
     def test_a_main_image_failure_is_recorded_as_a_parse_crash(self):
         """主图字段异常在改前也算解析异常：记失败、留原始页。"""
-        owner = click_listing.PlaywrightListing(MagicMock(), self.shop, _cfg(), self.human)
+        owner = click_listing.PlaywrightListing(MagicMock(), self.shop, crawler_cfg(), self.human)
         card = owner.card(0)
         detail_page = MagicMock()
         detail_page.url = "https://detail.1688.com/offer/11.html"

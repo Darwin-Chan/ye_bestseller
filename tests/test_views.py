@@ -12,7 +12,7 @@ from bestseller_monitor import rounds, views
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import Database, connect
 from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
-from helpers import new_round
+from helpers import crawler_cfg, new_round
 
 # 固定时刻：北京时间 2026-09-13 12:00。三个页面的「今天」都由它决定。
 NOW = "2026-09-13T04:00:00+00:00"
@@ -26,7 +26,7 @@ class ViewsTestCase(unittest.TestCase):
         self.conn = connect(Path(tmp.name) / "views.db")
         self.addCleanup(self.conn.close)
         self.db = Database(self.conn)
-        self.cfg = SimpleNamespace(max_pages_per_shop=3)
+        self.cfg = crawler_cfg(max_pages_per_shop=3)
         self.shops = [Shop("A01", "店铺A", "https://A01.example/")]
         self.state = views.UiState()
 

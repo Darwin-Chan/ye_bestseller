@@ -6,39 +6,13 @@
 如实报列表失败（店铺留待续跑），而不是把旧页再读一遍当成新页。
 """
 import unittest
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from bestseller_monitor import listing
 from bestseller_monitor.listing import ListingLoadFailed
+from helpers import crawler_cfg
 
 
-def _cfg(**overrides):
-    values = {
-        "timeout_ms": 1,
-        "max_pages_per_shop": 2,
-        "max_detail_opportunities_per_round": 1000,
-        "human_pause_minutes": 1,
-        "intervention_confirmation_sec": 0,
-        "deny_backoff_sec": 0.0,
-        "deny_retry2_backoff_sec": 0.0,
-        "deny_window_minutes": 10,
-        "deny_shop_limit": 7,
-        "deny_round_limit": 10,
-        "list_delay_sec": (0.0, 0.0),
-        "action_delay_sec": (0.0, 0.0),
-        "read_delay_sec": (0.0, 0.0),
-        "detail_delay_sec": (0.0, 0.0),
-        "long_pause_interval": (1, 1),
-        "long_pause_sec": (0.0, 0.0),
-        "batch_size": 1,
-        "batch_rest_sec": (0.0, 0.0),
-        "retry_base_sec": 0.0,
-        "retry_jitter_sec": 0.0,
-        "shuffle_within_shop": False,
-    }
-    values.update(overrides)
-    return SimpleNamespace(**values)
 
 
 def _sequences(values):
@@ -90,7 +64,7 @@ class PrepareTests(unittest.TestCase):
     def setUp(self):
         self.page = MagicMock()
         self.human = MagicMock()
-        self.cfg = _cfg()
+        self.cfg = crawler_cfg()
         self.calls: list[str] = []
         self.events: list[str] = []
 
@@ -146,7 +120,7 @@ class AdvanceTests(unittest.TestCase):
     def setUp(self):
         self.page = MagicMock()
         self.human = MagicMock()
-        self.cfg = _cfg()
+        self.cfg = crawler_cfg()
 
     def _advance(self, *, identities, click=None):
         with patch.object(listing, "_POLL_SEC", 0.0), \

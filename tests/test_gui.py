@@ -15,7 +15,7 @@ from bestseller_monitor.db import (CST, DETAIL_BUDGET_NOTE, Database, connect,
                                    cst_date, utcnow)
 from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
 from gui import Api
-from helpers import isolated_locks, new_round
+from helpers import crawler_cfg, isolated_locks, new_round
 from tools import bench_refresh
 
 
@@ -40,7 +40,7 @@ def gui_api(*, shops=(), now=None, db_path=None, open_conn=None, stop_clock=None
     """
     if open_conn is None and db_path is not None:
         open_conn = lambda: connect(db_path)  # noqa: E731 - 工厂按调用次开新连接
-    return Api(cfg=SimpleNamespace(max_pages_per_shop=3, **cfg),
+    return Api(cfg=crawler_cfg(max_pages_per_shop=3, **cfg),
                shops=list(shops),
                now=now or utcnow,
                open_conn=open_conn,

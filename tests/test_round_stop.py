@@ -3,7 +3,6 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from bestseller_monitor import browser_pw, click_listing, detail, pipeline, rounds, stop_request
@@ -14,6 +13,7 @@ from bestseller_monitor.db import (CST, Database, DayBoundaryReached, DetailBudg
 from bestseller_monitor.guard import InterventionTimeout, RoundPauseRequired
 from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
 from bestseller_monitor.stop_request import StopRequested
+from helpers import crawler_cfg
 
 
 def _cst(y: int, m: int, d: int, hh: int, mm: int) -> str:
@@ -61,29 +61,6 @@ class RoundStopRuleTests(unittest.TestCase):
         self.conn.close()
         self.tmp.cleanup()
 
-    @staticmethod
-    def _cfg(**overrides):
-        values = {
-            "timeout_ms": 1,
-            "human_pause_minutes": 1,
-            "intervention_confirmation_sec": 0,
-            "fail_rate_limit": 0.1,
-            "max_attempts_per_page": 2,
-            "max_detail_opportunities_per_round": 1000,
-            "shuffle_within_shop": False,
-            "long_pause_interval": (1, 1),
-            "detail_delay_sec": (0.0, 0.0),
-            "long_pause_sec": (0.0, 0.0),
-            "batch_size": 1,
-            "batch_rest_sec": (0.0, 0.0),
-            "list_delay_sec": (0.0, 0.0),
-            "action_delay_sec": (0.0, 0.0),
-            "read_delay_sec": (0.0, 0.0),
-            "retry_base_sec": 0.0,
-            "retry_jitter_sec": 0.0,
-        }
-        values.update(overrides)
-        return SimpleNamespace(**values)
 
     def _open(self, run_date: str, *keys: str):
         return rounds.open(self.db, RoundRequest(
@@ -114,7 +91,7 @@ class RoundStopRuleTests(unittest.TestCase):
     def _capture(self, round_id, observe, **kwargs):
         """照补采路径的样子取一次观测：规则在 detail.capture_observation 里。"""
         return detail.capture_observation(
-            self.db, self._cfg(), MagicMock(), round_id, self._target(), observe, **kwargs)
+            self.db, crawler_cfg(), MagicMock(), round_id, self._target(), observe, **kwargs)
 
     def _observation(self):
         return detail.Observation(payload=self._payload())
@@ -176,7 +153,7 @@ class RoundStopRuleTests(unittest.TestCase):
 
         with patch.object(click_listing, "crawl_store_by_click") as crawl:
             with self.assertRaises(DayBoundaryReached):
-                pipeline._run_listing_pw(self.db, self._cfg(), stale.id, [shop], MagicMock())
+                pipeline._run_listing_pw(self.db, crawler_cfg(), stale.id, [shop], MagicMock())
 
         crawl.assert_not_called()
         row = self.conn.execute(
@@ -204,7 +181,7 @@ class RoundStopRuleTests(unittest.TestCase):
 
         with patch.object(click_listing, "crawl_store_by_click", side_effect=crawl):
             with self.assertRaises(stop_request.StopRequested):
-                pipeline._run_listing_pw(self.db, self._cfg(), run.id, [shop], MagicMock())
+                pipeline._run_listing_pw(self.db, crawler_cfg(), run.id, [shop], MagicMock())
 
         row = self.conn.execute(
             "SELECT list_status, list_note FROM shop_rounds WHERE round_id=?", (run.id,)
@@ -222,7 +199,7 @@ class RoundStopRuleTests(unittest.TestCase):
             self._capture(run.id, lambda: self._observation(), attempts=1)
 
         with self.assertRaises(stop_request.StopRequested):
-            pipeline._capture_pending_offers(self.db, self._cfg(), MagicMock(), run.id,
+            pipeline._capture_pending_offers(self.db, crawler_cfg(), MagicMock(), run.id,
                                              offers, capture)
 
         self.assertEqual(
@@ -250,7 +227,7 @@ class RoundStopRuleTests(unittest.TestCase):
         with patch.object(browser_pw, "open_detail",
                           side_effect=stop_request.StopRequested("停")):
             with self.assertRaises(stop_request.StopRequested):
-                pipeline._capture_one_pw(self.db, self._cfg(), MagicMock(), run.id,
+                pipeline._capture_one_pw(self.db, crawler_cfg(), MagicMock(), run.id,
                                          self._offer(), MagicMock())
 
         self.assertEqual(

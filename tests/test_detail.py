@@ -6,22 +6,13 @@
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from bestseller_monitor import dedupe, detail, rounds
 from bestseller_monitor.db import Database, DayBoundaryReached, connect, cst_date, utcnow
-from helpers import new_round
+from helpers import crawler_cfg, new_round
 
 
-def _cfg(**overrides):
-    values = {
-        "max_attempts_per_page": 2,
-        "max_detail_opportunities_per_round": 10,
-        "raw_page_dir": None,
-    }
-    values.update(overrides)
-    return SimpleNamespace(**values)
 
 
 class DetailTestCase(unittest.TestCase):
@@ -36,7 +27,7 @@ class DetailTestCase(unittest.TestCase):
         # 本次观测发生在今天这一轮。
         self.past_round = new_round(self.db, "A01", run_date="2026-01-01")
         self.round_id = new_round(self.db, "A01")
-        self.cfg = _cfg(raw_page_dir=self.tmp / "raw")
+        self.cfg = crawler_cfg(raw_page_dir=self.tmp / "raw")
         self.human = MagicMock()
         self.visits = 0
 

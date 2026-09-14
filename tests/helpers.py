@@ -1,5 +1,7 @@
 """测试共用件：建轮只走轮次模块这一条路；锁名字按用例隔离。"""
 from contextlib import contextmanager
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
@@ -9,6 +11,57 @@ from bestseller_monitor import rounds
 from bestseller_monitor.db import cst_date
 from bestseller_monitor.listing import ListingLoadFailed
 from bestseller_monitor.rounds import RoundRequest, ShopScope
+
+# 采集配置替身存档原始页的地方（失败路径真会写文件；用例要断言就覆盖成本地 tmp）。
+_RAW_PAGE_DIR = Path(tempfile.gettempdir()) / "bestseller-test-raw"
+
+
+def crawler_cfg(**overrides):
+    """一个采集配置包含什么：全套默认值只在这里写一遍，用例只覆盖自己关心的键（候选 06）。
+
+    值都取「不拖慢测试」的那一档：超时 1 毫秒、各种延迟 0、deny 阈值按 `config.toml` 的量级。
+    与采集过程无关的键（`db_file` / `shop_csv` / `driver` / `ensure_dirs`）给中性默认，要用的
+    用例自己覆盖。
+
+    **这是采集配置的替身，不是 `Config` 的替身**：真读配置文件的那类用例
+    （`test_config.py` / `test_run_cli.py`）照样走 `Config.from_file`。
+    """
+    values = {
+        "max_pages_per_shop": 2,
+        "timeout_ms": 1,
+        "fail_rate_limit": 0.1,
+        "max_attempts_per_page": 2,
+        "max_detail_opportunities_per_round": 1000,
+        "deny_window_minutes": 10,
+        "deny_shop_limit": 7,
+        "deny_round_limit": 10,
+        "deny_backoff_sec": 0.0,
+        "deny_retry2_backoff_sec": 0.0,
+        "human_pause_minutes": 1,
+        "intervention_confirmation_sec": 0,
+        "shuffle_within_shop": False,
+        "list_delay_sec": (0.0, 0.0),
+        "action_delay_sec": (0.0, 0.0),
+        "read_delay_sec": (0.0, 0.0),
+        "detail_delay_sec": (0.0, 0.0),
+        "long_pause_interval": (1, 1),
+        "long_pause_sec": (0.0, 0.0),
+        "batch_size": 1,
+        "batch_rest_sec": (0.0, 0.0),
+        "retry_base_sec": 0.0,
+        "retry_jitter_sec": 0.0,
+        # 存档目录给一个共享临时目录（与改前 test_click_listing 的默认一致）：
+        # 失败路径真的会往里写原始页，默认 None 会让它崩。要断言的用例自己覆盖成本地 tmp。
+        "raw_page_dir": _RAW_PAGE_DIR,
+        "alarm_on_intervention": False,
+        "db_file": None,
+        "shop_csv": None,
+        "driver": "pw_cdp",
+        "ensure_dirs": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
 
 @contextmanager
 def isolated_locks():

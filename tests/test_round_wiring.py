@@ -9,7 +9,7 @@ from bestseller_monitor import browser_pw, pipeline, rounds
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import CST, Database, connect, cst_date
 from bestseller_monitor.rounds import RoundRequest, ScopeMismatch, ShopScope
-from helpers import isolated_locks, new_round
+from helpers import crawler_cfg, isolated_locks, new_round
 
 SHOP_CSV_HEADER = "shop_key,shop_name,shop_url,pages,active,offer_list_url"
 
@@ -33,14 +33,9 @@ class RoundScopeWiringTests(unittest.TestCase):
         self.shop_csv.write_text("\n".join(rows) + "\n", encoding="utf-8")
 
     def _cfg(self, **overrides):
-        values = {
-            "db_file": self.db_path,
-            "shop_csv": self.shop_csv,
-            "driver": "pw_cdp",
-            "ensure_dirs": MagicMock(),
-        }
-        values.update(overrides)
-        return SimpleNamespace(**values)
+        """这一层要的那几件（采集配置的默认值见 helpers.crawler_cfg）。"""
+        return crawler_cfg(db_file=self.db_path, shop_csv=self.shop_csv,
+                           driver="pw_cdp", ensure_dirs=MagicMock(), **overrides)
 
     @staticmethod
     def _shop(key):
@@ -174,25 +169,9 @@ class PwCdpRoundAssemblyTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def _cfg(self):
-        """record_params() 要的键与 deny 窗口都给全，其余字段这一层用不到。"""
-        return SimpleNamespace(
-            db_file=self.db_path,
-            driver="pw_cdp",
-            deny_window_minutes=10,
-            detail_delay_sec=(0.0, 0.0),
-            list_delay_sec=(0.0, 0.0),
-            long_pause_interval=(1, 1),
-            long_pause_sec=(0.0, 0.0),
-            batch_size=1,
-            batch_rest_sec=(0.0, 0.0),
-            action_delay_sec=(0.0, 0.0),
-            read_delay_sec=(0.0, 0.0),
-            retry_base_sec=0.0,
-            retry_jitter_sec=0.0,
-            max_pages_per_shop=3,
-            human_pause_minutes=1,
-            alarm_on_intervention=False,
-        )
+        """这一层要的那几件（采集配置的默认值见 helpers.crawler_cfg）。"""
+        return crawler_cfg(db_file=self.db_path, driver="pw_cdp", max_pages_per_shop=3,
+                           human_pause_minutes=1)
 
     def _run(self, listing):
         session = ("pw", "br", "page", "ctx")

@@ -20,7 +20,7 @@ from bestseller_monitor.detail import DetailParseFailed, parse_detail_html
 from bestseller_monitor.guard import InterventionTimeout, RoundPauseRequired
 from bestseller_monitor.listing import ListingLoadFailed
 from bestseller_monitor.rounds import RoundRequest, ShopScope
-from helpers import isolated_locks, new_round
+from helpers import crawler_cfg, isolated_locks, new_round
 from tools import check_orphans
 
 
@@ -54,7 +54,7 @@ class P1Tests(unittest.TestCase):
         # 页面内容一次就解析得出来，等可读那一步不会真的 sleep；打桩只为万一是等待。
         with patch.object(browser_pw.time, "sleep"):
             html = browser_pw.open_detail(
-                page, "https://detail.1688.com/offer/111.html", self._cfg(),
+                page, "https://detail.1688.com/offer/111.html", crawler_cfg(),
                 emit=lambda event, **kw: events.append((event, kw)))
 
         self.assertEqual([event for event, _ in events], ["detail_nav"],
@@ -67,34 +67,6 @@ class P1Tests(unittest.TestCase):
         self.conn.close()
         self.tmp.cleanup()
 
-    @staticmethod
-    def _cfg(**overrides):
-        values = {
-            "timeout_ms": 1,
-            "human_pause_minutes": 1,
-            "intervention_confirmation_sec": 0,
-            "fail_rate_limit": 0.1,
-            "max_attempts_per_page": 2,
-            "max_detail_opportunities_per_round": 1000,
-            "deny_window_minutes": 10,
-            "deny_shop_limit": 7,
-            "deny_round_limit": 10,
-            "deny_backoff_sec": 0.0,
-            "deny_retry2_backoff_sec": 0.0,
-            "shuffle_within_shop": False,
-            "long_pause_interval": (1, 1),
-            "detail_delay_sec": (0.0, 0.0),
-            "long_pause_sec": (0.0, 0.0),
-            "batch_size": 1,
-            "batch_rest_sec": (0.0, 0.0),
-            "list_delay_sec": (0.0, 0.0),
-            "action_delay_sec": (0.0, 0.0),
-            "read_delay_sec": (0.0, 0.0),
-            "retry_base_sec": 0.0,
-            "retry_jitter_sec": 0.0,
-        }
-        values.update(overrides)
-        return SimpleNamespace(**values)
 
     def test_detail_parser_rejects_missing_stock_and_accepts_zero(self):
         with self.assertRaisesRegex(DetailParseFailed, "未解析到 SKU"):
@@ -132,7 +104,7 @@ class P1Tests(unittest.TestCase):
         with patch.object(browser_pw, "open_detail", return_value=DETAIL_HTML), \
              patch.object(detail, "extract_main_image", return_value=None):
             pipeline._capture_one_pw(
-                self.db, self._cfg(), MagicMock(), round_id, offer, MagicMock(),
+                self.db, crawler_cfg(), MagicMock(), round_id, offer, MagicMock(),
             )
 
         row = self.conn.execute(
@@ -159,7 +131,7 @@ class P1Tests(unittest.TestCase):
              patch.object(detail, "extract_main_image",
                           side_effect=ValueError("图片字段异常")):
             pipeline._capture_one_pw(
-                self.db, self._cfg(raw_page_dir=Path(self.tmp.name) / "raw"),
+                self.db, crawler_cfg(raw_page_dir=Path(self.tmp.name) / "raw"),
                 MagicMock(), round_id, offer, MagicMock(),
             )
 
@@ -190,7 +162,7 @@ class P1Tests(unittest.TestCase):
         with patch.object(browser_pw.time, "sleep"), \
              patch.object(browser_pw, "intervention_kind", return_value=None):
             pipeline._capture_one_pw(
-                self.db, self._cfg(), MagicMock(), round_id, offer, page,
+                self.db, crawler_cfg(), MagicMock(), round_id, offer, page,
                 emit=lambda event, **kw: events.append(event),
             )
 
@@ -211,7 +183,7 @@ class P1Tests(unittest.TestCase):
 
         with patch.object(browser_pw, "open_detail", return_value="<html>deny</html>"):
             pipeline._capture_one_pw(
-                self.db, self._cfg(raw_page_dir=Path(self.tmp.name) / "raw"),
+                self.db, crawler_cfg(raw_page_dir=Path(self.tmp.name) / "raw"),
                 MagicMock(), round_id, offer, page, deny_tracker=tracker)
 
         self.assertEqual((tracker.shop_count("A01"), tracker.round_count()), (1, 1),
@@ -246,7 +218,7 @@ class P1Tests(unittest.TestCase):
             sku_rows=[{"sku_id": "22:1", "sku_name": "默认", "sku_price": 1.0,
                        "sku_stock": 3}],
             collected_at=utcnow(), attempt=1)
-        cfg = self._cfg(deny_shop_limit=2, raw_page_dir=Path(self.tmp.name) / "raw")
+        cfg = crawler_cfg(deny_shop_limit=2, raw_page_dir=Path(self.tmp.name) / "raw")
         page = MagicMock()
         page.url = "https://s.1688.com/bsop-punish?x=1"
         crawled: list[str] = []
@@ -303,7 +275,7 @@ class P1Tests(unittest.TestCase):
         for offer_id in map(str, range(2, 11)):
             self.db.mark_failure(round_id, "A01", offer_id, 1, "解析失败")
 
-        pipeline._finalize_round(self.db, self._cfg(), rounds.load(self.db, round_id))
+        pipeline._finalize_round(self.db, crawler_cfg(), rounds.load(self.db, round_id))
 
         row = self.conn.execute(
             "SELECT terminal_reason, note FROM rounds WHERE id=?", (round_id,)
@@ -317,7 +289,7 @@ class P1Tests(unittest.TestCase):
         self.db.mark_listing_failure(round_id, "A01", "首屏无商品卡片")
 
         with self.assertRaises(RoundPauseRequired):
-            pipeline._finalize_round(self.db, self._cfg(), rounds.load(self.db, round_id))
+            pipeline._finalize_round(self.db, crawler_cfg(), rounds.load(self.db, round_id))
 
         row = self.conn.execute(
             "SELECT terminal_reason, list_status, list_note FROM rounds JOIN shop_rounds "
@@ -417,7 +389,7 @@ class P1Tests(unittest.TestCase):
 
     def test_same_name_inventory_does_not_block_failed_offer_detail(self):
         round_id, offer = self._seed_same_name_failed_offer()
-        cfg = self._cfg()
+        cfg = crawler_cfg()
         with patch.object(browser_pw, "open_detail",
                           return_value=self._detail_html()) as capture:
             pipeline._capture_one_pw(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
@@ -436,7 +408,7 @@ class P1Tests(unittest.TestCase):
         )
         self.db.mark_failure(round_id, shop.key, "11", 1, "解析失败")
         self.db.mark_failure(round_id, shop.key, "22", 1, "解析失败")
-        cfg = self._cfg(max_detail_opportunities_per_round=1)
+        cfg = crawler_cfg(max_detail_opportunities_per_round=1)
 
         with patch.object(browser_pw, "open_detail",
                           return_value=self._detail_html()) as capture:
@@ -450,7 +422,7 @@ class P1Tests(unittest.TestCase):
 
     def test_detail_budget_exhaustion_finishes_round_with_terminal_note(self):
         db_path = Path(self.tmp.name) / "budget-terminal.db"
-        cfg = self._cfg(db_file=db_path, driver="pw_cdp", ensure_dirs=MagicMock())
+        cfg = crawler_cfg(db_file=db_path, driver="pw_cdp", ensure_dirs=MagicMock())
         with isolated_locks(), patch.object(
                 pipeline, "_run_pwcdp_round",
                 side_effect=pipeline.DetailBudgetExhausted("预算耗尽")):
@@ -488,7 +460,7 @@ class P1Tests(unittest.TestCase):
         with patch.object(click_listing, "crawl_store_by_click", side_effect=fake_crawl):
             with self.assertRaises(pipeline.DetailBudgetExhausted):
                 pipeline._run_listing_pw(
-                    self.db, self._cfg(), round_id, [shop], MagicMock(),
+                    self.db, crawler_cfg(), round_id, [shop], MagicMock(),
                 )
 
         offers = self.db.conn.execute(
@@ -525,7 +497,7 @@ class P1Tests(unittest.TestCase):
         offer = self.db.conn.execute(
             "SELECT * FROM shop_offers WHERE round_id=? AND offer_id='11'", (round_id,)
         ).fetchone()
-        cfg = self._cfg(max_detail_opportunities_per_round=1)
+        cfg = crawler_cfg(max_detail_opportunities_per_round=1)
 
         with patch.object(browser_pw, "open_detail") as capture:
             pipeline._capture_one_pw(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
@@ -536,7 +508,7 @@ class P1Tests(unittest.TestCase):
     def test_retry_shares_attempt_budget_with_first_visit(self):
         """初次访问已用掉的尝试次数要从补采的额度里扣掉。"""
         round_id, offer = self._seed_same_name_failed_offer()   # 商品 22 已有 attempt=1 的失败记录
-        cfg = self._cfg(max_attempts_per_page=2)
+        cfg = crawler_cfg(max_attempts_per_page=2)
 
         with patch.object(browser_pw, "open_detail",
                           return_value=self._detail_html()) as capture:
@@ -554,7 +526,7 @@ class P1Tests(unittest.TestCase):
         """尝试次数已在初次访问用尽时，补采不再访问详情。"""
         round_id, offer = self._seed_same_name_failed_offer()
         self.db.mark_failure(round_id, offer["shop_key"], "22", 2, "第二次也失败")
-        cfg = self._cfg(max_attempts_per_page=2)
+        cfg = crawler_cfg(max_attempts_per_page=2)
 
         with patch.object(browser_pw, "open_detail") as capture:
             pipeline._capture_one_pw(self.db, cfg, Humanizer(cfg), round_id, offer, MagicMock())
@@ -565,7 +537,7 @@ class P1Tests(unittest.TestCase):
         """兜底异常也要接着已用掉的尝试次数，而不是写回第 1 次。"""
         round_id, offer = self._seed_same_name_failed_offer()   # 商品 22 已有 attempt=1
         shop = Shop("A01", "店铺A", "https://shop.example/")
-        cfg = self._cfg()
+        cfg = crawler_cfg()
 
         with patch.object(pipeline, "_capture_one_pw", side_effect=RuntimeError("boom")):
             pipeline._retry_shop_pending_pw(
@@ -618,10 +590,10 @@ class P1Tests(unittest.TestCase):
                             if raises:
                                 with self.assertRaises(type(exc)):
                                     pipeline._run_listing_pw(
-                                        db, self._cfg(), round_id, [shop], MagicMock())
+                                        db, crawler_cfg(), round_id, [shop], MagicMock())
                             else:
                                 pipeline._run_listing_pw(
-                                    db, self._cfg(), round_id, [shop], MagicMock())
+                                    db, crawler_cfg(), round_id, [shop], MagicMock())
 
                         self.assertEqual(check_orphans.audit(conn, round_id)["orphans"], [])
                     finally:
@@ -642,7 +614,7 @@ class P1Tests(unittest.TestCase):
 
         with patch.object(click_listing, "crawl_store_by_click", side_effect=fake_crawl):
             with self.assertRaises(RuntimeError):
-                pipeline._run_listing_pw(self.db, self._cfg(), round_id, [shop], MagicMock())
+                pipeline._run_listing_pw(self.db, crawler_cfg(), round_id, [shop], MagicMock())
 
         row = self.conn.execute(
             "SELECT list_status, list_note FROM shop_rounds WHERE round_id=? AND shop_key='A01'",
@@ -671,7 +643,7 @@ class P1Tests(unittest.TestCase):
 
         with patch.object(click_listing, "crawl_store_by_click", side_effect=fake_crawl):
             with self.assertRaises(InterventionTimeout):
-                pipeline._run_listing_pw(self.db, self._cfg(), round_id, [shop], MagicMock())
+                pipeline._run_listing_pw(self.db, crawler_cfg(), round_id, [shop], MagicMock())
 
         row = self.conn.execute(
             "SELECT list_status, list_note FROM shop_rounds WHERE round_id=? AND shop_key='A01'",
@@ -708,7 +680,7 @@ class P1Tests(unittest.TestCase):
 
         with patch.object(click_listing, "crawl_store_by_click", side_effect=fake_crawl):
             with self.assertRaises(browser_pw.RoundDenyExceeded):
-                pipeline._run_listing_pw(self.db, self._cfg(), round_id, shops, MagicMock())
+                pipeline._run_listing_pw(self.db, crawler_cfg(), round_id, shops, MagicMock())
 
         rows = self.conn.execute(
             "SELECT shop_key, list_status, list_note FROM shop_rounds "
@@ -740,7 +712,7 @@ class P1Tests(unittest.TestCase):
             raise browser_pw.ShopDenyExceeded("店铺 A01 10 分钟内 deny≥7")
 
         with patch.object(click_listing, "crawl_store_by_click", side_effect=fake_crawl):
-            pipeline._run_listing_pw(self.db, self._cfg(), round_id, [shop], MagicMock())
+            pipeline._run_listing_pw(self.db, crawler_cfg(), round_id, [shop], MagicMock())
 
         row = self.conn.execute(
             "SELECT list_status, offer_count, list_note FROM shop_rounds "
@@ -764,7 +736,7 @@ class P1Tests(unittest.TestCase):
         ]
         for shop in shops:
             self.db.add_shop(round_id, shop.key, shop.url, shop.name)
-        cfg = self._cfg(raw_page_dir=Path(self.tmp.name) / "raw")
+        cfg = crawler_cfg(raw_page_dir=Path(self.tmp.name) / "raw")
         ok_offers = [(1, "22", "https://detail.1688.com/offer/22.html", "商品", "")]
         with patch.object(
             click_listing,
@@ -790,7 +762,7 @@ class P1Tests(unittest.TestCase):
         ]
         for shop in shops:
             self.db.add_shop(round_id, shop.key, shop.url, shop.name)
-        cfg = self._cfg()
+        cfg = crawler_cfg()
 
         self.db.mark_failure(
             round_id, "A01", "1", 1, "解析失败",
