@@ -98,6 +98,8 @@ def bind_process(pid: int) -> ProcessCapability | None:
 
 
 def process_capability_alive(capability: ProcessCapability) -> bool | None:
+    if capability is None:
+        return None
     if os.name != "nt":
         return None
     try:
@@ -112,6 +114,8 @@ def process_capability_alive(capability: ProcessCapability) -> bool | None:
 
 
 def terminate_process_capability(capability: ProcessCapability) -> bool:
+    if capability is None:
+        return False
     if os.name != "nt":
         return False
     try:

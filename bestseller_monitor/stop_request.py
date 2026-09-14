@@ -239,11 +239,11 @@ class ProcessStopRuntime:
         if handle is not None:
             return BoundTarget(target, handle)
         if target.process_os_started is None:
-            raise RuntimeError("process_identity_unavailable")
+            return BoundTarget(target, None)
         from . import browser_proc
         capability = browser_proc.bind_process(target.pid)
         if capability is None:
-            raise RuntimeError("process_binding_unavailable")
+            return BoundTarget(target, None)
         if (target.process_os_started is not None
                 and capability.created != target.process_os_started):
             browser_proc.release_process_capability(capability)
