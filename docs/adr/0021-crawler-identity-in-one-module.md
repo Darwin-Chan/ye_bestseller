@@ -41,15 +41,34 @@
 
 ## 结果
 
-- 「谁在跑」只剩一处判据；`crawler_process` 的物理列名只在 `crawler_identity` 里出现
-  （`db.py` 的表定义与 `record_/clear_` 除外）。
+- 「谁在跑」只剩一处判据；界面与停止协议都不再写这条 SQL，`crawler_process` 的物理列名只在
+  `crawler_identity.py`（判据）、`db.py`（表定义与 `record_/clear_`）与 `tools/diag_stop_request.py`
+  （诊断脚本有意直接看原始列，与 `check_orphans.py` 同一类）里出现。
 - 新增 `tests/test_crawler_identity.py` 十条：锁是权威、子进程兜底窗口、纯读不清残留、
   残留清理、「只有锁没有行」的占位身份、「锁在别处、行没写」的未知身份、没有进程时为 None、
-  payload 形状。其中「不构造 `Api` 也能测清残留」正是改前做不到的那一条。
+  身份 → 停止目标、payload 形状。其中「不构造 `Api` 也能测清残留」正是改前做不到的那一条。
 - `test_gui` 那条残留用例保留，继续守界面路径；`test_stop_request` 的停止目标改用
-  `CrawlerProcess`。
-- **行为零变化**：锁权威、子进程兜底、占位身份、残留清理时机、停止目标字段、payload 形状
-  逐条照旧。全套 388 条通过、1 条跳过。
+  `stop_request.StopTarget`。
+- **行为变化的唯一一处**：界面 payload 从「整行 dump」变成概念的四个字段，因此少了没人读的
+  `id`（`docs/ui_live.html` 只读 `d.crawler.round_id`）。其余逐条照旧：锁权威、子进程兜底、
+  占位身份、残留清理时机、停止目标字段。全套 388 条通过、1 条跳过。
+
+**与 ADR-0011 的关系（显式推翻一条）**：0011 决策写「`Api` 保留两处写……`crawler_identity()`
+仍在 `Api`（它要问会话锁、并会清掉残留身份行，不是纯读）」——本条把判据与清残留都搬进 module，
+`Api` 只剩一行接线，0011 的状态行已注明取代。0011 另否掉过「读模型返回 dataclass 再由 `Api`
+转 dict」：那条说的是 `views` 的返回形状，本条没动它（`views` 仍返回 dict）；换掉的是身份的
+**入参**类型，出界时才用 `to_payload()` 转回 dict。
+
+两轴审查（这次两个子 agent 都用最小上下文 spawn，正常交付）的收口：
+
+- **Standards 轴**：`Api.crawler_identity` 与 module 同名易混 → 方法改名 `current_crawler`；
+  「停止目标」与「谁在跑」共用一个类型（`StopInFlight.target` 只认 pid + 启动时刻）→ 新增
+  `stop_request.StopTarget`（含 `of()` 把身份翻成目标，顺手把 0011 时代 `_stop_target` 那道
+  「pid 与启动时刻都得有」的闸补回来）；`abort_run` 不再读同一行两次；`current()` 只在真要清
+  残留时才建 `Database`；`registered()` 去掉 `pid NOT NULL` 下不可达的那次判空。
+- **Spec 轴**：上面那条 payload 少一个 `id` 的差别原本被写成「形状照旧」，已改成如实描述。
+- 留着的一条判断：`current()` 这个名字装不下「判定 + 顺手清」两件事（清理只在判定为没人在跑时
+  发生）。ADR-0008 把这两件定成一件事，所以清残留留在它里面；名字取「现在是谁」。
 
 被否掉的方向：
 

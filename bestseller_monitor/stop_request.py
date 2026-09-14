@@ -111,11 +111,29 @@ def consume(db: Database, *, pid: int | None = None) -> None:
 # ---------- 界面端：把「正在停止」这件事编排完 ----------
 
 @dataclass(frozen=True)
+class StopTarget:
+    """这次停止针对哪个进程：协议按 (PID, 启动时刻) 认人（ADR-0009）。
+
+    它不是「谁在跑」那条身份的别名——身份行还带轮次与备注，这里只要认人那两件。
+    `of()` 负责把身份行翻成目标：拿不到 pid 或启动时刻就没有目标（等于没有回执的窗口）。
+    """
+
+    pid: int
+    started_at: str
+
+    @classmethod
+    def of(cls, who: CrawlerProcess | None) -> "StopTarget | None":
+        if who is None or not who.pid or not who.started_at:
+            return None
+        return cls(int(who.pid), who.started_at)
+
+
+@dataclass(frozen=True)
 class StopInFlight:
     """界面侧正在进行的停止：等采集进程自己停下，窗口到点才强杀。"""
 
     kind: str
-    target: CrawlerProcess | None
+    target: StopTarget | None
     deadline: float
     acked: bool = False
 
@@ -163,7 +181,7 @@ class StopWatch:
         """丢掉在跑的停止：没起过任务、也没有采集在跑时用。"""
         self._in_flight = None
 
-    def begin(self, kind: str, target: CrawlerProcess | None) -> StopInFlight:
+    def begin(self, kind: str, target: StopTarget | None) -> StopInFlight:
         """记下「正在停止」：不阻塞，倒计时与超时兜底交给轮询。"""
         self._in_flight = StopInFlight(kind=kind, target=target,
                                        deadline=self._now() + self._grace_sec)

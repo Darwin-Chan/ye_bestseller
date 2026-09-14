@@ -138,7 +138,7 @@ class Api:
             stop_foreign=lambda identity: self._stop_crawler_process(identity),
             close_browser=lambda: self._kill_browser(),
             is_running=lambda: self.any_crawler_running(),
-            identity_of=lambda conn: self.crawler_identity(conn),
+            identity_of=lambda conn: self.current_crawler(conn),
             now=stop_clock or time.time,
         )
 
@@ -180,7 +180,7 @@ class Api:
                 self._stop_watch.tick(conn)
                 return views.start_view(
                     conn, cfg=self.cfg, shops=self.shops, state=self._ui_state(),
-                    crawler=self.crawler_identity(conn), now=self._now())
+                    crawler=self.current_crawler(conn), now=self._now())
             finally:
                 conn.close()
 
@@ -211,7 +211,7 @@ class Api:
         """有采集进程在跑吗（判据在 crawler_identity，这里只接线）。"""
         return crawler_identity.is_running(own_alive=self._own_crawler_alive())
 
-    def crawler_identity(self, conn):
+    def current_crawler(self, conn):
         """正在跑的采集进程身份；没有就返回 None（判据 + 顺手清残留在 crawler_identity）。"""
         return crawler_identity.current(
             conn,
@@ -253,7 +253,7 @@ class Api:
             try:
                 # 有采集进程在跑就不许再起一个：界面与命令行共用同一把会话锁，
                 # 判据是环境事实，不是「本界面记不记得自己拉过子进程」。
-                if self.crawler_identity(conn) is not None:
+                if self.current_crawler(conn) is not None:
                     return {"ok": False, "error": _BUSY_ERROR}
                 # 只读地问一句会不会被拒：今天已有轮次但范围不同就给出可读理由。
                 # 轮次本身由采集子进程创建，启动失败不会留下空的「进行中」轮次。
@@ -325,7 +325,7 @@ class Api:
                 db = Database(conn)
                 if not self._own_crawler_alive():
                     return {"ok": True}   # 本界面没有在跑的采集进程，没什么可暂停的
-                target = crawler_identity.registered(conn)
+                target = stop_request.StopTarget.of(crawler_identity.registered(conn))
                 if target is None:
                     # 身份行还没登记（子进程刚拉起的那一小段）：退回强制结束，
                     # 此时它连浏览器都还没起，不会留下孤儿。
@@ -358,7 +358,7 @@ class Api:
                 # 这一处清理不是卫生，是语义：中止压过暂停——留下的暂停请求会让
                 # 采集进程把这次停止认领成「暂停」，日志与店铺备注就写错了原因。
                 db.clear_stop_request()
-                identity = self.crawler_identity(conn)
+                identity = self.current_crawler(conn)
                 if self.round_id is None and identity is None:
                     self._stop_watch.forget()
                     return {"ok": True}  # 没起过任务、也没有采集在跑：不必连库
@@ -369,8 +369,9 @@ class Api:
                 if identity is None:
                     self._stop_watch.forget()
                     return {"ok": True, "round_id": rid}   # 采集进程已经不在了
+                # 同一条身份行只读这一次：它是「正在跑的是谁」，也是这次停止的目标。
                 self._stop_watch.begin(stop_request.ABORT,
-                                       crawler_identity.registered(conn))
+                                       stop_request.StopTarget.of(identity))
                 log.info("中止：轮次 #%s 已收尾为人工放弃，等采集进程自己停下。", rid)
                 return {"ok": True, "round_id": rid, "stopping": self._stop_watch.state}
             finally:

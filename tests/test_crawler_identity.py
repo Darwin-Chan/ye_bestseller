@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from bestseller_monitor import crawler_identity, single_instance
+from bestseller_monitor import crawler_identity, single_instance, stop_request
 from bestseller_monitor.crawler_identity import CrawlerProcess
 from bestseller_monitor.db import Database, connect
 from helpers import isolated_locks, new_round
@@ -106,6 +106,17 @@ class CrawlerIdentityTests(unittest.TestCase):
 
         self.assertEqual(who.to_payload(),
                          {"pid": 1, "round_id": 2, "started_at": "t", "note": None})
+
+    # ---------- 身份 → 停止目标 ----------
+    def test_a_stop_target_needs_both_a_pid_and_a_started_at(self):
+        """停止请求按 (PID, 启动时刻) 认人：占位身份（还没有启动时刻）成不了目标。"""
+        row = self.db.record_crawler_process(pid=4321, round_id=self.round_id, note="run.py")
+        placeholder = CrawlerProcess(pid=999, round_id=self.round_id)
+
+        self.assertEqual(stop_request.StopTarget.of(crawler_identity.registered(self.conn)),
+                         stop_request.StopTarget(pid=4321, started_at=row))
+        self.assertIsNone(stop_request.StopTarget.of(placeholder))
+        self.assertIsNone(stop_request.StopTarget.of(None))
 
 
 if __name__ == "__main__":

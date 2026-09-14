@@ -58,8 +58,7 @@ def registered(conn) -> CrawlerProcess | None:
     row = Database(conn).crawler_process()
     if row is None:
         return None
-    return CrawlerProcess(pid=int(row["pid"]) if row["pid"] is not None else None,
-                          round_id=row["round_id"],
+    return CrawlerProcess(pid=int(row["pid"]), round_id=row["round_id"],
                           started_at=row["started_at"], note=row["note"])
 
 
@@ -70,11 +69,10 @@ def current(conn, *, own_alive: bool = False, own_pid: int | None = None,
     `own_*` 是界面会话自己的事实（它拉起的那个子进程、它认领的轮次），只在 `own_alive`
     为真时参与——不是本界面起的进程，界面拿不到它的 pid。
     """
-    database = Database(conn)
     who = registered(conn)
     if not is_running(own_alive=own_alive):
         if who is not None:
-            database.clear_crawler_process()
+            Database(conn).clear_crawler_process()
         return None
     if who is not None:
         return who

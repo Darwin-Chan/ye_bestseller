@@ -1,6 +1,6 @@
 # 0011. 界面取数走 views module，时刻与连接从入参来
 
-- 状态：已接受
+- 状态：已接受（一条决策被 [ADR-0021](0021-crawler-identity-in-one-module.md) 取代：「`Api` 保留两处写……`crawler_identity()` 仍在 `Api`」——判据与清残留搬进 `crawler_identity` module，`Api` 只剩一行接线）
 - 日期：2026-09-13
 
 ## 背景
