@@ -33,7 +33,14 @@
         <p class="text-xs uppercase tracking-[0.2em] text-slate-400">架构审查 · 第二轮 · 加深机会</p>
         <h1 class="text-4xl font-serif">bestseller / 1688 库存快照</h1>
         <p class="text-sm text-slate-500">2026-09-13 · HEAD 46b20d7 · 上一轮（<a class="underline" href="file:///F:/AI/projects/bestseller/docs/reviews/architecture-review-2026-09-13.html">候选 01–06</a>）已全部落地，本轮扫它之后又改的 14 个提交</p>
-        <p class="text-sm text-slate-600 border-l-4 border-amber-300 bg-amber-50 px-4 py-3 rounded">归档说明：本报告是 2026-09-13 第二轮审查的快照（当时 HEAD <code>46b20d7</code>），文中的行号与数字指向当时的工作区，之后已位移；正文保持快照原样，不随实现更新。候选 01「本轮计数收成一份 round_tally」同日落地：新增 <code>Database.round_tally()</code> / <code>ShopTally</code> / <code>RoundTally</code>，删掉 <code>success_rows</code> / <code>failed_rows</code> / <code>offer_counts</code>，见 <code>docs/adr/0017-round-counts-in-one-place.md</code> 与 <code>.scratch/round-tally/spec.md</code>；主体见 <code>55a51ce</code>，两轴审查（Standards 0 条成文违规 / 4 条基线气味，Spec a=0 / b=1 / c=2）的收口见 <code>bf79b84</code>，全套 350 条用例通过、1 条跳过。候选 02–06 仍未做。</p>
+        <p class="text-sm text-slate-600 border-l-4 border-amber-300 bg-amber-50 px-4 py-3 rounded">归档说明：本报告是 2026-09-13 第二轮审查的快照（当时 HEAD <code>46b20d7</code>），文中的行号与数字指向当时的工作区，之后已位移；正文保持快照原样，不随实现更新。<b>六个候选已全部落地</b>（每个都是「主体 + 两轴审查收口」两个提交）：<br>
+        <b>01 本轮计数收成 <code>Database.round_tally()</code></b>（<code>55a51ce</code> / <code>bf79b84</code>，ADR-0017）——口径统一到榜单行、孤儿单列，删掉 <code>success_rows</code>/<code>failed_rows</code>/<code>offer_counts</code>；30 万行合成库上一次刷新 0.53 秒（护栏 1 秒）。<br>
+        <b>02 「页面 → 观测」翻译收进 <code>detail.observe_page()</code></b>（<code>a207f03</code>，ADR-0018）——两条路同一份失败分类，补采也留原始页；收口落在 <code>c7a0d8d</code>（与 03 的收口混在同一提交里，见下）。<br>
+        <b>03 诊断工具共用一个浏览器会话</b>（<code>223adac</code> / <code>c7a0d8d</code> / <code>7291893</code>，ADR-0019）——删掉固定 <code>sleep(9)</code> 与会把整机 Edge 一起关掉的 <code>taskkill</code>，补上失败分支的收尾。<br>
+        <b>04 详情访问只有一处规则</b>（<code>91a10cc</code> / <code>887b7c5</code>，ADR-0020）——<code>guard.ready_detail_page()</code> 先认 deny 再等人工介入，补采的 deny 计入阈值，固定 <code>sleep(2)</code> 换成条件等待。<br>
+        <b>05 采集进程身份收成 <code>crawler_identity</code> module</b>（<code>d375703</code> / <code>5b15d4c</code>，ADR-0021）——判据与清残留一处，<code>StopTarget</code> 独立成类型。<br>
+        <b>06 测试的采集配置替身收成 <code>helpers.crawler_cfg()</code></b>（<code>593b4aa</code> / <code>9c26cf5</code> / <code>4d6fdb6</code>，ADR-0022）——九份 → 一处，替身与真 <code>Config</code> 同形。<br>
+        全套 <b>393 条用例通过、1 条跳过</b>。两处挂账：<code>c7a0d8d</code> 把候选 02 的收口与候选 03 的收口混在一个提交里（要拆得 rebase，未动）；北京时间 <b>23:55–24:00</b> 这五分钟里，一批用真挂钟建当天轮次的用例会因 <code>DAY_CUTOFF=(23,55)</code> 必红（修法是给那批用例注入时刻，未做）。</p>
         <div class="flex flex-wrap gap-x-6 gap-y-2 text-xs text-slate-500 border-t border-slate-200 pt-4">
           <span><span class="inline-block w-4 h-3 border border-slate-400 align-middle mr-1"></span>module</span>
           <span><span class="inline-block w-4 h-0 border-t border-dashed border-slate-500 align-middle mr-1"></span>seam</span>
