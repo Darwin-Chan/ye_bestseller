@@ -450,6 +450,62 @@ class BrowserSessionEstablishmentTests(unittest.TestCase):
 
         self.assertEqual(kill.call_args_list, [unittest.mock.call(proc.pid)] * 2)
 
+    def test_owned_process_that_lags_behind_the_terminate_command_is_cleaned(self):
+        """终止命令返回时进程可能还没走完：同一 Popen 探到退出才算收尾完成。"""
+        proc = FakeProcess(20311)
+        factory, pw, br, _, _ = self.stack(browser_pid=proc.pid)
+        killed = {"flag": False, "polls": 0}
+
+        def terminate(pid):
+            killed["flag"] = True
+            return True
+
+        def poll():
+            if not killed["flag"]:
+                return None
+            killed["polls"] += 1
+            return None if killed["polls"] <= 2 else 0
+
+        proc.poll = poll
+        states = []
+        publish = lambda *state: states.append(state) or True
+
+        with patch("playwright.sync_api.sync_playwright", return_value=factory), \
+                patch.object(browser_pw.subprocess, "Popen", return_value=proc), \
+                patch.object(browser_proc, "process_creation_proof", return_value="proof"), \
+                patch.object(browser_proc, "terminate_process_tree", side_effect=terminate), \
+                patch.object(browser_proc.time, "sleep") as sleep:
+            browser_pw.open_session(self.cfg(), publish_browser=publish)
+            browser_pw.close_session(pw, br, publish_browser=publish)
+
+        self.assertEqual(killed["polls"], 3)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(states[-1], ("CLOSED", None, None, None))
+
+    def test_owned_process_that_never_exits_is_retained_at_the_bound(self):
+        """命令成功但进程一直活着：到上限保留待清理项，下一个会话被拒。"""
+        proc = FakeProcess(20312)
+        factory, pw, br, _, _ = self.stack(browser_pid=proc.pid)
+        states = []
+        publish = lambda *state: states.append(state) or True
+
+        with patch("playwright.sync_api.sync_playwright", return_value=factory), \
+                patch.object(browser_pw.subprocess, "Popen", return_value=proc), \
+                patch.object(browser_proc, "process_creation_proof", return_value="proof"), \
+                patch.object(browser_proc, "_VERIFY_EXIT_TIMEOUT_SEC", 0.0), \
+                patch.object(browser_proc, "terminate_process_tree", return_value=True):
+            browser_pw.open_session(self.cfg(), publish_browser=publish)
+            browser_pw.close_session(pw, br, publish_browser=publish)
+            self.assertTrue(proc.alive)
+            self.assertNotIn(("CLOSED", None, None, None), states)
+            with self.assertRaises(RuntimeError):
+                browser_pw.open_session(self.cfg())
+
+            proc.alive = False          # 进程最终退出：重复 close 的重试把账收干净
+            browser_pw.close_session(pw, br, publish_browser=publish)
+
+        self.assertEqual(states[-1], ("CLOSED", None, None, None))
+
     def test_closed_publication_failure_does_not_retain_a_clean_session(self):
         factory, pw, br, _, _ = self.stack()
         states = []

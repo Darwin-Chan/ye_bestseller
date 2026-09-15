@@ -11,9 +11,14 @@ import logging
 import ctypes
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
+
+# 终止命令发出后，仍用同一原始句柄确认目标真的退出；上限是模块内部值，不增加配置。
+_VERIFY_EXIT_TIMEOUT_SEC = 2.0
+_VERIFY_EXIT_POLL_SEC = 0.1
 
 @dataclass
 class ProcessCapability:
@@ -136,6 +141,24 @@ def terminate_process_tree(pid: int) -> bool:
     return True
 
 
+def wait_until_gone(probe, *, timeout: float | None = None, poll: float | None = None):
+    """Probe an already-terminated target until it is gone, within a bound.
+
+    ``probe`` reports ``True`` while the exact target is still alive, ``False``
+    once it is gone, and ``None`` when that cannot be verified. The wait ends at
+    the first ``False``/``None`` and returns it: a ``None`` is never taken as
+    gone, and only a ``True`` keeps probing until ``timeout`` expires.
+    """
+    timeout = _VERIFY_EXIT_TIMEOUT_SEC if timeout is None else timeout
+    poll = _VERIFY_EXIT_POLL_SEC if poll is None else poll
+    deadline = time.monotonic() + timeout
+    state = probe()
+    while state is True and time.monotonic() < deadline:
+        time.sleep(poll)
+        state = probe()
+    return state
+
+
 def close_browser(port: int, *, launched_by_us: bool, browser_pid: int | None = None,
                   browser_os_started: str | None = None) -> int | None:
     """Close a browser process bound by an exact creation proof.
@@ -167,7 +190,7 @@ def close_browser(port: int, *, launched_by_us: bool, browser_pid: int | None = 
             return None
         if not terminate_process_capability(capability):
             return None
-        gone = process_capability_alive(capability)
+        gone = wait_until_gone(lambda: process_capability_alive(capability))
         if gone is False:
             log.info("已关闭本次启动的浏览器进程（PID %s）。", browser_pid)
             return browser_pid

@@ -243,7 +243,7 @@ def _cleanup(resources: _SessionResources) -> bool:
         if not proc_was_alive:
             resources.proc = None
         elif browser_proc.terminate_process_tree(proc.pid):
-            if proc.poll() is not None:
+            if browser_proc.wait_until_gone(lambda: proc.poll() is None) is False:
                 resources.proc = None
             else:
                 log.warning("浏览器会话清理后进程仍存活（阶段 cleanup，PID %s）。", proc.pid)

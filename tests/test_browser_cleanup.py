@@ -61,9 +61,45 @@ class CloseBrowserTests(unittest.TestCase):
         terminate.assert_called_once_with(capability)
         release.assert_called_once_with(capability)
 
+    def test_matching_proof_keeps_probing_until_the_bound_target_is_gone(self):
+        """终止命令返回时进程可能还没走完：同一 capability 探到退出才算数。"""
+        capability = browser_proc.ProcessCapability(6104, 94, "proof")
+        with patch.object(browser_proc, "bind_process", return_value=capability), \
+                patch.object(browser_proc, "process_capability_alive",
+                             side_effect=[True, True, False]) as alive, \
+                patch.object(browser_proc.time, "sleep") as sleep, \
+                patch.object(browser_proc, "terminate_process_capability",
+                             return_value=True) as terminate, \
+                patch.object(browser_proc, "release_process_capability"):
+            self.assertEqual(browser_proc.close_browser(
+                9222, launched_by_us=True, browser_pid=6104,
+                browser_os_started="proof"), 6104)
+
+        terminate.assert_called_once_with(capability)
+        self.assertEqual(alive.call_count, 3)
+        sleep.assert_called_once()
+
+    def test_unverifiable_exit_is_retained_without_retrying(self):
+        """核验动作拿不到答案是「不可核验」，保留待清理项，不当成已退出，也不重探。"""
+        capability = browser_proc.ProcessCapability(6104, 95, "proof")
+        with patch.object(browser_proc, "bind_process", return_value=capability), \
+                patch.object(browser_proc, "process_capability_alive",
+                             side_effect=[True, None]) as alive, \
+                patch.object(browser_proc.time, "sleep") as sleep, \
+                patch.object(browser_proc, "terminate_process_capability", return_value=True), \
+                patch.object(browser_proc, "release_process_capability"), \
+                self.assertLogs(LOG, level="WARNING"):
+            self.assertIsNone(browser_proc.close_browser(
+                9222, launched_by_us=True, browser_pid=6104,
+                browser_os_started="proof"))
+
+        self.assertEqual(alive.call_count, 2)
+        sleep.assert_not_called()
+
     def test_target_that_remains_alive_is_retained_as_a_cleanup_failure(self):
         capability = browser_proc.ProcessCapability(6104, 93, "proof")
-        with patch.object(browser_proc, "bind_process", return_value=capability), \
+        with patch.object(browser_proc, "_VERIFY_EXIT_TIMEOUT_SEC", 0.0), \
+                patch.object(browser_proc, "bind_process", return_value=capability), \
                 patch.object(browser_proc, "process_capability_alive", return_value=True), \
                 patch.object(browser_proc, "terminate_process_capability", return_value=True), \
                 patch.object(browser_proc, "release_process_capability"):
