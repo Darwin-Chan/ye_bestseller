@@ -375,8 +375,8 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
     emit = db.event_logger(round_id, config_hash)
     def publish(state, port, browser_pid, browser_os_started):
         if started_at is None:
-            return
-        db.publish_browser_state_if_current(
+            return False
+        return db.publish_browser_state_if_current(
             target_pid=os.getpid(), target_started_at=started_at,
             browser_state=state, browser_port=port, browser_pid=browser_pid,
             browser_os_started=browser_os_started)

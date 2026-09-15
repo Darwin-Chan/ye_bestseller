@@ -1,11 +1,11 @@
-"""手动验证：轮次收尾与 GUI 暂停/中止后，本任务启动的 Edge 是否真的被关掉（IS-43）。
+"""手动验证：自有会话正常收尾，以及 profile handoff 不误杀外部 Edge（IS-43）。
 
 只在 Windows + 本机 Edge 上跑，使用独立临时 profile 与专用端口（默认 9333），
 不碰线上 9222，也不碰用户的其它 Edge 窗口。
 
 用法：
     python tools/diag_edge_cleanup.py
-退出码 0 = 三组都绿；非 0 = 出现"轮次结束了但 Edge 还占着调试端口"。
+退出码 0 = 两组都绿；非 0 = 归属行为与预期不符。
 """
 from __future__ import annotations
 
@@ -37,6 +37,13 @@ def port_owner() -> int | None:
     return browser_proc.listen_port_owner(PORT)
 
 
+def cleanup() -> None:
+    """Best-effort setup cleanup requires an exact probe target, never a port kill."""
+    owner = port_owner()
+    if owner is not None:
+        print(f"    现有端口占用者 PID={owner}，不做无 proof 强杀")
+
+
 def cfg() -> SimpleNamespace:
     return SimpleNamespace(
         chrome_path=EDGE,
@@ -47,23 +54,12 @@ def cfg() -> SimpleNamespace:
     )
 
 
-def cleanup() -> None:
-    owner = port_owner()
-    if owner:
-        browser_proc.terminate_process_tree(owner)
-    time.sleep(2)
-
-
 def round_once() -> dict:
     """跑一轮：open_session → close_session，返回插桩。"""
     from bestseller_monitor import browser_pw
 
     out: dict = {"port_owner_before": port_owner()}
     session = browser_pw.open_session(cfg())
-    proc = browser_pw._launched_proc
-    out["popen_pid"] = proc.pid if proc else None
-    time.sleep(3)
-    out["popen_exited_at_3s"] = proc.poll() is not None if proc else None
     out["cdp_browser_pid"] = browser_pw.cdp_browser_pid(session[1])
     browser_pw.close_session(session[0], session[1])
     time.sleep(3)
@@ -76,9 +72,7 @@ def mode_hold() -> int:
     from bestseller_monitor import browser_pw
 
     session = browser_pw.open_session(cfg())
-    proc = browser_pw._launched_proc
-    print(json.dumps({"popen_pid": proc.pid if proc else None,
-                      "port_owner": port_owner(),
+    print(json.dumps({"port_owner": port_owner(),
                       "cdp_browser_pid": browser_pw.cdp_browser_pid(session[1])}),
           flush=True)
     time.sleep(600)
@@ -131,31 +125,20 @@ def main() -> int:
     cleanup()
     print(f"基线：msedge={msedge_count()} 端口{PORT}占用者={port_owner()}")
 
-    print("\n[1/3] 干净环境跑一轮（期望绿）")
+    print("\n[1/2] 干净环境跑一轮（期望绿）")
     _, control = run_child("round")
     print("   ", control)
     green1 = bool(control) and control.get("port_owner_after_close") is None
 
-    print("\n[2/3] 上一轮被暂停强杀留下浏览器，本轮正常收尾（期望绿）")
-    cleanup()
+    print("\n[2/2] 上一轮被暂停强杀留下浏览器，本轮 handoff 不误杀（期望绿）")
     paused_crawler()
     _, after = run_child("round")
     print("   ", after)
-    green2 = bool(after) and after.get("port_owner_after_close") is None
+    green2 = bool(after) and after.get("port_owner_after_close") is not None
 
-    print("\n[3/3] 上一轮被暂停强杀留下浏览器，GUI 暂停路径收尾（期望绿）")
-    cleanup()
-    paused_crawler()
-    closed = browser_proc.close_browser(PORT, launched_by_us=True)
-    time.sleep(2)
-    print(f"    GUI 收尾关掉的 PID={closed} 端口占用者={port_owner()}")
-    green3 = port_owner() is None
-
-    cleanup()
     print(f"\n清理后：msedge={msedge_count()} 端口{PORT}占用者={port_owner()}")
-    print(f"结果：[1]={'绿' if green1 else '红'} [2]={'绿' if green2 else '红'} "
-          f"[3]={'绿' if green3 else '红'}")
-    return 0 if (green1 and green2 and green3) else 1
+    print(f"结果：[1]={'绿' if green1 else '红'} [2]={'绿' if green2 else '红'}")
+    return 0 if (green1 and green2) else 1
 
 
 if __name__ == "__main__":

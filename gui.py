@@ -64,10 +64,6 @@ WINDOW_TITLE = "1688 畅销品监控 · 每日库存抓取"
 
 log = logging.getLogger(__name__)
 
-# 暂停/中止后收尾浏览器：抓取进程被强杀时端口可能还没监听，短暂重试几次（IS-43）。
-_BROWSER_CLOSE_RETRY_SEC = 3.0
-_BROWSER_CLOSE_RETRY_INTERVAL = 0.7
-
 # 一句提示的 MessageBox 旗标：信息图标 + 抢到前台 + 置顶。
 _MB_ICONINFORMATION = 0x40
 _MB_SETFOREGROUND = 0x10000
@@ -138,7 +134,6 @@ class Api:
             browser_enabled=getattr(self.cfg, "start_browser", True),
             terminate=lambda bound: self._terminate_bound(bound),
             close_browser=lambda browser: self._close_bound_browser(browser),
-            browser_port=lambda: self.cfg.attach_port,
         )
         self._stop_watch = stop_request.StopWatch(
             runtime, now=stop_clock or time.time,
@@ -248,8 +243,6 @@ class Api:
     def _close_bound_browser(self, browser):
         if browser.port is None:
             return True
-        if browser.compatibility:
-            return browser_proc.close_browser(browser.port, launched_by_us=True) is not None
         result = browser_proc.close_browser(
             browser.port, launched_by_us=True, browser_pid=browser.pid,
             browser_os_started=browser.os_started)
@@ -361,10 +354,6 @@ class Api:
                         # 身份登记前没有浏览器副作用；只结束入口时冻结的 child。
                         log.info("暂停：身份尚未登记，结束入口时冻结的子进程。")
                         self._kill_proc()
-                        # Legacy test doubles have no numeric process handle. They
-                        # predate browser publication and are kept isolated here.
-                        if not isinstance(getattr(self.proc, "pid", None), int):
-                            self._kill_browser()
                         return {"ok": True}
                     return {"ok": False, "error": "暂时无法确认停止目标，请稍后重试。",
                             "retryable": True}
@@ -445,17 +434,6 @@ class Api:
                 self.proc.terminate()
             except OSError:
                 pass
-
-    def _kill_browser(self):
-        """收尾本任务启动的浏览器：抓取进程被强杀时不会执行它的 finally（IS-43）。"""
-        if not getattr(self.cfg, "start_browser", True):
-            return  # start_browser=false：接管用户自己的浏览器，不动它
-        deadline = time.time() + _BROWSER_CLOSE_RETRY_SEC
-        while True:
-            pid = browser_proc.close_browser(self.cfg.attach_port, launched_by_us=True)
-            if pid is not None or time.time() >= deadline:
-                return pid
-            time.sleep(_BROWSER_CLOSE_RETRY_INTERVAL)
 
     # ---------- 停止：先请求，超时才强杀（ADR-0009） ----------
     # ---------- 结果页 ----------

@@ -15,7 +15,11 @@ import logging
 import os
 import re
 import subprocess
+import threading
 import time
+from collections import deque
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from . import browser_proc, listing
 from .click_listing import WAIT_POPUP_MS
@@ -33,11 +37,32 @@ from .guard import (  # noqa: F401
 
 log = logging.getLogger(__name__)
 
-# 记录本次由 open_session 启动的浏览器进程与调试端口：
-# 收尾只结束本任务启动的浏览器，绝不波及用户其它 Edge 窗口。
-_launched_proc = None
-_launched_port = None
-_launched_os_started = None
+@dataclass
+class _SessionResources:
+    """One session's exact handles, acquired in establishment order."""
+
+    token: object
+    port: int
+    publisher: Callable[..., bool] | None
+    start_browser: bool
+    proc: Any = None
+    launch_proof: str | None = None
+    pw: Any = None
+    br: Any = None
+    page: Any = None
+    ctx: Any = None
+    handle_pw: Any = None
+    handle_br: Any = None
+    delivered: bool = False
+    phase: str = "opening"
+    publication_failed: bool = False
+
+
+_session_lock = threading.RLock()
+_session: _SessionResources | None = None
+# A small identity cache makes repeated close a no-op without letting an old A
+# close a newer B. Closed Playwright handles are retained only for this bound.
+_closed_handles: deque[tuple[Any, Any, Callable[..., bool] | None]] = deque(maxlen=16)
 
 # 兼容旧私有名/旧名（本文件内部与诊断工具仍引用）
 _body_text = body_text
@@ -59,84 +84,209 @@ _click_text_in_frames = listing.click_text_in_frames
 
 
 def open_session(cfg: Config, *, publish_browser=None):
-    global _launched_proc, _launched_port, _launched_os_started
+    global _session
+    _clear_pending_before_open()
     from playwright.sync_api import sync_playwright
 
-    edge = cfg.chrome_path or r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-    proc = None
-    launch_proof = None
-    if publish_browser is not None and getattr(cfg, "start_browser", True):
-        publish_browser("STARTING", cfg.attach_port, None, None)
-    if getattr(cfg, "start_browser", True) and os.path.exists(edge):
-        proc = subprocess.Popen([
-            edge,
-            f"--remote-debugging-port={cfg.attach_port}",
-            f"--user-data-dir={cfg.user_data_path}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "about:blank",
-        ])
-        launch_proof = browser_proc.process_creation_proof(proc.pid)
-        log.info("已用普通进程启动浏览器（调试端口 %s，PID %s）。", cfg.attach_port, proc.pid)
-    _launched_proc = proc
-    _launched_port = cfg.attach_port
-    _launched_os_started = launch_proof
+    resources = _SessionResources(
+        object(), int(cfg.attach_port), publish_browser,
+        bool(getattr(cfg, "start_browser", True)),
+    )
+    with _session_lock:
+        if _session is not None:
+            raise RuntimeError("同一进程已有活动或待清理的浏览器会话")
+        _session = resources
 
-    pw = sync_playwright().start()
-    # 用「能连上调试端口」作为浏览器就绪条件，替代固定 8 秒（超时兜底）
-    br = None
-    last_exc: Exception | None = None
-    deadline = time.time() + _WAIT_LAUNCH_SEC
-    while time.time() < deadline:
-        try:
-            br = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{cfg.attach_port}")
-            break
-        except Exception as exc:
-            last_exc = exc
-            time.sleep(0.8)
-    if br is None:
-        try:
-            pw.stop()
-        except Exception:
-            pass
-        _abandon_launched_browser()
-        if publish_browser is not None:
-            publish_browser("UNKNOWN", cfg.attach_port, None, None)
-        raise RuntimeError(f"无法连接浏览器调试端口 {cfg.attach_port}（{last_exc}）")
-    ctx = br.contexts[0]
-    page = ctx.new_page()
-    page.set_default_timeout(cfg.timeout_ms)
-    if publish_browser is not None:
-        browser_pid = cdp_browser_pid(br)
-        if getattr(cfg, "start_browser", True) and browser_pid:
-            launch_proof = launch_proof or browser_proc.process_creation_proof(browser_pid)
-        if getattr(cfg, "start_browser", True) and browser_pid and launch_proof:
-            publish_browser("OWNED", cfg.attach_port, browser_pid, launch_proof)
-        elif not getattr(cfg, "start_browser", True):
-            publish_browser("BORROWED", cfg.attach_port, None, None)
-        else:
-            publish_browser("UNKNOWN", cfg.attach_port, None, None)
-    return pw, br, page, ctx
+    stage = "launch"
+    try:
+        if resources.start_browser:
+            _publish(resources, "STARTING", resources.port, None, None)
+            edge = getattr(cfg, "chrome_path", None)
+            if not edge or not os.path.isfile(edge):
+                raise FileNotFoundError(f"浏览器路径不存在：{edge or '<empty>'}")
+            resources.proc = subprocess.Popen([
+                edge,
+                f"--remote-debugging-port={resources.port}",
+                f"--user-data-dir={cfg.user_data_path}",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "about:blank",
+            ])
+            resources.launch_proof = browser_proc.process_creation_proof(resources.proc.pid)
+            log.info("已用普通进程启动浏览器（调试端口 %s，PID %s）。",
+                     resources.port, resources.proc.pid)
+
+        stage = "playwright"
+        resources.pw = sync_playwright().start()
+        stage = "cdp"
+        last_exc: Exception | None = None
+        deadline = time.monotonic() + _WAIT_LAUNCH_SEC
+        while time.monotonic() < deadline:
+            try:
+                resources.br = resources.pw.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{resources.port}")
+                break
+            except Exception as exc:  # noqa: BLE001 - retry until the readiness deadline
+                last_exc = exc
+                time.sleep(0.8)
+        if resources.br is None:
+            raise RuntimeError(
+                f"无法连接浏览器调试端口 {resources.port}（{last_exc}）")
+
+        stage = "context"
+        if not resources.br.contexts:
+            raise RuntimeError("浏览器没有可复用的默认 context")
+        resources.ctx = resources.br.contexts[0]
+        stage = "page"
+        resources.page = resources.ctx.new_page()
+        stage = "configure"
+        resources.page.set_default_timeout(cfg.timeout_ms)
+
+        stage = "publish"
+        state, pid, proof = _browser_publication(resources)
+        _publish(resources, state, resources.port, pid, proof)
+        resources.handle_pw = resources.pw
+        resources.handle_br = resources.br
+        resources.delivered = True
+        resources.phase = "active"
+        return resources.pw, resources.br, resources.page, resources.ctx
+    except BaseException:
+        log.warning("浏览器会话建立失败（阶段 %s，端口 %s）。", stage, resources.port)
+        _cleanup(resources)
+        if publish_browser is not None and not resources.publication_failed:
+            try:
+                publish_browser("UNKNOWN", resources.port, None, None)
+            except Exception as exc:  # noqa: BLE001 - preserve the establishment error
+                log.warning("发布浏览器 UNKNOWN 状态失败：%s", exc)
+        _release_if_clean(resources)
+        raise
 
 
-def _abandon_launched_browser() -> None:
-    """连不上调试端口、会话没能建立时，收掉本次由我们拉起的浏览器进程。
-
-    只结束「我们拉起、而且现在还活着」的那一个（`proc.poll() is None`）。同一 profile
-    已经有实例时，本次 msedge.exe 交接后立刻退出、`poll()` 有值——这时端口上那个是用户
-    自己的浏览器，绝不能按端口占用者去关它。
-    """
-    global _launched_proc, _launched_port, _launched_os_started
-    proc = _launched_proc
-    _launched_proc = None
-    _launched_port = None
-    _launched_os_started = None
-    if proc is None:
+def _publish(resources: _SessionResources, state: str, port: int | None,
+             pid: int | None, proof: str | None) -> None:
+    if resources.publisher is None:
         return
-    if proc.poll() is None:
-        browser_proc.terminate_process_tree(proc.pid)
-    else:
-        log.info("本次启动的浏览器进程（PID %s）已退出（交接给既有实例），无需收尾。", proc.pid)
+    try:
+        accepted = resources.publisher(state, port, pid, proof)
+    except BaseException:
+        resources.publication_failed = True
+        raise
+    if accepted is not True:
+        resources.publication_failed = True
+        raise RuntimeError(f"浏览器状态发布被当前目标拒绝：{state}")
+
+
+def _browser_publication(resources: _SessionResources) -> tuple[str, int | None, str | None]:
+    if not resources.start_browser:
+        return "BORROWED", None, None
+    proc = resources.proc
+    if proc is None or proc.poll() is not None:
+        return "BORROWED", None, None
+    browser_pid = cdp_browser_pid(resources.br)
+    current_proof = (browser_proc.process_creation_proof(browser_pid)
+                     if browser_pid is not None else None)
+    if (browser_pid == proc.pid and resources.launch_proof is not None
+            and current_proof == resources.launch_proof):
+        return "OWNED", browser_pid, resources.launch_proof
+    return "UNKNOWN", None, None
+
+
+def _clear_pending_before_open() -> None:
+    with _session_lock:
+        resources = _session
+        if resources is None:
+            return
+        if resources.phase in {"opening", "active", "closing"}:
+            raise RuntimeError("同一进程已有活动或正在关闭的浏览器会话")
+        resources.phase = "closing"
+    _cleanup(resources)
+    if resources.phase != "clean":
+        resources.phase = "pending"
+        raise RuntimeError("上一个浏览器会话仍有资源待清理")
+    _publish_closed(resources)
+    _release_if_clean(resources)
+
+
+def _cleanup(resources: _SessionResources) -> bool:
+    resources.phase = "closing"
+    if resources.page is not None:
+        try:
+            resources.page.close()
+            resources.page = None
+        except Exception as exc:  # noqa: BLE001 - best-effort cleanup retains the handle
+            log.warning("浏览器会话清理失败（资源 page，阶段 cleanup）：%s", exc)
+
+    # A borrowed browser must keep its transport alive when the page cannot be
+    # closed, otherwise a retry loses the only exact handle to that page.
+    if resources.page is None and resources.br is not None:
+        try:
+            resources.br.close()
+            resources.br = None
+            resources.ctx = None
+        except Exception as exc:  # noqa: BLE001
+            log.warning("浏览器会话清理失败（资源 cdp，阶段 cleanup）：%s", exc)
+    if resources.page is None and resources.br is None and resources.pw is not None:
+        try:
+            resources.pw.stop()
+            resources.pw = None
+        except Exception as exc:  # noqa: BLE001
+            log.warning("浏览器会话清理失败（资源 playwright，阶段 cleanup）：%s", exc)
+
+    proc = resources.proc
+    proc_was_alive = False
+    if proc is not None:
+        proc_was_alive = proc.poll() is None
+        if not proc_was_alive:
+            resources.proc = None
+        elif browser_proc.terminate_process_tree(proc.pid):
+            if proc.poll() is not None:
+                resources.proc = None
+            else:
+                log.warning("浏览器会话清理后进程仍存活（阶段 cleanup，PID %s）。", proc.pid)
+        else:
+            log.warning("浏览器会话进程清理失败（阶段 cleanup，PID %s）。", proc.pid)
+
+    # Once our exact process is gone, its remote objects are gone as well. This
+    # lets owned sessions recover even if a remote close call failed first.
+    if proc_was_alive and resources.proc is None:
+        resources.page = None
+        resources.br = None
+        resources.ctx = None
+        if resources.pw is not None:
+            try:
+                resources.pw.stop()
+                resources.pw = None
+            except Exception as exc:  # noqa: BLE001
+                log.warning("浏览器会话清理失败（资源 playwright，阶段 cleanup）：%s", exc)
+
+    clean = resources.page is None and resources.br is None \
+        and resources.pw is None and resources.proc is None
+    resources.phase = "clean" if clean else "pending"
+    return clean
+
+
+def _release_if_clean(resources: _SessionResources) -> bool:
+    global _session
+    if resources.phase != "clean":
+        return False
+    with _session_lock:
+        if _session is resources:
+            _session = None
+        if resources.delivered:
+            _closed_handles.append(
+                (resources.handle_pw, resources.handle_br, resources.publisher))
+    return True
+
+
+def _publish_closed(resources: _SessionResources) -> None:
+    if not resources.delivered or resources.publisher is None:
+        return
+    try:
+        accepted = resources.publisher("CLOSED", None, None, None)
+        if accepted is not True:
+            log.warning("发布浏览器 CLOSED 状态被当前目标拒绝。")
+    except Exception as exc:  # noqa: BLE001 - close remains best effort
+        log.warning("发布浏览器 CLOSED 状态失败：%s", exc)
 
 
 def cdp_browser_pid(br) -> int | None:
@@ -156,36 +306,27 @@ def cdp_browser_pid(br) -> int | None:
 
 
 def close_session(pw, br, *, publish_browser=None) -> None:
-    global _launched_proc, _launched_port, _launched_os_started
-    # 先问 CDP，再断开：交接场景里这个 PID 才是真正在跑的浏览器。
-    browser_pid = cdp_browser_pid(br)
-    try:
-        br.close()
-    except Exception:
-        pass
-    try:
-        pw.stop()
-    except Exception:
-        pass
-    proc = _launched_proc
-    port = _launched_port
-    launch_proof = _launched_os_started
-    _launched_proc = None
-    _launched_port = None
-    _launched_os_started = None
-    if proc is None:
-        log.info("本次未启动浏览器（接管既有实例），跳过关闭。")
-        if publish_browser is not None:
-            publish_browser("CLOSED", port, browser_pid, launch_proof)
+    with _session_lock:
+        resources = _session
+        if resources is None:
+            if any(old_pw is pw and old_br is br and old_pub is publish_browser
+                   for old_pw, old_br, old_pub in _closed_handles):
+                return
+            raise RuntimeError("浏览器会话句柄不是当前活动会话")
+        if (resources.handle_pw is not pw or resources.handle_br is not br
+                or resources.publisher is not publish_browser):
+            raise RuntimeError("浏览器会话句柄或状态发布器与当前活动会话不匹配")
+        if not resources.delivered:
+            raise RuntimeError("浏览器会话尚未完成建立")
+        if resources.phase not in {"active", "pending"}:
+            raise RuntimeError("浏览器会话正在关闭")
+        resources.phase = "closing"
+
+    _cleanup(resources)
+    if resources.phase != "clean":
         return
-    own_pid = proc.pid if proc.poll() is None else None
-    if own_pid is None:
-        log.warning("本次启动的浏览器进程（PID %s）已退出：同一 profile 已有实例时会交接给旧实例；"
-                    "改按调试端口 %s 的归属关闭。", proc.pid, port)
-    browser_proc.close_browser(port, launched_by_us=True,
-                               browser_pid=browser_pid, own_pid=own_pid)
-    if publish_browser is not None:
-        publish_browser("CLOSED", port, browser_pid, launch_proof)
+    _publish_closed(resources)
+    _release_if_clean(resources)
 
 
 def navigate_detail(page, product_url: str, cfg: Config, emit=None) -> OpenedDetail:

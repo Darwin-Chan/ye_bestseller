@@ -152,7 +152,15 @@ class GuiStopRequestTests(unittest.TestCase):
         try:
             db = Database(conn)
             rid = new_round(db, "A01")
-            started_at = db.record_crawler_process(pid=pid, round_id=rid, note="run.py")
+            owned = getattr(self.api.cfg, "start_browser", True)
+            started_at = db.record_crawler_process(
+                pid=pid, round_id=rid, note="run.py",
+                process_os_started="crawler-proof",
+                browser_state="OWNED" if owned else "BORROWED",
+                browser_port=9222 if owned else None,
+                browser_pid=9201 if owned else None,
+                browser_os_started="browser-proof" if owned else None,
+            )
         finally:
             conn.close()
         self.lock = single_instance.acquire(single_instance.CRAWLER_LOCK)
@@ -217,7 +225,9 @@ class GuiStopRequestTests(unittest.TestCase):
             self.api.get_run()      # 轮询驱动兜底，不新增后台线程
 
         kill_proc.assert_called_once_with()
-        close.assert_called_once_with(9222, launched_by_us=True)
+        close.assert_called_once_with(
+            9222, launched_by_us=True, browser_pid=9201,
+            browser_os_started="browser-proof")
         self.assertIsNone(self.api._stop_watch.state)
         self.assertIsNone(self._request_row(), "停下之后不该留着停止请求")
 
@@ -257,7 +267,7 @@ class GuiStopRequestTests(unittest.TestCase):
             result = self.api.pause_run()
 
         kill_proc.assert_called_once_with()
-        close.assert_called_once_with(9222, launched_by_us=True)
+        close.assert_not_called()
         self.assertIsNone(self._request_row())
         self.assertNotIn("stopping", result)
 
@@ -282,17 +292,14 @@ class GuiStopRequestTests(unittest.TestCase):
         self.assertIsNotNone(self._request_row(),
                              "惰性请求可以留着：认领按目标进程匹配，撞不上新进程")
 
-    def test_browser_cleanup_waits_for_a_browser_that_starts_late(self):
-        """刚启动就被暂停时端口还没监听，收尾要短暂重试。"""
-        with patch.object(gui, "_BROWSER_CLOSE_RETRY_SEC", 5.0), \
-                patch.object(gui.time, "sleep") as sleep, \
-                patch.object(browser_proc, "close_browser",
-                             side_effect=[None, 4242]) as close:
-            pid = self.api._kill_browser()
+    def test_browser_cleanup_without_a_published_target_does_not_guess_from_the_port(self):
+        with patch.object(browser_proc, "close_browser") as close:
+            self.api._close_bound_browser(
+                stop_request.BoundBrowser(4242, 9222, None))
 
-        self.assertEqual(pid, 4242)
-        self.assertEqual(close.call_count, 2)
-        sleep.assert_called_once()
+        close.assert_called_once_with(
+            9222, launched_by_us=True, browser_pid=4242,
+            browser_os_started=None)
 
 
 class GuiLoggingTests(unittest.TestCase):
@@ -616,7 +623,9 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         try:
             db = Database(conn)
             rid = new_round(db)
-            db.record_crawler_process(pid=pid, round_id=rid, note="run.py")
+            db.record_crawler_process(
+                pid=pid, round_id=rid, note="run.py",
+                process_os_started="crawler-proof")
         finally:
             conn.close()
         self.lock = single_instance.acquire(single_instance.CRAWLER_LOCK)
@@ -645,14 +654,19 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         rid = self._running_crawler()
         seen = {}
 
-        def kill(pid):
+        capability = browser_proc.ProcessCapability(4321, 91, "crawler-proof")
+
+        def kill(cap):
             seen["reason_at_kill_time"] = self._row("terminal_reason")
-            seen["pid"] = pid
+            seen["pid"] = cap.pid
             self.lock.release()   # 进程被杀掉 → 内核释放会话锁
             return True
 
-        with patch.object(browser_proc, "process_image_name", return_value="python.exe"), \
-                patch.object(browser_proc, "terminate_process_tree", side_effect=kill):
+        with patch.object(browser_proc, "bind_process", return_value=capability), \
+                patch.object(browser_proc, "process_capability_alive",
+                             side_effect=[True, False]), \
+                patch.object(browser_proc, "terminate_process_capability", side_effect=kill), \
+                patch.object(browser_proc, "release_process_capability"):
             result = self.api.abort_run()
             self.assertEqual(self._row("terminal_reason"), "ABANDONED",
                              "先写终态：它本身就是停止信号（ADR-0009）")

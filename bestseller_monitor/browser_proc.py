@@ -1,8 +1,7 @@
 """浏览器进程的归属判定与收尾（与驱动解耦，爬虫与 GUI 共用）。
 
-收尾必须按「归属」关，不能只认自己 Popen 出来的那个 PID：同一 profile 已有
-实例时，新启动的 msedge.exe 会把命令交给旧实例后立刻退出，那时只有 CDP 或
-调试端口占用者还能指出真正在跑的浏览器进程（IS-43）。
+收尾必须按精确归属关，不能从调试端口重新猜目标：同一 profile 已有实例时，
+新启动的 msedge.exe 会把命令交给旧实例后立刻退出，旧实例属于外部借用，绝不终止。
 
 本模块只依赖标准库，GUI（打包时不带 playwright）也能直接调用。
 """
@@ -15,10 +14,6 @@ import subprocess
 from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
-
-# 端口占用者只在这些镜像名下才当作浏览器关闭，避免误杀占用同一端口的其它程序。
-BROWSER_IMAGES = ("msedge.exe", "msedge_proxy.exe", "chrome.exe", "chromium.exe")
-
 
 @dataclass
 class ProcessCapability:
@@ -164,32 +159,47 @@ def terminate_process_tree(pid: int) -> bool:
 def close_browser(port: int, *, launched_by_us: bool, browser_pid: int | None = None,
                   own_pid: int | None = None,
                   browser_os_started: str | None = None) -> int | None:
-    """按归属关闭本任务启动的浏览器，返回被关闭的 PID。
+    """Close an exact local owner or proof-bound browser process.
 
-    归属判定：本次由本程序启动过浏览器（launched_by_us）才关；接管既有实例
-    （start_browser=false）时不动用户的浏览器。自己启动的进程已退出（交接给
-    同一 profile 的旧实例）时，改用 CDP 报告的 browser PID，再回退到调试端口
-    占用者；用端口占用者兜底时先核对镜像名，避免误杀别的程序。
+    ``port`` is retained for the public compatibility signature and logging only;
+    it is never used to select a destructive target.
     """
     if not launched_by_us:
         log.info("本次未启动浏览器（接管既有实例），跳过关闭（端口 %s）。", port)
         return None
-    pid = browser_pid or own_pid or listen_port_owner(port)
-    if pid is None:
-        log.info("调试端口 %s 上没有浏览器进程，无需关闭。", port)
-        return None
-    if own_pid is None or pid != own_pid:
-        if browser_os_started is not None:
-            proof = process_creation_proof(pid)
-            if proof is None or proof != browser_os_started:
-                log.warning("浏览器 PID %s 的创建证明不匹配，跳过关闭。", pid)
-                return None
-        image = process_image_name(pid)
-        if image not in BROWSER_IMAGES:
-            log.warning("调试端口 %s 的占用者 PID %s（%s）不是浏览器，跳过关闭。",
-                        port, pid, image or "未知镜像")
+    if own_pid is not None:
+        if not isinstance(own_pid, int) or own_pid <= 0:
+            log.warning("拒绝关闭无效的本地浏览器 PID（端口 %s）。", port)
             return None
-    if terminate_process_tree(pid):
-        log.info("已关闭本次启动的浏览器进程（PID %s）。", pid)
-        return pid
-    return None
+        if terminate_process_tree(own_pid):
+            log.info("已关闭本次启动的浏览器进程（PID %s）。", own_pid)
+            return own_pid
+        return None
+
+    if browser_pid is None or browser_os_started is None:
+        log.warning("拒绝关闭未绑定精确归属的浏览器（端口 %s）。", port)
+        return None
+    capability = bind_process(browser_pid)
+    if capability is None:
+        log.warning("无法绑定浏览器 PID %s，拒绝关闭。", browser_pid)
+        return None
+    try:
+        if capability.created != browser_os_started:
+            log.warning("浏览器 PID %s 的创建证明不匹配，跳过关闭。", browser_pid)
+            return None
+        alive = process_capability_alive(capability)
+        if alive is False:
+            return browser_pid
+        if alive is not True:
+            log.warning("无法核验浏览器 PID %s 是否仍存活，拒绝关闭。", browser_pid)
+            return None
+        if not terminate_process_capability(capability):
+            return None
+        gone = process_capability_alive(capability)
+        if gone is False:
+            log.info("已关闭本次启动的浏览器进程（PID %s）。", browser_pid)
+            return browser_pid
+        log.warning("浏览器 PID %s 终止后仍未确认退出。", browser_pid)
+        return None
+    finally:
+        release_process_capability(capability)

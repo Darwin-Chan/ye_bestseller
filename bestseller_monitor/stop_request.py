@@ -144,7 +144,6 @@ class BoundBrowser:
     pid: int
     port: int | None = None
     os_started: str | None = None
-    compatibility: bool = False
 
 
 @dataclass(frozen=True)
@@ -222,12 +221,11 @@ class ProcessStopRuntime:
     """Windows process adapter.  It binds handles at begin and never reselects a PID."""
 
     def __init__(self, *, own_process=None, browser_enabled: bool = True,
-                 terminate=None, close_browser=None, browser_port=None):
+                 terminate=None, close_browser=None):
         self.own_process = own_process
         self.browser_enabled = browser_enabled
         self._terminate_callback = terminate
         self._close_callback = close_browser
-        self._browser_port = browser_port
 
     def bind(self, target: StopTarget) -> BoundTarget:
         process = self.own_process() if callable(self.own_process) else self.own_process
@@ -278,13 +276,6 @@ class ProcessStopRuntime:
         if state == "OWNED" and identity.browser_pid and identity.browser_os_started:
             browser = BoundBrowser(int(identity.browser_pid), identity.browser_port,
                                    identity.browser_os_started)
-        elif (state == "NOT_STARTED" and handle is not None
-              and not isinstance(getattr(handle, "pid", None), int)
-              and self._browser_port is not None):
-            # Compatibility for the pre-publication test double only. Real Popen
-            # handles always have a numeric pid and therefore never use this path.
-            port = self._browser_port() if callable(self._browser_port) else self._browser_port
-            browser = BoundBrowser(bound.target.pid, port, compatibility=True)
         return RuntimeFacts(identity, alive, browser, state)
 
     def terminate(self, bound: BoundTarget) -> EffectResult:

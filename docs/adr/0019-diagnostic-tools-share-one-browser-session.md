@@ -75,3 +75,10 @@ browser PID / 端口占用者归属。`diag_card_urls` / `diag_verify_state` / `
 相关词汇见 [CONTEXT.md](../../CONTEXT.md) 的「浏览器会话」；来源是
 `docs/reviews/architecture-review-2026-09-13-r2.html` 候选 03，规格在
 `.scratch/diag-session/spec.md`。
+
+## 后续关系
+
+2026-09-14 架构报告的候选 03 将生命周期保证扩展到所有 `open_session()` 调用方，而非只覆盖诊断工具；
+仍保留 `open_session` / `close_session` 接口、CDP 条件等待和工具自己的页面等待。建立阶段任何异常
+都必须由会话内部补偿清理已取得且有归属的资源，且保留原始异常；配置是浏览器可执行路径的唯一来源。
+该项是独立候选，完整规格见 `.scratch/browser-session-lifecycle/spec.md`，持久决定见 ADR-0025。
