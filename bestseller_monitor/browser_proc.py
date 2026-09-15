@@ -24,26 +24,6 @@ class ProcessCapability:
     created: str
 
 
-def image_name_for_pid(tasklist_csv: str, pid: int) -> str:
-    """从 `tasklist /FO CSV` 输出里取指定 PID 的镜像名（小写）；找不到返回空串。"""
-    for line in tasklist_csv.splitlines():
-        fields = [field.strip().strip('"') for field in line.split(",")]
-        if len(fields) >= 2 and fields[1].isdigit() and int(fields[1]) == pid:
-            return fields[0].lower()
-    return ""
-
-
-def process_image_name(pid: int) -> str:
-    """进程镜像名（小写）；查询不可用或查不到返回空串。"""
-    try:
-        out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
-                             capture_output=True, text=True).stdout
-    except Exception as exc:  # noqa: BLE001
-        log.debug("查询进程镜像名失败：%s", exc)
-        return ""
-    return image_name_for_pid(out, pid)
-
-
 def process_creation_proof(pid: int) -> str | None:
     """Return the Windows creation FILETIME for pid, or None when unverifiable."""
     if os.name != "nt":
@@ -157,23 +137,15 @@ def terminate_process_tree(pid: int) -> bool:
 
 
 def close_browser(port: int, *, launched_by_us: bool, browser_pid: int | None = None,
-                  own_pid: int | None = None,
                   browser_os_started: str | None = None) -> int | None:
-    """Close an exact local owner or proof-bound browser process.
+    """Close a browser process bound by an exact creation proof.
 
     ``port`` is retained for the public compatibility signature and logging only;
-    it is never used to select a destructive target.
+    it is never used to select a destructive target. A session's own Popen goes
+    through ``terminate_process_tree`` instead of this function.
     """
     if not launched_by_us:
         log.info("本次未启动浏览器（接管既有实例），跳过关闭（端口 %s）。", port)
-        return None
-    if own_pid is not None:
-        if not isinstance(own_pid, int) or own_pid <= 0:
-            log.warning("拒绝关闭无效的本地浏览器 PID（端口 %s）。", port)
-            return None
-        if terminate_process_tree(own_pid):
-            log.info("已关闭本次启动的浏览器进程（PID %s）。", own_pid)
-            return own_pid
         return None
 
     if browser_pid is None or browser_os_started is None:

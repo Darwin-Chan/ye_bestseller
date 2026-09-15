@@ -687,8 +687,7 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         """PID 已经不在了：只写终态，采集进程会在下一个检查点自己停下。"""
         self._running_crawler()
 
-        with patch.object(browser_proc, "process_image_name", return_value=""), \
-                patch.object(browser_proc, "terminate_process_tree") as kill:
+        with patch.object(browser_proc, "terminate_process_tree") as kill:
             result = self.api.abort_run()
             self.clock.advance(20)
             self.api.get_start()
@@ -701,8 +700,7 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         """停不掉（拿不到可用 PID）时身份行要留着：下次还得知道是谁在跑。"""
         self._running_crawler()
 
-        with patch.object(browser_proc, "process_image_name", return_value=""), \
-                patch.object(browser_proc, "terminate_process_tree") as kill:
+        with patch.object(browser_proc, "terminate_process_tree") as kill:
             self.api.abort_run()
             self.clock.advance(20)
             self.api.get_start()
@@ -710,20 +708,6 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         kill.assert_not_called()
         self.assertEqual(self._row("pid", "crawler_process"), 4321,
                          "进程可能还在跑，身份行不能先清掉")
-
-    def test_abort_never_kills_a_pid_that_is_no_longer_our_crawler(self):
-        """PID 会被系统回收：镜像名不是 python 就不许动它。"""
-        self._running_crawler()
-
-        with patch.object(browser_proc, "process_image_name", return_value="msedge.exe"), \
-                patch.object(browser_proc, "terminate_process_tree") as kill:
-            result = self.api.abort_run()
-            self.clock.advance(20)
-            self.api.get_start()
-
-        self.assertTrue(result["ok"])
-        kill.assert_not_called()
-        self.assertEqual(self._row("terminal_reason"), "ABANDONED")
 
     def test_abort_keeps_an_earlier_terminal_state(self):
         """轮次刚好已经结束了：不改写终态，也不报错。"""
@@ -735,8 +719,7 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         finally:
             conn.close()
 
-        with patch.object(browser_proc, "process_image_name", return_value="python.exe"), \
-                patch.object(browser_proc, "terminate_process_tree", return_value=True):
+        with patch.object(browser_proc, "terminate_process_tree", return_value=True):
             result = self.api.abort_run()
 
         self.assertTrue(result["ok"])
@@ -762,8 +745,7 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         self.api.round_id = old                 # 界面还记着已经完结的那一轮
         running = self._running_crawler()       # 别处正在跑的是另一轮
 
-        with patch.object(browser_proc, "process_image_name", return_value="python.exe"), \
-                patch.object(browser_proc, "terminate_process_tree", return_value=True):
+        with patch.object(browser_proc, "terminate_process_tree", return_value=True):
             self.api.abort_run()
 
         self.assertNotEqual(running, old)

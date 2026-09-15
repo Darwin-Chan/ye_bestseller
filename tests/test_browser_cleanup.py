@@ -20,19 +20,6 @@ class CloseBrowserTests(unittest.TestCase):
         kill.assert_not_called()
         self.assertIn("跳过关闭", "\n".join(logs.output))
 
-    def test_local_owner_pid_never_needs_port_or_image_guessing(self):
-        with patch.object(browser_proc, "listen_port_owner") as port_owner, \
-                patch.object(browser_proc, "process_image_name") as image, \
-                patch.object(browser_proc, "terminate_process_tree", return_value=True) as kill:
-            self.assertEqual(
-                browser_proc.close_browser(9222, launched_by_us=True, own_pid=10500),
-                10500,
-            )
-
-        kill.assert_called_once_with(10500)
-        port_owner.assert_not_called()
-        image.assert_not_called()
-
     def test_browser_pid_without_creation_proof_is_refused_without_port_fallback(self):
         with patch.object(browser_proc, "bind_process") as bind, \
                 patch.object(browser_proc, "listen_port_owner") as port_owner, \
@@ -84,11 +71,6 @@ class CloseBrowserTests(unittest.TestCase):
                 9222, launched_by_us=True, browser_pid=6104,
                 browser_os_started="proof"))
 
-    def test_returns_none_when_local_taskkill_fails(self):
-        with patch.object(browser_proc, "terminate_process_tree", return_value=False):
-            self.assertIsNone(
-                browser_proc.close_browser(9222, launched_by_us=True, own_pid=10500))
-
     def test_taskkill_failure_is_warned(self):
         failed = SimpleNamespace(returncode=1, stdout="", stderr="")
         with patch.object(browser_proc.subprocess, "run", return_value=failed), \
@@ -105,27 +87,6 @@ class CloseBrowserTests(unittest.TestCase):
 
 class ProcessLookupTests(unittest.TestCase):
     """Lookup helpers remain available for non-destructive diagnostics."""
-
-    TASKLIST_SAMPLE = (
-        '"System Idle Process","0","Services","0","8 K"\n'
-        '"System","4","Services","0","4,872 K"\n'
-        '"pwsh.exe","12808","Console","2","84,112 K"\n'
-        '"msedge.exe","15812","Console","2","205,680 K"\n'
-        ""
-    )
-
-    def test_parses_image_name_from_tasklist_csv(self):
-        self.assertEqual(browser_proc.image_name_for_pid(self.TASKLIST_SAMPLE, 12808), "pwsh.exe")
-        self.assertEqual(browser_proc.image_name_for_pid(self.TASKLIST_SAMPLE, 15812), "msedge.exe")
-        self.assertEqual(browser_proc.image_name_for_pid(self.TASKLIST_SAMPLE, 0),
-                         "system idle process")
-        self.assertEqual(browser_proc.image_name_for_pid(self.TASKLIST_SAMPLE, 4242), "")
-
-    def test_process_image_name_reads_real_process(self):
-        name = browser_proc.process_image_name(os.getpid())
-        if not name:
-            self.skipTest("tasklist 在本环境不可用（沙箱拒绝进程查询）")
-        self.assertEqual(name, os.path.basename(os.sys.executable).lower())
 
     def test_listen_port_owner_finds_own_listening_socket(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:

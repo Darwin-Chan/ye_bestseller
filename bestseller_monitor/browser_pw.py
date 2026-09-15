@@ -41,7 +41,6 @@ log = logging.getLogger(__name__)
 class _SessionResources:
     """One session's exact handles, acquired in establishment order."""
 
-    token: object
     port: int
     publisher: Callable[..., bool] | None
     start_browser: bool
@@ -60,9 +59,14 @@ class _SessionResources:
 
 _session_lock = threading.RLock()
 _session: _SessionResources | None = None
-# A small identity cache makes repeated close a no-op without letting an old A
-# close a newer B. Closed Playwright handles are retained only for this bound.
-_closed_handles: deque[tuple[Any, Any, Callable[..., bool] | None]] = deque(maxlen=16)
+# Session identity is the pw/br objects themselves: every establishment returns
+# fresh ones, so an old A can never match a newer B. This cache only makes a
+# repeat close of a recently closed session a no-op; the bound is memory, and
+# past it a stale handle is indistinguishable from a bogus one, so close_session
+# raises rather than silently succeeding.
+_CLOSED_HANDLE_MEMORY = 16
+_closed_handles: deque[tuple[Any, Any, Callable[..., bool] | None]] = deque(
+    maxlen=_CLOSED_HANDLE_MEMORY)
 
 # 兼容旧私有名/旧名（本文件内部与诊断工具仍引用）
 _body_text = body_text
@@ -89,7 +93,7 @@ def open_session(cfg: Config, *, publish_browser=None):
     from playwright.sync_api import sync_playwright
 
     resources = _SessionResources(
-        object(), int(cfg.attach_port), publish_browser,
+        int(cfg.attach_port), publish_browser,
         bool(getattr(cfg, "start_browser", True)),
     )
     with _session_lock:
