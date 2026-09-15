@@ -12,6 +12,9 @@ Issues and specs for this repo live as markdown files in `.scratch/`.
 - Rejected feature requests are closed with `Status: wontfix` and recorded one file per concept at
   `.out-of-scope/<concept>.md` (decision, reason, prior requests). Check that directory before
   re-litigating an enhancement.
+- `.scratch/` is gitignored: tickets are machine-local and reach no session that only sees the repo
+  (a fresh clone or a cloud session has no `.scratch/`). `.out-of-scope/` is the one tracked part,
+  so wontfix decisions survive a clone.
 
 ## Existing notes
 
