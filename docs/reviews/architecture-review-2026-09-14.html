@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>bestseller · 架构审查 · 2026-09-14</title>
+<script async src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+mermaid.initialize({startOnLoad:true,theme:"neutral",securityLevel:"strict",themeVariables:{fontFamily:"Microsoft YaHei, sans-serif",fontSize:"14px"},flowchart:{useMaxWidth:true,htmlLabels:false}});
+</script>
+<style>
+:root{--paper:#f6f5f0;--ink:#182d29;--muted:#65736e;--line:#d8dfd7;--green:#166a51;--pale:#e9f3eb;--red:#b54740;--redp:#fff0eb;--amber:#8b6214}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.65 "Segoe UI","Microsoft YaHei",sans-serif}
+main{max-width:1160px;margin:auto;padding:52px 32px 70px}a{color:inherit;text-decoration-color:#9eaea2;text-underline-offset:4px}a:hover{color:var(--green)}h1,h2,h3,p{margin:0}h1{font:600 42px/1.2 Georgia,"Microsoft YaHei",serif;letter-spacing:-1px}h2{font-size:25px;line-height:1.4;letter-spacing:-.4px}h3{font-size:14px}.eyebrow{font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700}.masthead{border-top:5px solid var(--ink);padding-top:22px}.title-row{display:flex;justify-content:space-between;gap:30px;align-items:end;margin:12px 0 18px}.edition{font:italic 20px Georgia,serif;color:var(--green)}.meta{font-size:12px;color:var(--muted);margin-top:8px}.legend{display:flex;flex-wrap:wrap;gap:20px;margin:24px 0;font-size:12px;color:var(--muted)}.legend i{display:inline-block;width:18px;height:12px;border:1px solid var(--muted);vertical-align:middle;margin-right:6px}.legend i.seam{border-style:dashed}.legend i.leak{border:none;border-top:2px solid var(--red);height:3px}.legend i.deep{background:var(--ink);border:3px solid var(--green)}
+.nav{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin:22px 0 16px}.nav a{padding:15px 12px;text-decoration:none;border-right:1px solid var(--line);font-size:13px}.nav a:last-child{border:0}.nav b{display:block;color:var(--green);font:22px Georgia,serif}.scope{font-size:12px;color:var(--muted);padding-bottom:8px}
+article{margin-top:38px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:28px;scroll-margin-top:20px}.card-head{display:flex;align-items:start;justify-content:space-between;gap:20px}.num{font:italic 34px Georgia,serif;color:#a7b5ab;margin-right:15px}.title-block{display:flex;align-items:center}.badges{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end;padding-top:7px}.badge{border-radius:20px;padding:3px 11px;font-size:11px;white-space:nowrap;font-weight:600}.strong{background:#def1e5;color:#116342}.worth{background:#fff0ce;color:#885c05}.dep{background:#f0f2ee;color:#667169}.files{font:11px/1.9 Consolas,monospace;color:var(--muted);margin:14px 0 20px;overflow-wrap:anywhere}.files a{text-decoration:none}.files a:hover{text-decoration:underline}
+.visuals{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:18px 0 24px}.panel{background:#f8f9f5;border:1px solid #e0e5dc;border-radius:8px;padding:16px;min-width:0}.panel.after{background:#f1f7f0}.panel-label{display:flex;justify-content:space-between;align-items:center;font-size:10px;text-transform:uppercase;letter-spacing:1.5px;font-weight:700;color:#6f7b70;margin-bottom:15px}.panel-label b{font-size:11px;letter-spacing:0;color:var(--red)}.after .panel-label b{color:var(--green)}.diagram{min-height:268px;display:flex;flex-direction:column;justify-content:center;align-items:stretch;gap:0}.step{padding:10px 15px;background:white;border:1px solid #cbd6cc;border-radius:5px;text-align:center;font-size:13px}.step small{color:var(--muted);font-size:11px}.arrow{text-align:center;height:24px;font-size:18px;line-height:24px;color:#7d8e82}.arrow.red{color:var(--red)}.step.bad{background:var(--redp);border-color:#d69991;color:#943d32}.step.ok{background:#e1f0e3;border-color:#a2c4ab;color:#1b694b}.deep-module{border:3px solid #43856b;background:var(--ink);color:#edf4eb;border-radius:8px;padding:17px;text-align:center}.deep-module .small-interface{border-bottom:1px dashed #95b2a0;padding-bottom:10px;margin-bottom:12px;font-size:12px;color:#d4e4d6}.deep-module .inside{font-size:13px;line-height:2}.deep-module .inside small{font-size:11px;color:#b5c9bb}.diagram-note{font-size:11px;color:var(--muted);text-align:center;margin-top:10px}
+.facts{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:18px}.facts h3{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:5px}.facts p{font-size:13px}.proof{background:#f6f5f0;border-left:3px solid #97ac9b;padding:10px 13px;margin:15px 0;font-size:12px;line-height:1.7}.proof strong{color:var(--green)}.proof code{font:11px Consolas,monospace}.wins{display:flex;gap:8px;flex-wrap:wrap;margin:15px 0}.wins span{font-size:12px;background:#edf4ed;color:#315940;padding:4px 9px;border-radius:4px}.method{font-size:12px;color:#54645a;border-top:1px solid #e8ece5;padding-top:13px;margin-top:13px}.method p+p{margin-top:5px}.adr{padding:10px 12px;border-radius:4px;background:#f4f3eb;font-size:12px;margin-top:12px;color:#616850}.adr.warning{background:#fff4dc;color:#825f1d}.adr a{font-weight:600}code{font-family:Consolas,monospace;font-size:.93em}svg text{font-family:"Segoe UI","Microsoft YaHei",sans-serif}
+.mermaid{height:0;visibility:hidden;margin:0;overflow:hidden}.mermaid[data-processed="true"]{height:auto;visibility:visible;overflow:visible}.mermaid:has(svg)+.mermaid-fallback{display:none}.mermaid svg{width:100%;max-height:286px}.mermaid-fallback{height:280px}.mermaid-fallback svg{width:100%;height:100%}
+.clock-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}.clock-cell{background:white;border:1px solid #cfdbcf;border-radius:5px;padding:12px;text-align:center;font-size:12px}.clock-cell b{display:block;font:21px Georgia,serif;color:var(--red);margin:7px}.clock-source{padding:12px;border:1px dashed #69a07c;color:#315d42;text-align:center;font-size:12px;border-radius:5px}
+.evidence-end{margin-top:32px;border-top:1px solid var(--line);padding-top:20px;font-size:12px;color:var(--muted)}.evidence-end b{color:var(--ink)}.top{background:var(--ink);color:#f0f5ed;border-radius:12px;padding:30px;margin-top:30px}.top .eyebrow{color:#adc8b5}.top h2{margin:10px 0}.top p{font-size:14px;color:#d3e0d4}.top a{display:inline-block;margin-top:15px;color:#e2f0d7;font-size:13px}.footer{display:flex;justify-content:space-between;gap:20px;font-size:11px;color:var(--muted);margin-top:20px}
+@media(max-width:760px){main{padding:26px 16px}.title-row{display:block}h1{font-size:32px}.edition{margin-top:12px}.nav{grid-template-columns:1fr 1fr}.nav a:nth-child(2){border:0}.card-head{display:block}.badges{justify-content:flex-start;margin-top:10px}.visuals,.facts{grid-template-columns:1fr}article{padding:20px}h2{font-size:21px}.num{font-size:28px}.footer{display:block}}
+@media print{body{background:white}main{padding:0}article{break-inside:avoid;box-shadow:none}.nav{display:none}.top{print-color-adjust:exact}.panel,.deep-module,.proof{print-color-adjust:exact}}
+</style>
+</head>
+<body class="bg-stone-50 text-slate-900">
+<main class="max-w-6xl mx-auto">
+<header class="masthead">
+<div class="eyebrow">Bestseller / architecture field notes</div>
+<div class="title-row"><h1>把顺序与归属<br>收进 module</h1><div class="edition">Review · 14 Sep 2026</div></div>
+<div class="meta">HEAD <b>67bf1b7</b> · 2026-09-14 · 根目录 F:\AI\projects\bestseller · 本轮编号 01–07 · 4 项明确推荐 / 3 项值得探索</div>
+<div class="legend"><span><i></i>module</span><span><i class="seam"></i>seam</span><span><i class="leak"></i>跨 seam 泄漏</span><span><i class="deep"></i>deep module</span></div>
+<nav class="nav"><a href="#c1"><b>01</b>详情访问 → 新鲜观测</a><a href="#c2"><b>02</b>停止始终指向同一进程</a><a href="#c3"><b>03</b>会话建立失败也有归属</a><a href="#c4"><b>04</b>点击事件语义</a><a href="#c5"><b>05</b>详情机会账本</a><a href="#c6"><b>06</b>店铺阶段进度</a><a href="#c7"><b>07</b>轮次时刻从入口进入</a></nav>
+<div class="scope">最近 60 次提交的热点：pipeline 22 次、gui 21 次、browser_pw 18 次、db 17 次。已对照 CONTEXT.md 与 ADR-0001–0022；此前两轮候选均已落地。</div>
+</header>
+
+<article id="c1">
+<div class="card-head"><div class="title-block"><span class="num">01</span><h2>让详情访问交回验证后的观测</h2></div><div class="badges"><span class="badge strong">Strong</span><span class="badge dep">mock · local-substitutable</span></div></div>
+<div class="files"><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/pipeline.py" title="F:/AI/projects/bestseller/bestseller_monitor/pipeline.py:442">bestseller_monitor/pipeline.py:442</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/browser_pw.py" title="F:/AI/projects/bestseller/bestseller_monitor/browser_pw.py:192">bestseller_monitor/browser_pw.py:192</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/guard.py" title="F:/AI/projects/bestseller/bestseller_monitor/guard.py:168">bestseller_monitor/guard.py:168</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/detail.py" title="F:/AI/projects/bestseller/bestseller_monitor/detail.py:145">bestseller_monitor/detail.py:145</a></div>
+<div class="visuals">
+<div class="panel"><div class="panel-label">Before <b>调用方记住承重顺序</b></div><div class="diagram">
+<div class="step">browser_pw：导航并读 HTML <small>t₀</small></div><div class="arrow">↓</div>
+<div class="step">guard：等人工验证，页面变化 <small>t₁</small></div><div class="arrow red">↓</div>
+<div class="step bad">pipeline：把 t₀ 的 HTML 交给 detail<br><small>页面已恢复，却解析旧验证页</small></div><div class="arrow red">↓</div>
+<div class="step bad">导航异常另走外层兜底，离开重试</div>
+</div></div>
+<div class="panel after"><div class="panel-label">After <b>完整访问在一次观测内</b></div><div class="diagram">
+<div class="deep-module"><div class="small-interface">详情观测 module · 一次读取的 seam</div><div class="inside">导航 / 打开弹窗<br>deny 判定 → 人工介入 → 等可读<br><b>读取当前 HTML → 翻译 Observation</b><br><small>读取失败仍进入统一失败与重试规则</small></div></div>
+<div class="arrow">↓</div><div class="step ok">调用方据结果记录事件</div>
+</div></div>
+</div>
+<div class="facts"><div><h3>问题</h3><p>详情访问的 interface 暴露了“先读、后等、再解析”的顺序知识；<code>observe_page(lambda: html)</code> 成了浅的调用方式，真正的读取异常还在它外面。</p></div><div><h3>改法</h3><p>把整段读取过程放回观测的 seam 内，让等待后的页面成为输入；deny 规则继续由 guard 持有，事件继续由调用方记录。</p></div></div>
+<div class="proof"><strong>隔离复现 A：</strong>第 2 次尝试中，验证已解决、页面已有库存；实际只读过 1 次 HTML，结果仍为“失败”，额度耗尽。<br><strong>隔离复现 B：</strong>额度为 2，第一次导航异常；实际只导航 1 次，写入裸异常，未继续第二次尝试。</div>
+<div class="wins"><span>locality：访问顺序集中</span><span>leverage：两条路径共用</span><span>depth：异常进入同一规则</span></div>
+<div class="method"><p><b>测试 seam：</b>真实临时 SQLite + 脚本化页面 adapter；生产 adapter 为 Playwright。保留成功事件序列，加“验证页变商品页”与“导航失败后成功”两条跨步骤行为验证。</p><p><b>Deletion test：</b>删除 pipeline 中缓存 HTML 再包装、以及预期读取失败的第二条处理路径，复杂度集中回完整观测；只另抽一个导航函数不会增加 depth。</p></div>
+<div class="adr"><a href="file:///F:/AI/projects/bestseller/docs/adr/0013-detail-observation-module.md">ADR-0013</a> / <a href="file:///F:/AI/projects/bestseller/docs/adr/0018-page-to-observation-in-detail.md">ADR-0018</a> / <a href="file:///F:/AI/projects/bestseller/docs/adr/0020-detail-visit-shared-across-paths.md">ADR-0020</a>：延续“失败只翻译一次、deny 共用账目”；验证后重读与导航重试是有意的行为修正。响应流 punish 识别仍是 ADR-0020 的独立挂账。</div>
+</article>
+
+<article id="c2">
+<div class="card-head"><div class="title-block"><span class="num">02</span><h2>把停止目标贯穿整个停止窗口</h2></div><div class="badges"><span class="badge strong">Strong</span><span class="badge dep">in-process · local-substitutable</span></div></div>
+<div class="files"><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/stop_request.py" title="F:/AI/projects/bestseller/bestseller_monitor/stop_request.py:184">bestseller_monitor/stop_request.py:184</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/stop_request.py" title="F:/AI/projects/bestseller/bestseller_monitor/stop_request.py:224">bestseller_monitor/stop_request.py:224</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/crawler_identity.py" title="F:/AI/projects/bestseller/bestseller_monitor/crawler_identity.py:1">bestseller_monitor/crawler_identity.py:1</a><span> · </span><a href="file:///F:/AI/projects/bestseller/gui.py" title="F:/AI/projects/bestseller/gui.py:345">gui.py:345</a></div>
+<div class="visuals">
+<div class="panel"><div class="panel-label">Before <b>回执认目标，强杀认当前</b></div><div class="diagram">
+<svg viewBox="0 0 440 270" role="img" aria-label="旧进程 A 的停止窗口到点后误指向新进程 B">
+<defs><marker id="r2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10z" fill="#b54740"/></marker></defs>
+<line x1="35" y1="40" x2="400" y2="40" stroke="#a7b5ab" stroke-width="2"/><circle cx="50" cy="40" r="5" fill="#547b64"/><circle cx="220" cy="40" r="5" fill="#a7b5ab"/><circle cx="385" cy="40" r="5" fill="#b54740"/>
+<text x="30" y="23" font-size="12" fill="#667169">t = 0</text><text x="188" y="23" font-size="12" fill="#667169">刷新间隙</text><text x="358" y="23" font-size="12" fill="#943d32">到期</text>
+<rect x="15" y="69" width="154" height="65" rx="5" fill="#fff" stroke="#b2c5b5"/><text x="92" y="96" text-anchor="middle" font-size="14">中止进程 A</text><text x="92" y="116" text-anchor="middle" font-size="11" fill="#667169">保存 PID + 启动时刻</text>
+<rect x="223" y="69" width="198" height="65" rx="5" fill="#fff" stroke="#b2c5b5"/><text x="322" y="96" text-anchor="middle" font-size="14">A 已退出，B 接手</text><text x="322" y="116" text-anchor="middle" font-size="11" fill="#667169">锁仍表示“有采集在跑”</text>
+<path d="M92,134 L92,181 L315,181 L315,204" fill="none" stroke="#b54740" stroke-width="2" marker-end="url(#r2)"/><text x="143" y="170" font-size="12" fill="#943d32">没有比对旧目标</text>
+<rect x="198" y="211" width="228" height="48" rx="5" fill="#fff0eb" stroke="#d69991"/><text x="312" y="240" text-anchor="middle" font-size="14" fill="#943d32">_force → 强杀当前进程 B</text>
+</svg></div></div>
+<div class="panel after"><div class="panel-label">After <b>目标拥有整条处置规则</b></div><div class="diagram">
+<div class="deep-module"><div class="small-interface">停止请求 module · 同一目标的 seam</div><div class="inside">保存 PID + 启动时刻<br>回执 / 到期 / 强杀前均核对目标<br><b>目标已替换 → 本次停止结束</b><br><small>强杀与浏览器回收只作用于匹配的归属</small></div></div>
+<div class="arrow">↓</div><div class="step ok">B 保持运行，旧窗口不能处置 B</div>
+</div></div>
+</div>
+<div class="facts"><div><h3>问题</h3><p>StopWatch 的 interface 收了停止目标，但只在回执阶段使用；强制停止时组合“杀自有子进程、读当前身份、关浏览器”，目标约束泄漏出 seam。</p></div><div><h3>改法</h3><p>让停止 module 负责从请求到处置的目标一致性；把散开的进程动作按同一个目标与归属组织，已有身份 module 继续提供事实。</p></div></div>
+<div class="proof"><strong>隔离复现：</strong><code>begin(ABORT, A)</code> 后把身份换成 B，再推进至 9 秒；真实 StopWatch 调用了 <code>stop_foreign(B)</code> 与浏览器回收。全部动作使用记录型 adapter，未结束真实进程。</div>
+<div class="wins"><span>locality：目标判据完整</span><span>leverage：暂停与中止共用</span><span>depth：调用方少管顺序</span></div>
+<div class="method"><p><b>测试 seam：</b>从 StopWatch 的 begin / tick 进入，以真实临时库 + 可推进时钟 + 记录动作的 adapter 验证 A→B、同 PID 不同启动时刻、身份暂缺；生产用现有进程动作 adapter。</p><p><b>Deletion test：</b>去掉“强杀时再选目标”这条第二规则，目标知识集中在停止 module；删除 crawler_identity 只会把身份规则复制回来，它应保留。</p></div>
+<div class="adr"><a href="file:///F:/AI/projects/bestseller/docs/adr/0009-stop-by-request-then-force-kill.md">ADR-0009</a> / <a href="file:///F:/AI/projects/bestseller/docs/adr/0016-stop-semantics-in-one-place.md">ADR-0016</a> / <a href="file:///F:/AI/projects/bestseller/docs/adr/0021-crawler-identity-in-one-module.md">ADR-0021</a>：延续进程身份语义；不改变 8 秒 / 回执后 10 秒窗口。未知目标如何收尾、浏览器归属如何跟随目标，是选中后需 grill 的决策。</div>
+</article>
+
+<article id="c3">
+<div class="card-head"><div class="title-block"><span class="num">03</span><h2>浏览器会话覆盖“尚未交付”的失败</h2></div><div class="badges"><span class="badge strong">Strong</span><span class="badge dep">mock</span></div></div>
+<div class="files"><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/browser_pw.py" title="F:/AI/projects/bestseller/bestseller_monitor/browser_pw.py:61">bestseller_monitor/browser_pw.py:61</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/browser_pw.py" title="F:/AI/projects/bestseller/bestseller_monitor/browser_pw.py:105">bestseller_monitor/browser_pw.py:105</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/browser_pw.py" title="F:/AI/projects/bestseller/bestseller_monitor/browser_pw.py:140">bestseller_monitor/browser_pw.py:140</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/pipeline.py" title="F:/AI/projects/bestseller/bestseller_monitor/pipeline.py:365">bestseller_monitor/pipeline.py:365</a></div>
+<div class="visuals">
+<div class="panel"><div class="panel-label">Before <b>已启动，不等于已交付</b></div><div class="diagram">
+<pre class="mermaid">flowchart TD
+ A["启动浏览器"] --> B["启动 Playwright"]
+ B --> C["连接端口 / 创建页面"]
+ C --> D["返回给调用方"]
+ D --> E["调用方 finally 收尾"]
+ B -.异常.-> F["离开；浏览器未回收"]
+ C -.页面阶段异常.-> F
+ classDef fail fill:#fff0eb,stroke:#b54740,color:#943d32;
+ class F fail
+</pre><div class="mermaid-fallback"><svg viewBox="0 0 440 280" role="img" aria-label="浏览器先启动，尚未返回期间的异常没有统一回收">
+<rect x="22" y="5" width="260" height="42" rx="5" fill="#fff" stroke="#bacabb"/><text x="152" y="31" text-anchor="middle" font-size="13">启动浏览器</text>
+<path d="M152,47 V64" stroke="#96ac9b"/><rect x="22" y="64" width="260" height="62" rx="5" fill="#fff" stroke="#bacabb"/><text x="152" y="89" text-anchor="middle" font-size="13">启动 Playwright → 连接</text><text x="152" y="110" text-anchor="middle" font-size="13">创建页面 → 设置超时</text>
+<path d="M282,94 H368 V181" stroke="#b54740" stroke-width="2" fill="none"/><text x="317" y="77" font-size="11" fill="#943d32">异常</text>
+<path d="M152,126 V154" stroke="#96ac9b"/><rect x="22" y="154" width="260" height="44" rx="5" fill="#fff" stroke="#bacabb"/><text x="152" y="182" text-anchor="middle" font-size="13">返回 → 调用方才进入 try</text>
+<path d="M152,198 V223" stroke="#96ac9b"/><rect x="22" y="223" width="260" height="42" rx="5" fill="#fff" stroke="#bacabb"/><text x="152" y="250" text-anchor="middle" font-size="13">finally：close_session</text>
+<rect x="308" y="183" width="115" height="78" rx="5" fill="#fff0eb" stroke="#d69991"/><text x="365" y="214" text-anchor="middle" font-size="12" fill="#943d32">提前离开</text><text x="365" y="239" text-anchor="middle" font-size="12" fill="#943d32">没有回收</text>
+</svg></div></div></div>
+<div class="panel after"><div class="panel-label">After <b>建立阶段也由会话拥有</b></div><div class="diagram">
+<div class="deep-module"><div class="small-interface">浏览器会话 module · 成功才交付</div><div class="inside">启动 → 接管 → 新页 → 配置<br><small>记录本次已取得的资源与归属</small><br><b>任何阶段失败 → 回收已取得资源</b><br><small>成功后的关闭沿用已有入口</small></div></div>
+<div class="arrow">↓</div><div class="step ok">调用方只处理已就绪的会话</div>
+</div></div>
+</div>
+<div class="facts"><div><h3>问题</h3><p>会话 interface 没有兑现完整的失败保证：端口连接失败已有回收，启动 Playwright、创建页面、设置超时失败却越过它，调用方的 finally 尚未开始。</p></div><div><h3>改法</h3><p>把资源取得与失败回收收成会话内部一条完整路径；每个阶段只回收已取得且属于本次启动的资源，归属不靠调用方补齐。</p></div></div>
+<div class="proof"><strong>3 个隔离故障注入：</strong>在 <code>start()</code>、<code>new_page()</code>、<code>set_default_timeout()</code> 分别抛错；浏览器回收调用均为 0，已启动进程的全局引用仍保留。后两种情况 Playwright 的 stop 调用也为 0。</div>
+<div class="wins"><span>locality：失败回收集中</span><span>leverage：采集与工具共用</span><span>depth：交付保证完整</span></div>
+<div class="method"><p><b>测试 seam：</b>直接从 open_session 注入阶段失败，用 Playwright / 进程的 mock adapter 观察回收；保留现有端口超时与接管既有浏览器的验证。</p><p><b>Deletion test：</b>删除“只有端口超时才回收”的专属分支，让它并入统一建立过程；单把这些分支搬去新文件只会搬动复杂度。</p></div>
+<div class="adr"><a href="file:///F:/AI/projects/bestseller/docs/adr/0019-diagnostic-tools-share-one-browser-session.md">ADR-0019</a>：这是既有失败保证的补全。它否决过“仅为少写几行改成 context manager”；本候选可保留 open / close，不以换调用方式为前提。</div>
+</article>
+
+<article id="c4">
+<div class="card-head"><div class="title-block"><span class="num">04</span><h2>点击事件的语义由一处持有</h2></div><div class="badges"><span class="badge strong">Strong</span><span class="badge dep">in-process · local-substitutable</span></div></div>
+<div class="files"><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/click_listing.py" title="F:/AI/projects/bestseller/bestseller_monitor/click_listing.py:249">bestseller_monitor/click_listing.py:249</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/db.py" title="F:/AI/projects/bestseller/bestseller_monitor/db.py:1366">bestseller_monitor/db.py:1366</a><span> · </span><a href="file:///F:/AI/projects/bestseller/tools/analyze_click.py" title="F:/AI/projects/bestseller/tools/analyze_click.py:15">tools/analyze_click.py:15</a><span> · </span><a href="file:///F:/AI/projects/bestseller/tests/test_analyze_click.py" title="F:/AI/projects/bestseller/tests/test_analyze_click.py:31">tests/test_analyze_click.py:31</a></div>
+<div class="visuals"><div class="panel"><div class="panel-label">Before <b>同一协议，多份解释</b></div><div class="diagram"><div class="step">点击 adapter：位置编码 page / idx</div><div class="arrow">↓</div><div class="step">遍历写 click_parse_error</div><div class="arrow">↓</div><div class="clock-grid"><div class="step">数据层<br><small>正则还原卡片身份</small></div><div class="step bad">分析工具<br><small>只认 click_parse_empty</small></div></div><div class="diagram-note">测试替身各写一份事件名与位置编码</div></div></div><div class="panel after"><div class="panel-label">After <b>共享语义，各算各的指标</b></div><div class="diagram"><div class="step">遍历决定何时记录点击结果</div><div class="arrow">↓</div><div class="deep-module"><div class="small-interface">点击事件 module · 编码与解释的 seam</div><div class="inside">卡片身份 / 结果种类 / 历史兼容<br><b>记录与消费使用同一语义</b></div></div><div class="arrow">↓</div><div class="clock-grid"><div class="step">本轮失败率<br><small>按商品 / 卡片</small></div><div class="step">点击可靠性<br><small>按事件次数</small></div></div></div></div></div>
+<div class="facts"><div><h3>问题</h3><p>点击事件的 interface 包含事件名与卡片身份格式，知识却散在采集、数据层、工具、测试替身；当前生产者与消费者已不相认。</p></div><div><h3>改法</h3><p>把编码、分类与旧事件解释收成一个 deep module，隐藏原始 note 规则；调用方继续决定何时记录，各指标保留自己的计数单位。</p></div></div>
+<div class="proof"><strong>子 agent 内存库复现，主 agent 已核对源码：</strong>放入 1 条 click_ok 与 1 条 click_parse_error，真实分析工具返回 attempted=1、success_rate=1.0；解析失败在查询时已被过滤。</div>
+<div class="wins"><span>locality：事件语义集中</span><span>leverage：采集与两种统计共用</span><span>depth：隐藏历史兼容</span></div>
+<div class="method"><p><b>测试 seam：</b>让真实遍历经事件 adapter 写临时 SQLite，再由数据层与工具消费；保留历史事件兼容。生产 adapter 为数据库事件记录，测试已有事件收集器与临时 SQLite。</p><p><b>Deletion test：</b>去掉多份事件集合与位置编解码，复杂度集中于协议 module；只抽常量仍会把身份与兼容规则留在调用方。</p></div>
+<div class="adr"><a href="file:///F:/AI/projects/bestseller/docs/adr/0013-detail-observation-module.md">ADR-0013</a> / <a href="file:///F:/AI/projects/bestseller/docs/adr/0017-round-counts-in-one-place.md">ADR-0017</a> / <a href="file:///F:/AI/projects/bestseller/docs/adr/0018-page-to-observation-in-detail.md">ADR-0018</a>：事件仍由调用方发，两个指标的公式不合并；日志写失败目前会被吞掉，部分日志却参与轮次失败率，事实的写入保证须在 grill 中明确。</div>
+</article>
+<article id="c5">
+<div class="card-head"><div class="title-block"><span class="num">05</span><h2>详情机会账本收起存储原语</h2></div><div class="badges"><span class="badge worth">Worth exploring</span><span class="badge dep">local-substitutable</span></div></div>
+<div class="files"><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/dedupe.py" title="F:/AI/projects/bestseller/bestseller_monitor/dedupe.py:22">bestseller_monitor/dedupe.py:22</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/db.py" title="F:/AI/projects/bestseller/bestseller_monitor/db.py:935">bestseller_monitor/db.py:935</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/detail.py" title="F:/AI/projects/bestseller/bestseller_monitor/detail.py:199">bestseller_monitor/detail.py:199</a><span> · </span><a href="file:///F:/AI/projects/bestseller/tests/test_dedupe.py" title="F:/AI/projects/bestseller/tests/test_dedupe.py:27">tests/test_dedupe.py:27</a></div>
+<div class="visuals"><div class="panel"><div class="panel-label">Before <b>规则已集中，存储 seam 仍宽</b></div><div class="diagram"><div class="step">点击 / 详情：申请、绑定、退还</div><div class="arrow">↓</div><div class="step">dedupe：账本规则</div><div class="arrow">↓</div><div class="step bad">Database 的 7 项细粒度原语<br><small>取全表 / 计数 / 上限 / 增 / 改 / 删 / 次数</small></div><div class="diagram-note">读上限会写库；测试越过规则直接读列</div></div></div><div class="panel after"><div class="panel-label">After <b>规则与存储成为同一 module</b></div><div class="diagram"><div class="step">点击 / 详情 / 行为测试</div><div class="arrow">↓</div><div class="deep-module"><div class="small-interface">详情机会 module · 申请 / 绑定 / 退还</div><div class="inside">预算固定与商品身份合并<br>重试复用 / 同日跳过退还<br><small>SQLite、原始列与提交细节是内部 implementation</small></div></div></div></div></div>
+<div class="facts"><div><h3>问题</h3><p>dedupe 的 implementation 需要学习一组只为它存在的 Database interface，以及隐式提交；上层测试也直接依赖 identity / offer_id 物理列。</p></div><div><h3>改法</h3><p>把机会规则和 SQLite 实现作为一个 module 维护，收起细粒度存储原语；用“另一个商品能否进入、重启后是否仍受限”检验行为。</p></div></div>
+<div class="proof"><strong>静态证据：</strong>添加、绑定、删除机会的生产调用方只有 dedupe；已有临时 SQLite 用例覆盖预算绑定、重启、合并与退还。这里主要改善 locality，未证明性能问题。</div>
+<div class="wins"><span>locality：账本规则与存储同处</span><span>leverage：上层测试少认列</span><span>depth：内部 seam 收窄</span></div>
+<div class="method"><p><b>测试 seam：</b>生产持久 SQLite，测试临时 SQLite adapter；保留关库再开的预算用例，将上层物理行断言换成下一次申请的可观察行为，无需新造存储 port。</p><p><b>Deletion test：</b>删除 dedupe 会让预算规则重新散到点击与补采；应吸收它下面的原语。若七个方法原样换个公开类，复杂度只是搬家。</p></div>
+<div class="adr"><a href="file:///F:/AI/projects/bestseller/docs/adr/0003-detail-budget-bound-to-round.md">ADR-0003</a> / <a href="file:///F:/AI/projects/bestseller/docs/adr/0013-detail-observation-module.md">ADR-0013</a> / <a href="file:///F:/AI/projects/bestseller/docs/adr/0014-click-listing-page-adapter.md">ADR-0014</a>：预算固定、点卡前申请、跳过退还均保留；已有单采集进程互斥，不以假设并发问题扩大范围。</div>
+</article>
+<article id="c6">
+<div class="card-head"><div class="title-block"><span class="num">06</span><h2>让店铺进度保留完整榜单的事实</h2></div><div class="badges"><span class="badge worth">Worth exploring</span><span class="badge dep">local-substitutable · mock</span></div></div>
+<div class="files"><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/pipeline.py" title="F:/AI/projects/bestseller/bestseller_monitor/pipeline.py:376">bestseller_monitor/pipeline.py:376</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/pipeline.py" title="F:/AI/projects/bestseller/bestseller_monitor/pipeline.py:389">bestseller_monitor/pipeline.py:389</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/db.py" title="F:/AI/projects/bestseller/bestseller_monitor/db.py:897">bestseller_monitor/db.py:897</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/views.py" title="F:/AI/projects/bestseller/bestseller_monitor/views.py:235">bestseller_monitor/views.py:235</a><span> · </span><a href="file:///F:/AI/projects/bestseller/tests/test_p1.py" title="F:/AI/projects/bestseller/tests/test_p1.py:197">tests/test_p1.py:197</a></div>
+<div class="visuals"><div class="panel"><div class="panel-label">Before <b>一列同时回答几件事</b></div><div class="diagram"><div class="step">榜单已完整保存 → 完成</div><div class="arrow">↓</div><div class="step bad">补采 deny 到阈值 → 榜单失败</div><div class="arrow">↓</div><div class="clock-grid"><div class="step bad">续跑重扫榜单</div><div class="step bad">界面归入未完成</div></div><div class="diagram-note">list_status 同时表示榜单事实与整店进度</div></div></div><div class="panel after"><div class="panel-label">After <b>阶段事实由同一处解释</b></div><div class="diagram"><div class="step">遍历与补采各表达本次结果</div><div class="arrow">↓</div><div class="deep-module"><div class="small-interface">店铺进度 module · 事实与转换的 seam</div><div class="inside">完整 / 残缺榜单事实<br>剩余详情与停止原因<br><b>续跑动作、终轮条件、界面事实</b></div></div><div class="diagram-note">是否“只补详情”须先重开既有取舍</div></div></div></div>
+<div class="facts"><div><h3>问题</h3><p>同一 list_status 被用来表示榜单完整性、是否跑完、续跑动作与界面分组；补采中断后，已完成榜单也失去“完成”事实。</p></div><div><h3>改法</h3><p>把一店的阶段事实、转换与下一步工作收在一个 deep module；调用方表达中断发生在哪个阶段，读方不再从一列与备注推断多种含义。</p></div></div>
+<div class="proof"><strong>源码控制流推论：</strong>保存完整榜单 → 补采撞阈值 → 改失败 → 续跑不在 completed_listing_keys → 再遍历榜单。现有用例只覆盖中断那次，未贯穿第二次续跑；未做现场复现。</div>
+<div class="wins"><span>locality：阶段转换集中</span><span>leverage：采集、续跑、界面共用</span><span>depth：读方少猜含义</span></div>
+<div class="method"><p><b>测试 seam：</b>真实临时 SQLite + 现有 Playwright / ScriptedListing 页面 adapter；完整跑“榜单完成→补采中断→续跑→补完”，同时观察界面与终态事实。</p><p><b>Deletion test：</b>只删记录未完成的 helper 不会减少知识；要吸收的是阶段转换和多处读方判据，单独搬 _run_listing_pw 没有 depth 收益。</p></div>
+<div class="adr warning"><b>明确重开 <a href="file:///F:/AI/projects/bestseller/docs/adr/0020-detail-visit-shared-across-paths.md">ADR-0020</a> 的取舍：</b>它有意把补采到阈值的店改为未完成；重开依据是完整榜单事实被抹平，续跑重复遍历与界面含义随之耦合。<a href="file:///F:/AI/projects/bestseller/docs/adr/0006-discovered-offers-are-listed-immediately.md">ADR-0006</a> 的残缺榜单只增不减仍保留；本项不扩展为页级断点续跑。</div>
+</article>
+<article id="c7">
+<div class="card-head"><div class="title-block"><span class="num">07</span><h2>让轮次时刻从采集入口进入</h2></div><div class="badges"><span class="badge worth">Worth exploring</span><span class="badge dep">in-process · local-substitutable</span></div></div>
+<div class="files"><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/pipeline.py" title="F:/AI/projects/bestseller/bestseller_monitor/pipeline.py:240">bestseller_monitor/pipeline.py:240</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/click_listing.py" title="F:/AI/projects/bestseller/bestseller_monitor/click_listing.py:124">bestseller_monitor/click_listing.py:124</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/detail.py" title="F:/AI/projects/bestseller/bestseller_monitor/detail.py:199">bestseller_monitor/detail.py:199</a><span> · </span><a href="file:///F:/AI/projects/bestseller/tests/helpers.py" title="F:/AI/projects/bestseller/tests/helpers.py:95">tests/helpers.py:95</a><span> · </span><a href="file:///F:/AI/projects/bestseller/tests/test_detail.py" title="F:/AI/projects/bestseller/tests/test_detail.py:220">tests/test_detail.py:220</a></div>
+<div class="visuals">
+<div class="panel"><div class="panel-label">Before <b>同一次流程，多个隐式读时点</b></div><div class="diagram">
+<div class="clock-grid"><div class="clock-cell">pipeline<b>cst_date()</b>轮次日期 / 检查点</div><div class="clock-cell">click_listing<b>cst_date()</b>同日去重 / 检查点</div><div class="clock-cell">detail<b>utcnow()</b>提交时刻 / 检查点</div><div class="clock-cell">tests/helpers<b>今天</b>按真实日期建轮</div></div>
+<div class="arrow red">↓</div><div class="step bad">测试按私有调用次数依次 patch 时间</div>
+</div></div>
+<div class="panel after"><div class="panel-label">After <b>一个可推进的时刻来源</b></div><div class="diagram">
+<div class="clock-source">真实时钟 adapter / 测试时钟 adapter</div><div class="arrow">↓</div>
+<div class="deep-module"><div class="small-interface">轮次采集 module · 时间从入口进入</div><div class="inside">轮次日期在启动时固定<br>去重日期、检查点、提交各取所需时刻<br><b>测试推进时间，观察结果</b><br><small>时间继续前进，不冻结整轮</small></div></div>
+</div></div>
+</div>
+<div class="facts"><div><h3>问题</h3><p>轮次判定与 views 已接受时刻，采集调用方仍各读挂钟；时间成了隐藏 interface，测试必须知道 detail 内部恰好调用几次 utcnow。</p></div><div><h3>改法</h3><p>将采集相关的时刻来源从入口传入，把日期与检查点用法收在轮次采集的 seam 内；复用既有轮次判定，不创建通用时间框架。</p></div></div>
+<div class="proof"><strong>已知挂账，当前验证：</strong>同一条现有“完整提交成功”测试，中午运行通过，模拟北京时间 23:56 则抛 DayBoundaryReached。截止规则正确；问题是该测试没有自主控制时间。原报告已记下 23:55–24:00 的测试窗口。</div>
+<div class="wins"><span>locality：时间约定可见</span><span>leverage：整条采集可推进</span><span>depth：测试无需数内部调用</span></div>
+<div class="method"><p><b>测试 seam：</b>真实临时 SQLite + 已有脚本化采集 adapter + 可推进时钟，验证 23:54→截止→次日、提交后停止仍留数据；保留与真实时钟无关的解析测试。</p><p><b>Deletion test：</b>删除多个挂钟别名的顺序打桩，时间知识集中在一个可推进来源；只给 utcnow 再套一个同名函数不会增加 depth。</p></div>
+<div class="adr"><a href="file:///F:/AI/projects/bestseller/docs/adr/0005-round-identity-is-date-and-shop-scope.md">ADR-0005</a> / <a href="file:///F:/AI/projects/bestseller/docs/adr/0011-ui-views-module-and-injected-now.md">ADR-0011</a>：沿用“时刻由调用方给”的方向。本项是已知测试债务的架构形态，不宣称新发现了生产跨日故障。</div>
+</article>
+
+<div class="evidence-end">
+<b>证据范围</b> · 源码静态核对 + 只读子 agent 独立探索 + 临时 SQLite / 模拟页面、时钟、进程动作的隔离复现。6 个相关测试文件共运行 96 条：95 通过，1 跳过；未运行全套测试，也未用真实 1688 页面验证。首次回收测试运行被本次临时脚本的日志禁用干扰，修正脚本后重跑通过。
+<br><b>筛选依据</b> · db.py 虽有 17 次近期改动，计数与迁移已有 ADR-0017 / 0015 承接；不因文件较长就继续拆分。旧报告已完成的六项没有作为未做工作重新列出。
+</div>
+<section class="top" id="top-recommendation">
+<div class="eyebrow">Top recommendation</div><h2>先做 01：详情访问交回验证后的观测</h2>
+<p>它同时修复验证后误判与导航异常漏重试，两处都来自“读取过程没有完整进入观测 seam”；现有真实临时库与页面 adapter 可以直接检验结果。</p>
+<a href="#c1">回到候选 01 ↗</a>
+</section>
+<div class="footer"><span>范围：候选与证据 · 尚未设计新 interface 或实施重构</span><span>下一步：选一个候选，进入 grilling</span></div>
+</main>
+</body>
+</html>
