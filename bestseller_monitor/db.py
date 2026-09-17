@@ -5,12 +5,12 @@ import logging
 import sqlite3
 import hashlib
 import json
-import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterator
 
+from . import click_events
 from .parse import DEFAULT_SKU_ID
 
 log = logging.getLogger(__name__)
@@ -299,15 +299,16 @@ class DetailBudgetExhausted(RuntimeError):
         super().__init__(note)
 
 
-_CARD_POS_RE = re.compile(r"page=(\d+)&idx=(\d+)")
-
-
-def _card_pos(note: str | None) -> tuple[int, int] | None:
-    """从事件 note 中解析卡片位置 (page, idx)，用于按卡片去重。"""
-    if not note:
-        return None
-    m = _CARD_POS_RE.search(note)
-    return (int(m.group(1)), int(m.group(2))) if m else None
+# 点击事件里「这张卡算成功 / 算失败」两个集合，只在这里写一遍。
+# `UNREADABLE`（拿到了商品编号、但详情读不出来）两个集合都不进：那张卡的失败已经由
+# `detail.capture_observation` 写成失败快照，并经 `failed_offers` 计入了失败率，
+# 在这里再算一次就是双计。事件名与位置编码都取自 `click_events`。
+_CARD_OK_OUTCOMES = (click_events.ClickOutcome.SUBMITTED, click_events.ClickOutcome.SKIPPED)
+_CARD_FAILED_OUTCOMES = (click_events.ClickOutcome.NOT_OPENED,
+                         click_events.ClickOutcome.NO_OFFER,
+                         click_events.ClickOutcome.DENIED)
+_CLICK_CARD_EVENTS = tuple(outcome.value
+                           for outcome in _CARD_OK_OUTCOMES + _CARD_FAILED_OUTCOMES)
 
 
 def _migrate_round_columns(conn: sqlite3.Connection) -> bool:
@@ -1429,26 +1430,30 @@ class Database:
         )
 
     def click_card_failures(self, round_id: int) -> int:
-        """统计「点击后从未抓到任何 SKU」的失败卡片数（按 shop+page+idx 去重）。
+        """统计「点击后没拿到商品编号」的失败卡片数（按店 + 卡片位置去重）。
 
         判定：
           - 成功：该卡片出现过 click_ok（抓到 SKU）或 click_skipped（成功跳过）。
           - 失败：该卡片仅出现过 click_no_popup / click_url_notoffer / click_deny。
+          - 不参与：click_parse_error（含旧名 click_parse_empty）——那张卡拿到了商品编号，
+            它的失败由失败快照经 `failed_offers` 计入，这里再算一次就是双计。
         用于把「点击失败但没拿到 offer_id」的卡片也计入整轮失败率，避免被静默丢弃、
         导致成功率被高估、『失败率>阈值即暂停』失效。
         """
         rows = self.conn.execute(
             "SELECT shop_key, event, note FROM event_log "
-            "WHERE round_id=? AND event IN "
-            "('click_ok','click_skipped','click_no_popup','click_url_notoffer','click_deny')",
-            (round_id,),
+            f"WHERE round_id=? AND event IN ({','.join('?' * len(_CLICK_CARD_EVENTS))})",
+            (round_id, *_CLICK_CARD_EVENTS),
         ).fetchall()
-        ok_keys: set[tuple] = set()
-        fail_keys: set[tuple] = set()
+        ok_keys: set = set()
+        fail_keys: set = set()
         for r in rows:
-            pos = _card_pos(r["note"])
-            key = (r["shop_key"], pos) if pos else (r["shop_key"], r["note"])
-            if r["event"] in ("click_ok", "click_skipped"):
+            got = click_events.classify(r["event"], r["note"])
+            if got is None:
+                continue
+            # 位置读不出来时退化成整条 note 作键（历史行如此；生产侧每条都带位置）。
+            key = (r["shop_key"], got.card if got.card is not None else r["note"])
+            if got.outcome in _CARD_OK_OUTCOMES:
                 ok_keys.add(key)
             else:
                 fail_keys.add(key)

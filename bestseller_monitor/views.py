@@ -16,7 +16,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from . import rounds
+from . import click_events, rounds
 from .config import effective_pages_limit
 from .crawler_identity import CrawlerProcess
 from .db import CST, Database, RoundTally, cst_date
@@ -220,10 +220,15 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
 
 def _shop_span(conn: sqlite3.Connection, round_id: int,
                shop_key: str) -> tuple[int, float | None]:
-    """该店本轮的事件跨度：（deny 数、耗时秒）。"""
+    """该店本轮的事件跨度：（deny 数、耗时秒）。
+
+    deny 数是**事件条数**不是卡片数：同一张卡在 deny 阶梯上的第 1/2/3 次各发一条
+    （见 `click_events.denied`），界面要看的正是这家店吃了多少 deny 压力。
+    失败率那边按卡片去重，两个单位刻意不同（见 `db.click_card_failures`）。
+    """
     deny = conn.execute(
-        "SELECT COUNT(*) c FROM event_log WHERE round_id=? AND shop_key=? AND event='click_deny'",
-        (round_id, shop_key),
+        "SELECT COUNT(*) c FROM event_log WHERE round_id=? AND shop_key=? AND event=?",
+        (round_id, shop_key, click_events.ClickOutcome.DENIED.value),
     ).fetchone()["c"]
     span = conn.execute(
         "SELECT MIN(ts), MAX(ts) FROM event_log WHERE round_id=? AND shop_key=?",
@@ -280,9 +285,10 @@ def _round_counts(conn: sqlite3.Connection, round_id: int) -> tuple[int, int]:
     total = conn.execute(
         "SELECT COUNT(*) c FROM shop_rounds WHERE round_id=?", (round_id,)
     ).fetchone()["c"]
+    # deny 按事件条数计，与 `_shop_span` 同一口径（不是卡片数）。
     deny = conn.execute(
-        "SELECT COUNT(*) c FROM event_log WHERE round_id=? AND event='click_deny'",
-        (round_id,),
+        "SELECT COUNT(*) c FROM event_log WHERE round_id=? AND event=?",
+        (round_id, click_events.ClickOutcome.DENIED.value),
     ).fetchone()["c"]
     return total, deny
 

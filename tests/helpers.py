@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from bestseller_monitor import single_instance
 from bestseller_monitor import rounds
+from bestseller_monitor.click_events import CardRef
 from bestseller_monitor.db import cst_date
 from bestseller_monitor.listing import ListingLoadFailed
 from bestseller_monitor.rounds import RoundRequest, ShopScope
@@ -134,10 +135,17 @@ class FakeCard:
         self._opened = opened
         self._read_error = read_error
         self._content_values = iter(content_values) if content_values is not None else None
-        self.note = ""          # 由 adapter 按当前页号填
-        self.ref = ""
+        self.card_ref = CardRef(page=0, index=0)   # 由 adapter 按当前页号填
         self.opens = 0
         self.closes = 0
+
+    @property
+    def note(self) -> str:
+        return self.card_ref.note
+
+    @property
+    def ref(self) -> str:
+        return self.card_ref.ref
 
     def title(self) -> str:
         return self._title
@@ -202,8 +210,7 @@ class ScriptedListing:
 
     def card(self, index: int):
         card = self.pages[self.page_no - 1][index]
-        card.note = f"page={self.page_no}&idx={index}"
-        card.ref = f"card:p{self.page_no}:i{index}"
+        card.card_ref = CardRef(page=self.page_no, index=index)
         return card
 
     def advance(self, describe: str) -> bool:

@@ -12,16 +12,23 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-CLICK_EVENTS = ("click_ok", "click_no_popup", "click_url_notoffer",
-                "click_parse_empty", "click_skipped", "click_deny")
-SUCCESS = "click_ok"
-FAILURE_EVENTS = ("click_no_popup", "click_url_notoffer", "click_parse_empty", "click_deny")
+REPO = Path(__file__).resolve().parents[1]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from bestseller_monitor.click_events import ALL_EVENT_NAMES, ClickOutcome, classify
+
+# 事件名与结果种类的对应（含历史名）由 click_events 一处定义，这里只挑自己关心的那些。
+# `click_skipped` 既不算成功也不算失败：它只进「点击」总数，不进成功率的分母。
+SUCCESS = ClickOutcome.SUBMITTED
+FAILURE_OUTCOMES = (ClickOutcome.UNREADABLE, ClickOutcome.NOT_OPENED,
+                    ClickOutcome.NO_OFFER, ClickOutcome.DENIED)
 
 
 def load_click_rows(conn: sqlite3.Connection, round_id: int | None = None):
     sql = ("SELECT shop_key, event, COUNT(*) AS c FROM event_log "
-           "WHERE event IN (%s)" % ",".join("?" for _ in CLICK_EVENTS))
-    params: list = list(CLICK_EVENTS)
+           f"WHERE event IN ({','.join('?' * len(ALL_EVENT_NAMES))})")
+    params: list = list(ALL_EVENT_NAMES)
     if round_id is not None:
         sql += " AND round_id=?"
         params.append(round_id)
@@ -30,17 +37,21 @@ def load_click_rows(conn: sqlite3.Connection, round_id: int | None = None):
 
 
 def compute(rows) -> list[dict]:
-    agg: dict[str, dict[str, int]] = defaultdict(lambda: {ev: 0 for ev in CLICK_EVENTS})
+    agg: dict[str, dict[ClickOutcome, int]] = defaultdict(
+        lambda: {outcome: 0 for outcome in ClickOutcome})
     for r in rows:
-        agg[r["shop_key"]][r["event"]] = r["c"]
+        got = classify(r["event"], None)
+        if got is not None:
+            agg[r["shop_key"]][got.outcome] += r["c"]
     out = []
     for sk, d in agg.items():
         ok = d[SUCCESS]
-        attempted = ok + sum(d[f] for f in FAILURE_EVENTS)
+        attempted = ok + sum(d[outcome] for outcome in FAILURE_OUTCOMES)
         success_rate = (ok / attempted) if attempted else None
-        no_popup_ratio = (d["click_no_popup"] / attempted) if attempted else None
+        no_popup_ratio = (d[ClickOutcome.NOT_OPENED] / attempted) if attempted else None
         out.append({
-            "shop": sk, **d,
+            "shop": sk,
+            **{outcome.value: d[outcome] for outcome in ClickOutcome},
             "total": sum(d.values()), "attempted": attempted,
             "success_rate": success_rate, "no_popup_ratio": no_popup_ratio,
         })
@@ -55,12 +66,13 @@ def _pct(v: float | None) -> str:
 def render(out: list[dict]) -> str:
     lines = ["1688 点击→弹窗可靠性（按店）",
              f"{'店铺':<6}{'点击':>6}{'成功':>6}{'无弹窗':>8}{'非offer':>8}"
-             f"{'解析空':>8}{'跳过':>6}{'deny':>6}{'成功率':>9}{'无弹窗占比':>10}"]
+             f"{'解析失败':>8}{'跳过':>6}{'deny':>6}{'成功率':>9}{'无弹窗占比':>10}"]
     for d in out:
         lines.append(
-            f"{d['shop']:<6}{d['total']:>6}{d[SUCCESS]:>6}{d['click_no_popup']:>8}"
-            f"{d['click_url_notoffer']:>8}{d['click_parse_empty']:>8}"
-            f"{d['click_skipped']:>6}{d['click_deny']:>6}{_pct(d['success_rate']):>9}"
+            f"{d['shop']:<6}{d['total']:>6}{d[SUCCESS.value]:>6}"
+            f"{d[ClickOutcome.NOT_OPENED.value]:>8}{d[ClickOutcome.NO_OFFER.value]:>8}"
+            f"{d[ClickOutcome.UNREADABLE.value]:>8}{d[ClickOutcome.SKIPPED.value]:>6}"
+            f"{d[ClickOutcome.DENIED.value]:>6}{_pct(d['success_rate']):>9}"
             f"{_pct(d['no_popup_ratio']):>10}"
         )
     if not out:
@@ -73,13 +85,16 @@ def write_csv(path: Path, out: list[dict]) -> None:
     with open(path, "w", newline="", encoding="utf-8-sig") as fh:
         w = csv.writer(fh)
         w.writerow(["shop", "total", "ok", "no_popup", "url_notoffer",
-                    "parse_empty", "skipped", "deny", "attempted",
+                    "parse_error", "skipped", "deny", "attempted",
                     "success_rate", "no_popup_ratio"])
         for d in out:
-            w.writerow([d["shop"], d["total"], d[SUCCESS], d["click_no_popup"],
-                        d["click_url_notoffer"], d["click_parse_empty"], d["click_skipped"],
-                        d["click_deny"], d["attempted"], _pct(d["success_rate"]),
-                        _pct(d["no_popup_ratio"])])
+            w.writerow([d["shop"], d["total"], d[SUCCESS.value],
+                        d[ClickOutcome.NOT_OPENED.value],
+                        d[ClickOutcome.NO_OFFER.value],
+                        d[ClickOutcome.UNREADABLE.value],
+                        d[ClickOutcome.SKIPPED.value],
+                        d[ClickOutcome.DENIED.value], d["attempted"],
+                        _pct(d["success_rate"]), _pct(d["no_popup_ratio"])])
 
 
 def main(argv: list[str] | None = None) -> int:

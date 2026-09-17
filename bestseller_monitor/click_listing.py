@@ -20,7 +20,7 @@ import re
 
 from playwright.sync_api import Error as PlaywrightError
 
-from . import dedupe, detail, detail_visit, listing, rounds
+from . import click_events, dedupe, detail, detail_visit, listing, rounds
 from .config import Config, Shop, effective_pages_limit
 from .db import cst_date, utcnow
 from .delay import Humanizer
@@ -75,13 +75,12 @@ class ShopWalk:
         if self._emit is not None:
             self._emit(event, shop_key=self.shop.key, phase=kw.pop("phase", "listing"), **kw)
 
-    @staticmethod
-    def _card_note(card, offer_id: str | None = None, suffix: str = "") -> str:
-        """事件备注：卡片位置 +(可选)商品编号 +(可选)后缀——改前遍历手拼的那一套。"""
-        note = card.note
-        if offer_id is not None:
-            note += "&offer_id=" + offer_id
-        return note + suffix
+    def record(self, spec: tuple[str, dict]) -> None:
+        """发一条 `click_events` 交回的事件规格（事件名 + 载荷）。
+
+        事件名与备注由协议模块产出，遍历只决定**什么时候**记——这里是这两件事的接缝。
+        """
+        self.emit(spec[0], **spec[1])
 
     # ---------- 遍历 ----------
     def run(self):
@@ -160,7 +159,7 @@ class ShopWalk:
         访问顺序与晚到 deny 由 `detail_visit` 统一，命中 deny 仍按第 1/2 次退避重试、
         第 3 次关掉详情跳过当前商品。
         """
-        note = card.note
+        ref = card.card_ref
         per_product_denies = 0
         retry_after_late_deny = False
         # 延迟导入避免 click_listing 与 pipeline 的停止分类形成 import 环。
@@ -180,12 +179,11 @@ class ShopWalk:
                 # 账目与判据都在 guard，这里只把它记成事件再上抛。
                 flag = ("round_abort" if isinstance(exc, RoundDenyExceeded)
                         else "shop_skip")
-                self.emit("click_deny", phase="detail",
-                          note=note + f"&n={per_product_denies + 1}&{flag}")
+                self.record(click_events.denied(ref, per_product_denies + 1, terminal=flag))
                 raise
 
             if isinstance(visit, detail_visit.NotOpenedVisit):
-                self.emit("click_no_popup", note=note)
+                self.record(click_events.not_opened(ref))
                 return None
             if isinstance(visit, detail_visit.ReadFailedVisit):
                 # 取得或初次 guard 失败时，已打开的弹窗仍由点击调用方关闭。
@@ -201,8 +199,8 @@ class ShopWalk:
                 except (ShopDenyExceeded, RoundDenyExceeded) as exc:
                     flag = ("round_abort" if isinstance(exc, RoundDenyExceeded)
                             else "shop_skip")
-                    self.emit("click_deny", phase="detail",
-                              note=note + f"&n={per_product_denies + 1}&{flag}")
+                    self.record(click_events.denied(ref, per_product_denies + 1,
+                                                   terminal=flag))
                     raise
                 except _LateDenied:
                     self.emit("popup_close", offer_id=card.offer_id)
@@ -216,18 +214,18 @@ class ShopWalk:
                 log.warning("店铺 %s 商品命中 deny（该商品第 %s 次）",
                             self.shop.key, per_product_denies)
                 if per_product_denies == 1:
-                    self.emit("click_deny", phase="detail", note=note + "&n=1")
+                    self.record(click_events.denied(ref, 1))
                     if not closed_for_deny:
                         card.close()
                     self.human.sleep(self.cfg.deny_backoff_sec)
                     continue
                 if per_product_denies == 2:
-                    self.emit("click_deny", phase="detail", note=note + "&n=2")
+                    self.record(click_events.denied(ref, 2))
                     if not closed_for_deny:
                         card.close()
                     self.human.sleep(self.cfg.deny_retry2_backoff_sec)
                     continue
-                self.emit("click_deny", phase="detail", note=note + "&n=3&skip")
+                self.record(click_events.denied(ref, 3, terminal="skip"))
                 log.warning("店铺 %s 商品第 3 次命中 deny，跳过当前商品", self.shop.key)
                 if not closed_for_deny:
                     card.close()
@@ -239,7 +237,7 @@ class ShopWalk:
         """一张卡的详情观测：认领商品、按结果记事件、把卡片关掉。"""
         offer_id = card.offer_id
         if offer_id is None:
-            self.emit("click_url_notoffer", note=card.note)
+            self.record(click_events.no_offer(card.card_ref))
             card.close()
             return None
         self.emit("popup_open", offer_id=offer_id)
@@ -267,16 +265,15 @@ class ShopWalk:
             raise
 
         if result.outcome is detail.Outcome.SKIPPED_TODAY:
-            self.emit("click_skipped", offer_id=offer_id,
-                    note=card.note + "&offer_id=" + offer_id)
+            self.record(click_events.skipped(card.card_ref, offer_id,
+                                            click_events.SkipReason.TODAY))
             self.emit("skip_existing", offer_id=offer_id, note="inventory_exists_today")
         elif result.outcome is detail.Outcome.SUBMITTED:
             skus = result.sku_count if result.sku_count is not None else 0
-            self.emit("click_ok", offer_id=offer_id,
-                    note=self._card_note(card, offer_id, f"&sku={skus}"))
+            self.record(click_events.ok(card.card_ref, offer_id, skus))
         elif result.outcome is detail.Outcome.DUPLICATE:
-            self.emit("click_skipped", offer_id=offer_id,
-                    note=self._card_note(card, offer_id, "&dup=1"))
+            self.record(click_events.skipped(card.card_ref, offer_id,
+                                            click_events.SkipReason.DUPLICATE))
         self.emit("popup_close", offer_id=offer_id)
         card.close()
         # 失败与「没读到编号」一样：对调用方来说这张卡没有拿到商品（只留了失败行）。
@@ -292,8 +289,7 @@ class ShopWalk:
             self.emit("detail_parse", offer_id=offer_id,
                     note=f"sku_count={observation.sku_count}")
             return observation
-        self.emit("click_parse_error", offer_id=offer_id,
-                note=self._card_note(card, offer_id))
+        self.record(click_events.unreadable(card.card_ref, offer_id))
         if observation.kind is detail.FailureKind.PARSE:
             self.emit("detail_parse", offer_id=offer_id, note="sku_count=0")
         return observation
@@ -403,14 +399,19 @@ class PlaywrightCard:
         self.offer_id: str | None = None
 
     @property
+    def card_ref(self) -> click_events.CardRef:
+        """这张卡的身份：页号由 adapter 记（推进时 +1），序号是它在本页的位置。"""
+        return click_events.CardRef(page=self._owner.page_no, index=self.index)
+
+    @property
     def note(self) -> str:
-        """事件备注里的卡片位置：改前由遍历拼，现在卡片自己知道。"""
-        return f"page={self._owner.page_no}&idx={self.index}"
+        """事件备注里的卡片位置。"""
+        return self.card_ref.note
 
     @property
     def ref(self) -> str:
         """详情机会账本上的标识：同一轮内重复命中同一张卡也认得出。"""
-        return f"card:p{self._owner.page_no}:i{self.index}"
+        return self.card_ref.ref
 
     def title(self) -> str:
         return read_card_title(self._owner.page, self.index)

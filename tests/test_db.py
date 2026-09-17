@@ -908,7 +908,7 @@ class DbTests(unittest.TestCase):
             ("B", "click_no_popup", "page=2&idx=0"),
             ("C", "click_deny", "page=1&idx=0&n=1"),
             ("C", "click_ok", "page=1&idx=0&offer_id=9&sku=2"),
-            ("C", "click_deny", "page=2&idx=0&n=3&scan"),
+            ("C", "click_deny", "page=2&idx=0&n=3&skip"),
         ]
         for shop, ev, note in evs:
             self.db.conn.execute(
@@ -919,6 +919,27 @@ class DbTests(unittest.TestCase):
         self.db.conn.commit()
         # 失败卡片：A(1,1)、A(1,2)、B(2,0)、C(2,0)；B(1,0)/C(1,0) 曾失败但最终 click_ok → 不算
         self.assertEqual(self.db.click_card_failures(rid), 4)
+
+    def test_a_card_that_reached_a_product_is_not_counted_here(self):
+        """拿到了商品编号但读不出来的卡：失败已由快照计入 failed_offers，这里不再算一次。"""
+        rid = new_round(self.db)
+        evs = [
+            # 旧名，就是库里轮次 10–12 那 9 条的写法：读侧要认得它，但同样不算卡片失败。
+            ("A", "click_parse_empty", "page=1&idx=0&offer_id=7"),
+            ("A", "click_parse_error", "page=2&idx=0&offer_id=8"),
+            # 同一张卡先没打开、后拿到编号却读不出来：卡片口径仍记它失败一次。
+            ("B", "click_no_popup", "page=1&idx=0"),
+            ("B", "click_parse_error", "page=1&idx=0&offer_id=5"),
+        ]
+        for shop, ev, note in evs:
+            self.db.conn.execute(
+                "INSERT INTO event_log(round_id, shop_key, event, ts, note, kind) "
+                "VALUES (?, ?, ?, ?, ?, 'work')",
+                (rid, shop, ev, "2026-09-05T00:00:00+00:00", note),
+            )
+        self.db.conn.commit()
+
+        self.assertEqual(self.db.click_card_failures(rid), 1)
 
     def test_connect_migration_drops_stock_delta(self):
         # 模拟旧库：snapshots 含 stock_delta 列
