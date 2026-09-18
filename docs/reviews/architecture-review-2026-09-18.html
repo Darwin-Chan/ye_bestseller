@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>bestseller · 架构审查 · 2026-09-18</title>
+<script async src="https://cdn.tailwindcss.com"></script>
+<style>
+:root{--paper:#f6f5f0;--ink:#182d29;--muted:#65736e;--line:#d8dfd7;--green:#166a51;--pale:#e9f3eb;--red:#b54740;--redp:#fff0eb;--amber:#8b6214}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.65 "Segoe UI","Microsoft YaHei",sans-serif}
+main{max-width:1160px;margin:auto;padding:52px 32px 70px}a{color:inherit;text-decoration-color:#9eaea2;text-underline-offset:4px}a:hover{color:var(--green)}h1,h2,h3,p{margin:0}h1{font:600 42px/1.2 Georgia,"Microsoft YaHei",serif;letter-spacing:-1px}h2{font-size:25px;line-height:1.4;letter-spacing:-.4px}h3{font-size:14px}.eyebrow{font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700}.masthead{border-top:5px solid var(--ink);padding-top:22px}.title-row{display:flex;justify-content:space-between;gap:30px;align-items:end;margin:12px 0 18px}.edition{font:italic 20px Georgia,serif;color:var(--green)}.meta{font-size:12px;color:var(--muted);margin-top:8px}.legend{display:flex;flex-wrap:wrap;gap:20px;margin:24px 0;font-size:12px;color:var(--muted)}.legend i{display:inline-block;width:18px;height:12px;border:1px solid var(--muted);vertical-align:middle;margin-right:6px}.legend i.seam{border-style:dashed}.legend i.leak{border:none;border-top:2px solid var(--red);height:3px}.legend i.deep{background:var(--ink);border:3px solid var(--green)}
+.nav{display:grid;grid-template-columns:repeat(2,1fr);border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin:22px 0 16px}.nav a{padding:15px 12px;text-decoration:none;border-right:1px solid var(--line);font-size:13px}.nav a:last-child{border:0}.nav b{display:block;color:var(--green);font:22px Georgia,serif}.scope{font-size:12px;color:var(--muted);padding-bottom:8px}.scope b{color:var(--ink)}
+article{margin-top:38px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:28px;scroll-margin-top:20px}.card-head{display:flex;align-items:start;justify-content:space-between;gap:20px}.num{font:italic 34px Georgia,serif;color:#a7b5ab;margin-right:15px}.title-block{display:flex;align-items:center}.badges{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end;padding-top:7px}.badge{border-radius:20px;padding:3px 11px;font-size:11px;white-space:nowrap;font-weight:600}.strong{background:#def1e5;color:#116342}.worth{background:#fff0ce;color:#885c05}.dep{background:#f0f2ee;color:#667169}.files{font:11px/1.9 Consolas,monospace;color:var(--muted);margin:14px 0 20px;overflow-wrap:anywhere}.files a{text-decoration:none}.files a:hover{text-decoration:underline}
+.visuals{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:18px 0 24px}.panel{background:#f8f9f5;border:1px solid #e0e5dc;border-radius:8px;padding:16px;min-width:0}.panel.after{background:#f1f7f0}.panel-label{display:flex;justify-content:space-between;align-items:center;font-size:10px;text-transform:uppercase;letter-spacing:1.5px;font-weight:700;color:#6f7b70;margin-bottom:15px}.panel-label b{font-size:11px;letter-spacing:0;color:var(--red)}.after .panel-label b{color:var(--green)}.diagram{min-height:300px;display:flex;flex-direction:column;justify-content:center;gap:0}.step{padding:9px 13px;background:white;border:1px solid #cbd6cc;border-radius:5px;text-align:center;font-size:12.5px}.step small{color:var(--muted);font-size:11px;display:block}.arrow{text-align:center;height:20px;font-size:15px;line-height:20px;color:#7d8e82}.arrow.red{color:var(--red)}.step.bad{background:var(--redp);border-color:#d69991;color:#943d32}.step.ok{background:#e1f0e3;border-color:#a2c4ab;color:#1b694b}.step.dead{background:#f4f4f2;border:1px dashed #b9beb6;color:#8b8f88;text-decoration:line-through;text-decoration-color:#c9a09a}.fork{display:grid;grid-template-columns:1fr 1fr;gap:9px}.fork .lane{border:1px solid #dde2d8;border-radius:6px;padding:8px;background:#fbfbf8}.lane-label{font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700;color:#8a958c;margin-bottom:7px;text-align:center}.deep-module{border:3px solid #43856b;background:var(--ink);color:#edf4eb;border-radius:8px;padding:15px;text-align:center}.deep-module .small-interface{border-bottom:1px dashed #95b2a0;padding-bottom:9px;margin-bottom:11px;font-size:12px;color:#d4e4d6}.deep-module .inside{font-size:12.5px;line-height:1.95}.deep-module .inside small{font-size:11px;color:#b5c9bb}.diagram-note{font-size:11px;color:var(--muted);text-align:center;margin-top:10px}.diagram-note.red{color:var(--red)}.chain{display:flex;flex-wrap:wrap;gap:5px;justify-content:center;align-items:center}.chain .node{font:11px Consolas,monospace;background:white;border:1px solid #cbd6cc;border-radius:4px;padding:4px 7px;white-space:nowrap}.chain .sep{color:#9aa79d;font-size:12px}
+.facts{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:18px}.facts h3{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:5px}.facts p{font-size:13px}.proof{background:#f6f5f0;border-left:3px solid #97ac9b;padding:10px 13px;margin:15px 0;font-size:12px;line-height:1.7}.proof strong{color:var(--green)}.proof code{font:11px Consolas,monospace}.wins{display:flex;gap:8px;flex-wrap:wrap;margin:15px 0}.wins span{font-size:12px;background:#edf4ed;color:#315940;padding:4px 9px;border-radius:4px}.method{font-size:12px;color:#54645a;border-top:1px solid #e8ece5;padding-top:13px;margin-top:13px}.method p+p{margin-top:5px}.adr{padding:10px 12px;border-radius:4px;background:#f4f3eb;font-size:12px;margin-top:12px;color:#616850}.adr.warning{background:#fff4dc;color:#825f1d}.adr a{font-weight:600}code{font-family:Consolas,monospace;font-size:.93em}
+.evidence-end{margin-top:32px;border-top:1px solid var(--line);padding-top:20px;font-size:12px;color:var(--muted)}.evidence-end b{color:var(--ink)}
+.top{background:var(--ink);color:#f0f5ed;border-radius:12px;padding:30px;margin-top:30px}.top .eyebrow{color:#adc8b5}.top h2{margin:10px 0}.top p{font-size:14px;color:#d3e0d4}.top a{display:inline-block;margin-top:15px;color:#e2f0d7;font-size:13px}
+.filtered{margin-top:34px;background:#fbfbf7;border:1px solid var(--line);border-left:4px solid #cbd6cc;border-radius:8px;padding:20px 22px;font-size:12.5px;color:#4d5c52}.filtered h3{font-size:11px;letter-spacing:1.4px;text-transform:uppercase;color:var(--muted);margin-bottom:10px}.filtered ul{margin:0;padding-left:18px}.filtered li{margin-bottom:5px}.filtered li b{color:var(--ink);font-weight:600}.filtered .tag{font:10px Consolas,monospace;color:#8a958c}
+.footer{display:flex;justify-content:space-between;gap:20px;font-size:11px;color:var(--muted);margin-top:20px}
+@media(max-width:760px){main{padding:26px 16px}.title-row{display:block}h1{font-size:32px}.edition{margin-top:12px}.nav{grid-template-columns:1fr}.nav a{border-right:0;border-bottom:1px solid var(--line)}.card-head{display:block}.badges{justify-content:flex-start;margin-top:10px}.visuals,.facts{grid-template-columns:1fr}article{padding:20px}h2{font-size:21px}.num{font-size:28px}.footer{display:block}}
+@media print{body{background:white}main{padding:0}article{break-inside:avoid;box-shadow:none}.nav{display:none}.top,.deep-module{print-color-adjust:exact}.panel,.proof{print-color-adjust:exact}}
+</style>
+</head>
+<body>
+<main class="max-w-6xl mx-auto">
+<header class="masthead">
+<div class="eyebrow">Bestseller / architecture field notes</div>
+<div class="title-row"><h1>停止目标与验证判据，<br>各收成一条</h1><div class="edition">Review · 18 Sep 2026</div></div>
+<div class="meta">HEAD <b>ffec77d</b> · 2026-09-18 · 根目录 F:\AI\projects\bestseller · 本轮 <b>2 条 Strong</b>（另 9 条 Worth exploring、2 条 Speculative 按你的要求未列入，清单见文末）</div>
+<div class="legend"><span><i></i>module</span><span><i class="seam"></i>seam</span><span><i class="leak"></i>跨 seam 泄漏</span><span><i class="deep"></i>deep module</span></div>
+<nav class="nav"><a href="#c1"><b>01</b>停止目标不能有第二条授权通道</a><a href="#c2"><b>02</b>验证判据只留一个输入面</a></nav>
+<div class="scope">扫描范围：<b>bestseller_monitor/ 全 21 个 module</b> + <code>gui.py</code> + <code>tools/</code>，五路并行 + 交叉复核。最近 80 次提交的热点：gui 21 次、pipeline 21 次、browser_pw 19 次、stop_request 15 次、db 15 次。已对照 CONTEXT.md 与 ADR-0001–0027；已做过的 15 轮深化与挂起的候选 05–07 均未重报。</div>
+</header>
+
+<article id="c1">
+<div class="card-head"><div class="title-block"><span class="num">01</span><h2>停止目标不能有第二条授权通道</h2></div><div class="badges"><span class="badge strong">Strong</span><span class="badge dep">in-process · 两路独立发现</span></div></div>
+<div class="files"><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/stop_request.py" title="F:/AI/projects/bestseller/bestseller_monitor/stop_request.py:223">bestseller_monitor/stop_request.py:223</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/stop_request.py" title="F:/AI/projects/bestseller/bestseller_monitor/stop_request.py:230">:230</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/stop_request.py" title="F:/AI/projects/bestseller/bestseller_monitor/stop_request.py:281">:281</a><span> · </span><a href="file:///F:/AI/projects/bestseller/gui.py" title="F:/AI/projects/bestseller/gui.py:132">gui.py:132</a><span> · </span><a href="file:///F:/AI/projects/bestseller/gui.py" title="F:/AI/projects/bestseller/gui.py:236">gui.py:236</a><span> · </span><a href="file:///F:/AI/projects/bestseller/gui.py" title="F:/AI/projects/bestseller/gui.py:349">gui.py:349</a></div>
+<div class="visuals">
+<div class="panel"><div class="panel-label">Before <b>两条通道，两处处置</b></div><div class="diagram">
+<div class="step">身份行 <small>(pid, started_at) · 冻结成 StopTarget</small></div><div class="arrow">↓</div>
+<div class="fork">
+<div class="lane"><div class="lane-label">支线 A · 自有子进程</div><div class="step bad" style="font-size:11.5px">bind：<b>pid 相等就收下 Popen</b><small>不核 creation proof</small></div><div class="arrow red">↓</div><div class="step bad" style="font-size:11.5px">处置回抄到 gui<small>吞 OSError 后报成功</small></div></div>
+<div class="lane"><div class="lane-label">支线 B · 外来目标</div><div class="step ok" style="font-size:11.5px">bind_process<small>+ creation proof</small></div><div class="arrow">↓</div><div class="step" style="font-size:11.5px">处置在 runtime<small>报 terminate_failed</small></div></div>
+</div>
+<div class="diagram-note red">runtime 自己的那两条缺省实现，全仓零穿行</div>
+</div></div>
+<div class="panel after"><div class="panel-label">After <b>一条通道，一处处置</b></div><div class="diagram">
+<div class="step">身份行 <small>(pid, started_at)</small></div><div class="arrow">↓</div>
+<div class="deep-module"><div class="small-interface">ProcessStopRuntime · 一种 binding、一种处置</div><div class="inside">bind：判据只有一条 <b>(pid, creation proof)</b><br>terminate / close_browser：缺省即唯一实现<br><small>冻结的 capability 在 begin 时定格，deadline 不再读可变状态</small></div></div>
+<div class="arrow">↓</div><div class="step ok">界面只交两件事实：是否自有子进程 · 浏览器是否本会话拉起</div>
+</div></div>
+</div>
+<div class="facts"><div><h3>问题</h3><p>ADR-0024 花整条 ADR 立的不变量——begin 时冻结 opaque capability、此后不再按 PID 重选——在「自有子进程」这支上退化成「调用方给谁就是谁」：凭 PID 相等收下 Popen，处置再回抄一份 adapter 本来就有的实现。</p></div><div><h3>改法</h3><p>让 <code>ProcessStopRuntime</code> 独自把冻结的 capability 变成效果（缺省分支转正），<code>Api</code> 只交目标事实，不交 Popen、不交动作。</p></div></div>
+<div class="proof"><strong>两处实现已经漂开：</strong>gui 那份吞掉 <code>OSError</code> 后回「成功」，runtime 那份回 <code>terminate_failed</code> 进核验重试；<code>browser.port is None</code> 的守卫只在 gui 侧；<code>browser_enabled</code> 否决门只在 runtime 侧。<br><strong>后果可静态确证：</strong>一支已经死掉的旧 Popen 只要 PID 与身份行相等就被当目标，下一 tick 判 GONE，把真正在跑的那次执行的身份行与 browser facts 清掉，界面显示「没有在跑」。<br><strong>可静态计数：</strong><code>ProcessStopRuntime</code> 全仓只有一个构造点 <code>gui.py:132</code>，两个回调每次都给了——<code>:281-307</code> 的缺省分支在生产里从不执行。</div>
+<div class="wins"><span>locality：绑定判据收成一条</span><span>leverage：一种处置，两处消失</span><span>死缺省转正</span><span>测试 seam：一条替身覆盖自有与外来</span></div>
+<div class="method"><p><b>测试 seam：</b>StopRuntime adapter 替身（已有 <code>RecordingStopRuntime</code>）；自有子进程与外来目标走同一条绑定判据后，两种目标共用一组用例。</p><p><b>Deletion test：</b>删掉 gui 的两个方法与两个回调参数、<code>bind</code> 的 own_process 分支——规则集中进 runtime（同款实现已在），唯一要搬的是「port 为空就没有可关的浏览器」一条守卫，它本属 browser facts 状态机。是集中，不是挪走。</p></div>
+<div class="adr"><a href="file:///F:/AI/projects/bestseller/docs/adr/0024-stop-target-owns-the-whole-window.md">ADR-0024</a>：无字面冲突——这是把它的不变量与删除清单走完。同批未走完的还有 <code>begin(target=None)</code> 与 <code>forget()</code>（本轮判为 Worth exploring，见文末）。</div>
+</article>
+
+<article id="c2">
+<div class="card-head"><div class="title-block"><span class="num">02</span><h2>验证判据只留一个输入面</h2></div><div class="badges"><span class="badge strong">Strong</span><span class="badge dep">mock · 判据里已不可达</span></div></div>
+<div class="files"><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/guard.py" title="F:/AI/projects/bestseller/bestseller_monitor/guard.py:136">bestseller_monitor/guard.py:136</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/guard.py" title="F:/AI/projects/bestseller/bestseller_monitor/guard.py:150">:150</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/click_listing.py" title="F:/AI/projects/bestseller/bestseller_monitor/click_listing.py:356">click_listing.py:356</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/click_listing.py" title="F:/AI/projects/bestseller/bestseller_monitor/click_listing.py:429">:429</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/listing.py" title="F:/AI/projects/bestseller/bestseller_monitor/listing.py:229">listing.py:229</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/detail_visit.py" title="F:/AI/projects/bestseller/bestseller_monitor/detail_visit.py:82">detail_visit.py:82</a><span> · </span><a href="file:///F:/AI/projects/bestseller/bestseller_monitor/browser_pw.py" title="F:/AI/projects/bestseller/bestseller_monitor/browser_pw.py:343">browser_pw.py:343</a></div>
+<div class="visuals">
+<div class="panel"><div class="panel-label">Before <b>信号穿过五个 module，落在死路上</b></div><div class="diagram">
+<div class="chain"><span class="node">响应监听</span><span class="sep">→</span><span class="node">self.punished</span><span class="sep">→</span><span class="node">prepare(punished=)</span><span class="sep">→</span><span class="node">OpenedDetail(punished=)</span></div>
+<div class="arrow red">↓</div>
+<div class="chain"><span class="node">ready_detail_page(punished=)</span><span class="sep">→</span><span class="node">intervention_kind(punished=)</span></div>
+<div class="arrow red">↓</div>
+<div class="step ok" style="font-size:11.5px">guard.py:136 &nbsp;<code>if is_punish_url(url): return "滑块"</code><small>同一个谓词，在这里就早退了</small></div>
+<div class="arrow red">↓</div>
+<div class="step dead" style="font-size:11.5px">guard.py:150 &nbsp;<code>if punished and is_punish_url(url)</code><small>对任何输入都到不了</small></div>
+<div class="diagram-note red">观察者比判据知道得多，而判据用不上它</div>
+</div></div>
+<div class="panel after"><div class="panel-label">After <b>判据持有它认的全部信号</b></div><div class="diagram">
+<div class="deep-module"><div class="small-interface">验证判据 · 一个输入面</div><div class="inside">地址 · 正文 · 验证容器可见性<br><b>响应流</b>（若要用，就在同一处用）<br><small>interface == implementation</small></div></div>
+<div class="arrow">↓</div>
+<div class="step ok" style="font-size:11.5px">intervention_kind(page)<small>调用方不再转交判据用不上的东西</small></div>
+<div class="arrow">↓</div>
+<div class="step" style="font-size:11.5px">adapter 只交页面<small>点击与补采两条路一次兑现</small></div>
+</div></div>
+</div>
+<div class="facts"><div><h3>问题</h3><p>响应流是唯一一处「观察者比判据知道得多」的信号：它被当成参数穿过五个 module，而 <code>intervention_kind</code> 对它的真假完全不敏感——同一个谓词在 <code>:136</code> 已经早退，<code>:150</code> 的兜底分支永远到不了。</p></div><div><h3>改法</h3><p>让 guard 持有它认的全部信号：要么补上「见到 punish 响应、地址正常」这条真判据，要么把 <code>punished</code> 从五个 interface 上撤掉。二选一，不留一条无人用的参数。</p></div></div>
+<div class="proof"><strong>不可达已核对：</strong><code>punished</code> 为真时 <code>:136</code> 已返回，为假时 <code>:150</code> 的条件不成立——两个取值都不改变返回值。<br><strong>现状只能钉住「信号穿到了」：</strong><code>tests/test_browser_pw.py:32</code> 断的是 <code>opened.punished</code>，没有一条用例断言过它判出了什么。<br><strong>旁证：</strong>本库 721 条 verify 事件全是 slider，没有 login 样本，漂移不会自己暴露。</div>
+<div class="wins"><span>locality：判据与信号同处一室</span><span>interface：五处收成一处</span><span>死分支消失</span><span>leverage：两条路一次兑现</span></div>
+<div class="method"><p><b>测试 seam：</b>脚本化页面 adapter（<code>tests/helpers.py</code> 的 FakeCard）已经能在不打浏览器的情况下摆出「有响应、地址正常」这一幕；判据收进一处后，用例从「信号穿到没有」改成「这一幕判成什么」。</p><p><b>Deletion test：</b>删掉整条线，对任何输入行为逐字不变（判真的唯一场景已被早退覆盖），复杂度不挪给任何调用方。通过。</p></div>
+<div class="adr warning"><a href="file:///F:/AI/projects/bestseller/docs/adr/0020-detail-visit-shared-across-paths.md">ADR-0020</a> / <a href="file:///F:/AI/projects/bestseller/docs/adr/0023-detail-visit-returns-fresh-observation.md">ADR-0023</a>：不冲突，但<b>更正两条挂账的前提</b>——两处都写着「补采路径缺响应监听」，实际上点击路径这份监听也早已不参与判据。无论删还是救，都会动 ADR-0023 写明的 <code>OpenedDetail(punished=)</code>。</div>
+</article>
+
+<div class="top">
+<div class="eyebrow">Top recommendation</div>
+<h2>先做 01：停止目标不能有第二条授权通道</h2>
+<p>它是本轮唯一被两路独立扫描从 seam 两端分别撞见的候选：一路从界面侧看到处置规则被回抄一份，一路从 adapter 侧看到绑定判据被绕开一条。两者的结论是同一处改动——<b>缺省实现已经在位，删掉多余的那条通道即可</b>，不需要新写逻辑；而且是这轮唯一有具体错误后果的一条（PID 复用下会把真正在跑的执行判成「没有在跑」）。</p>
+<a href="#c1">↑ 回到 01 的卡片</a>
+</div>
+
+<section class="filtered">
+<h3>按你的要求被过滤掉的（不列入正文）</h3>
+<ul>
+<li><b>Worth exploring · 9 条</b>：榜单页「打开之后怎么安顿」没有主人（deny-first 规则只长在详情页那份上）；<code>StopWatch</code> 还挂着一条只为旧测试存在的第二形状（五回调 + <code>forget()</code>，<code>_force</code> 里按 runtime 类型分叉）；界面会话账（认领的轮次、段计时、暂停旗）没有一处持有；<code>browser_enabled</code> 是关闭与否的第二个判据；<code>cleanup_pending</code> 承诺的「持精确 binding 重试」没有重试主体；卡片 DOM 词汇散在三处；<code>Config</code> 五个字段零读方、四处读点在静默默认；<code>rounds.phase</code> 只写不读（两路扫描各自发现）；「本轮尝试次数」的判据在 db 与 detail 写了两遍。</li>
+<li><b>Speculative · 2 条</b>：<code>vtype</code> 是一层没人真正消费的中间词汇；迁移清单里 <code>_drop_shops_active</code> 是 <code>_drop_column</code> 的重复实现。</li>
+<li><b>死物，不占条目</b>：<code>pipeline.STOP_EXCEPTIONS</code> 零调用；<code>detail</code> 放进 payload 的 <code>"html"</code> 键无人读；<code>browser_pw</code> 顶上那两组「旧名兼容」re-export 只为诊断工具与两个测试文件活着；<code>browser_pw.navigate_detail</code> 的 <code>cfg</code> 参数已无消费者。</li>
+<li><b>已裁定，不重报</b>：<code>Database</code> 上成组的原语（账本 → 挂起 05、采集进程身份 → ADR-0021、停止请求 → ADR-0024、店铺进度 → 挂起 06）；<code>event_logger</code> 吞写失败 → ADR-0026 挂账第 1 条（IS-53）；工具的库路径 → IS-54。</li>
+</ul>
+</section>
+
+<div class="footer"><span>bestseller · 架构审查 · 2026-09-18 · HEAD ffec77d</span><span>本轮未改动任何代码；报告为本目录下的临时文件</span></div>
+</main>
+</body>
+</html>
