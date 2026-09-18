@@ -125,7 +125,7 @@ class Api:
         self._elapsed_base = 0.0
         self._run_start_ts: float | None = None
         # 停止编排（窗口、回执、超时强杀）在 stop_request 里；**冻结目标之后的处置也在那里**，
-        # 界面只交一件事实：本会话拉起的那个子进程。晚绑定 lambda 让 begin 那一刻读一次
+        # 界面只交一件事实：本界面拉起的那个子进程。晚绑定 lambda 让 begin 那一刻读一次
         # `self.proc` 并冻进绑定，此后窗口不再读这个可变字段（ADR-0024）。
         # 窗口：请求发出后 8 秒、采集进程回执之后再 10 秒（ADR-0009，数值在 StopWatch 里）。
         runtime = stop_request.ProcessStopRuntime(own_process=lambda: self.proc)

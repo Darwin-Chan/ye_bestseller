@@ -34,7 +34,7 @@ adapter「在 begin 时冻结本 GUI 的 `Popen` handle 或打开 A 的 Win32 pr
 2026-09-18 的架构审查报告把这条写成「自有子进程是一条按 PID 信任的平行授权通道」，并推测
 PID 复用下会误判真正在跑的新执行。逐条走 `StopWatch._relation` 与 `_cleanup_target` 后
 **不成立**：PID 复用意味着 identity 行的 `started_at` 不同，判 `REPLACED`；清理是
-`(pid, started_at)` 条件删除，命中 0 行，B 保留。`bind` 的本会话 handle 优先也不是绕过授权，
+`(pid, started_at)` 条件删除，命中 0 行，B 保留。`bind` 让界面自己拉起的那个 handle 优先也不是绕过授权，
 是 ADR-0024 明文允许的一种绑定。所以本条的危害是**潜伏的**（不变量由构造之外的东西守着），
 不是活的线上故障。
 
@@ -44,13 +44,13 @@ PID 复用下会误判真正在跑的新执行。逐条走 `StopWatch._relation`
 
 ```python
 class ProcessStopRuntime:
-    def __init__(self, *, own_process=None):   # 唯一注入：本会话拉起的那个子进程
+    def __init__(self, *, own_process=None):   # 唯一注入：本界面拉起的那个子进程
         ...
     def terminate(self, bound) -> EffectResult      # 缺省分支转正，只碰 bound.capability
     def close_browser(self, browser) -> EffectResult  # 只看 BoundBrowser 上的 facts
 ```
 
-- `terminate` 只对传进来的那个绑定动手：本会话的 Popen 走 `capability.terminate()`（`OSError`
+- `terminate` 只对传进来的那个绑定动手：界面自己的 Popen 走 `capability.terminate()`（`OSError`
   → `terminate_failed`），外来目标走 `browser_proc.terminate_process_capability`。**不读
   `self.proc`，也不读当前配置。**
 - `close_browser` 删掉 `browser_enabled` 门与 `port is None` 门。`launched_by_us=True` 不是
@@ -61,7 +61,7 @@ class ProcessStopRuntime:
   `_kill_proc` 保留，唯一调用点是「暂停」的启动竞态——那条路没有停止目标、建不起窗口，
   按 ADR-0024 是有意的窄例外。
 
-`bind` 的判据优先级不动：本会话自己的 handle 优先，比重新 `OpenProcess` 拿到的更强。
+`bind` 的判据优先级不动：界面自己拉起的那个 handle 优先，比重新 `OpenProcess` 拿到的更强。
 
 ## 预期结果与代价
 
@@ -83,6 +83,16 @@ class ProcessStopRuntime:
 - `browser_proc.close_browser` 的签名（`launched_by_us` 参数）保持不变：它仍是 ADR-0019 的
   会话收尾与这里的强制关闭共用的那一个入口。
 
+## 挂账
+
+- **IS-55**：ADR-0024 的删除清单还剩三样没走完（`_LegacyRuntime` / `forget()` /
+  `begin(target=None)`）。它们是同一个 `StopRuntime` seam 的第二形状，与本条同源但性质是
+  「旧决定没落地完」，混做会让改动面翻倍，故拆出单开：
+  [IS-55](../../.scratch/1688-inventory-snapshot/issues/55-is-55.md)。
+- **`hasattr(capability, "poll")` 的分派写了两处**（`observe()` 里两处、`terminate()` 一处）：
+  Popen 与 Win32 capability 两种句柄的形状判断散在 adapter 内部。这是本条之前就有的形状，
+  不是本条引入的；收成一个小 helper 是纯内部整理，等下次动这个 adapter 时顺手做。
+
 ## 实现边界
 
 - 只动 `bestseller_monitor/stop_request.py` 的 `ProcessStopRuntime` 与 `gui.py` 的接线；
@@ -91,20 +101,25 @@ class ProcessStopRuntime:
 
 ## 收口与验收
 
-- 全套 `python -m unittest discover -s tests`：**452 项通过、0 跳过**（改前 447）。
-  新增 `ProcessStopRuntimeTests` 4 条（处置只认绑定 facts、无端口仍尝试关闭、唯一注入是自有
-  子进程、终止失败如实上报），`GuiStopRequestTests` 新增 2 条（强杀只动 begin 冻结的句柄、
-  identity 说 `OWNED` 时界面配置不能否决关闭），搬走 1 条（原钉 `Api._close_bound_browser`
-  的用例移成 adapter 的契约）。
+- 全套 `python -m unittest discover -s tests`：**454 项通过、0 跳过**（改前 447）。
+  新增 `ProcessStopRuntimeTests` 5 条（处置只认绑定 facts、无端口仍尝试关闭、缺 proof 仍交下去、
+  唯一注入是自有子进程、终止失败如实上报）、`GuiStopRequestTests` 2 条（强杀只动 begin 冻结的
+  句柄、identity 说 `OWNED` 时界面配置不能否决关闭）、`test_stop_target.py` 1 条（强杀失败留在
+  `VERIFYING`、不清事实、不关浏览器），搬走 1 条（原钉 `Api._close_bound_browser` 的用例移成
+  adapter 的契约）。
 - **真机抽查**（真实子进程，三条分支都跑）：
 
   | 分支 | 结果 |
   | --- | --- |
-  | 本会话的 Popen（调用方随后把可变字段清成 `None`） | `effect.ok=True`，进程确实退出 |
+  | 界面自己的 Popen（调用方随后把可变字段清成 `None`） | `effect.ok=True`，进程确实退出 |
   | 外来目标 + creation proof | 绑定成功，`effect.ok=True`，进程确实退出 |
   | proof 对不上 | 拒绝（`process_identity_mismatch`），目标仍在跑 |
 
   第一行是本条要买的那条不变量：绑定认得住，与调用方此刻的字段无关。
+- **两轴审查后的一处更正**：规格把「`OSError` 被吞掉」写成了一条红→绿的缺陷，实现时发现
+  改前也会进 `VERIFYING`（吞掉之后紧随的观察看见进程还活着，给出 `process_still_running`），
+  两边的收口相同，差别只在原因码与「要不要靠下一步来救」。所以那是**覆盖缺口**而不是行为缺陷，
+  窗口层的用例本来就没写；现已补上。逐条偏离记在 spec 的「两轴审查后的收口」。
 
 ## 被否掉的方向
 

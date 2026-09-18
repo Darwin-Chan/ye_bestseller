@@ -80,6 +80,27 @@ class StopTargetTests(unittest.TestCase):
         self.assertIsNotNone(self.db.crawler_process())
         self.assertNotIn("terminate", [name for name, _ in runtime.actions])
 
+    def test_a_failed_force_leaves_the_target_verifying(self):
+        """强杀没落到实处：窗口留在核验里，事实不清、浏览器不关（候选 01 验收 2）。
+
+        「杀失败」与「杀完还活着」在 adapter 那层是两件事（`terminate_failed` /
+        `process_still_running`），但在窗口这层收口相同：都没证明停下，都不许清事实。
+        """
+        runtime = stop_request.RecordingStopRuntime(
+            alive=True, browser=stop_request.BoundBrowser(9201, 9222, "browser-proof"),
+            browser_state="OWNED")
+        runtime.fail_terminate = True
+        watch = self._watch(runtime)
+        watch.begin(self.conn, stop_request.StopCommand(stop_request.ABORT, self.a, 1))
+        self.clock.value += 20
+
+        status = watch.tick(self.conn)
+
+        self.assertEqual(status.phase, stop_request.StopPhase.VERIFYING)
+        self.assertEqual(status.code, "terminate_failed")
+        self.assertIsNotNone(self.db.crawler_process(), "没证明停下就不该清事实")
+        self.assertNotIn("close_browser", [name for name, _ in runtime.actions])
+
     def test_browser_binding_failure_is_verifying_not_port_guess(self):
         runtime = stop_request.RecordingStopRuntime(alive=True,
                                                      browser_state="STARTING")

@@ -178,13 +178,10 @@ class GuiStopRequestTests(unittest.TestCase):
 
     def _dies(self):
         """「强杀」真的生效：内核释放会话锁，子进程变成已退出。"""
-        def kill():
-            self.lock.release()
-            self.api.proc.poll.return_value = 1
-        return kill
+        return self._dies_when_terminated(self.api.proc)
 
     def _dies_when_terminated(self, proc):
-        """只让 `proc` 这一个句柄答应去死。
+        """只让 `proc` 这一个句柄答应去死（默认就是界面当前那个）。
 
         停止窗口是「对冻结的那个绑定动手」，所以用例要把死亡挂在**那个句柄**上，而不是挂在
         `Api` 的某个方法上——后者会把「动的是谁」这件事挡在断言之外。

@@ -220,7 +220,7 @@ class RecordingStopRuntime:
 class ProcessStopRuntime:
     """Windows process adapter.  It binds handles at begin and never reselects a PID.
 
-    冻结目标之后**怎么处置**是这一个 module 的事：调用方只交事实（本会话拉起的那个子进程
+    冻结目标之后**怎么处置**是这一个 module 的事：调用方只交事实（本界面拉起的那个子进程
     句柄），不交动作。动作留在外面时，规则会有第二份实现，而「动的是冻结的那个绑定还是调用方
     此刻的可变字段」就取决于接线而不是取决于这条不变量（ADR-0024）。
     """

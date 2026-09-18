@@ -317,6 +317,22 @@ class ProcessStopRuntimeTests(unittest.TestCase):
         close.assert_called_once_with(None, launched_by_us=True, browser_pid=4242,
                                       browser_os_started="browser-proof")
 
+    def test_a_binding_without_a_proof_is_handed_over_untouched(self):
+        """没有 creation proof 的绑定照样交下去：拒绝是 `browser_proc` 的判断，不是这里的。
+
+        这条是原来钉在 `gui.Api._close_bound_browser` 上的那条用例搬过来的——它验的是
+        「不拿端口猜归属」，而「猜」这件事发生在 `browser_proc.close_browser` 里：那边缺
+        pid 或 proof 一律拒绝。adapter 不该在这里替它提前判一次。
+        """
+        runtime = stop_request.ProcessStopRuntime(own_process=lambda: None)
+
+        with patch.object(browser_proc, "close_browser", return_value=None) as close:
+            effect = runtime.close_browser(stop_request.BoundBrowser(4242, 9222, None))
+
+        close.assert_called_once_with(9222, launched_by_us=True, browser_pid=4242,
+                                      browser_os_started=None)
+        self.assertFalse(effect.ok, "对方拒绝关闭时如实上报，窗口据此进 cleanup_pending")
+
     def test_the_only_injected_input_is_the_own_child(self):
         """调用方交事实，不交动作、也不交否决权。"""
         with self.assertRaises(TypeError):
