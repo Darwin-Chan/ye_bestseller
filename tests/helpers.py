@@ -140,10 +140,6 @@ class FakeCard:
         self.closes = 0
 
     @property
-    def note(self) -> str:
-        return self.card_ref.note
-
-    @property
     def ref(self) -> str:
         return self.card_ref.ref
 

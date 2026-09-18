@@ -304,9 +304,12 @@ class DetailBudgetExhausted(RuntimeError):
 # `detail.capture_observation` 写成失败快照，并经 `failed_offers` 计入了失败率，
 # 在这里再算一次就是双计。事件名与位置编码都取自 `click_events`。
 _CARD_OK_OUTCOMES = (click_events.ClickOutcome.SUBMITTED, click_events.ClickOutcome.SKIPPED)
-_CARD_FAILED_OUTCOMES = (click_events.ClickOutcome.NOT_OPENED,
-                         click_events.ClickOutcome.NO_OFFER,
-                         click_events.ClickOutcome.DENIED)
+# 卡片口径的失败就是「没走到认出商品编号那一步」——由结果种类自己的属性给出，
+# 将来新增种类时这里不会漏掉。`UNREADABLE` 恰好有编号，所以自动落在两个集合之外。
+_CARD_FAILED_OUTCOMES = tuple(outcome for outcome in click_events.ClickOutcome
+                              if not outcome.has_offer_id)
+# SQL 白名单必须与下面分类用的两个集合严格一致：分类写的是两个显式分支、不是 `else`，
+# 这样将来新增的种类要么两处都在、要么两处都不在，不会一边取到了行、另一边判不出。
 _CLICK_CARD_EVENTS = tuple(outcome.value
                            for outcome in _CARD_OK_OUTCOMES + _CARD_FAILED_OUTCOMES)
 
@@ -1455,7 +1458,7 @@ class Database:
             key = (r["shop_key"], got.card if got.card is not None else r["note"])
             if got.outcome in _CARD_OK_OUTCOMES:
                 ok_keys.add(key)
-            else:
+            elif got.outcome in _CARD_FAILED_OUTCOMES:
                 fail_keys.add(key)
         return len(fail_keys - ok_keys)
 

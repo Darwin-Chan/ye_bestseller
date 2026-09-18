@@ -404,11 +404,6 @@ class PlaywrightCard:
         return click_events.CardRef(page=self._owner.page_no, index=self.index)
 
     @property
-    def note(self) -> str:
-        """事件备注里的卡片位置。"""
-        return self.card_ref.note
-
-    @property
     def ref(self) -> str:
         """详情机会账本上的标识：同一轮内重复命中同一张卡也认得出。"""
         return self.card_ref.ref
