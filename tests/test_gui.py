@@ -146,13 +146,18 @@ class GuiStopRequestTests(unittest.TestCase):
                        db_path=self.db_path, start_browser=start_browser,
                        attach_port=attach_port, stop_clock=self.clock)
 
-    def _running_crawler(self, pid: int = 6104) -> tuple[int, str]:
-        """造出「本界面拉起的采集进程在跑」：占住会话锁 + 身份行 + 活着的子进程句柄。"""
+    def _running_crawler(self, pid: int = 6104, *, owned: bool | None = None) -> tuple[int, str]:
+        """造出「本界面拉起的采集进程在跑」：占住会话锁 + 身份行 + 活着的子进程句柄。
+
+        `owned` 覆盖身份行发布的 browser 事实（默认跟随界面自己的配置）；给 `True` 而界面
+        配置说 `start_browser=False`，就是「配置漂移」那一幕：浏览器是本次启动的，界面这份
+        配置却不是当年那份。
+        """
         conn = connect(self.db_path)
         try:
             db = Database(conn)
             rid = new_round(db, "A01")
-            owned = getattr(self.api.cfg, "start_browser", True)
+            owned = getattr(self.api.cfg, "start_browser", True) if owned is None else owned
             started_at = db.record_crawler_process(
                 pid=pid, round_id=rid, note="run.py",
                 process_os_started="crawler-proof",
@@ -178,6 +183,17 @@ class GuiStopRequestTests(unittest.TestCase):
             self.api.proc.poll.return_value = 1
         return kill
 
+    def _dies_when_terminated(self, proc):
+        """只让 `proc` 这一个句柄答应去死。
+
+        停止窗口是「对冻结的那个绑定动手」，所以用例要把死亡挂在**那个句柄**上，而不是挂在
+        `Api` 的某个方法上——后者会把「动的是谁」这件事挡在断言之外。
+        """
+        def kill():
+            self.lock.release()
+            proc.poll.return_value = 1
+        return kill
+
     def _request_row(self):
         conn = connect(self.db_path)
         try:
@@ -199,11 +215,11 @@ class GuiStopRequestTests(unittest.TestCase):
     def test_pause_writes_a_stop_request_instead_of_killing(self):
         rid, started_at = self._running_crawler()
 
-        with patch.object(Api, "_kill_proc") as kill_proc, \
-                patch.object(browser_proc, "close_browser") as close:
+        with patch.object(browser_proc, "close_browser") as close:
             result = self.api.pause_run()
 
-        kill_proc.assert_not_called()
+        # 请求阶段不动手：既没结束子进程，也没碰浏览器。
+        self.api.proc.terminate.assert_not_called()
         close.assert_not_called()
         self.assertEqual(result["stopping"], "stopping")
         request = self._request_row()
@@ -218,13 +234,14 @@ class GuiStopRequestTests(unittest.TestCase):
     def test_pause_deadline_forces_the_stop_and_closes_the_browser(self):
         self._running_crawler()
 
-        with patch.object(Api, "_kill_proc", side_effect=self._dies()) as kill_proc, \
-                patch.object(browser_proc, "close_browser", return_value=6104) as close:
+        self.api.proc.terminate.side_effect = self._dies()
+
+        with patch.object(browser_proc, "close_browser", return_value=6104) as close:
             self.api.pause_run()
             self.clock.advance(20)   # 拨过 8 秒窗口
             self.api.get_run()      # 轮询驱动兜底，不新增后台线程
 
-        kill_proc.assert_called_once_with()
+        self.api.proc.terminate.assert_called_once_with()
         close.assert_called_once_with(
             9222, launched_by_us=True, browser_pid=9201,
             browser_os_started="browser-proof")
@@ -234,26 +251,31 @@ class GuiStopRequestTests(unittest.TestCase):
     def test_pause_acknowledgement_widens_the_window_and_reports_closing(self):
         self._running_crawler()
 
-        with patch.object(Api, "_kill_proc") as kill_proc, \
-                patch.object(browser_proc, "close_browser"):
+        with patch.object(browser_proc, "close_browser"):
             self.api.pause_run()
             self._acknowledge()
             self.clock.advance(20)   # 原窗口已经到点
             data = self.api.get_run()
 
-        kill_proc.assert_not_called()
+        self.api.proc.terminate.assert_not_called()
         self.assertEqual(data["stopping"], "closing", "回执之后是在收尾，不是在等响应")
 
     def test_pause_keeps_user_browser_when_attaching(self):
+        """接管用户浏览器（`BORROWED`）时强杀照做，但没有浏览器可关。
+
+        这一条是「删掉 `browser_enabled` 是删冗余、不是删保护」的证据：授权来自身份行发布的
+        facts——`BORROWED` 根本没有 `BoundBrowser`，所以界面那份配置说什么都不影响结果。
+        """
         self.api = self._api(start_browser=False)
         self._running_crawler()
+        self.api.proc.terminate.side_effect = self._dies()
 
-        with patch.object(Api, "_kill_proc", side_effect=self._dies()), \
-                patch.object(browser_proc, "close_browser") as close:
+        with patch.object(browser_proc, "close_browser") as close:
             self.api.pause_run()
             self.clock.advance(20)
             self.api.get_run()
 
+        self.api.proc.terminate.assert_called_once_with()
         close.assert_not_called()
 
     def test_pause_without_an_identity_ends_the_process_directly(self):
@@ -292,15 +314,48 @@ class GuiStopRequestTests(unittest.TestCase):
         self.assertIsNotNone(self._request_row(),
                              "惰性请求可以留着：认领按目标进程匹配，撞不上新进程")
 
-    def test_browser_cleanup_without_a_published_target_does_not_guess_from_the_port(self):
-        with patch.object(browser_proc, "close_browser") as close:
-            self.api._close_bound_browser(
-                stop_request.BoundBrowser(4242, 9222, None))
+    def test_force_acts_on_the_child_frozen_at_begin(self):
+        """窗口打开之后界面又换了子进程句柄：被处置的必须是 begin 冻结的那一个。
+
+        这是 ADR-0024 写下的不变量（「deadline 时不再读取可变的 `self.proc`」）。今天生产上
+        碰不到它——`start_run` / `resume_run` 在窗口未收口时会拒绝起新进程——但那条窗口检查
+        不该是这条不变量的承重件。
+        """
+        self._running_crawler()
+        frozen = self.api.proc
+        frozen.terminate.side_effect = self._dies_when_terminated(frozen)
+
+        with patch.object(browser_proc, "close_browser", return_value=6104):
+            self.api.pause_run()          # begin：冻结此刻的子进程
+            decoy = MagicMock()
+            decoy.poll.return_value = None
+            self.api.proc = decoy         # 界面的可变字段换了
+            self.clock.advance(20)
+            self.api.get_run()            # 拨过 8 秒窗口，强制
+
+        frozen.terminate.assert_called_once_with()
+        decoy.terminate.assert_not_called()
+        self.assertIsNone(self.api._stop_watch.state, "冻结的那个退出了，窗口该收口")
+
+    def test_a_published_owned_browser_is_closed_even_when_gui_config_disagrees(self):
+        """界面当前配置不是关闭授权：identity 行说 OWNED 且带精确 proof 就该关。
+
+        `start_browser=false` 的那条路本来就发布 `BORROWED`、根本没有 `BoundBrowser` 可关；
+        所以拿配置再挡一道保护不了任何东西，只会在配置漂移时（采集由另一份配置的界面、
+        `run.py --config` 或上一次界面拉起）把一个有精确归属的浏览器静默放走。
+        """
+        self.api = self._api(start_browser=False)
+        self._running_crawler(owned=True)
+        self.api.proc.terminate.side_effect = self._dies()
+
+        with patch.object(browser_proc, "close_browser", return_value=9201) as close:
+            self.api.pause_run()
+            self.clock.advance(20)
+            self.api.get_run()
 
         close.assert_called_once_with(
-            9222, launched_by_us=True, browser_pid=4242,
-            browser_os_started=None)
-
+            9222, launched_by_us=True, browser_pid=9201,
+            browser_os_started="browser-proof")
 
 class GuiLoggingTests(unittest.TestCase):
     def test_gui_records_its_own_actions_to_log_file(self):

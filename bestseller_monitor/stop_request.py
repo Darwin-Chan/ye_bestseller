@@ -218,14 +218,15 @@ class RecordingStopRuntime:
 
 
 class ProcessStopRuntime:
-    """Windows process adapter.  It binds handles at begin and never reselects a PID."""
+    """Windows process adapter.  It binds handles at begin and never reselects a PID.
 
-    def __init__(self, *, own_process=None, browser_enabled: bool = True,
-                 terminate=None, close_browser=None):
+    冻结目标之后**怎么处置**是这一个 module 的事：调用方只交事实（本会话拉起的那个子进程
+    句柄），不交动作。动作留在外面时，规则会有第二份实现，而「动的是冻结的那个绑定还是调用方
+    此刻的可变字段」就取决于接线而不是取决于这条不变量（ADR-0024）。
+    """
+
+    def __init__(self, *, own_process=None):
         self.own_process = own_process
-        self.browser_enabled = browser_enabled
-        self._terminate_callback = terminate
-        self._close_callback = close_browser
 
     def bind(self, target: StopTarget) -> BoundTarget:
         process = self.own_process() if callable(self.own_process) else self.own_process
@@ -279,9 +280,7 @@ class ProcessStopRuntime:
         return RuntimeFacts(identity, alive, browser, state)
 
     def terminate(self, bound: BoundTarget) -> EffectResult:
-        if self._terminate_callback is not None:
-            result = self._terminate_callback(bound)
-            return result if isinstance(result, EffectResult) else EffectResult(bool(result))
+        """结束绑定的那个目标；只碰传进来的句柄，不看调用方此刻的任何状态。"""
         handle = bound.capability
         if hasattr(handle, "poll"):
             try:
@@ -295,11 +294,13 @@ class ProcessStopRuntime:
         return EffectResult(False, "terminate_failed")
 
     def close_browser(self, browser: BoundBrowser) -> EffectResult:
-        if not self.browser_enabled:
-            return EffectResult(True)
-        if self._close_callback is not None:
-            result = self._close_callback(browser)
-            return result if isinstance(result, EffectResult) else EffectResult(bool(result))
+        """关闭绑定在目标上的浏览器。
+
+        `launched_by_us=True` 不是调用方的声明，是 facts 推出来的：`observe()` 只在身份的
+        `browser_state == "OWNED"` 时才给出 `BoundBrowser`，`BORROWED` / `NOT_STARTED` 根本没有
+        浏览器可传。真正的授权检查在 `browser_proc.close_browser` 里（缺 pid 或 proof 一律拒绝），
+        端口只用于日志，因此这里不拿端口的有无把门，也不看调用方当前的配置。
+        """
         from . import browser_proc
         closed = browser_proc.close_browser(
             browser.port, launched_by_us=True, browser_pid=browser.pid,

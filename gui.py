@@ -35,7 +35,6 @@ from bestseller_monitor.rounds import (
     TerminalReason,
 )
 from bestseller_monitor import rounds
-from bestseller_monitor import browser_proc
 from bestseller_monitor import crawler_identity
 from bestseller_monitor import single_instance
 from bestseller_monitor import stop_request
@@ -125,16 +124,11 @@ class Api:
         self.user_paused = False
         self._elapsed_base = 0.0
         self._run_start_ts: float | None = None
-        # 停止编排（窗口、回执、超时强杀）在 stop_request 里；这里只把世界的几个口子接上。
-        # 一律用 lambda 晚绑定：测试 patch 类方法（例如 `_kill_proc`）时要打到实际调用点上，
-        # 直接传绑定方法会在构造那一刻就定死（与前面几轮踩过的别名坑同一类）。
+        # 停止编排（窗口、回执、超时强杀）在 stop_request 里；**冻结目标之后的处置也在那里**，
+        # 界面只交一件事实：本会话拉起的那个子进程。晚绑定 lambda 让 begin 那一刻读一次
+        # `self.proc` 并冻进绑定，此后窗口不再读这个可变字段（ADR-0024）。
         # 窗口：请求发出后 8 秒、采集进程回执之后再 10 秒（ADR-0009，数值在 StopWatch 里）。
-        runtime = stop_request.ProcessStopRuntime(
-            own_process=lambda: self.proc,
-            browser_enabled=getattr(self.cfg, "start_browser", True),
-            terminate=lambda bound: self._terminate_bound(bound),
-            close_browser=lambda browser: self._close_bound_browser(browser),
-        )
+        runtime = stop_request.ProcessStopRuntime(own_process=lambda: self.proc)
         self._stop_watch = stop_request.StopWatch(
             runtime, now=stop_clock or time.time,
         )
@@ -232,21 +226,6 @@ class Api:
             stderr=subprocess.DEVNULL,
             creationflags=flags,
         )
-
-    def _terminate_bound(self, bound):
-        """Terminate only the process capability frozen by StopWatch.begin()."""
-        if hasattr(bound.capability, "poll"):
-            self._kill_proc()
-            return True
-        return browser_proc.terminate_process_capability(bound.capability)
-
-    def _close_bound_browser(self, browser):
-        if browser.port is None:
-            return True
-        result = browser_proc.close_browser(
-            browser.port, launched_by_us=True, browser_pid=browser.pid,
-            browser_os_started=browser.os_started)
-        return result is not None
 
     def start_run(self, keys: list[str]) -> dict:
         with self._lock:
@@ -429,6 +408,12 @@ class Api:
         return current.id if current is not None else None
 
     def _kill_proc(self):
+        """结束本界面拉起的那个子进程。
+
+        唯一调用点是「暂停」的启动竞态：子进程刚拉起、身份行还没登记，没有可认领的停止目标，
+        也建不起停止窗口（ADR-0024 留的唯一窄例外）。窗口内的强制停止不走这里——那条路只对
+        begin 冻结的绑定动手，处置在 `ProcessStopRuntime` 里。
+        """
         if self.proc is not None and self.proc.poll() is None:
             try:
                 self.proc.terminate()

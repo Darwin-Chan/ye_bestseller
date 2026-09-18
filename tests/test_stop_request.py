@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import crawler_identity, guard, rounds, stop_request
+from bestseller_monitor import browser_proc, crawler_identity, guard, rounds, stop_request
 from bestseller_monitor.db import Database, DayBoundaryReached, connect, utcnow
 from bestseller_monitor.delay import Humanizer
 from bestseller_monitor.rounds import TerminalReason
@@ -287,3 +287,52 @@ class StopWatchTests(unittest.TestCase):
         self.watch.forget()
 
         self.assertIsNone(self.watch.state)
+
+
+class ProcessStopRuntimeTests(unittest.TestCase):
+    """生产 adapter 的处置契约：只认绑定上的 facts（2026-09-18 审查候选 01）。
+
+    这一组替代原来钉在 `gui.Api._close_bound_browser` 上的那条用例。处置搬进 adapter 之后，
+    契约在 adapter 上钉一次就够了——在调用方再钉一次，就是在保住那份重复的实现。
+    """
+
+    def test_close_uses_the_binding_facts_and_ignores_caller_config(self):
+        runtime = stop_request.ProcessStopRuntime(own_process=lambda: None)
+
+        with patch.object(browser_proc, "close_browser", return_value=4242) as close:
+            effect = runtime.close_browser(
+                stop_request.BoundBrowser(4242, 9222, "browser-proof"))
+
+        self.assertTrue(effect.ok)
+        close.assert_called_once_with(9222, launched_by_us=True, browser_pid=4242,
+                                      browser_os_started="browser-proof")
+
+    def test_a_binding_without_a_recorded_port_is_still_attempted(self):
+        """端口只用于日志，不拿它的有无把门（`.scratch/stop-target/spec.md` 的挂账）。"""
+        runtime = stop_request.ProcessStopRuntime(own_process=lambda: None)
+
+        with patch.object(browser_proc, "close_browser", return_value=4242) as close:
+            runtime.close_browser(stop_request.BoundBrowser(4242, None, "browser-proof"))
+
+        close.assert_called_once_with(None, launched_by_us=True, browser_pid=4242,
+                                      browser_os_started="browser-proof")
+
+    def test_the_only_injected_input_is_the_own_child(self):
+        """调用方交事实，不交动作、也不交否决权。"""
+        with self.assertRaises(TypeError):
+            stop_request.ProcessStopRuntime(own_process=None, browser_enabled=False)
+        with self.assertRaises(TypeError):
+            stop_request.ProcessStopRuntime(own_process=None,
+                                            terminate=lambda bound: True)
+
+    def test_a_failed_terminate_is_reported_not_swallowed(self):
+        capability = MagicMock()
+        capability.terminate.side_effect = OSError("拒绝访问")
+        bound = stop_request.BoundTarget(
+            stop_request.StopTarget(4242, "2026-09-19T00:00:00"), capability)
+
+        effect = stop_request.ProcessStopRuntime().terminate(bound)
+
+        self.assertFalse(effect.ok)
+        self.assertEqual(effect.code, "terminate_failed")
+        self.assertTrue(effect.retryable, "留在核验里重试，而不是报成功收口")
