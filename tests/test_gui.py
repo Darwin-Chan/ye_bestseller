@@ -301,7 +301,6 @@ class GuiStopRequestTests(unittest.TestCase):
                                         target_pid=6104, target_started_at=started_at)
         finally:
             conn.close()
-        self.api._stop_watch.forget()
 
         with patch.object(Api, "_spawn_crawler"):
             result = self.api.start_run(["A01"])

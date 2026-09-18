@@ -4,10 +4,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_proc, crawler_identity, guard, rounds, stop_request
+from bestseller_monitor import browser_proc, guard, rounds, stop_request
 from bestseller_monitor.db import Database, DayBoundaryReached, connect, utcnow
 from bestseller_monitor.delay import Humanizer
 from bestseller_monitor.rounds import TerminalReason
@@ -163,130 +162,6 @@ class StopRequestHookTests(unittest.TestCase):
                 patch.object(guard.sound, "play_alarm"):
             with self.assertRaises(stop_request.StopRequested):
                 guard.wait_for_resolution(page, 10, confirm_sec=0.01)
-
-
-class StopWatchTests(unittest.TestCase):
-    """界面端的停止编排：窗口、回执、强杀与收尾（不碰进程、也不碰浏览器）。"""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.conn = connect(Path(self.tmp.name) / "watch.db")
-        self.addCleanup(self.conn.close)
-        self.db = Database(self.conn)
-        self.rid = new_round(self.db, "A01")
-        self.started_at = self.db.record_crawler_process(
-            pid=os.getpid(), round_id=self.rid, note="run.py")
-        self.now = 1000.0
-        self.killed: list[str] = []
-        self.running = True
-        self.watch = stop_request.StopWatch(
-            # 「强杀」真的生效：内核释放会话锁，进程随之不在。
-            kill_child=self._kill_child,
-            stop_foreign=lambda identity: self.killed.append(f"foreign:{identity.pid}"),
-            close_browser=lambda: self.killed.append("browser"),
-            is_running=lambda: self.running,
-            identity_of=lambda conn: crawler_identity.registered(conn),
-            now=lambda: self.now,
-        )
-
-    def _kill_child(self) -> None:
-        self.killed.append("child")
-        self.running = False
-
-    def begin(self, kind: str = stop_request.PAUSE) -> None:
-        self.watch.begin(kind, stop_request.StopTarget(pid=os.getpid(),
-                                                       started_at=self.started_at))
-
-    def test_nothing_happens_inside_the_window(self):
-        self.begin()
-
-        self.watch.tick(self.conn)
-
-        self.assertEqual(self.killed, [])
-        self.assertEqual(self.watch.state, "stopping")
-
-    def test_the_window_deadline_forces_the_stop_and_cleans_up(self):
-        self.begin()
-        self.db.request_stop(round_id=self.rid, kind=stop_request.PAUSE,
-                             target_pid=os.getpid(), target_started_at=self.started_at)
-
-        self.now += 8.0
-        self.watch.tick(self.conn)
-
-        self.assertEqual(self.killed, ["child", "browser"])
-        self.assertIsNone(self.watch.state)
-        self.assertIsNone(self.db.stop_request(), "收尾之后不该留着停止请求")
-        self.assertIsNone(self.db.crawler_process(), "身份行也要清掉")
-
-    def test_an_acknowledgement_widens_the_window(self):
-        self.begin()
-        self.db.request_stop(round_id=self.rid, kind=stop_request.PAUSE,
-                             target_pid=os.getpid(), target_started_at=self.started_at)
-        self.db.ack_stop_request(target_pid=os.getpid(), target_started_at=self.started_at)
-
-        self.now += 8.0                       # 原窗口到点
-        self.watch.tick(self.conn)
-
-        self.assertEqual(self.killed, [], "回执之后是在收尾，不是在等响应")
-        self.assertEqual(self.watch.state, "closing")
-        self.now += 10.0                      # 收尾窗口也到点
-        self.watch.tick(self.conn)
-        self.assertEqual(self.killed, ["child", "browser"])
-
-    def test_a_crawler_that_already_stopped_is_just_cleaned_up(self):
-        self.begin()
-        self.db.request_stop(round_id=self.rid, kind=stop_request.PAUSE,
-                             target_pid=os.getpid(), target_started_at=self.started_at)
-        self.running = False
-
-        self.watch.tick(self.conn)
-
-        self.assertEqual(self.killed, [], "进程已经走了就不必再杀")
-        self.assertIsNone(self.watch.state)
-        self.assertIsNone(self.db.stop_request())
-
-    def test_a_foreign_crawler_is_only_stopped_on_abort(self):
-        self.db.clear_crawler_process()
-        target_started_at = self.db.record_crawler_process(
-            pid=4321, round_id=self.rid, note="别处起的")
-        self.watch.begin(stop_request.ABORT,
-                             stop_request.StopTarget(pid=4321, started_at=target_started_at))
-
-        self.now += 8.0
-        self.watch.tick(self.conn)
-
-        self.assertEqual(self.killed, ["child", "foreign:4321", "browser"],
-                         "中止要停的可能是别处起的采集")
-
-    def test_a_kill_that_did_not_take_leaves_the_request_for_the_crawler(self):
-        """强杀没落到实处：请求留着，采集进程在下一个检查点仍会自己停下。"""
-        self.begin()
-        self.db.request_stop(round_id=self.rid, kind=stop_request.PAUSE,
-                             target_pid=os.getpid(), target_started_at=self.started_at)
-        self.watch = stop_request.StopWatch(
-            kill_child=lambda: self.killed.append("child"),   # 杀了但进程还在
-            stop_foreign=lambda identity: None,
-            close_browser=lambda: self.killed.append("browser"),
-            is_running=lambda: True,
-            identity_of=lambda conn: crawler_identity.registered(conn),
-            now=lambda: self.now,
-        )
-        self.begin()
-
-        self.now += 8.0
-        self.watch.tick(self.conn)
-
-        self.assertIsNotNone(self.db.stop_request(), "请求留着等它自己认领")
-        self.assertIsNotNone(self.db.crawler_process(), "身份行也留着")
-        self.assertIsNone(self.watch.state)
-
-    def test_forget_drops_the_stop_in_flight(self):
-        self.begin()
-
-        self.watch.forget()
-
-        self.assertIsNone(self.watch.state)
 
 
 class ProcessStopRuntimeTests(unittest.TestCase):

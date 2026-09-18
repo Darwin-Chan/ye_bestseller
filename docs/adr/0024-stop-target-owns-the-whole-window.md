@@ -1,6 +1,6 @@
 # 0024. 停止目标拥有整个停止窗口
 
-- 状态：已采用并实现
+- 状态：已采用并实现（**删除清单已走完**，2026-09-19：`_LegacyRuntime`、`forget()`、`begin(kind, target)` 与 `begin` 的 `conn=None` 跳过校验通道都已删；见 [IS-55](../../.scratch/1688-inventory-snapshot/issues/55-is-55.md) 与 [规格](../../.scratch/stop-runtime-shape/spec.md)。`_kill_proc` 那条「暂停」窄例外按本条保留）
 - 日期：2026-09-15
 
 ## 背景

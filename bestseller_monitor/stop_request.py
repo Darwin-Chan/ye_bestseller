@@ -181,10 +181,11 @@ class RecordingStopRuntime:
 
     def __init__(self, *, alive: bool | None = True,
                  browser: BoundBrowser | None = None,
-                 browser_state: str | None = None):
+                 browser_state: str | None = None, stubborn: bool = False):
         self.alive = alive
         self.browser = browser
         self.browser_state = browser_state
+        self.stubborn = stubborn        # 「杀了但进程还在」：terminate 成功却不改 alive
         self.actions: list[tuple[str, object]] = []
         self.bound: BoundTarget | None = None
         self.fail_terminate = False
@@ -203,7 +204,8 @@ class RecordingStopRuntime:
         self.actions.append(("terminate", bound.target))
         if self.fail_terminate:
             return EffectResult(False, "terminate_failed")
-        self.alive = False
+        if not self.stubborn:
+            self.alive = False
         return EffectResult(True)
 
     def close_browser(self, browser: BoundBrowser) -> EffectResult:
@@ -314,43 +316,6 @@ class ProcessStopRuntime:
             browser_proc.release_process_capability(capability)
 
 
-class _LegacyRuntime:
-    """旧版五回调的兼容 adapter；生产接线不再依赖它。"""
-
-    def __init__(self, *, kill_child, stop_foreign, close_browser, is_running,
-                 identity_of):
-        self.kill_child = kill_child
-        self.stop_foreign = stop_foreign
-        self.close = close_browser
-        self.running = is_running
-        self.identity_of = identity_of
-        self.kind = PAUSE
-        self.conn = None
-
-    def bind(self, target):
-        return BoundTarget(target, target)
-
-    def observe(self, conn, bound):
-        self.conn = conn
-        who = self.identity_of(conn)
-        return RuntimeFacts(who, bool(self.running()), BoundBrowser(1), "OWNED")
-
-    def terminate(self, bound):
-        self.kill_child()
-        if self.kind == ABORT:
-            who = self.identity_of(self.conn)
-            if who is not None:
-                self.stop_foreign(who)
-        return EffectResult(True)
-
-    def close_browser(self, browser):
-        self.close()
-        return EffectResult(True)
-
-    def release(self, bound):
-        return None
-
-
 @dataclass(frozen=True)
 class StopInFlight:
     command: StopCommand
@@ -376,14 +341,8 @@ class StopInFlight:
 class StopWatch:
     """目标贯穿整个停止窗口的停止编排。"""
 
-    def __init__(self, runtime: StopRuntime | None = None, *, now=time.time,
-                 grace_sec: float = 8.0, ack_grace_sec: float = 10.0, **legacy):
-        if runtime is None and legacy:
-            required = {"kill_child", "stop_foreign", "close_browser", "is_running",
-                        "identity_of"}
-            if not required <= legacy.keys():
-                raise TypeError("StopWatch requires runtime")
-            runtime = _LegacyRuntime(**{key: legacy[key] for key in required})
+    def __init__(self, runtime: StopRuntime, *, now=time.time,
+                 grace_sec: float = 8.0, ack_grace_sec: float = 10.0):
         if runtime is None:
             raise TypeError("StopWatch requires runtime")
         self._runtime = runtime
@@ -409,23 +368,17 @@ class StopWatch:
     def state(self) -> str | None:
         return self.status.state
 
-    def forget(self) -> None:
-        if self._in_flight is None:
-            return
-        if not isinstance(self._runtime, _LegacyRuntime):
-            raise RuntimeError("active stop targets cannot be forgotten")
-        if self._in_flight is not None:
-            self._runtime.release(self._in_flight.bound)
-        self._in_flight = None
+    def begin(self, conn, command: StopCommand):
+        """开一个停止窗口：先确认目标仍是登记的那个身份，再冻结绑定、写下请求。
 
-    def begin(self, conn, command=None):
-        """新接口 `begin(conn, StopCommand)`；兼容旧接口 `begin(kind, target)`。"""
-        legacy_call = command is not None and isinstance(conn, (str, StopKind))
-        if legacy_call:
-            command = StopCommand(conn, command)
-            conn = None
+        `conn` 与 `command` 都是必须的。没有连接就没有「目标仍是当前身份」这道确认，而
+        那条确认正是 ADR-0024 要求的开窗前提——旧签名用 `conn=None` 跳过它，那个口子随
+        旧形一起删（ADR-0024 的删除清单）。
+        """
         if command is None or not isinstance(command, StopCommand):
             raise TypeError("begin requires StopCommand")
+        if conn is None:
+            raise TypeError("begin requires a connection to the identity row")
         if self._in_flight is not None:
             active = self._in_flight.command
             if active.target == command.target and active.kind == command.kind:
@@ -434,27 +387,24 @@ class StopWatch:
                 raise RuntimeError("stop already targets another crawler")
             if command.kind is not StopKind.ABORT:
                 raise RuntimeError("stop already active")
-        if conn is not None:
-            current = crawler_identity.registered(conn)
-            target = command.target
-            if (current is None or current.pid != target.pid
-                    or current.started_at != target.started_at):
+        current = crawler_identity.registered(conn)
+        target = command.target
+        if (current is None or current.pid != target.pid
+                or current.started_at != target.started_at):
+            raise RuntimeError("target_identity_unavailable")
+        db = Database(conn)
+        if command.kind is StopKind.PAUSE:
+            ok = db.request_stop_if_current(
+                round_id=command.round_id, kind=command.kind.value,
+                target_pid=target.pid, target_started_at=target.started_at)
+            if not ok:
                 raise RuntimeError("target_identity_unavailable")
-            db = Database(conn)
-            if command.kind is StopKind.PAUSE:
-                ok = db.request_stop_if_current(
-                    round_id=command.round_id, kind=command.kind.value,
-                    target_pid=target.pid, target_started_at=target.started_at)
-                if not ok:
-                    raise RuntimeError("target_identity_unavailable")
-            else:
-                db.clear_stop_request(target_pid=target.pid,
-                                      target_started_at=target.started_at)
+        else:
+            db.clear_stop_request(target_pid=target.pid,
+                                  target_started_at=target.started_at)
         bound = self._runtime.bind(command.target)
         self._in_flight = StopInFlight(command, bound,
                                        self._now() + self._grace_sec)
-        if isinstance(self._runtime, _LegacyRuntime):
-            self._runtime.kind = command.kind.value
         return self.status
 
     def tick(self, conn) -> StopStatus:
@@ -490,7 +440,7 @@ class StopWatch:
             return self._verify(stop, "target_unverifiable")
         if self._now() < stop.deadline:
             return self.status
-        return self._force(conn, db, stop, facts)
+        return self._force(conn, db, stop)
 
     @staticmethod
     def _relation(target, facts) -> StopRelation:
@@ -527,7 +477,7 @@ class StopWatch:
         self._in_flight = replace(stop, phase=StopPhase.VERIFYING, code=code)
         return self.status
 
-    def _force(self, conn, db, stop, facts):
+    def _force(self, conn, db, stop):
         try:
             conn.execute("BEGIN IMMEDIATE")
         except Exception as exc:  # noqa: BLE001
@@ -563,9 +513,6 @@ class StopWatch:
                 return self.status
             if after.process_alive is not False:
                 conn.rollback()
-                if isinstance(self._runtime, _LegacyRuntime):
-                    self._in_flight = None
-                    return self.status
                 return self._verify(stop, "process_still_running")
             if browser is not None:
                 closed = self._runtime.close_browser(browser)

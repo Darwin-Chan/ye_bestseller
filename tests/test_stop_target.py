@@ -111,6 +111,89 @@ class StopTargetTests(unittest.TestCase):
         self.assertEqual(status.code, "browser_binding_unavailable")
         self.assertNotIn("terminate", [name for name, _ in runtime.actions])
 
+    def test_nothing_happens_inside_the_window(self):
+        runtime = stop_request.RecordingStopRuntime(alive=True)
+        watch = self._watch(runtime)
+        watch.begin(self.conn, stop_request.StopCommand(stop_request.PAUSE, self.a, 1))
+
+        self.clock.value += 4        # 窗口是 8 秒
+        status = watch.tick(self.conn)
+
+        self.assertEqual(status.phase, stop_request.StopPhase.STOPPING)
+        self.assertEqual([name for name, _ in runtime.actions], ["bind"],
+                         "窗口里只观察，不动手")
+
+    def test_the_deadline_forces_the_stop_and_clears_every_trace(self):
+        runtime = stop_request.RecordingStopRuntime(
+            alive=True, browser=stop_request.BoundBrowser(9201, 9222, "browser-proof"),
+            browser_state="OWNED")
+        watch = self._watch(runtime)
+        watch.begin(self.conn, stop_request.StopCommand(stop_request.PAUSE, self.a, 1))
+        self.assertIsNotNone(self.db.stop_request(), "开窗时已经写下请求（CAS 到目标身份）")
+
+        self.clock.value += 20
+        status = watch.tick(self.conn)
+
+        self.assertEqual(status.phase, stop_request.StopPhase.IDLE)
+        self.assertEqual([name for name, _ in runtime.actions],
+                         ["bind", "terminate", "close_browser", "release"])
+        self.assertIsNone(self.db.stop_request(), "收尾之后请求不留")
+        self.assertIsNone(self.db.crawler_process(), "身份行也要清掉")
+
+    def test_an_abort_stops_the_registered_crawler_even_when_it_is_not_ours(self):
+        """目标可能是别处起的采集：登记行是谁，目标就是谁（本界面只负责编排）。"""
+        self.db.clear_crawler_process()
+        started_at = self.db.record_crawler_process(pid=4321, round_id=1)
+        target = stop_request.StopTarget(4321, started_at)
+        runtime = stop_request.RecordingStopRuntime(alive=True)
+        watch = self._watch(runtime)
+
+        watch.begin(self.conn, stop_request.StopCommand(stop_request.ABORT, target, 1))
+        self.clock.value += 20
+        status = watch.tick(self.conn)
+
+        self.assertEqual(status.phase, stop_request.StopPhase.IDLE)
+        self.assertIn(("terminate", target), runtime.actions)
+
+    def test_a_kill_that_did_not_take_stays_verifying(self):
+        """杀了但进程还在：留在核验里重试，事实不清、浏览器不关。
+
+        只有这一套语义了——旧 runtime 那份「静默丢弃 watch」随 `_LegacyRuntime` 一起删
+        （ADR-0024 的删除清单）。
+        """
+        runtime = stop_request.RecordingStopRuntime(alive=True, stubborn=True)
+        watch = self._watch(runtime)
+        watch.begin(self.conn, stop_request.StopCommand(stop_request.PAUSE, self.a, 1))
+
+        self.clock.value += 20
+        status = watch.tick(self.conn)
+
+        self.assertEqual(status.phase, stop_request.StopPhase.VERIFYING)
+        self.assertEqual(status.code, "process_still_running")
+        self.assertIsNotNone(self.db.crawler_process(), "没证明停下就不清事实")
+        self.assertIsNotNone(self.db.stop_request(), "请求留着，等它在检查点自己认领")
+        self.assertNotIn("close_browser", [name for name, _ in runtime.actions])
+
+    def test_begin_requires_a_connection(self):
+        """开窗之前必须确认目标仍是登记的那个身份：没有连接就没有这道确认。"""
+        watch = self._watch(stop_request.RecordingStopRuntime(alive=True))
+        command = stop_request.StopCommand(stop_request.PAUSE, self.a, 1)
+
+        with self.assertRaises(TypeError):
+            watch.begin(None, command)
+        with self.assertRaises(TypeError):
+            watch.begin(self.conn)
+
+        self.assertIsNone(watch.state, "两次都不该开窗")
+
+    def test_the_five_callback_shape_is_gone(self):
+        """旧版五回调构造不再存在：StopWatch 只接受一个 runtime（ADR-0024 的删除清单）。"""
+        with self.assertRaises(TypeError):
+            stop_request.StopWatch(
+                kill_child=lambda: None, stop_foreign=lambda who: None,
+                close_browser=lambda: None, is_running=lambda: True,
+                identity_of=lambda conn: None)
+
 
 if __name__ == "__main__":
     unittest.main()
