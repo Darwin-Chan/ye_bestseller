@@ -434,6 +434,7 @@ class PlaywrightAdapterTests(ClickListingTestCase):
 
         self.assertIs(detail_page, popup)
         self.assertIs(again, popup)
+        popup.on.assert_not_called()      # 弹窗上也不挂响应监听（候选 02）
         kind.assert_not_called()
         wait.assert_not_called()
         self.assertEqual(page.expect_popup.call_args.kwargs["timeout"],

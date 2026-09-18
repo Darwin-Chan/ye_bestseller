@@ -20,7 +20,7 @@ BROWSER_IO_ERRORS = (PlaywrightError, TimeoutError, OSError, ConnectionError)
 class OpenedDetail:
     """一个 adapter 已取得的详情页；页面仍归取得它的调用方关闭。
 
-    只交页面：验证据号不是 adapter 的事实——判据读页面上的地址、正文与验证容器（ADR-0029）。
+    只交页面：adapter 不替判据交证据——判据读的是页面上的地址、正文与可见验证容器（ADR-0029）。
     """
 
     page: object

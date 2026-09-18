@@ -98,8 +98,13 @@ if punished and is_punish_url(url):    # :150 —— 与 :136 是同一条谓词
 ## 挂账
 
 - 无新增工单。撤回 ADR-0020 那条待办（不转成工单，理由见「已知的盲区」）。
-- 诊断工具各自的响应监听（`diag_offer_id_presolve` / `diag_list_dom` / `diag_verify_state`）不
-  动：它们的旗标自己用，不走 `intervention_kind` 的形参。
+- 真正有自家响应监听的只有两个诊断工具（`diag_offer_id_presolve` / `diag_list_dom`），不动：
+  它们的旗标自己用，不走 `intervention_kind` 的形参。`diag_verify_state` 没有监听，它是调用点，
+  随签名改了实参个数。
+- **疑似 Data Clumps**：`emit` / `deny_tracker` / `shop_key` 三件套在 `ready_detail_page` 的形参、
+  `ReadyDetailVisit` 的字段与 `begin_detail_visit` 的关键字构造上第三次同行——一个想出生的
+  「guard 上下文」类型。这是本条之前就有的形状，本条只是把位置传参改关键字之后让它显形；
+  收成一个类型是独立的一步，等下次动这条 seam 时再判。
 
 ## 实现边界
 
@@ -132,6 +137,11 @@ if punished and is_punish_url(url):    # :150 —— 与 :136 是同一条谓词
   三实参调用形状实测可跑，`browser_pw.intervention_kind(page)` 单实参实测可跑。
 - 未做：真机（真实浏览器）上制造一次「响应流有 punish、地址正常」的场景——这条盲区本来就是
   难得自然复现的那类，也正是它被记成盲区而不是待办的原因。
+- **两轴审查后补的一处覆盖**：`click_card` 里给弹窗挂的那份监听删除后原本没有断言钉住（新加的
+  用例只覆盖了 `PlaywrightListing.__init__`），已在既有用例 `test_opening_a_card_only_opens_the_page`
+  补 `popup.on.assert_not_called()`。同一次收口里更正了本 ADR 与规格对诊断工具的两处口径
+  （真正挂响应监听的只有 `diag_offer_id_presolve` 与 `diag_list_dom`），并把「验证据号」这个
+  不在词汇表里的词从新增文字里去掉。
 
 ## 被否掉的方向
 

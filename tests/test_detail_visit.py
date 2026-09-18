@@ -38,7 +38,7 @@ class DetailVisitTests(unittest.TestCase):
         self.assertEqual(page.content.call_count, 2)
 
     def test_the_visit_capability_carries_only_the_page(self):
-        """`OpenedDetail` 不携带自家的验证据号：判据只认页面（候选 02）。"""
+        """`OpenedDetail` 只交页面：判据的证据是页面上的地址、正文与可见验证容器（候选 02）。"""
         with self.assertRaises(TypeError):
             detail_visit.OpenedDetail(MagicMock(), punished=True)
 

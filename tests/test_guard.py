@@ -123,11 +123,12 @@ class InterventionEvidenceTests(unittest.TestCase):
     # 正文与验证容器都读不到（没有 locator）——只剩地址一条证据
     PAGE = SimpleNamespace(url="https://detail.1688.com/offer/11.html")
 
-    def test_a_punish_response_with_a_normal_address_is_not_an_intervention(self):
-        """响应流里有 punish、地址正常：判据给不出「滑块」，也不该假装给得出。
+    def test_a_normal_address_alone_is_not_an_intervention(self):
+        """地址正常、正文与验证容器都读不到的页面：判据给 None。
 
-        这是 ADR-0020 记下的那个「仍看不到」的场景。改前那个形参也换不来别的返回值，
-        所以本条钉的是「删掉等于行为不变」——盲区本身记在 ADR-0029，不在这里修。
+        这是 ADR-0020 记下的那个「响应里出现 punish 而后台地址正常」的场景，也是 ADR-0029
+        记的盲区所在：改前那个形参换不来别的返回值（差分核过），改后也没有第二条路认它。
+        所以本条钉的是「删掉等于行为不变」——盲区本身不在这里修。
         """
         self.assertIsNone(guard.intervention_kind(self.PAGE))
 
