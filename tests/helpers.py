@@ -188,9 +188,8 @@ class ScriptedListing:
     没有下一页时 `advance` 返回 False（就是「点不到下一页/加载更多」那条路）。
     """
 
-    def __init__(self, pages, *, punished: bool = False):
+    def __init__(self, pages):
         self.pages = [list(page) for page in pages]
-        self.punished = punished
         self.page_no = 0
         self.prepared: list[str] = []
         self.scrolled: list[str] = []

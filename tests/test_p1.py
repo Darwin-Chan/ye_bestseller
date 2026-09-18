@@ -72,7 +72,7 @@ class P1Tests(unittest.TestCase):
         page.content.side_effect = ["<html>登录墙</html>", DETAIL_HTML]
 
         with patch.object(browser_pw, "navigate_detail",
-                          return_value=detail_visit.OpenedDetail(page, punished=True)), \
+                          return_value=detail_visit.OpenedDetail(page)), \
              patch.object(detail_visit, "ready_detail_page", return_value=False), \
              patch.object(detail_visit, "intervention_kind", return_value=None), \
              patch.object(detail_visit, "is_deny_url", return_value=False), \
@@ -101,7 +101,7 @@ class P1Tests(unittest.TestCase):
         page = MagicMock()
         page.url = offer["product_url"]
         page.content.return_value = DETAIL_HTML
-        opened = detail_visit.OpenedDetail(page, punished=True)
+        opened = detail_visit.OpenedDetail(page)
 
         with patch.object(browser_pw, "navigate_detail",
              side_effect=[PlaywrightError("第一次导航失败"), opened]) as navigate, \
@@ -447,7 +447,7 @@ class P1Tests(unittest.TestCase):
         page.url = ("https://s.1688.com/bsop-punish?x=1" if deny
                     else "https://detail.1688.com/offer/111.html")
         page.content.return_value = html
-        return detail_visit.OpenedDetail(page, punished=True)
+        return detail_visit.OpenedDetail(page)
 
     def test_same_name_inventory_does_not_block_failed_offer_detail(self):
         round_id, offer = self._seed_same_name_failed_offer()

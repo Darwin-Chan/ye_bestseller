@@ -29,7 +29,6 @@ class NavigateDetailTests(unittest.TestCase):
 
         self.assertIsInstance(opened, detail_visit.OpenedDetail)
         self.assertIs(opened.page, page)
-        self.assertTrue(opened.punished)
         page.content.assert_not_called()
         self.assertEqual([event for event, _ in events], ["detail_nav"])
 

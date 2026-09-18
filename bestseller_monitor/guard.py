@@ -128,8 +128,12 @@ def captcha_visible(page) -> bool:
         return False
 
 
-def intervention_kind(page, punished: bool = False) -> str | None:
-    """判定是否需要人工介入。仅看验证据信号，绝不因“没有商品”误判。"""
+def intervention_kind(page) -> str | None:
+    """判定是否需要人工介入。仅看验证据信号，绝不因“没有商品”误判。
+
+    证据只有页面上的三样：地址、正文、可见验证容器。响应流里那份 punish 信号曾经也占一个
+    形参，但读它的那行与地址判定是同一条谓词，对任何输入都到不了，已整个撤掉（ADR-0029）。
+    """
     url = (page.url or "").lower()
     if is_login_url(url):
         return "登录墙"
@@ -146,9 +150,6 @@ def intervention_kind(page, punished: bool = False) -> str | None:
     for m in LOGIN_MARKERS:
         if m in body and len(body) < 3000:
             return "登录墙"
-    # 仅当 URL 是真 punish 页且页面确实“像验证”时，才兜底判滑块（避免裸 URL 误报）
-    if punished and is_punish_url(url):
-        return "滑块"
     return None
 
 
@@ -165,7 +166,7 @@ def resolved(page) -> bool:
         return False
 
 
-def ready_detail_page(page, cfg: Config, *, emit=None, punished: bool = False,
+def ready_detail_page(page, cfg: Config, *, emit=None,
                       deny_tracker: DenyTracker | None = None,
                       shop_key: str | None = None) -> bool:
     """一个刚打开的详情页能不能用：先认 deny（记账 + 阈值），不是 deny 才判人工介入并等人解决。
@@ -192,7 +193,7 @@ def ready_detail_page(page, cfg: Config, *, emit=None, punished: bool = False,
                     f"店铺 {shop_key} {cfg.deny_window_minutes} 分钟内"
                     f" deny≥{cfg.deny_shop_limit}")
         return True
-    kind = intervention_kind(page, punished)
+    kind = intervention_kind(page)
     if kind:
         wait_for_resolution(page, cfg.human_pause_minutes, emit=emit,
                             verification_type=vtype(kind),

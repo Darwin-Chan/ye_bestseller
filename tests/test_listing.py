@@ -80,7 +80,7 @@ class PrepareTests(unittest.TestCase):
              patch.object(listing, "click_text_in_frames",
                           side_effect=lambda *a, **k: step("排序", can_sort)):
             listing.prepare(self.page, "https://shop.example/", self.cfg, self.human,
-                            describe="店铺 A01 首屏", punished=False,
+                            describe="店铺 A01 首屏",
                             emit=lambda event, **kw: self.events.append(event))
         return wait_cards, resolve
 

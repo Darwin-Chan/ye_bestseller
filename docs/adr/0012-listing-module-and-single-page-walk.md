@@ -1,6 +1,6 @@
 # 0012. 榜单页收成一个 module：准备与推进各一道 interface
 
-- 状态：已接受
+- 状态：已接受（`prepare` 的签名被 [ADR-0029](0029-intervention-evidence-in-one-place.md) 更新：`punished` 形参已撤掉，现为 `prepare(page, url, cfg, human, *, describe, emit=None)`）
 - 日期：2026-09-13
 
 ## 背景

@@ -37,6 +37,11 @@ class DetailVisitTests(unittest.TestCase):
         self.assertEqual(observation.sku_count, 1)
         self.assertEqual(page.content.call_count, 2)
 
+    def test_the_visit_capability_carries_only_the_page(self):
+        """`OpenedDetail` 不携带自家的验证据号：判据只认页面（候选 02）。"""
+        with self.assertRaises(TypeError):
+            detail_visit.OpenedDetail(MagicMock(), punished=True)
+
     def test_acquisition_failure_becomes_a_read_failed_visit(self):
         error = PlaywrightError("导航失败")
 

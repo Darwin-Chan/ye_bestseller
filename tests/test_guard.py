@@ -112,5 +112,33 @@ class ReadyDetailPageTests(unittest.TestCase):
         self.assertTrue(ready_detail_page(self.page(self.DENY), self.CFG))
 
 
+class InterventionEvidenceTests(unittest.TestCase):
+    """验证判据的输入面只有页面本身：响应流信号已从五个 interface 上撤掉（候选 02）。
+
+    信号原本被当成形参从 `click_listing` 一路转到 `intervention_kind`，而判据读它的那一行
+    与早退行是同一条谓词，对任何输入都到不了。撤掉它买到的是行为不变。
+    """
+
+    CFG = crawler_cfg()
+    # 正文与验证容器都读不到（没有 locator）——只剩地址一条证据
+    PAGE = SimpleNamespace(url="https://detail.1688.com/offer/11.html")
+
+    def test_a_punish_response_with_a_normal_address_is_not_an_intervention(self):
+        """响应流里有 punish、地址正常：判据给不出「滑块」，也不该假装给得出。
+
+        这是 ADR-0020 记下的那个「仍看不到」的场景。改前那个形参也换不来别的返回值，
+        所以本条钉的是「删掉等于行为不变」——盲区本身记在 ADR-0029，不在这里修。
+        """
+        self.assertIsNone(guard.intervention_kind(self.PAGE))
+
+    def test_the_judgment_admits_only_the_page(self):
+        with self.assertRaises(TypeError):
+            guard.intervention_kind(self.PAGE, True)
+
+    def test_the_settling_entry_does_not_take_a_punish_signal(self):
+        with self.assertRaises(TypeError):
+            ready_detail_page(self.PAGE, self.CFG, punished=True)
+
+
 if __name__ == "__main__":
     unittest.main()

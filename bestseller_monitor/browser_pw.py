@@ -339,5 +339,4 @@ def navigate_detail(page, product_url: str, cfg: Config, emit=None) -> OpenedDet
         m = re.search(r"/(?:offer|item)/(\d+)\.html", product_url)
         emit("detail_nav", offer_id=m.group(1) if m else None, phase="detail")
     page.goto(product_url, wait_until="domcontentloaded")
-    # 补采没有点击路径的响应监听，沿用旧路径的地址级 punish 判定信号。
-    return OpenedDetail(page, punished=True)
+    return OpenedDetail(page)

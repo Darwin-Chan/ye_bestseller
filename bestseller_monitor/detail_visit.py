@@ -18,10 +18,12 @@ BROWSER_IO_ERRORS = (PlaywrightError, TimeoutError, OSError, ConnectionError)
 
 @dataclass(frozen=True)
 class OpenedDetail:
-    """一个 adapter 已取得的详情页；页面仍归取得它的调用方关闭。"""
+    """一个 adapter 已取得的详情页；页面仍归取得它的调用方关闭。
+
+    只交页面：验证据号不是 adapter 的事实——判据读页面上的地址、正文与验证容器（ADR-0029）。
+    """
 
     page: object
-    punished: bool = False
 
 
 @dataclass(frozen=True)
@@ -53,7 +55,6 @@ class ReadyDetailVisit:
     _emit: object = None
     _deny_tracker: DenyTracker | None = None
     _shop_key: str | None = None
-    _punished: bool = False
     _reraise: tuple[type[BaseException], ...] = ()
     _observed: bool = False
 
@@ -79,7 +80,7 @@ class ReadyDetailVisit:
                     return DeniedVisit(self._raw_html())
 
             try:
-                intervention = intervention_kind(self._page, self._punished)
+                intervention = intervention_kind(self._page)
             except self._reraise:
                 raise
             except BROWSER_IO_ERRORS as exc:
@@ -104,7 +105,7 @@ class ReadyDetailVisit:
     def _guard(self) -> bool | detail.Observation:
         try:
             return ready_detail_page(
-                self._page, self._cfg, emit=self._emit, punished=self._punished,
+                self._page, self._cfg, emit=self._emit,
                 deny_tracker=self._deny_tracker, shop_key=self._shop_key,
             )
         except self._reraise:
@@ -148,7 +149,7 @@ def begin_detail_visit(
 
     try:
         denied = ready_detail_page(
-            opened.page, cfg, emit=emit, punished=opened.punished,
+            opened.page, cfg, emit=emit,
             deny_tracker=deny_tracker, shop_key=shop_key,
         )
     except reraise:
@@ -158,7 +159,8 @@ def begin_detail_visit(
     if denied:
         return DeniedVisit(_read_raw_html(opened.page, reraise))
     return ReadyDetailVisit(
-        opened.page, cfg, emit, deny_tracker, shop_key, opened.punished, reraise,
+        _page=opened.page, _cfg=cfg, _emit=emit, _deny_tracker=deny_tracker,
+        _shop_key=shop_key, _reraise=reraise,
     )
 
 

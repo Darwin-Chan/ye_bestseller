@@ -226,20 +226,18 @@ def wait_for_list_change(page, before: tuple, describe: str,
 
 # ---------- 推进：换到下一批 ----------
 
-def prepare(page, url: str, cfg, human, *, describe: str, punished: bool = False,
-            emit=None) -> None:
+def prepare(page, url: str, cfg, human, *, describe: str, emit=None) -> None:
     """打开发榜页并把它准备好：等首屏卡片 → 人工介入 → 点「销量」排序。
 
     `describe` 是这次准备的上下文（如「店铺 A01 首屏」），用于日志与失败文案；
-    `punished` 是驱动在响应监听里看到的验证据号；`emit` 给了就记 `list_load` / `list_sort`
-    与人工介入事件（调用方决定这一遍要不要记）。
+    `emit` 给了就记 `list_load` / `list_sort` 与人工介入事件（调用方决定这一遍要不要记）。
 
     首屏拿不到商品卡片 → 抛 `ListingLoadFailed`：不能把空结果写成完成榜单。
     """
     page.goto(url, wait_until="domcontentloaded")
     human.after_load()          # read_delay_sec：页面加载后、读取数据前的拟人化延迟
     cards_ready = wait_cards(page, min_count=1, describe=f"{describe}商品卡片")
-    kind = intervention_kind(page, punished)
+    kind = intervention_kind(page)
     if kind:
         wait_for_resolution(page, cfg.human_pause_minutes, emit=emit,
                             verification_type=vtype(kind),

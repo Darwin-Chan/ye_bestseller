@@ -62,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"      is_punish={browser_pw._is_punish_url(url)} "
                           f"captcha_visible={browser_pw._captcha_visible(popup)} "
                           f"resolved={browser_pw._resolved(popup)} "
-                          f"intervention={browser_pw.intervention_kind(popup, False)}")
+                          f"intervention={browser_pw.intervention_kind(popup)}")
                     body = browser_pw._body_text(popup)
                     print(f"      body[:140]={body[:140]!r}")
                     try:

@@ -1,6 +1,6 @@
 # 0023. 详情访问用一次性 capability 交回验证后的当前观测
 
-- 状态：已接受
+- 状态：已接受（范围外那句被 [ADR-0029](0029-intervention-evidence-in-one-place.md) 更正：响应流 punish 识别不再是「独立缺口」而是有意的盲区，`OpenedDetail` 的 `punished` 字段随之撤掉）
 - 日期：2026-09-14
 
 ## 背景

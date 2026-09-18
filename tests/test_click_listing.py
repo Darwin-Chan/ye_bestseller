@@ -430,7 +430,7 @@ class PlaywrightAdapterTests(ClickListingTestCase):
              patch.object(guard, "wait_for_resolution",
                           side_effect=InterventionTimeout("超时")) as wait:
             detail_page, again = click_listing.click_card(
-                page, MagicMock(), crawler_cfg(), False, MagicMock())
+                page, MagicMock(), crawler_cfg())
 
         self.assertIs(detail_page, popup)
         self.assertIs(again, popup)
@@ -438,6 +438,14 @@ class PlaywrightAdapterTests(ClickListingTestCase):
         wait.assert_not_called()
         self.assertEqual(page.expect_popup.call_args.kwargs["timeout"],
                          browser_pw._WAIT_POPUP_MS)
+
+    def test_the_adapter_does_not_watch_the_response_stream(self):
+        """响应流不是判据的证据来源：谁挂监听，谁就在暗示一条没人认的证据链（候选 02）。"""
+        page = MagicMock()
+
+        click_listing.PlaywrightListing(page, self.shop, crawler_cfg(), self.human)
+
+        page.on.assert_not_called()
 
     def test_scrolling_stops_after_the_first_no_change_window(self):
         page = MagicMock()

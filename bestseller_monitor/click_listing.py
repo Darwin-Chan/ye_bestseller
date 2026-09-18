@@ -24,7 +24,7 @@ from . import click_events, dedupe, detail, detail_visit, listing, rounds
 from .config import Config, Shop, effective_pages_limit
 from .db import cst_date, utcnow
 from .delay import Humanizer
-from .guard import RoundDenyExceeded, ShopDenyExceeded, is_punish_url
+from .guard import RoundDenyExceeded, ShopDenyExceeded
 
 log = logging.getLogger(__name__)
 
@@ -353,23 +353,13 @@ class PlaywrightListing:
         self.cfg = cfg
         self.human = human
         self.page_no = 0
-        self.punished = False
         self._emit = None
-        page.on("response", self._on_punish_response)
-
-    def _on_punish_response(self, response) -> None:
-        try:
-            if (response.request.resource_type in ("xhr", "fetch")
-                    and is_punish_url(response.url)):
-                self.punished = True
-        except Exception:
-            pass
 
     def prepare(self, describe: str, *, emit=None) -> None:
         self.page_no = 1
         self._emit = emit
         listing.prepare(self.page, self.shop.url, self.cfg, self.human,
-                        describe=describe, punished=self.punished, emit=emit)
+                        describe=describe, emit=emit)
 
     def scroll_to_load(self, describe: str) -> int:
         return scroll_cards_until_stable(self.page, describe)
@@ -415,8 +405,7 @@ class PlaywrightCard:
         owner = self._owner
         image = owner.page.locator(listing.PRODUCT_IMG_SEL).nth(self.index)
         self._detail_page, self._popup = click_card(
-            owner.page, image, owner.cfg, owner.punished, owner._on_punish_response,
-            emit=owner._emit)
+            owner.page, image, owner.cfg, emit=owner._emit)
         if self._detail_page is None:
             self.url = ""
             self.offer_id = None
@@ -424,10 +413,7 @@ class PlaywrightCard:
         self.url = self._detail_page.url or ""
         found = re.search(r"/(?:offer|item)/(\d+)\.html", self.url)
         self.offer_id = found.group(1) if found else None
-        return detail_visit.OpenedDetail(
-            self._detail_page,
-            punished=getattr(owner, "punished", False),
-        )
+        return detail_visit.OpenedDetail(self._detail_page)
 
     def close(self) -> None:
         close_popup_or_back(self._detail_page, self._popup, self._owner.page)
@@ -484,7 +470,7 @@ def read_card_title(page, idx: int) -> str:
         return ""
 
 
-def click_card(page, image, cfg: Config, punished: bool, on_response, emit=None):
+def click_card(page, image, cfg: Config, emit=None):
     """点商品图的「可点击父元素」并等详情打开；返回 (详情页, 弹窗)。
 
     弹窗没出现时，页面可能就地跳到了详情。这里只负责「把页面打开」；打开之后的 deny
@@ -524,7 +510,6 @@ def click_card(page, image, cfg: Config, punished: bool, on_response, emit=None)
             except PlaywrightError:
                 pass
             return None, None
-        popup.on("response", on_response)
         return popup, popup
 
     if "detail.1688.com/offer/" not in (page.url or ""):

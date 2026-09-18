@@ -66,9 +66,7 @@ def main(argv: list[str] | None = None) -> int:
             for i in range(n):
                 title = click_listing.read_card_title(page, i)
                 img = page.locator(browser_pw._PRODUCT_IMG_SEL).nth(i)
-                detail_page, popup = click_listing.click_card(
-                    page, img, cfg, False, lambda r: None
-                )
+                detail_page, popup = click_listing.click_card(page, img, cfg)
                 if detail_page is None:
                     continue
                 m = re.search(r"/(?:offer|item)/(\d+)\.html", detail_page.url)
