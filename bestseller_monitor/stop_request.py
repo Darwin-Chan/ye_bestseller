@@ -181,11 +181,14 @@ class RecordingStopRuntime:
 
     def __init__(self, *, alive: bool | None = True,
                  browser: BoundBrowser | None = None,
-                 browser_state: str | None = None, stubborn: bool = False):
+                 browser_state: str | None = None,
+                 survives_terminate: bool = False):
         self.alive = alive
         self.browser = browser
         self.browser_state = browser_state
-        self.stubborn = stubborn        # 「杀了但进程还在」：terminate 成功却不改 alive
+        # 「杀了没杀掉」：terminate 报成功，但进程仍然活着——与 fail_terminate
+        # （根本没杀成）走的是 _force 里两条不同的分支。
+        self.survives_terminate = survives_terminate
         self.actions: list[tuple[str, object]] = []
         self.bound: BoundTarget | None = None
         self.fail_terminate = False
@@ -204,7 +207,7 @@ class RecordingStopRuntime:
         self.actions.append(("terminate", bound.target))
         if self.fail_terminate:
             return EffectResult(False, "terminate_failed")
-        if not self.stubborn:
+        if not self.survives_terminate:
             self.alive = False
         return EffectResult(True)
 
@@ -342,7 +345,7 @@ class StopWatch:
     """目标贯穿整个停止窗口的停止编排。"""
 
     def __init__(self, runtime: StopRuntime, *, now=time.time,
-                 grace_sec: float = 8.0, ack_grace_sec: float = 10.0):
+                 grace_sec: float = 8.0, ack_grace_sec: float = 10.0) -> None:
         if runtime is None:
             raise TypeError("StopWatch requires runtime")
         self._runtime = runtime
@@ -368,7 +371,7 @@ class StopWatch:
     def state(self) -> str | None:
         return self.status.state
 
-    def begin(self, conn, command: StopCommand):
+    def begin(self, conn, command: StopCommand) -> StopStatus:
         """开一个停止窗口：先确认目标仍是登记的那个身份，再冻结绑定、写下请求。
 
         `conn` 与 `command` 都是必须的。没有连接就没有「目标仍是当前身份」这道确认，而

@@ -161,7 +161,7 @@ class StopTargetTests(unittest.TestCase):
         只有这一套语义了——旧 runtime 那份「静默丢弃 watch」随 `_LegacyRuntime` 一起删
         （ADR-0024 的删除清单）。
         """
-        runtime = stop_request.RecordingStopRuntime(alive=True, stubborn=True)
+        runtime = stop_request.RecordingStopRuntime(alive=True, survives_terminate=True)
         watch = self._watch(runtime)
         watch.begin(self.conn, stop_request.StopCommand(stop_request.PAUSE, self.a, 1))
 
