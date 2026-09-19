@@ -101,7 +101,8 @@ function renderProducts() {
             if(!skus.has(row.sku_id)) skus.set(row.sku_id,[]);
             skus.get(row.sku_id).push(row);
         }
-        return `<article><h3>G${offset+i+1} · ${esc(latest?.product_name||p.product_name||p.offer_id)}</h3>
+        const group=snapshot.groups.find(g=>g.members.some(m=>m.shop_key===p.shop_key&&m.offer_id===p.offer_id));
+        return `<article><h3>${esc(group.id)} · ${esc(latest?.product_name||p.product_name||p.offer_id)}</h3>
             <span>待确认</span><p>${esc(latest?.shop_name||p.shop_key)} · 商品 ${esc(p.offer_id)} · ${skus.size} 个 SKU</p>
             ${[...skus].map(([id,obs])=>`<details open><summary>${esc(obs.at(-1).sku_name||id)} · SKU ${esc(id)}</summary>
                 <table><thead><tr><th>观测日期</th><th>实际库存</th><th>区间关系</th></tr></thead><tbody>
