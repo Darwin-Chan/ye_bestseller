@@ -128,22 +128,26 @@ def captcha_visible(page) -> bool:
         return False
 
 
-def intervention_kind(page) -> str | None:
-    """判定是否需要人工介入。仅看验证据信号，绝不因“没有商品”误判。
+def _page_evidence(page) -> tuple[str, str, bool]:
+    """读一次页面上的三样证据：地址、正文、可见验证容器。
 
-    证据只有页面上的三样：地址、正文、可见验证容器。响应流里那份 punish 信号曾经也占一个
-    形参，但读它的那行与地址判定是同一条谓词，对任何输入都到不了，已整个撤掉（ADR-0029）。
+    判据与它的解除判定都从这一份读起（ADR-0030）。各读各的就会给出互相矛盾的答案，
+    而「要人工介入」与「介入已经解除」本来就是同一件事的两种读法。
     """
-    url = (page.url or "").lower()
-    if is_login_url(url):
+    return (page.url or ""), body_text(page), captcha_visible(page)
+
+
+def _intervention_of(url: str, body: str, captcha: bool) -> str | None:
+    """三样证据 → 需不需要人工介入。纯函数，判据只有这一份。"""
+    lowered = (url or "").lower()
+    if is_login_url(lowered):
         return "登录墙"
-    if is_punish_url(url):
+    if is_punish_url(lowered):
         return "滑块"
-    body = body_text(page)
     for m in SLIDER_MARKERS:
         if m in body:
             return "滑块"
-    if captcha_visible(page):
+    if captcha:
         # 可见验证容器：只有当页面确实带验证文案，或不是“点我反馈”这种纯反爬拦截页时，才算滑块
         if any(m in body for m in SLIDER_MARKERS) or ("点我反馈" not in body):
             return "滑块"
@@ -153,17 +157,33 @@ def intervention_kind(page) -> str | None:
     return None
 
 
+def intervention_kind(page) -> str | None:
+    """判定是否需要人工介入。仅看验证据信号，绝不因“没有商品”误判。
+
+    证据只有页面上的三样：地址、正文、可见验证容器。响应流里那份 punish 信号曾经也占一个
+    形参，但读它的那行与地址判定是同一条谓词，对任何输入都到不了，已整个撤掉（ADR-0029）。
+
+    判据只有这一份：`resolved` 是它的另一种读法，不再自己认一遍证据（ADR-0030）。
+    """
+    return _intervention_of(*_page_evidence(page))
+
+
 def resolved(page) -> bool:
-    """解决判定：验证弹窗/iframe 不再可见，且不处于登录墙，即认为已解决。"""
+    """人工介入是否已经解除：同一次判定不再认得这个页面上的任何信号。
+
+    改前这是一份独立的判据，只读地址与可见验证容器、看不见正文。于是「只由正文命中」的
+    那一幕里，它与 `intervention_kind` 同时给出「要介入」和「已解决」两个矛盾答案：详情读取
+    循环的每一步都在等一个永远不为假的判据，而确认窗口拿这个「已解决」把自己判成误报
+    （ADR-0030）。
+
+    读不到证据时回 `False`——与 `intervention_kind` 上抛是有意的不同：那是判据，异常交给
+    调用方；这是轮询谓词，「读不到」只说明还不能停。
+    """
     try:
-        url = (page.url or "").lower()
-        if is_login_url(url):
-            return False
-        if is_punish_url(url):
-            return False
-        return not captcha_visible(page)
+        evidence = _page_evidence(page)
     except Exception:
         return False
+    return _intervention_of(*evidence) is None
 
 
 def ready_detail_page(page, cfg: Config, *, emit=None,

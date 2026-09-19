@@ -14,7 +14,7 @@ from bestseller_monitor.guard import (
     ready_detail_page,
     vtype,
 )
-from helpers import crawler_cfg
+from helpers import FakePage, GuardClock, crawler_cfg
 
 
 class GuardTests(unittest.TestCase):
@@ -139,6 +139,98 @@ class InterventionEvidenceTests(unittest.TestCase):
     def test_the_settling_entry_does_not_take_a_punish_signal(self):
         with self.assertRaises(TypeError):
             ready_detail_page(self.PAGE, self.CFG, punished=True)
+
+
+class InterventionResolutionTests(unittest.TestCase):
+    """「要不要介入」与「解除没有」是同一份证据的两种读法（2026-09-19 审查候选 01）。
+
+    改前 `resolved` 只读地址与可见验证容器，看不见正文。于是「只由正文命中」的那一幕里，
+    同一次判定同时说「要人介入」与「已经解决」：详情读取循环因此没有出口（真仓 HEAD 上实跑
+    40 秒不返回、约 43 万圈/秒空转），确认窗口当场把一条落在 DOM 上的信号判成误报。
+    """
+
+    CFG = crawler_cfg()
+    PRODUCT = "https://detail.1688.com/offer/11.html"
+    LOGIN_WALL = "请登录后查看商品详情"
+
+    def test_a_page_that_needs_intervention_is_never_reported_as_resolved(self):
+        """判据说要介入的时候，不能说同一页已经解除。
+
+        改前红在两条正文命中的形状——而正文正是这两个标记表唯一真正命中过的证据：
+        生产存档里命中的 7 个 offer 全是「地址正常、正文是登录墙」。
+
+        这条改完之后不可能再失败，它是给「有人把 `resolved` 又写回成一份独立判据」准备的
+        回归护栏；行为证明在下面三条。
+        """
+        shapes = {
+            "地址是登录页": FakePage("https://login.1688.com/"),
+            "正文是登录墙": FakePage(self.PRODUCT, body=self.LOGIN_WALL),
+            "地址是 punish 页": FakePage("https://x/punish?x5secdata=1"),
+            "正文是滑块": FakePage(self.PRODUCT, body="请完成验证后继续访问"),
+            "验证容器可见": FakePage(self.PRODUCT, captcha=True),
+        }
+
+        for name, page in shapes.items():
+            with self.subTest(页面=name):
+                self.assertIsNotNone(guard.intervention_kind(page))
+                self.assertFalse(guard.resolved(page))
+
+    def test_a_page_with_no_evidence_at_all_is_resolved(self):
+        page = FakePage(self.PRODUCT, body="这是一个正常的商品详情页")
+
+        self.assertIsNone(guard.intervention_kind(page))
+        self.assertTrue(guard.resolved(page))
+
+    def test_a_body_only_signal_survives_the_confirmation_window(self):
+        """落在 DOM 上的信号不该被确认窗口当成「没有落点的瞬时报错」丢掉。
+
+        改前红：窗口第一句 `if resolved(page)` 恒真，于是从不刷新、从不发
+        `verification_appear`、从不响铃——登录墙就这么被静默跳过。
+        """
+        page = FakePage(self.PRODUCT, body=self.LOGIN_WALL)   # 刷新也救不回来
+        emit = MagicMock()
+
+        with patch.object(guard, "time", GuardClock(step=1.0)), \
+             patch.object(guard.sound, "play_alarm") as alarm, \
+             self.assertRaises(InterventionTimeout):
+            guard.wait_for_resolution(page, 1, emit=emit,
+                                      verification_type="login", confirm_sec=2.0)
+
+        self.assertEqual(page.reloads, 1, "过了确认窗口要先试一次刷新")
+        self.assertEqual(emit.call_args.args[0], "verification_appear")
+        self.assertEqual(emit.call_args.kwargs["verification_type"], "login")
+        alarm.assert_called()
+
+    def test_a_signal_that_a_reload_clears_is_still_a_false_alarm(self):
+        """确认窗口的老职责不变：刷新后恢复的仍旧忽略，不发事件、不响铃。"""
+        page = FakePage(self.PRODUCT, body=self.LOGIN_WALL, body_after_reload="")
+        emit = MagicMock()
+
+        with patch.object(guard, "time", GuardClock(step=1.0)), \
+             patch.object(guard.sound, "play_alarm") as alarm:
+            guard.wait_for_resolution(page, 0, emit=emit, confirm_sec=2.0)
+
+        self.assertEqual(page.reloads, 1)
+        emit.assert_not_called()
+        alarm.assert_not_called()
+
+    def test_the_settling_entry_only_reports_a_page_once_the_signal_is_gone(self):
+        """`ready_detail_page` 说「页面可用」之后，判据不能再认得这个页面上的信号。
+
+        这是 `detail_visit` 那个读取循环唯一的推进条件：`_guard()` 返回假值之后它就重置
+        可读窗口再 `continue`，下一圈必须走到读页面那一步。改前不成立——正文命中的介入被
+        确认窗口判成误报，函数返回「可用」，而判据原地仍为真，循环于是永远转下去。
+        """
+        page = FakePage(self.PRODUCT, body=self.LOGIN_WALL, body_after_reload="")
+        cfg = crawler_cfg(intervention_confirmation_sec=2.0)
+
+        with patch.object(guard, "time", GuardClock(step=1.0)), \
+             patch.object(guard.sound, "play_alarm"):
+            denied = ready_detail_page(page, cfg)
+
+        self.assertFalse(denied, "登录墙不是 deny")
+        self.assertIsNone(guard.intervention_kind(page),
+                          "判据说页面可用了，就不该再认得这个页面")
 
 
 if __name__ == "__main__":

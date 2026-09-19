@@ -1,10 +1,11 @@
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
 from playwright.sync_api import Error as PlaywrightError
 
-from bestseller_monitor import detail, detail_visit
-from helpers import crawler_cfg
+from bestseller_monitor import detail, detail_visit, guard
+from helpers import FakePage, GuardClock, crawler_cfg
 
 
 DETAIL_HTML = ('<script>{"skuInfoMap":{"红色":{"skuId":"red","name":"红色",'
@@ -220,6 +221,49 @@ class DetailVisitTests(unittest.TestCase):
             self.assertTrue(visit.observe(PRODUCT_URL).ok)
             with self.assertRaises(RuntimeError):
                 visit.observe(PRODUCT_URL)
+
+    def test_a_late_body_only_intervention_cannot_spin_the_readiness_loop(self):
+        """晚到的正文级介入也要有界：等到时限就暂停，而不是无限空转（2026-09-19 候选 01）。
+
+        改前 `resolved` 看不见正文：确认窗口当场返回 → `_guard()` 说页面可用 → 重置可读窗口
+        → `continue` → 判据仍然为真 → **不返回**（真仓 HEAD 上实跑 40 秒，约 43 万圈/秒）。
+        """
+        page = FakePage(PRODUCT_URL, body="正常的商品详情内容", html=DETAIL_HTML)
+        visit = self.begin(page)
+        self.assertIsInstance(visit, detail_visit.ReadyDetailVisit)
+
+        page.become_wall("请登录后查看商品详情")   # 弹窗打开之后才出现的登录墙
+        with patch.object(guard, "time", GuardClock(step=10.0)), \
+             patch.object(guard.sound, "play_alarm"), \
+             patch.object(detail_visit.time, "sleep"):
+            with self.assertRaises(guard.InterventionTimeout):
+                self.assert_returns_within(lambda: visit.observe(PRODUCT_URL), 3.0,
+                                           release=page.solve)
+
+    def assert_returns_within(self, call, seconds: float, *, release):
+        """跑 `call`；`seconds` 内没返回就判定「这条分支没有出口」，并把那条线程放出来。
+
+        这条分支的空转不带 `sleep`（每圈都去问一次页面），所以超时之后要靠 `release` 让页面
+        进入已解决状态，那条线程下一圈才走得出去，不会在后面的用例里继续烧 CPU。
+        """
+        box: dict = {}
+
+        def target():
+            try:
+                box["value"] = call()
+            except BaseException as exc:   # noqa: BLE001 - 原样带回主线程
+                box["error"] = exc
+
+        thread = threading.Thread(target=target, daemon=True)
+        thread.start()
+        thread.join(seconds)
+        if thread.is_alive():
+            release()
+            thread.join(5.0)
+            self.fail(f"{seconds} 秒内没有返回：这条分支没有出口")
+        if "error" in box:
+            raise box["error"]
+        return box.get("value")
 
 
 if __name__ == "__main__":

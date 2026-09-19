@@ -109,6 +109,88 @@ def new_round(db, *shops, run_date: str | None = None) -> int:
     return opened.round.id
 
 
+class GuardClock:
+    """`guard.time` 的替身：每次读时间往前走一步，`sleep` 不真睡。
+
+    `guard` 的等待循环按真实秒数要跑分钟级（`human_pause_minutes`），而用例要判的只是
+    「有没有界」。走一步顶一环，圈数一样、用例快得多。
+    """
+
+    def __init__(self, step: float = 1.0):
+        self.step = step
+        self.now = 0.0
+
+    def time(self) -> float:
+        self.now += self.step
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        pass
+
+
+class FakePage:
+    """脚本化的一个页面：地址、正文、可见验证容器，以及人工「解决」它的那一刻。
+
+    `guard` 认的三样证据都从这里取：`body_text` 读 `locator("body").inner_text()`、
+    `captcha_visible` 读验证容器选择器的可见性。没有验证容器时 `count()` 为 0，
+    与真页面上选择器匹配不到东西同形。
+
+    `become_wall()` / `solve()` 是给「晚到的介入」与「人工解决」两步用的——页面本来就是
+    会变的，用例不必拿「第几次读」去模拟时间。
+    """
+
+    def __init__(self, url: str, *, body: str = "", captcha: bool = False,
+                 html: str = "<html></html>", body_after_reload: str | None = None):
+        self.url = url
+        self.body = body
+        self.captcha = captcha
+        self.html = html
+        self._body_after_reload = body_after_reload
+        self.reloads = 0
+
+    def become_wall(self, body: str) -> None:
+        """弹窗打开之后才出现的登录墙/滑块文案。"""
+        self.body = body
+
+    def solve(self) -> None:
+        """人工解决：验证容器与文案一起消失。"""
+        self.body = ""
+        self.captcha = False
+
+    def reload(self, wait_until=None) -> None:
+        self.reloads += 1
+        if self._body_after_reload is not None:
+            self.body = self._body_after_reload
+
+    def content(self) -> str:
+        return self.html
+
+    def locator(self, selector: str):
+        return _BodyLocator(self) if selector == "body" else _CaptchaLocator(self)
+
+
+class _BodyLocator:
+    def __init__(self, page: "FakePage"):
+        self._page = page
+
+    def inner_text(self, timeout=None) -> str:
+        return self._page.body
+
+
+class _CaptchaLocator:
+    def __init__(self, page: "FakePage"):
+        self._page = page
+
+    def count(self) -> int:
+        return 1 if self._page.captcha else 0
+
+    def nth(self, index: int):
+        return self
+
+    def is_visible(self) -> bool:
+        return self._page.captcha
+
+
 class FakeCard:
     """脚本化的一张商品卡：标题、打开后读到什么、是不是 deny。
 
