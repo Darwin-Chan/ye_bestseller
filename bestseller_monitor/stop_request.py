@@ -327,6 +327,8 @@ class StopInFlight:
     acked: bool = False
     phase: StopPhase = StopPhase.STOPPING
     code: str | None = None
+    # 关失败、还欠着的那一个浏览器：在失败那一刻冻结，重试只碰它，绝不按当前事实重选。
+    pending_browser: BoundBrowser | None = None
 
     @property
     def kind(self):
@@ -432,13 +434,10 @@ class StopWatch:
         except Exception as exc:  # noqa: BLE001
             return self._verify(stop, "observation_failed", str(exc))
         relation = self._relation(stop.command.target, facts)
+        if stop.pending_browser is not None:
+            return self._retry_cleanup(db, stop, facts, relation)
         if relation in (StopRelation.REPLACED, StopRelation.GONE):
-            try:
-                self._cleanup_target(db, stop.command.target)
-            except Exception as exc:  # noqa: BLE001
-                return self._verify(stop, "database_unavailable", str(exc))
-            self._finish(stop)
-            return self.status
+            return self._settle(db, stop)
         if relation is StopRelation.UNVERIFIABLE:
             return self._verify(stop, "target_unverifiable")
         if self._now() < stop.deadline:
@@ -522,7 +521,8 @@ class StopWatch:
                 if not closed.ok:
                     conn.rollback()
                     self._in_flight = replace(stop, phase=StopPhase.CLEANUP_PENDING,
-                                              code=closed.code or "browser_close_failed")
+                                              code=closed.code or "browser_close_failed",
+                                              pending_browser=browser)
                     return self.status
             self._delete_target_in_transaction(conn, target)
             conn.commit()
@@ -535,6 +535,45 @@ class StopWatch:
                                       code="database_unavailable")
             log.warning("停止目标清理暂不可用：%s", exc)
             return self.status
+        self._finish(stop)
+        return self.status
+
+    def _retry_cleanup(self, db, stop, facts, relation):
+        """`CLEANUP_PENDING` 的重试主体：目标已经死透，只剩浏览器没关掉。
+
+        `_force` 关浏览器失败时进程已被证明退出，所以下一次 tick 必然判出 `GONE` —— 而 `tick`
+        里 `GONE` 的短路在 deadline 之前。不在这里重试的话，`close_browser` 每个窗口只会被调
+        一次：一次瞬时失败就留下一个真在跑的孤儿浏览器占着 profile 与调试端口（IS-43），
+        而条件清理还会把唯一能定位它的那份精确绑定一起抹掉。
+
+        重试只认冻结下来的那一个 binding，绝不按当前事实重选（ADR-0024）。
+        """
+        if relation is StopRelation.REPLACED:
+            # B 接手了：结束旧重试，只留一句警告，不碰 B 的实例。
+            log.warning("停止目标已被替换，结束旧目标未完成的浏览器收尾。")
+            return self._settle(db, replace(stop, pending_browser=None))
+        if relation is StopRelation.UNVERIFIABLE:
+            self._in_flight = replace(stop, code="target_unverifiable")
+            return self.status
+        current = facts.browser
+        if current is not None and current != stop.pending_browser:
+            # 事实里的浏览器换了一个：原 binding 不再精确，那不是我们的目标。不动手，也不收口
+            # ——收口会把没关掉的那个浏览器的绑定抹掉，正是要避免的伤害。等 B 出现或事实清空。
+            self._in_flight = replace(stop, code="browser_binding_changed")
+            return self.status
+        closed = self._runtime.close_browser(stop.pending_browser)
+        if not closed.ok:
+            self._in_flight = replace(stop, phase=StopPhase.CLEANUP_PENDING,
+                                      code=closed.code or "browser_close_failed")
+            return self.status
+        return self._settle(db, replace(stop, pending_browser=None))
+
+    def _settle(self, db, stop):
+        """条件清理 A 的三处事实并结束窗口；清理供不上库就留在核验里重试。"""
+        try:
+            self._cleanup_target(db, stop.command.target)
+        except Exception as exc:  # noqa: BLE001
+            return self._verify(stop, "database_unavailable", str(exc))
         self._finish(stop)
         return self.status
 
