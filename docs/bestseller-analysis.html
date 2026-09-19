@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>畅销品分析</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f3f6f4;color:#203d33;font:14px/1.7 system-ui,sans-serif}header{background:#143e32;color:white;padding:24px max(24px,calc((100vw - 1120px)/2))}header h1{margin:0}main{max-width:1168px;margin:26px auto;padding:0 24px}.panel,article{background:white;border:1px solid #dce5df;border-radius:10px;padding:24px;margin:16px 0}.dates{display:grid;grid-template-columns:1fr 1fr;gap:28px}input,button{font:inherit;border:1px solid #b9cbc1;border-radius:5px;padding:8px 12px}button{cursor:pointer;background:white;color:#204d3d}button.primary{background:#196b51;color:white}button:disabled{opacity:.5;cursor:wait}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:8px;border-bottom:1px solid #e4eae6}th{color:#61796c}.muted{color:#718578}.error{color:#a32d23;background:#fff1ed;padding:14px;border-radius:6px}.bar{display:flex;align-items:center;justify-content:space-between;gap:14px}details{margin:12px 0}dialog{border:0;border-radius:10px;max-width:580px;padding:26px}dialog::backdrop{background:#173c3266}dialog button{float:right;margin-top:12px}[hidden]{display:none!important}@media(max-width:700px){.dates{grid-template-columns:1fr}.bar{flex-wrap:wrap}}
+</style>
+<header><h1>畅销品分析</h1><span>选择日期 · 固定库存 · 核对商品</span></header>
+<main><div id="error" class="error" role="alert" hidden></div>
+<section id="datePage" class="panel"><h2>选择销量计算区间</h2><p class="muted">当日真实抓取数量不包含补齐库存。开始日期只作为销量基准。</p><div class="dates">
+<section><label>开始日期 <input id="start" type="date"></label><h3>当日真实抓取</h3><div id="startCoverage">请选择日期</div></section>
+<section><label>结束日期 <input id="end" type="date"></label><h3>当日真实抓取</h3><div id="endCoverage">请选择日期</div></section></div>
+<p><button id="begin" class="primary">下一步、进入同款确认</button></p></section>
+<section id="reviewPage" hidden><div class="bar"><h2>确认同款</h2><button id="back">重新选择日期</button></div><p id="snapshotInfo"></p><p class="muted">当前提供固定库存核对；同款识别、销量计算、人工确认和暂存尚未开放。关闭程序后需重新分析。</p><div id="products"></div><div class="bar"><button id="prev">上一页</button><span id="pageInfo"></span><button id="next">下一页</button></div></section>
+</main><dialog id="notice"><p id="noticeText"></p><button id="noticeOK">继续</button></dialog>
+<script>
+const $ = id => document.getElementById(id);
+const esc = value => String(value ?? '').replace(/[&<>"']/g, character => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+}[character]));
+let settings = null, busy = false, noticeAction = null;
+
+async function api(path, options) {
+    const response = await fetch(path, options);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '请求失败');
+    return data;
+}
+function error(reason) {
+    $('error').textContent = reason.message;
+    $('error').hidden = false;
+}
+function clearError() { $('error').hidden = true; }
+function notice(text, action = null) {
+    noticeAction = action;
+    $('noticeText').textContent = text;
+    $('notice').showModal();
+}
+$('noticeOK').onclick = () => {
+    const action = noticeAction;
+    noticeAction = null;
+    $('notice').close();
+    if (action) action();
+};
+async function getSettings() {
+    if (!settings) settings = await api('/api/settings');
+    return settings;
+}
+async function coverage(which) {
+    const input = $(which), day = input.value, target = $(which + 'Coverage');
+    if (!day) { target.textContent = '请选择日期'; return; }
+    target.textContent = '正在读取…';
+    try {
+        const config = await getSettings();
+        const rows = await api('/api/coverage?date=' + encodeURIComponent(day));
+        if (input.value !== day) return;
+        target.innerHTML = `<table aria-label="${which === 'start' ? '开始' : '结束'}日期真实抓取">
+            <thead><tr><th>店铺</th><th>商品数</th><th>SKU 数</th></tr></thead><tbody>
+            ${rows.map(row => `<tr><td>${esc(row.shop_name || row.shop_key)}</td>
+                <td>${row.products}</td><td>${row.skus}</td></tr>`).join('')}
+            </tbody></table>`;
+        const weekday = new Date(day + 'T12:00:00+08:00').getUTCDay() || 7;
+        if (weekday !== config.full_capture_weekday && !$('notice').open) {
+            const name = ['', '周一', '周二', '周三', '周四', '周五', '周六', '周日'][config.full_capture_weekday];
+            notice(`你选择的日期可能库存数据不完整，只有每${name}会全量抓取库存数据`);
+        }
+    } catch (reason) {
+        if (input.value === day) {
+            target.textContent = '读取失败，请重新选择日期重试';
+            error(reason);
+        }
+    }
+}
+for (const which of ['start', 'end']) {
+    $(which).addEventListener('change', () => { clearError(); coverage(which); });
+}
+let currentSnapshot=null, productPage=0, inventoryByProduct=new Map();
+function show(snapshot) {
+    currentSnapshot=snapshot;
+    productPage=0;
+    inventoryByProduct=new Map();
+    for(const row of snapshot.inventory) {
+        const key=JSON.stringify([row.shop_key,row.offer_id]);
+        if(!inventoryByProduct.has(key)) inventoryByProduct.set(key,[]);
+        inventoryByProduct.get(key).push(row);
+    }
+    $('start').value=snapshot.start;
+    $('end').value=snapshot.end;
+    $('datePage').hidden=true;
+    $('reviewPage').hidden=false;
+    $('snapshotInfo').textContent=`${snapshot.start} — ${snapshot.end} · 数据固定于 ${snapshot.frozen_at} · ${snapshot.groups.length} 个待确认单商品组`;
+    renderProducts();
+    history.replaceState(null,'','#analysis='+snapshot.id);
+}
+function renderProducts() {
+    const snapshot=currentSnapshot, offset=productPage*20;
+    $('products').innerHTML=snapshot.products.slice(offset,offset+20).map((p,i)=>{
+        const rows=inventoryByProduct.get(JSON.stringify([p.shop_key,p.offer_id]))||[];
+        const within=rows.filter(r=>r.date>=snapshot.start&&r.date<=snapshot.end);
+        const latest=within.reduce((a,b)=>!a||b.date>a.date?b:a,null);
+        const skus=new Map();
+        for(const row of rows) {
+            if(!skus.has(row.sku_id)) skus.set(row.sku_id,[]);
+            skus.get(row.sku_id).push(row);
+        }
+        return `<article><h3>G${offset+i+1} · ${esc(latest?.product_name||p.product_name||p.offer_id)}</h3>
+            <span>待确认</span><p>${esc(latest?.shop_name||p.shop_key)} · 商品 ${esc(p.offer_id)} · ${skus.size} 个 SKU</p>
+            ${[...skus].map(([id,obs])=>`<details open><summary>${esc(obs.at(-1).sku_name||id)} · SKU ${esc(id)}</summary>
+                <table><thead><tr><th>观测日期</th><th>实际库存</th><th>区间关系</th></tr></thead><tbody>
+                ${obs.map(r=>`<tr><td>${esc(r.date)}</td><td>${r.stock}</td><td>${r.date<snapshot.start?'开始日前基准候选':r.date>snapshot.end?'结束日后观测':'区间内'}</td></tr>`).join('')}
+                </tbody></table></details>`).join('')}</article>`;
+    }).join('');
+    const pages=Math.ceil(snapshot.products.length/20);
+    $('pageInfo').textContent=`${productPage+1} / ${pages}`;
+    $('prev').disabled=productPage===0;
+    $('next').disabled=productPage+1>=pages;
+}
+$('prev').onclick=()=>{if(productPage>0){productPage--;renderProducts()}};
+$('next').onclick=()=>{if((productPage+1)*20<currentSnapshot.products.length){productPage++;renderProducts()}};
+async function begin(acknowledged = false) {
+    if (busy) return;
+    clearError();
+    const start = $('start').value, end = $('end').value;
+    if (!start || !end || start >= end) {
+        error(new Error('请选择有效日期，结束日期必须晚于开始日期'));
+        return;
+    }
+    busy = true;
+    $('begin').disabled = true;
+    try {
+        const data = await api('/api/analysis', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({start, end, acknowledged})
+        });
+        if (data.needs_confirmation) {
+            notice('当前存在运行中的库存抓取程序，为避免数据变化，将锁定当前数据生成后续分析', () => begin(true));
+        } else {
+            show(data);
+        }
+    } catch (reason) {
+        error(reason);
+    } finally {
+        busy = false;
+        $('begin').disabled = false;
+    }
+}
+$('begin').onclick = () => begin();
+$('back').onclick = () => {
+    history.replaceState(null, '', location.pathname);
+    $('reviewPage').hidden = true;
+    $('datePage').hidden = false;
+    clearError();
+    for (const which of ['start', 'end']) coverage(which);
+};
+(async () => {
+    try {
+        await getSettings();
+        const id = new URLSearchParams(location.hash.slice(1)).get('analysis');
+        if (id) show(await api('/api/analysis?id=' + encodeURIComponent(id)));
+    } catch (reason) {
+        error(reason);
+    }
+})();
+</script></html>

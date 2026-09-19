@@ -1,0 +1,5 @@
+[analysis]
+# 分析专用配置；相对路径以本配置所在目录为基准。
+database = "F:/AI/bestseller_runtime/data/bestseller.db"
+# ISO 星期：1=周一，7=周日。只是提醒，不调度采集。
+full_capture_weekday = 1
