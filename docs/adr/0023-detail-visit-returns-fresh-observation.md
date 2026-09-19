@@ -1,6 +1,6 @@
 # 0023. 详情访问用一次性 capability 交回验证后的当前观测
 
-- 状态：已接受（范围外那句被 [ADR-0029](0029-intervention-evidence-in-one-place.md) 更正：响应流 punish 识别不再是「独立缺口」而是有意的盲区，`OpenedDetail` 的 `punished` 字段随之撤掉）
+- 状态：已接受（范围外那句被 [ADR-0029](0029-intervention-evidence-in-one-place.md) 更正：响应流 punish 识别不再是「独立缺口」而是有意的盲区，`OpenedDetail` 的 `punished` 字段随之撤掉。**正文里的 interface 签名与「调用方传 `reraise=STOP_WITH_OUTCOME`」于 2026-09-19 失效**：那个形参连同它穿过的 7 处 `except <元组>: raise` 一起撤掉了——它们对任何输入都不改变结果，六个停止异常本来就不是 `BROWSER_IO_ERRORS` 的子类。**本条真正要的那条不变量（已登记停止异常以同一对象原样穿透、不写商品失败行）没有变**，只是不再靠形参声明，而是靠「没落进 `BROWSER_IO_ERRORS`」自然成立；核它的用例仍在本条名下（`test_all_registered_stop_outcomes_keep_identity_across_the_visit_stages`）。见 [ADR-0018 的状态行](0018-page-to-observation-in-detail.md) 与 [规格](../../.scratch/reraise-dead-line/spec.md)）
 - 日期：2026-09-14
 
 ## 背景

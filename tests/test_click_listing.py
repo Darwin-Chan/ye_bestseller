@@ -509,16 +509,25 @@ class ClickListingDependencyTests(unittest.TestCase):
     与它引出的环（`pipeline` → `browser_pw` → `click_listing` → `pipeline`）一起消失。
 
     **这条只能查源码**：「没有这条依赖」是对导入图的断言，运行时观察不到——环今天靠写法绕开了。
+    查的是**所有写法**：`import a.b.pipeline`、`from . import pipeline`、
+    `from bestseller_monitor.pipeline import X` 都算（前两种的 `module` 分别是整串与 `None`，
+    只认 `from .pipeline import X` 那一种会假绿）。
     """
 
     def test_the_click_path_does_not_import_the_orchestrator(self):
-        tree = ast.parse(Path(click_listing.__file__).read_text(encoding="utf-8"))
-        imported = {
-            node.module.split(".")[0]
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module
-        }
+        source = Path(click_listing.__file__).read_text(encoding="utf-8")
+        imported = set()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    imported.add(node.module)
+                elif node.level:
+                    # `from . import X`：X 是同级 module，名字在 alias 上
+                    imported.update(alias.name for alias in node.names)
 
+        imported = {name.split(".")[-1] for name in imported}
         self.assertNotIn("pipeline", imported, "点这条路径不该认识编排层")
 
 

@@ -74,7 +74,7 @@ class ReadyDetailVisit:
                 if isinstance(guarded, detail.Observation):
                     return guarded
                 if guarded:
-                    return DeniedVisit(self._raw_html())
+                    return DeniedVisit(_read_raw_html(self._page))
 
             try:
                 intervention = intervention_kind(self._page)
@@ -85,7 +85,7 @@ class ReadyDetailVisit:
                 if isinstance(guarded, detail.Observation):
                     return guarded
                 if guarded:
-                    return DeniedVisit(self._raw_html())
+                    return DeniedVisit(_read_raw_html(self._page))
                 # 人工介入结束后，给当前页面一个完整的可读窗口。
                 deadline = time.time() + DETAIL_READY_TIMEOUT_SEC
                 continue
@@ -111,9 +111,6 @@ class ReadyDetailVisit:
             return self._page.content()
         except BROWSER_IO_ERRORS as exc:
             return detail.Observation.read_failed(exc)
-
-    def _raw_html(self) -> str:
-        return _read_raw_html(self._page)
 
 
 def begin_detail_visit(
