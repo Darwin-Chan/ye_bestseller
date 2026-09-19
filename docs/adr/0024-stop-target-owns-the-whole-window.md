@@ -1,6 +1,6 @@
 # 0024. 停止目标拥有整个停止窗口
 
-- 状态：已采用并实现（**删除清单已走完**，2026-09-19：`_LegacyRuntime`、`forget()`、`begin(kind, target)` 与 `begin` 的 `conn=None` 跳过校验通道都已删；见 [IS-55](../../.scratch/1688-inventory-snapshot/issues/55-is-55.md) 与 [规格](../../.scratch/stop-runtime-shape/spec.md)。`_kill_proc` 那条「暂停」窄例外按本条保留。**规格里的强制序列第 5 步此前没有落点**，2026-09-19 补齐：`CLEANUP_PENDING` 声明了「只在没有 B/未知接手、且原 browser binding 仍精确时重试」，实际却从不重试——走到这一步时进程已被证明退出，下一次 tick 必然判 `GONE`，而 `GONE` 的短路在 deadline 之前。现在把还欠着的那个浏览器冻结进 `StopInFlight.pending_browser`，由 `tick` 在短路之前重试；见 [规格](../../.scratch/cleanup-retry/spec.md)）
+- 状态：已采用并实现（**删除清单已走完**，2026-09-19：`_LegacyRuntime`、`forget()`、`begin(kind, target)` 与 `begin` 的 `conn=None` 跳过校验通道都已删；见 [IS-55](../../.scratch/1688-inventory-snapshot/issues/55-is-55.md) 与 [规格](../../.scratch/stop-runtime-shape/spec.md)。`_kill_proc` 那条「暂停」窄例外按本条保留。**规格里的强制序列第 5 步此前没有落点**，2026-09-19 补齐：`CLEANUP_PENDING` 声明了「只在没有 B/未知接手、且原 browser binding 仍精确时重试」，实际却从不重试——走到这一步时进程已被证明退出，下一次 tick 必然判 `GONE`，而 `GONE` 的短路在 deadline 之前。现在把还欠着的那个浏览器冻结进 `StopInFlight.pending_browser`，由 `tick` 在短路之前重试，重试给一个与协作停止窗口同长的上限（不设上限的话，`close_browser` 对已经不存在的 PID 永远回 `None`，窗口会永远停在 `cleanup_pending`，而界面在未收口的相里拒绝启动新采集）；见 [规格](../../.scratch/cleanup-retry/spec.md)）
 - 日期：2026-09-15
 
 ## 背景

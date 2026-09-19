@@ -260,6 +260,28 @@ class BrowserCleanupRetryTests(unittest.TestCase):
         self.assertEqual(len(self._closes(runtime)), 1, "认不出的浏览器不动手")
         self.assertIsNotNone(self.db.crawler_process(), "没收口就不该清事实")
 
+    def test_the_cleanup_retry_gives_up_at_its_own_window(self):
+        """重试有上限：浏览器已经不在、绑定也核不出来时，相不能永远停着。
+
+        `browser_proc.close_browser` 要先 `bind_process`；PID 已经不存在时它永远回 `None`
+        （实跑核过：「无法绑定浏览器 PID …，拒绝关闭」）。那条路不设上限的话，窗口就永远停在
+        `cleanup_pending`，而界面在未收口的相里拒绝启动新的采集——机器这么卡住。
+        """
+        watch, runtime = self._watch_at_the_deadline()
+        watch.tick(self.conn)
+
+        self.clock.value += 4          # 收尾相自己那个窗口是 8 秒
+        still = watch.tick(self.conn)
+        self.assertEqual(still.phase, stop_request.StopPhase.CLEANUP_PENDING)
+        self.assertEqual(len(self._closes(runtime)), 2, "窗口之内要真的在重试")
+
+        self.clock.value += 9
+        status = watch.tick(self.conn)
+
+        self.assertEqual(status.phase, stop_request.StopPhase.IDLE, "到上限就得放掉，不能永远停着")
+        self.assertEqual(len(self._closes(runtime)), 2, "过了上限不再动手")
+        self.assertIsNone(self.db.crawler_process(), "放弃之后才清事实")
+
     def test_a_replaced_target_ends_the_old_retry_and_leaves_b_alone(self):
         watch, runtime = self._watch_at_the_deadline()
         watch.tick(self.conn)
@@ -295,6 +317,8 @@ class BrowserCleanupRetryTests(unittest.TestCase):
 
         self.assertEqual(watch.tick(self.conn).phase, stop_request.StopPhase.IDLE)
         self.assertEqual(len(attempts), 2, "那条路的重试今天是活的，不许被改掉")
+        self.assertNotIn("close_browser", [name for name, _ in runtime.actions],
+                         "那条路没有浏览器可关，不许被写成欠着一个")
 
 
 if __name__ == "__main__":

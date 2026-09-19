@@ -435,7 +435,7 @@ class StopWatch:
             return self._verify(stop, "observation_failed", str(exc))
         relation = self._relation(stop.command.target, facts)
         if stop.pending_browser is not None:
-            return self._retry_cleanup(db, stop, facts, relation)
+            return self._retry_cleanup(db, stop, facts.browser, relation)
         if relation in (StopRelation.REPLACED, StopRelation.GONE):
             return self._settle(db, stop)
         if relation is StopRelation.UNVERIFIABLE:
@@ -520,10 +520,7 @@ class StopWatch:
                 closed = self._runtime.close_browser(browser)
                 if not closed.ok:
                     conn.rollback()
-                    self._in_flight = replace(stop, phase=StopPhase.CLEANUP_PENDING,
-                                              code=closed.code or "browser_close_failed",
-                                              pending_browser=browser)
-                    return self.status
+                    return self._pending_cleanup(stop, browser, closed.code)
             self._delete_target_in_transaction(conn, target)
             conn.commit()
         except Exception as exc:  # noqa: BLE001
@@ -538,7 +535,20 @@ class StopWatch:
         self._finish(stop)
         return self.status
 
-    def _retry_cleanup(self, db, stop, facts, relation):
+    def _pending_cleanup(self, stop, browser, code):
+        """停在这个相：还欠着一个没关掉的浏览器。
+
+        上限**只在进入这个相时开一次**（判据是此刻还没欠着任何浏览器）——每次重试都续期的话，
+        那个上限就形同虚设。
+        """
+        entering = stop.pending_browser is None
+        self._in_flight = replace(
+            stop, phase=StopPhase.CLEANUP_PENDING,
+            code=code or "browser_close_failed", pending_browser=browser,
+            deadline=self._now() + self._grace_sec if entering else stop.deadline)
+        return self.status
+
+    def _retry_cleanup(self, db, stop, browser, relation):
         """`CLEANUP_PENDING` 的重试主体：目标已经死透，只剩浏览器没关掉。
 
         `_force` 关浏览器失败时进程已被证明退出，所以下一次 tick 必然判出 `GONE` —— 而 `tick`
@@ -546,26 +556,29 @@ class StopWatch:
         一次：一次瞬时失败就留下一个真在跑的孤儿浏览器占着 profile 与调试端口（IS-43），
         而条件清理还会把唯一能定位它的那份精确绑定一起抹掉。
 
-        重试只认冻结下来的那一个 binding，绝不按当前事实重选（ADR-0024）。
+        重试只认冻结下来的那一个 binding，绝不按当前事实重选（ADR-0024）。但**它必须有上限**：
+        `browser_proc.close_browser` 要先 `bind_process`，PID 已经不存在时它永远回 `None`
+        （实跑核过），不设上限窗口就永远停着，而界面在未收口的相里拒绝启动新的采集。
         """
         if relation is StopRelation.REPLACED:
             # B 接手了：结束旧重试，只留一句警告，不碰 B 的实例。
             log.warning("停止目标已被替换，结束旧目标未完成的浏览器收尾。")
             return self._settle(db, replace(stop, pending_browser=None))
+        if self._now() >= stop.deadline:
+            log.warning("浏览器收尾重试到窗口上限仍未成功，放弃这一个（PID %s，端口 %s）——"
+                        "绑定随事实一起清掉，那个进程可能还在。", browser.pid, browser.port)
+            return self._settle(db, replace(stop, pending_browser=None))
         if relation is StopRelation.UNVERIFIABLE:
             self._in_flight = replace(stop, code="target_unverifiable")
             return self.status
-        current = facts.browser
-        if current is not None and current != stop.pending_browser:
+        if browser is not None and browser != stop.pending_browser:
             # 事实里的浏览器换了一个：原 binding 不再精确，那不是我们的目标。不动手，也不收口
-            # ——收口会把没关掉的那个浏览器的绑定抹掉，正是要避免的伤害。等 B 出现或事实清空。
+            # ——收口会把没关掉的那个浏览器的绑定抹掉，正是要避免的伤害。等 B 出现或窗口到顶。
             self._in_flight = replace(stop, code="browser_binding_changed")
             return self.status
         closed = self._runtime.close_browser(stop.pending_browser)
         if not closed.ok:
-            self._in_flight = replace(stop, phase=StopPhase.CLEANUP_PENDING,
-                                      code=closed.code or "browser_close_failed")
-            return self.status
+            return self._pending_cleanup(stop, stop.pending_browser, closed.code)
         return self._settle(db, replace(stop, pending_browser=None))
 
     def _settle(self, db, stop):
