@@ -6,8 +6,8 @@
 - 用普通进程拉起浏览器、经调试端口接管、按归属收尾（IS-43）；
 - 逐店补采的详情导航 adapter（交回 `detail_visit.OpenedDetail`，见 ADR-0023）。
 
-`DenyTracker`、两个 deny 异常与详情页「打开之后怎么安顿」都长在 guard.py（deny 判定的家，
-候选 04）；这里不为它们转出旧名。
+`DenyTracker`、两个 deny 异常与详情页「打开之后怎么安顿」（`guard.ready_detail_page()`）都长在
+guard.py（deny 判定的家，候选 04）；这里不为它们转出旧名。
 """
 from __future__ import annotations
 
@@ -26,10 +26,11 @@ from .click_listing import WAIT_POPUP_MS
 from .config import Config
 from .delay import Humanizer
 from .detail_visit import OpenedDetail
-from .guard import is_punish_url
-# 诊断工具的兼容名：它们按旧名从 browser_pw 取这些，别删（见下面的 `_*` 别名）。
+# 诊断工具仍从 browser_pw 取这几个名字（四个旧私有名，加 guard 的公开名
+# `intervention_kind`）：调用点在 tools/，这条边界由 tests/test_browser_pw.py::
+# CompatSurfaceTests 钉着。
 from .guard import (  # noqa: F401
-    body_text, captcha_visible, intervention_kind, resolved,
+    body_text, captcha_visible, intervention_kind, is_punish_url, resolved,
 )
 
 log = logging.getLogger(__name__)

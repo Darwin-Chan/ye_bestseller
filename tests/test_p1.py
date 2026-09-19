@@ -219,9 +219,11 @@ class P1Tests(unittest.TestCase):
         page = MagicMock()
         page.content.return_value = DETAIL_HTML
 
-        # 走真的 navigate_detail 与 detail_visit，事件才真是生产路径发出来的。
+        # 走真的 navigate_detail 与 detail_visit，事件才真是生产路径发出来的；判据那两处按本仓
+        # 用例的常规替身给掉——`detail_visit` 是从 guard 直接取名的，打 browser_pw 上的名字空转。
         with patch.object(browser_pw.time, "sleep"), \
-             patch.object(browser_pw, "intervention_kind", return_value=None):
+             patch.object(detail_visit, "ready_detail_page", return_value=False), \
+             patch.object(detail_visit, "intervention_kind", return_value=None):
             pipeline._capture_one_pw(
                 self.db, crawler_cfg(), MagicMock(), round_id, offer, page,
                 emit=lambda event, **kw: events.append(event),

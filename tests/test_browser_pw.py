@@ -41,15 +41,15 @@ class CompatSurfaceTests(unittest.TestCase):
     （搬到别处的私有名在这里「只留工具需要的兼容别名」）与 `browser_pw.py` 里那句「别删」。
     """
 
-    # 诊断工具按旧名从 browser_pw 取这些
-    TOOL_ALIASES = ("_body_text", "_captcha_visible", "_is_punish_url", "_resolved",
-                    "intervention_kind")
+    # 诊断工具从 browser_pw 取的：四个旧私有名 + 一个 guard 的公开名
+    TOOL_NAMES = ("_body_text", "_captcha_visible", "_is_punish_url", "_resolved",
+                  "intervention_kind")
     # 没有消费者的那些：留着只会让人以为还有人在用
     DEAD_NAMES = ("DenyTracker", "RoundDenyExceeded", "ShopDenyExceeded",
                   "_is_deny_url", "_vtype")
 
-    def test_only_the_aliases_tools_use_survive(self):
-        for name in self.TOOL_ALIASES:
+    def test_only_the_names_tools_use_survive(self):
+        for name in self.TOOL_NAMES:
             self.assertTrue(hasattr(browser_pw, name), f"{name} 还有诊断工具在用")
         for name in self.DEAD_NAMES:
             self.assertFalse(hasattr(browser_pw, name), f"{name} 已经没有消费者")

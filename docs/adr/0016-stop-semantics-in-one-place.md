@@ -1,6 +1,6 @@
 # 0016. 停止语义只有一处定义：分类表 + 界面端的窗口状态机
 
-- 状态：已接受（构造与状态机的描述被后续更新：[ADR-0024](0024-stop-target-owns-the-whole-window.md) 起 `StopWatch` 只接受一个 `StopRuntime` adapter，`StopInFlight` 随之从「kind / target / round_id …」改成 `command` / `bound` / `deadline` / `acked` / `phase` / `code`；正文里的五回调 seam 与 `forget()` 已按它的删除清单删尽，那七条 `tests/test_stop_request.py::StopWatchTests` 随之迁进 `test_stop_target.py`。`Api` 的「晚绑定 lambda」接线仍在，`_kill_proc` 那条「暂停」窄例外按 ADR-0024 保留）
+- 状态：已接受（构造与状态机的描述被后续更新：[ADR-0024](0024-stop-target-owns-the-whole-window.md) 起 `StopWatch` 只接受一个 `StopRuntime` adapter，`StopInFlight` 随之从「kind / target / round_id …」改成 `command` / `bound` / `deadline` / `acked` / `phase` / `code`；正文里的五回调 seam 与 `forget()` 已按它的删除清单删尽，那七条 `tests/test_stop_request.py::StopWatchTests` 随之迁进 `test_stop_target.py`。`Api` 的「晚绑定 lambda」接线仍在，`_kill_proc` 那条「暂停」窄例外按 ADR-0024 保留。另：背景里点名的 `STOP_EXCEPTIONS` 已于 2026-09-19 删除——本条要收的就是它那族知识，收进 `_STOP_OUTCOMES` 表之后它自己零调用）
 - 日期：2026-09-13
 
 ## 背景
