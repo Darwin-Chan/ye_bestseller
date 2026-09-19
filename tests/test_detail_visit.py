@@ -1,3 +1,5 @@
+import dataclasses
+import inspect
 import threading
 import unittest
 from unittest.mock import MagicMock, patch
@@ -17,9 +19,9 @@ class DetailVisitTests(unittest.TestCase):
     def setUp(self):
         self.cfg = crawler_cfg()
 
-    def begin(self, page, *, reraise=()):
+    def begin(self, page):
         return detail_visit.begin_detail_visit(
-            lambda: detail_visit.OpenedDetail(page), self.cfg, reraise=reraise,
+            lambda: detail_visit.OpenedDetail(page), self.cfg,
         )
 
     def test_verification_html_is_not_observed_before_the_page_becomes_readable(self):
@@ -55,19 +57,6 @@ class DetailVisitTests(unittest.TestCase):
         self.assertEqual(result.observation.kind, detail.FailureKind.READ)
         self.assertIn("导航失败", result.observation.failure)
 
-    def test_registered_stop_exception_is_rethrown_as_the_same_object(self):
-        class Stop(Exception):
-            pass
-
-        error = Stop("暂停")
-        with self.assertRaises(Stop) as raised:
-            detail_visit.begin_detail_visit(
-                lambda: (_ for _ in ()).throw(error), self.cfg,
-                reraise=(Stop,),
-            )
-
-        self.assertIs(raised.exception, error)
-
     def test_all_registered_stop_outcomes_keep_identity_across_the_visit_stages(self):
         from bestseller_monitor import pipeline
 
@@ -84,7 +73,7 @@ class DetailVisitTests(unittest.TestCase):
                 with self.assertRaises(type(error)) as raised:
                     detail_visit.begin_detail_visit(
                         lambda error=error: (_ for _ in ()).throw(error),
-                        self.cfg, reraise=pipeline.STOP_WITH_OUTCOME,
+                        self.cfg,
                     )
                 self.assertIs(raised.exception, error)
 
@@ -96,7 +85,7 @@ class DetailVisitTests(unittest.TestCase):
                     with self.assertRaises(type(error)) as raised:
                         detail_visit.begin_detail_visit(
                             lambda page=page: detail_visit.OpenedDetail(page),
-                            self.cfg, reraise=pipeline.STOP_WITH_OUTCOME,
+                            self.cfg,
                         )
                     self.assertIs(raised.exception, error)
 
@@ -108,12 +97,28 @@ class DetailVisitTests(unittest.TestCase):
                  patch.object(detail_visit, "is_deny_url", return_value=False):
                 visit = detail_visit.begin_detail_visit(
                     lambda page=page: detail_visit.OpenedDetail(page), self.cfg,
-                    reraise=pipeline.STOP_WITH_OUTCOME,
                 )
                 with self.subTest(stage="content", error=type(error).__name__):
                     with self.assertRaises(type(error)) as raised:
                         visit.observe(PRODUCT_URL)
                     self.assertIs(raised.exception, error)
+
+    def test_the_visit_entry_admits_no_stop_exception_tuple(self):
+        """`reraise` 那条线是惰性的，已整个撤掉（2026-09-19 审查候选 03）。
+
+        它穿过的 7 句 `except <元组>: raise` 对任何输入都不改变结果：下面那句只捕
+        `BROWSER_IO_ERRORS` 的四个类，而登记在 `_STOP_OUTCOMES` 里的六个停止异常一个都不是
+        它的子类，本来就会原样上抛。删掉它顺带把 `click_listing` 为拿一个常量而写的延迟
+        import（与它引出的那条 import 环）一并去掉。
+
+        **这条非用签名不可**：多传一个位置实参会被静默绑到下一个参数上。
+        """
+        self.assertEqual(list(inspect.signature(detail_visit.begin_detail_visit).parameters),
+                         ["acquire", "cfg", "emit", "deny_tracker", "shop_key"])
+        self.assertNotIn("_reraise",
+                         {field.name for field in dataclasses.fields(detail_visit.ReadyDetailVisit)})
+        with self.assertRaises(TypeError):
+            detail_visit.begin_detail_visit(lambda: None, self.cfg, reraise=())
 
     def test_an_adapter_program_error_is_not_masqueraded_as_read_failure(self):
         with self.assertRaises(TypeError):

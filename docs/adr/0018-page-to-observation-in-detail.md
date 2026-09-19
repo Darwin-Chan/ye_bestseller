@@ -1,6 +1,6 @@
 # 0018. 「页面 → 观测」的翻译收进 `detail.observe_page()`
 
-- 状态：已接受（`STOP_EXCEPTIONS` 这个名 2026-09-19 已删——它当时零调用，那族异常现在只有 `pipeline.STOP_WITH_OUTCOME` 一个名字；本条「`reraise=` 显式传」与「被否掉的方向」两处提到的都是同一族，指后者）
+- 状态：已接受（`STOP_EXCEPTIONS` 这个名 2026-09-19 已删——它当时零调用，那族异常现在只有 `pipeline.STOP_WITH_OUTCOME` 一个名字；本条「`reraise=` 显式传」与「被否掉的方向」两处提到的都是同一族，指后者。**`reraise=` 这条线本身也于 2026-09-19 撤掉**：它穿过的 7 句 `except <元组>: raise` 对任何输入都不改变结果——`BROWSER_IO_ERRORS` 只是四个浏览器错误，那六个停止异常一个都不是它的子类，本来就会原样上抛；删掉它顺带带走了 `click_listing` 为拿那个常量而写的延迟 import（以及 `pipeline → browser_pw → click_listing → pipeline` 那个环）。`STOP_WITH_OUTCOME` 仍在 `pipeline` 里供它自己三处 `except` 用。见 [规格](../../.scratch/reraise-dead-line/spec.md)）
 - 日期：2026-09-13
 
 ## 背景

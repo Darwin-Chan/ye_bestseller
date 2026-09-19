@@ -162,8 +162,6 @@ class ShopWalk:
         ref = card.card_ref
         per_product_denies = 0
         retry_after_late_deny = False
-        # 延迟导入避免 click_listing 与 pipeline 的停止分类形成 import 环。
-        from .pipeline import STOP_WITH_OUTCOME
 
         for _ in range(3):
             closed_for_deny = False
@@ -173,7 +171,6 @@ class ShopWalk:
                 visit = detail_visit.begin_detail_visit(
                     card.acquire, self.cfg, emit=self.emit,
                     deny_tracker=self.deny_tracker, shop_key=self.shop.key,
-                    reraise=STOP_WITH_OUTCOME,
                 )
             except (ShopDenyExceeded, RoundDenyExceeded) as exc:
                 # 账目与判据都在 guard，这里只把它记成事件再上抛。

@@ -55,7 +55,6 @@ class ReadyDetailVisit:
     _emit: object = None
     _deny_tracker: DenyTracker | None = None
     _shop_key: str | None = None
-    _reraise: tuple[type[BaseException], ...] = ()
     _observed: bool = False
 
     def observe(self, product_url: str) -> detail.Observation | DeniedVisit:
@@ -68,8 +67,6 @@ class ReadyDetailVisit:
         while True:
             try:
                 denied = is_deny_url(self._page.url or "")
-            except self._reraise:
-                raise
             except BROWSER_IO_ERRORS as exc:
                 return detail.Observation.read_failed(exc)
             if denied:
@@ -81,8 +78,6 @@ class ReadyDetailVisit:
 
             try:
                 intervention = intervention_kind(self._page)
-            except self._reraise:
-                raise
             except BROWSER_IO_ERRORS as exc:
                 return detail.Observation.read_failed(exc)
             if intervention:
@@ -108,21 +103,17 @@ class ReadyDetailVisit:
                 self._page, self._cfg, emit=self._emit,
                 deny_tracker=self._deny_tracker, shop_key=self._shop_key,
             )
-        except self._reraise:
-            raise
         except BROWSER_IO_ERRORS as exc:
             return detail.Observation.read_failed(exc)
 
     def _read_html(self) -> str | detail.Observation:
         try:
             return self._page.content()
-        except self._reraise:
-            raise
         except BROWSER_IO_ERRORS as exc:
             return detail.Observation.read_failed(exc)
 
     def _raw_html(self) -> str:
-        return _read_raw_html(self._page, self._reraise)
+        return _read_raw_html(self._page)
 
 
 def begin_detail_visit(
@@ -132,13 +123,10 @@ def begin_detail_visit(
     emit=None,
     deny_tracker: DenyTracker | None = None,
     shop_key: str | None = None,
-    reraise: tuple[type[BaseException], ...] = (),
 ) -> NotOpenedVisit | ReadFailedVisit | DeniedVisit | ReadyDetailVisit:
     """取得详情页并完成初次 guard，交回一次性的后续读取 capability。"""
     try:
         opened = acquire()
-    except reraise:
-        raise
     except BROWSER_IO_ERRORS as exc:
         return ReadFailedVisit(exc, detail.Observation.read_failed(exc))
 
@@ -152,22 +140,18 @@ def begin_detail_visit(
             opened.page, cfg, emit=emit,
             deny_tracker=deny_tracker, shop_key=shop_key,
         )
-    except reraise:
-        raise
     except BROWSER_IO_ERRORS as exc:
         return ReadFailedVisit(exc, detail.Observation.read_failed(exc))
     if denied:
-        return DeniedVisit(_read_raw_html(opened.page, reraise))
+        return DeniedVisit(_read_raw_html(opened.page))
     return ReadyDetailVisit(
         _page=opened.page, _cfg=cfg, _emit=emit, _deny_tracker=deny_tracker,
-        _shop_key=shop_key, _reraise=reraise,
+        _shop_key=shop_key,
     )
 
 
-def _read_raw_html(page, reraise: tuple[type[BaseException], ...]) -> str:
+def _read_raw_html(page) -> str:
     try:
         return page.content()
-    except reraise:
-        raise
     except BROWSER_IO_ERRORS:
         return ""

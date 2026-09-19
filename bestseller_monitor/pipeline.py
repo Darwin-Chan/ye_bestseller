@@ -468,7 +468,7 @@ def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, 
             lambda: browser_pw.navigate_detail(
                 page, offer["product_url"], emit=emit_detail),
             cfg, emit=emit_detail, deny_tracker=deny_tracker,
-            shop_key=offer["shop_key"], reraise=STOP_WITH_OUTCOME,
+            shop_key=offer["shop_key"],
         )
         if isinstance(visit, detail_visit.NotOpenedVisit):
             raise RuntimeError("逐店补采的导航 adapter 不应返回 NotOpenedVisit")

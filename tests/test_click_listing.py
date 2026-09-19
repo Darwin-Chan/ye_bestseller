@@ -4,6 +4,7 @@
 所以这里用 helpers 里的 ScriptedListing 与 FakeCard 就能把「这家店有哪几页、
 每页有哪些卡、每张卡读到什么」摆出来，断言 offers、页数、事件与库里的行。
 """
+import ast
 import os
 import tempfile
 import unittest
@@ -498,6 +499,27 @@ class PlaywrightAdapterTests(ClickListingTestCase):
         self.assertEqual(observation.kind, detail.FailureKind.PARSE)
         self.assertIn("图片字段异常", observation.failure)
         self.assertTrue(observation.raw_html, "原始页要留着供校准")
+
+
+class ClickListingDependencyTests(unittest.TestCase):
+    """点这条路径不依赖编排层（2026-09-19 审查候选 03）。
+
+    `capture()` 曾经为了拿一个停止分类常量，在**函数体里**延迟 import `pipeline`——注释自己
+    写着「避免形成 import 环」。那个常量只喂给 `reraise=` 那个形参，形参撤了，这句 import
+    与它引出的环（`pipeline` → `browser_pw` → `click_listing` → `pipeline`）一起消失。
+
+    **这条只能查源码**：「没有这条依赖」是对导入图的断言，运行时观察不到——环今天靠写法绕开了。
+    """
+
+    def test_the_click_path_does_not_import_the_orchestrator(self):
+        tree = ast.parse(Path(click_listing.__file__).read_text(encoding="utf-8"))
+        imported = {
+            node.module.split(".")[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
+
+        self.assertNotIn("pipeline", imported, "点这条路径不该认识编排层")
 
 
 if __name__ == "__main__":
