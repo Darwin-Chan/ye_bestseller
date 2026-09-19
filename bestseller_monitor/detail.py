@@ -38,7 +38,7 @@ def parse_detail_html(html: str, product_url: str) -> dict:
         raise DetailParseFailed(f"详情页未解析到 SKU：{product_url}", html=html)
     if any(row.get("sku_stock") is None for row in rows):
         raise DetailParseFailed(f"详情页存在缺失库存的 SKU：{product_url}", html=html)
-    return {"product_name": product_name, "html": html, "rows": rows}
+    return {"product_name": product_name, "rows": rows}
 
 
 def save_raw_page(cfg: Config, round_id: int, offer_id: str, html: str) -> Path:

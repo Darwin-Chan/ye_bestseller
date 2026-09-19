@@ -107,10 +107,6 @@ _STOP_OUTCOMES: dict[type, StopOutcome] = {
     ),
 }
 
-# 「该不该继续」这一族异常：整轮级的停止，处理方式一律是原样上抛（ADR-0009）。
-STOP_EXCEPTIONS = tuple(exc for exc, outcome in _STOP_OUTCOMES.items()
-                        if outcome.scope is StopScope.ROUND)
-
 # 单店那条阶梯要认得的全部：跳过单店那种也在内。
 STOP_WITH_OUTCOME = tuple(_STOP_OUTCOMES)
 

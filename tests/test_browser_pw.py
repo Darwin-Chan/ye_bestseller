@@ -33,5 +33,27 @@ class NavigateDetailTests(unittest.TestCase):
         self.assertEqual([event for event, _ in events], ["detail_nav"])
 
 
+class CompatSurfaceTests(unittest.TestCase):
+    """`browser_pw` 对外转出的旧名：只留诊断工具真在用的那几个。
+
+    这条边界两侧一起钉——留哪些、删哪些都是决定，光钉「少了几个名字」说不清。
+    依据是 [ADR-0012](../docs/adr/0012-listing-module-and-single-page-walk.md) 那条模式
+    （搬到别处的私有名在这里「只留工具需要的兼容别名」）与 `browser_pw.py` 里那句「别删」。
+    """
+
+    # 诊断工具按旧名从 browser_pw 取这些
+    TOOL_ALIASES = ("_body_text", "_captcha_visible", "_is_punish_url", "_resolved",
+                    "intervention_kind")
+    # 没有消费者的那些：留着只会让人以为还有人在用
+    DEAD_NAMES = ("DenyTracker", "RoundDenyExceeded", "ShopDenyExceeded",
+                  "_is_deny_url", "_vtype")
+
+    def test_only_the_aliases_tools_use_survive(self):
+        for name in self.TOOL_ALIASES:
+            self.assertTrue(hasattr(browser_pw, name), f"{name} 还有诊断工具在用")
+        for name in self.DEAD_NAMES:
+            self.assertFalse(hasattr(browser_pw, name), f"{name} 已经没有消费者")
+
+
 if __name__ == "__main__":
     unittest.main()

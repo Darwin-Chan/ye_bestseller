@@ -6,8 +6,8 @@
 - 用普通进程拉起浏览器、经调试端口接管、按归属收尾（IS-43）；
 - 逐店补采的详情导航 adapter（交回 `detail_visit.OpenedDetail`，见 ADR-0023）。
 
-`DenyTracker` 与那两个 deny 异常现在长在 guard.py（deny 判定的家），这里替沿用旧 import 的
-调用方转出来；详情页「打开之后怎么安顿」也归 `guard.ready_detail_page()`（候选 04）。
+`DenyTracker`、两个 deny 异常与详情页「打开之后怎么安顿」都长在 guard.py（deny 判定的家，
+候选 04）；这里不为它们转出旧名。
 """
 from __future__ import annotations
 
@@ -26,13 +26,10 @@ from .click_listing import WAIT_POPUP_MS
 from .config import Config
 from .delay import Humanizer
 from .detail_visit import OpenedDetail
-from .guard import (DenyTracker, RoundDenyExceeded,  # noqa: F401  旧名兼容
-                    ShopDenyExceeded)
-# 诊断工具仍按旧私有名读取这两个 guard 谓词。
-from .guard import is_deny_url, is_punish_url
-# 诊断工具的兼容名：它们按旧名从 browser_pw 取这些，别删（见下面的 `_*` 别名与工具用例）。
+from .guard import is_punish_url
+# 诊断工具的兼容名：它们按旧名从 browser_pw 取这些，别删（见下面的 `_*` 别名）。
 from .guard import (  # noqa: F401
-    body_text, captcha_visible, intervention_kind, resolved, vtype,
+    body_text, captcha_visible, intervention_kind, resolved,
 )
 
 log = logging.getLogger(__name__)
@@ -68,13 +65,11 @@ _CLOSED_HANDLE_MEMORY = 16
 _closed_handles: deque[tuple[Any, Any, Callable[..., bool] | None]] = deque(
     maxlen=_CLOSED_HANDLE_MEMORY)
 
-# 兼容旧私有名/旧名（本文件内部与诊断工具仍引用）
+# 诊断工具按旧私有名取这几个（本文件自己不用它们）
 _body_text = body_text
 _captcha_visible = captcha_visible
 _is_punish_url = is_punish_url
-_is_deny_url = is_deny_url
 _resolved = resolved
-_vtype = vtype
 
 # 条件等待的上限兜底（秒）——优先“等条件满足”，超时才继续，替代固定 sleep。
 _WAIT_LAUNCH_SEC = 25.0    # 等浏览器调试端口可连接

@@ -129,7 +129,7 @@ class FakeCard:
         self.url = (f"https://detail.1688.com/offer/{offer_id}.html"
                     if offer_id else "https://detail.1688.com/")
         self.observation = observation or detail.Observation(
-            payload={"product_name": title or "商品", "html": "<html></html>",
+            payload={"product_name": title or "商品",
                      "rows": [{"sku_name": "默认(单规格)", "sku_stock": 3}]})
         self._denied = denied
         self._opened = opened

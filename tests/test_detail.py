@@ -53,9 +53,8 @@ class DetailTestCase(unittest.TestCase):
         return adapter
 
     def payload(self, offer_id="11", rows=(("默认(单规格)", 3),)):
-        html = "<html></html>"
         return detail.Observation(
-            payload={"product_name": "商品11", "html": html,
+            payload={"product_name": "商品11",
                      "rows": [{"sku_name": n, "sku_stock": s} for n, s in rows]},
         )
 
@@ -251,6 +250,18 @@ class ObserveHtmlTests(unittest.TestCase):
         self.assertEqual(observation.payload["rows"],
                          [{"sku_id": "red", "sku_name": "红色", "sku_price": 10.0,
                            "sku_stock": 3}])
+
+    def test_the_payload_carries_only_the_keys_that_are_read(self):
+        """成功的 payload 只有三个键：`product_name` / `rows` / `main_image_url`。
+
+        它曾经还带一个 `html`，而全仓没有一处读它、也不落库——失败路径要用的原始页走的是
+        `DetailParseFailed(html=…)` / `Observation.raw_html`，那是另一条活路。
+        """
+        with patch.object(detail, "extract_main_image", return_value="https://img/1.png"):
+            observation = detail.observe_html(self.HTML, self.URL)
+
+        self.assertEqual(sorted(observation.payload),
+                         ["main_image_url", "product_name", "rows"])
 
     def test_a_parse_failure_keeps_the_raw_page(self):
         observation = detail.observe_html("<html>没有 SKU</html>", self.URL)

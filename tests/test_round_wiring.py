@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_pw, pipeline, rounds
+from bestseller_monitor import browser_pw, guard, pipeline, rounds
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import CST, Database, connect, cst_date
 from bestseller_monitor.rounds import RoundRequest, ScopeMismatch, ShopScope
@@ -204,6 +204,6 @@ class PwCdpRoundAssemblyTests(unittest.TestCase):
         )]
         self.assertEqual(events, [(self.round_id, "click_deny", "A01")],
                          "埋点要落在本轮的事件表里，界面过程页读的就是它")
-        self.assertIsInstance(captured["deny_tracker"], browser_pw.DenyTracker)
+        self.assertIsInstance(captured["deny_tracker"], guard.DenyTracker)
         params = self.db.conn.execute("SELECT COUNT(*) c FROM run_params").fetchone()["c"]
         self.assertEqual(params, 1, "本轮生效的参数要留档")

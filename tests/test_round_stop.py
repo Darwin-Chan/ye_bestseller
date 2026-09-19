@@ -99,7 +99,6 @@ class RoundStopRuleTests(unittest.TestCase):
     @staticmethod
     def _payload():
         return {
-            "html": "<html></html>",
             "product_name": "详情标题",
             "rows": [{"sku_id": "red", "sku_name": "红色", "sku_price": 10, "sku_stock": 3}],
         }

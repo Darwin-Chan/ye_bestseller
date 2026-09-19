@@ -2,11 +2,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_pw
-from bestseller_monitor.browser_pw import (
-    DenyTracker, ShopDenyExceeded, RoundDenyExceeded,
-)
 from bestseller_monitor.config import Shop
+from bestseller_monitor.guard import DenyTracker, RoundDenyExceeded, ShopDenyExceeded
 
 
 class DenyTrackerTests(unittest.TestCase):

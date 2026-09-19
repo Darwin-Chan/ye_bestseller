@@ -20,7 +20,8 @@ from bestseller_monitor.db import (
 )
 from bestseller_monitor.delay import Humanizer
 from bestseller_monitor.detail import DetailParseFailed, parse_detail_html
-from bestseller_monitor.guard import InterventionTimeout, RoundPauseRequired
+from bestseller_monitor.guard import (InterventionTimeout, RoundDenyExceeded,
+                                      RoundPauseRequired, ShopDenyExceeded)
 from bestseller_monitor.listing import ListingLoadFailed
 from bestseller_monitor.rounds import RoundRequest, ShopScope
 from helpers import crawler_cfg, isolated_locks, new_round
@@ -364,7 +365,7 @@ class P1Tests(unittest.TestCase):
     def test_round_deny_exceeded_finishes_round_and_forces_new_round(self):
         db_path = Path(self.tmp.name) / "deny.db"
         cfg = crawler_cfg(db_file=db_path, driver="pw_cdp", ensure_dirs=MagicMock())
-        exc = browser_pw.RoundDenyExceeded("整轮 10 分钟内 deny≥10")
+        exc = RoundDenyExceeded("整轮 10 分钟内 deny≥10")
 
         with isolated_locks(), patch.object(pipeline, "_run_pwcdp_round", side_effect=exc):
             pipeline.run_round(cfg, [Shop("A01", "店铺A", "https://shop.example/")])
@@ -616,8 +617,8 @@ class P1Tests(unittest.TestCase):
     def test_no_orphan_snapshots_whichever_way_the_listing_ends(self):
         """四种离开榜单阶段的方式，都不留下「有快照、无榜单行」的商品。"""
         cases = [
-            ("店铺 deny 跳店", browser_pw.ShopDenyExceeded("店铺 A01 10 分钟内 deny≥7"), False),
-            ("整轮 deny 中止", browser_pw.RoundDenyExceeded("整轮 10 分钟内 deny≥10"), True),
+            ("店铺 deny 跳店", ShopDenyExceeded("店铺 A01 10 分钟内 deny≥7"), False),
+            ("整轮 deny 中止", RoundDenyExceeded("整轮 10 分钟内 deny≥10"), True),
             ("人工验证超时", InterventionTimeout("人工验证超时"), True),
             ("详情预算耗尽", pipeline.DetailBudgetExhausted(pipeline.DETAIL_BUDGET_NOTE), True),
         ]
@@ -738,10 +739,10 @@ class P1Tests(unittest.TestCase):
             db, rid = kwargs["db"], kwargs["round_id"]
             db.remember_shop_offer(rid, "A01", shop.url, shop.name,
                                    (1, "11", url11, "商品11", ""))
-            raise browser_pw.RoundDenyExceeded("整轮 10 分钟内 deny≥10")
+            raise RoundDenyExceeded("整轮 10 分钟内 deny≥10")
 
         with patch.object(click_listing, "crawl_store_by_click", side_effect=fake_crawl):
-            with self.assertRaises(browser_pw.RoundDenyExceeded):
+            with self.assertRaises(RoundDenyExceeded):
                 pipeline._run_listing_pw(self.db, crawler_cfg(), round_id, shops, MagicMock())
 
         rows = self.conn.execute(
@@ -771,7 +772,7 @@ class P1Tests(unittest.TestCase):
             db, rid = kwargs["db"], kwargs["round_id"]
             db.remember_shop_offer(rid, shop.key, shop.url, shop.name,
                                    (1, "11", url11, "商品11", ""))
-            raise browser_pw.ShopDenyExceeded("店铺 A01 10 分钟内 deny≥7")
+            raise ShopDenyExceeded("店铺 A01 10 分钟内 deny≥7")
 
         with patch.object(click_listing, "crawl_store_by_click", side_effect=fake_crawl):
             pipeline._run_listing_pw(self.db, crawler_cfg(), round_id, [shop], MagicMock())
