@@ -1,0 +1,699 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>架构审查 · bestseller · 2026-09-19</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+    </script>
+    <style>
+      .seam { stroke-dasharray: 5 5; }
+      .dead { text-decoration: line-through; opacity: .45; }
+      .hatch {
+        background-image: repeating-linear-gradient(45deg, #fee2e2 0 6px, #fef2f2 6px 12px);
+      }
+      .stack { background-image: repeating-linear-gradient(45deg, #f5f5f4 0 6px, #fafaf9 6px 12px); }
+      .mono { font-variant-ligatures: none; }
+    </style>
+  </head>
+  <body class="bg-stone-50 text-slate-900 font-sans antialiased">
+    <main class="max-w-5xl mx-auto px-6 py-14 space-y-14">
+
+      <!-- ─────────────── header ─────────────── -->
+      <header class="space-y-6">
+        <div class="flex items-baseline justify-between flex-wrap gap-3">
+          <p class="text-xs uppercase tracking-[0.2em] text-slate-500">Bestseller / architecture field notes</p>
+          <p class="font-mono text-xs text-slate-500">HEAD 17c4640 · 19 Sep 2026</p>
+        </div>
+        <h1 class="font-serif text-4xl leading-tight text-slate-900">
+          验证判据与收尾重试，<br class="hidden sm:block" />
+          各有一条无处可去的路
+        </h1>
+        <p class="text-sm text-slate-600 max-w-3xl leading-relaxed">
+          本轮只列 <span class="text-emerald-700 font-medium">Strong</span>：三条都有一条**声明过、却没有任何落点**的规则，
+          或一条**构造得出、跑起来不返回**的路。扫描范围：<span class="mono">bestseller_monitor/</span> 全 21 个 module
+          + <span class="mono">gui.py</span> + <span class="mono">tools/</span> + 测试面，五路并行；
+          三条都另派了一路**对抗性复核**去证伪，其中两条复核者独立实跑复现——
+          复核对候选 2 的一处口径提出了更正，已改进正文。
+          最近 80 次提交的热点：<span class="mono">pipeline</span> 23 次、<span class="mono">browser_pw</span> 21 次、
+          <span class="mono">stop_request</span> 19 次、<span class="mono">gui</span> 19 次、<span class="mono">db</span> 16 次。
+          已对照 <span class="mono">CONTEXT.md</span> 与 ADR-0001–0029；15 轮已做的深化、挂起的候选 05–07、
+          以及 09-19 刚删的那批均未重报。
+        </p>
+        <div class="flex flex-wrap gap-x-6 gap-y-2 text-xs text-slate-500 pt-2 border-t border-stone-200">
+          <span class="flex items-center gap-2"><span class="inline-block w-4 h-3 border border-slate-400 bg-white"></span>module</span>
+          <span class="flex items-center gap-2"><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="#64748b" stroke-width="1.5" class="seam"/></svg>seam</span>
+          <span class="flex items-center gap-2"><svg width="26" height="8"><line x1="0" y1="4" x2="20" y2="4" stroke="#dc2626" stroke-width="1.5"/><path d="M20 1 L26 4 L20 7 Z" fill="#dc2626"/></svg>判据被绕开 / 走不到</span>
+          <span class="flex items-center gap-2"><span class="inline-block w-4 h-3 bg-slate-900"></span>深 module</span>
+        </div>
+      </header>
+
+      <section id="candidates" class="space-y-14">
+
+        <!-- ═══════════════ 01 ═══════════════ -->
+        <article id="c01" class="space-y-6 border-t-2 border-slate-900 pt-8">
+          <div class="flex items-start justify-between gap-4 flex-wrap">
+            <div>
+              <p class="font-mono text-xs text-slate-400 mb-1">01</p>
+              <h2 class="font-serif text-2xl text-slate-900">验证判据读两份证据，详情路径的等待没有出口</h2>
+            </div>
+            <div class="flex gap-2 items-center">
+              <span class="text-xs px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 font-medium">Strong</span>
+              <span class="text-xs px-2.5 py-1 rounded-full bg-slate-100 text-slate-600">in-process</span>
+            </div>
+          </div>
+
+          <p class="font-mono text-xs text-slate-500 leading-relaxed">
+            bestseller_monitor/guard.py:131 · :156 · :196 · bestseller_monitor/detail_visit.py:82 · bestseller_monitor/listing.py:240
+          </p>
+
+          <!-- before / after -->
+          <div class="grid md:grid-cols-2 gap-4">
+            <!-- BEFORE -->
+            <div class="rounded-lg border border-stone-200 bg-white p-5">
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-4">Before · 一份证据，两套判据</p>
+
+              <div class="space-y-2 mb-4">
+                <p class="text-xs uppercase tracking-wider text-slate-400">页面上的证据</p>
+                <div class="flex gap-1.5">
+                  <span class="flex-1 text-center text-xs py-1.5 border border-slate-300 bg-stone-50 rounded">地址</span>
+                  <span class="flex-1 text-center text-xs py-1.5 border border-slate-300 bg-stone-50 rounded">正文</span>
+                  <span class="flex-1 text-center text-xs py-1.5 border border-slate-300 bg-stone-50 rounded">验证容器</span>
+                </div>
+              </div>
+
+              <svg viewBox="0 0 320 96" class="w-full">
+                <line x1="53" y1="6" x2="53" y2="34" stroke="#64748b" stroke-width="1.2" class="seam"/>
+                <line x1="160" y1="6" x2="160" y2="34" stroke="#64748b" stroke-width="1.2" class="seam"/>
+                <line x1="267" y1="6" x2="267" y2="34" stroke="#64748b" stroke-width="1.2" class="seam"/>
+                <line x1="53" y1="34" x2="53" y2="52" stroke="#0f172a" stroke-width="1.2"/>
+                <line x1="160" y1="34" x2="160" y2="52" stroke="#dc2626" stroke-width="1.5"/>
+                <line x1="267" y1="34" x2="267" y2="52" stroke="#0f172a" stroke-width="1.2"/>
+                <line x1="53" y1="52" x2="267" y2="52" stroke="#0f172a" stroke-width="1.2"/>
+                <line x1="160" y1="52" x2="160" y2="60" stroke="#dc2626" stroke-width="1.5"/>
+                <path d="M157 60 L160 68 L163 60 Z" fill="#dc2626"/>
+                <text x="160" y="82" text-anchor="middle" font-size="9" fill="#dc2626" font-family="ui-monospace, monospace">正文只喂给检测，解决判定看不见它</text>
+              </svg>
+
+              <div class="grid grid-cols-2 gap-2 mt-3">
+                <div class="border border-slate-400 rounded p-2.5">
+                  <p class="font-mono text-[11px] text-slate-700 mb-1">intervention_kind</p>
+                  <p class="text-[11px] text-slate-500">地址 · 正文 · 容器<br />→ “要不要人介入”</p>
+                </div>
+                <div class="border border-slate-400 rounded p-2.5">
+                  <p class="font-mono text-[11px] text-slate-700 mb-1">resolved</p>
+                  <p class="text-[11px] text-slate-500">地址 · 容器<br />→ “介入好了没”</p>
+                </div>
+              </div>
+
+              <div class="mt-3 hatch border border-red-200 rounded p-2.5">
+                <p class="text-[11px] text-red-800 leading-snug">
+                  正文命中的那一幕：<span class="mono">kind</span> 说「登录墙」，<span class="mono">resolved</span> 说「已解决」。
+                  同一个页面，同一次判定。
+                </p>
+              </div>
+            </div>
+
+            <!-- AFTER -->
+            <div class="rounded-lg border border-stone-200 bg-white p-5">
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-4">After · 一份判据，两种读数</p>
+
+              <div class="space-y-2 mb-4">
+                <p class="text-xs uppercase tracking-wider text-slate-400">页面上的证据</p>
+                <div class="flex gap-1.5">
+                  <span class="flex-1 text-center text-xs py-1.5 border border-slate-300 bg-stone-50 rounded">地址</span>
+                  <span class="flex-1 text-center text-xs py-1.5 border border-slate-300 bg-stone-50 rounded">正文</span>
+                  <span class="flex-1 text-center text-xs py-1.5 border border-slate-300 bg-stone-50 rounded">验证容器</span>
+                </div>
+              </div>
+
+              <div class="flex justify-center">
+                <svg viewBox="0 0 320 40" class="w-full">
+                  <line x1="160" y1="2" x2="160" y2="14" stroke="#0f172a" stroke-width="1.2"/>
+                  <path d="M157 14 L160 22 L163 14 Z" fill="#0f172a"/>
+                </svg>
+              </div>
+
+              <div class="deep rounded p-4 text-white">
+                <p class="font-mono text-xs text-slate-300 mb-1">页面验证态</p>
+                <p class="text-[11px] text-slate-400 leading-relaxed">
+                  一处读完三样证据，给出一个状态；<br />
+                  「要介入」与「已解决」都是它的读数，<br />
+                  因此不可能互相矛盾。
+                </p>
+              </div>
+
+              <div class="grid grid-cols-2 gap-2 mt-3 opacity-70">
+                <div class="border border-slate-300 rounded p-2.5 bg-stone-50">
+                  <p class="font-mono text-[11px] text-slate-400 mb-1">needs_intervention</p>
+                  <p class="text-[11px] text-slate-400">读数一</p>
+                </div>
+                <div class="border border-slate-300 rounded p-2.5 bg-stone-50">
+                  <p class="font-mono text-[11px] text-slate-400 mb-1">is_resolved</p>
+                  <p class="text-[11px] text-slate-400">读数二</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- the exit-less loop -->
+          <div class="rounded-lg border border-red-200 bg-white p-5">
+            <p class="text-xs uppercase tracking-wider text-red-700 mb-3">跑起来是什么样：<span class="mono">ReadyDetailVisit.observe()</span> 的这条分支没有出口</p>
+            <div class="grid md:grid-cols-[auto_1fr] gap-5 items-start">
+              <ol class="space-y-1.5 text-xs text-slate-600">
+                <li><span class="mono text-slate-400">82</span> <span class="mono">intervention = intervention_kind(page)</span> → 真</li>
+                <li><span class="mono text-slate-400">89</span> <span class="mono">guarded = self._guard()</span> → <span class="mono">False</span>（不是 deny）</li>
+                <li><span class="mono text-slate-400">95</span> <span class="mono">deadline = time.time() + 10</span> ← 重置</li>
+                <li><span class="mono text-slate-400">96</span> <span class="mono">continue</span></li>
+                <li class="text-red-700">回到 82：判据仍然为真，因为没人改变过页面</li>
+              </ol>
+              <div class="hatch border border-red-200 rounded p-4">
+                <p class="text-[11px] text-red-900 leading-relaxed">
+                  <span class="mono text-slate-400">:101</span> 的 <span class="mono">deadline</span> 兜底
+                  <strong>只在不含介入的那条路上被读</strong>，而这条路每次进来就把它推到 10 秒以后。
+                  整个循环里唯一能改变状态的动作是 <span class="mono">wait_for_resolution</span> 的确认窗口，
+                  而它第一句就问 <span class="mono">resolved()</span>——此刻恒为真，于是当场返回，什么都不做。
+                </p>
+                <p class="text-[11px] text-red-900 leading-relaxed mt-2">
+                  这条路上<strong>没有 <span class="mono">sleep</span></strong>：实跑测得
+                  <span class="mono">43 万次/秒</span>空转，每一圈都要问一次浏览器。
+                  出口只有三个，全都不靠这个判据：页面证据自己变了（用户手工过验证）、
+                  页面死掉、或用户在界面上按暂停（<span class="mono">stop_request.check()</span> 抛 <span class="mono">StopRequested</span>）。
+                </p>
+              </div>
+            </div>
+            <div class="mt-4 pt-3 border-t border-red-100 grid sm:grid-cols-3 gap-4 text-xs">
+              <div>
+                <p class="text-slate-400 mb-1">构造输入（逐行可推）</p>
+                <p class="mono text-slate-600 leading-relaxed">url = .../offer/11.html<br />正文含「请登录」<br />无可见验证容器</p>
+              </div>
+              <div>
+                <p class="text-slate-400 mb-1">两个判据的应答</p>
+                <p class="mono text-slate-600 leading-relaxed">intervention_kind → '登录墙'<br />resolved → True</p>
+              </div>
+              <div>
+                <p class="text-slate-400 mb-1">实跑（真仓 HEAD）</p>
+                <p class="mono text-red-700 leading-relaxed">observe() 40 秒未返回<br />两个方向都独立复现</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="rounded-lg border border-stone-300 bg-white p-5">
+            <p class="text-xs uppercase tracking-wider text-slate-500 mb-3">这一幕在生产里出现过——而且发生了别的事</p>
+            <div class="grid md:grid-cols-[1fr_1fr] gap-5 text-xs">
+              <div class="space-y-2 text-slate-700 leading-relaxed">
+                <p>
+                  <span class="mono text-slate-500">F:/AI/bestseller_runtime/data/raw_pages/</span> 的存档原页里，
+                  <strong>206 份中有 7 份</strong>（<span class="mono">round_{10,21}</span>）正是这一幕：
+                  正文含「亲，请登录」、长度约 912（过 <span class="mono">:151</span> 那道 &lt;3000 的门）、
+                  DOM 里 0 处 captcha 选择器命中。这 7 个 offer 在 <span class="mono">event_log</span> 里都有
+                  <span class="mono">popup_open</span>——而该事件只在弹窗网址匹配
+                  <span class="mono">/(?:offer|item)/(\d+)\.html</span> 时才发，说明地址确实是正常详情 URL。
+                </p>
+                <p>
+                  也就是说：<strong>判据认的那一幕是真的，仓库里有案</strong>。721 条 verification 事件全是
+                  <span class="mono">slider</span>，一条 <span class="mono">login</span> 都没有——一个已经命中的判据
+                  从没留下过它命中过的痕迹。
+                </p>
+              </div>
+              <div class="space-y-2 text-slate-700 leading-relaxed">
+                <p>
+                  <strong>但那个循环本身还没在生产里跑过。</strong>
+                  <span class="mono">observe()</span> 的循环是 2026-09-14（<span class="mono">2d2cba1</span>）才引进的，
+                  而生产数据止于 09-13。旧代码只调一次 <span class="mono">wait_for_resolution</span>：
+                  确认窗口里 <span class="mono">resolved()</span> 为真即静默丢弃、继续往下走——
+                  正好对上那 7 条的结局：<span class="mono">detail_parse sku_count=0</span> +
+                  <span class="mono">detail_fail</span>，没有 <span class="mono">click_deny</span>、没有 verification 事件。
+                </p>
+                <p class="text-slate-500">
+                  所以本轮的主张分两层：<strong>判据分叉与无出口是静态可证的</strong>（并已实跑复现）；
+                  <strong>它在生产循环里挂住还没发生过</strong>——循环比数据年轻四天。
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-2 gap-6 text-sm">
+            <div>
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-2">Problem</p>
+              <p class="text-slate-700 leading-relaxed">
+                <span class="mono text-xs">guard</span> 对<strong>同一份页面证据</strong>给了两套判据：检测用三样，解决判定只用两样。
+                正文这一路因此成了「检测认、解除不认」的信号——判真的那一刻就被同一次判定自己否掉。
+                详情路径的那个循环拿不到出口；榜单路径（<span class="mono text-xs">listing.py:240</span>）走的是同一对调用，
+                症状相反：<span class="mono text-xs">wait_for_resolution</span> 空转一场，登录墙既不等人工、也不发
+                <span class="mono text-xs">verification_appear</span>，直接落成店铺失败。
+              </p>
+            </div>
+            <div>
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-2">Solution</p>
+              <p class="text-slate-700 leading-relaxed">
+                <span class="mono text-xs">guard</span> 持有它认的全部证据，读一次给出一个页面验证态；
+                「要不要人介入」与「解决没有」都是这个状态的读数，不再各读一份子集。
+                形状是<strong>两套判据收成一份</strong>，不是给循环加超时——加了超时，正文命中的介入仍然
+                既等不到、也解不开。<br class="mb-1" />
+                收成一份之后确认窗口才回到它声明的职责：它存在是为了过滤
+                <strong>没有 DOM 落点</strong>的瞬时信号（ADR-0029 原话是 tmd/x5sec 上报那一类）。
+                正文是 DOM 落点，它本来就该挺过窗口、响铃、等人——而详情循环也才第一次拿到
+                <span class="mono text-xs">continue</span> 之后那个「页面真的变了」的状态。
+              </p>
+            </div>
+          </div>
+
+          <ul class="grid sm:grid-cols-2 gap-x-8 gap-y-1.5 text-sm text-slate-700 list-disc pl-5">
+            <li><strong>locality</strong>：「什么算要人工、什么算好了」只在一处</li>
+            <li><strong>leverage</strong>：两条调用路（详情 / 榜单）一次兑现</li>
+            <li>详情循环第一次有终止保证</li>
+            <li>测试 seam 现成：<span class="mono text-xs">test_guard.py</span> 的假页面</li>
+          </ul>
+
+          <div class="bg-amber-50 border border-amber-200 rounded p-4 text-xs text-amber-900 leading-relaxed space-y-2">
+            <p>
+              <strong>ADR-0029 已经看见过这个洞，只是把它记在了另一个信号名下。</strong>
+              那条 ADR「被否掉的方向」一节的原话：
+            </p>
+            <p class="pl-3 border-l-2 border-amber-300 text-amber-800">
+              「<span class="mono">intervention_kind</span> 为真 → <span class="mono">_guard()</span> →
+              <span class="mono">ready_detail_page</span> 说页面可用（不是 deny）→ 重置可读窗口 →
+              <span class="mono">continue</span> → 再判还是真…… → <strong>不终止</strong>。
+              所以还得同时造一个「这条信号什么时候算解除」的判据。」
+            </p>
+            <p>
+              它把「再判还是真」归因于<span class="mono">_punished</span> 在 capability 里冻结、而
+              <span class="mono">resolved()</span> 又看不见它——这是对的，于是它选择删掉 <span class="mono">punished</span>。
+              但<strong>洞不在那条信号里，在「检测与解除读两份证据」这件事里</strong>：
+              正文命中的介入走的是同一条 <span class="mono">continue</span>，
+              <span class="mono">resolved()</span> 同样看不见正文。删掉 <span class="mono">punished</span>
+              关掉了一个入口，另一个还开着——而 ADR-0029 自己写下的「缺的那条判据」，正是这条要补的东西。
+            </p>
+            <p class="text-[11px] text-amber-800/80">
+              <strong>口径收一句</strong>：这不是 0029 留下的缺口——它的「实现边界」明说不改三样证据、
+              也不碰 <span class="mono">LOGIN_MARKERS</span> 的长度门，所以它没走到这一步。
+              准确说法是：<strong>0029 之后的缺口，机制与它当时描述的那条同源</strong>。
+              本轮不是翻案，是把那条 ADR 指出的机制在另一个入口上兑现。
+            </p>
+          </div>
+
+          <div class="bg-stone-100 border border-stone-200 rounded p-3 text-xs text-slate-600 leading-relaxed">
+            <strong>还没核实的</strong>：那 7 份存档里的正文长度是按去标签估的（真 <span class="mono">inner_text</span> 会更长），
+            captcha 是照存档 DOM 判的——两处都有约三倍余量，但不是真浏览器里量的。
+            另外，真实浏览器上「正文命中而页面又自己恢复」的频率没有样本，所以不宣称它必然挂住。
+          </div>
+        </article>
+
+        <!-- ═══════════════ 02 ═══════════════ -->
+        <article id="c02" class="space-y-6 border-t-2 border-slate-900 pt-8">
+          <div class="flex items-start justify-between gap-4 flex-wrap">
+            <div>
+              <p class="font-mono text-xs text-slate-400 mb-1">02</p>
+              <h2 class="font-serif text-2xl text-slate-900">收尾失败声明的重试，没有落点</h2>
+            </div>
+            <div class="flex gap-2 items-center">
+              <span class="text-xs px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 font-medium">Strong</span>
+              <span class="text-xs px-2.5 py-1 rounded-full bg-slate-100 text-slate-600">in-process</span>
+            </div>
+          </div>
+
+          <p class="font-mono text-xs text-slate-500 leading-relaxed">
+            bestseller_monitor/stop_request.py:517 · :520 · :524 · :435 · :444 · :541 · :366 · bestseller_monitor/db.py:790 · docs/ui_live.html:282
+          </p>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <!-- BEFORE -->
+            <div class="rounded-lg border border-stone-200 bg-white p-5">
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-4">Before · 一个自称可重试的相，只走一次</p>
+
+              <svg viewBox="0 0 330 176" class="w-full">
+                <!-- tick 1 -->
+                <text x="0" y="12" font-size="9" fill="#94a3b8" font-family="ui-monospace, monospace">tick 1 → _force()</text>
+                <rect x="8" y="20" width="86" height="22" rx="3" fill="#f5f5f4" stroke="#cbd5e1"/>
+                <text x="51" y="35" text-anchor="middle" font-size="9" fill="#475569" font-family="ui-monospace, monospace">terminate</text>
+                <path d="M94 31 L112 31" stroke="#0f172a" stroke-width="1.2"/>
+                <path d="M112 28 L120 31 L112 34 Z" fill="#0f172a"/>
+                <rect x="120" y="20" width="96" height="22" rx="3" fill="#f5f5f4" stroke="#cbd5e1"/>
+                <text x="168" y="35" text-anchor="middle" font-size="8.5" fill="#475569" font-family="ui-monospace, monospace">prove process dead</text>
+                <path d="M216 31 L234 31" stroke="#0f172a" stroke-width="1.2"/>
+                <path d="M234 28 L242 31 L234 34 Z" fill="#0f172a"/>
+                <rect x="242" y="20" width="82" height="22" rx="3" fill="#fee2e2" stroke="#dc2626"/>
+                <text x="283" y="35" text-anchor="middle" font-size="9" fill="#b91c1c" font-family="ui-monospace, monospace">close ✗</text>
+
+                <text x="242" y="56" font-size="8.5" fill="#b91c1c" font-family="ui-monospace, monospace">→ CLEANUP_PENDING</text>
+
+                <!-- divider -->
+                <line x1="0" y1="72" x2="330" y2="72" stroke="#e7e5e4" stroke-width="1"/>
+
+                <!-- tick 2 -->
+                <text x="0" y="90" font-size="9" fill="#94a3b8" font-family="ui-monospace, monospace">tick 2 → observe()</text>
+                <rect x="8" y="98" width="120" height="22" rx="3" fill="#f5f5f4" stroke="#cbd5e1"/>
+                <text x="68" y="113" text-anchor="middle" font-size="8.5" fill="#475569" font-family="ui-monospace, monospace">process_alive = False</text>
+                <path d="M128 109 L146 109" stroke="#0f172a" stroke-width="1.2"/>
+                <path d="M146 106 L154 109 L146 112 Z" fill="#0f172a"/>
+                <rect x="154" y="98" width="60" height="22" rx="3" fill="#f5f5f4" stroke="#cbd5e1"/>
+                <text x="184" y="113" text-anchor="middle" font-size="9" fill="#475569" font-family="ui-monospace, monospace">GONE</text>
+
+                <line x1="184" y1="120" x2="184" y2="138" stroke="#dc2626" stroke-width="1.6"/>
+                <path d="M181 138 L184 146 L187 138 Z" fill="#dc2626"/>
+
+                <rect x="62" y="146" width="248" height="24" rx="3" fill="#fee2e2" stroke="#dc2626"/>
+                <text x="186" y="162" text-anchor="middle" font-size="8.5" fill="#b91c1c" font-family="ui-monospace, monospace">_cleanup_target + _finish — 窗口结束</text>
+              </svg>
+
+              <div class="hatch border border-red-200 rounded p-2.5 mt-3">
+                <p class="text-[11px] text-red-800 leading-snug">
+                  <span class="mono">:435</span> 的 <span class="mono">GONE</span> 短路
+                  <strong>先于</strong> <span class="mono">:444</span> 的 deadline 判定执行。
+                  走到 <span class="mono">close_browser</span> 的前提正是「进程已证死」——
+                  于是下一次 tick 必然落到这条短路上。
+                </p>
+              </div>
+            </div>
+
+            <!-- AFTER -->
+            <div class="rounded-lg border border-stone-200 bg-white p-5">
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-4">After · 声明的重试有主体</p>
+
+              <svg viewBox="0 0 330 176" class="w-full">
+                <text x="0" y="12" font-size="9" fill="#94a3b8" font-family="ui-monospace, monospace">tick 1 → _force()</text>
+                <rect x="8" y="20" width="86" height="22" rx="3" fill="#f5f5f4" stroke="#cbd5e1"/>
+                <text x="51" y="35" text-anchor="middle" font-size="9" fill="#475569" font-family="ui-monospace, monospace">terminate</text>
+                <path d="M94 31 L112 31" stroke="#0f172a" stroke-width="1.2"/>
+                <path d="M112 28 L120 31 L112 34 Z" fill="#0f172a"/>
+                <rect x="120" y="20" width="96" height="22" rx="3" fill="#f5f5f4" stroke="#cbd5e1"/>
+                <text x="168" y="35" text-anchor="middle" font-size="8.5" fill="#475569" font-family="ui-monospace, monospace">prove process dead</text>
+                <path d="M216 31 L234 31" stroke="#0f172a" stroke-width="1.2"/>
+                <path d="M234 28 L242 31 L234 34 Z" fill="#0f172a"/>
+                <rect x="242" y="20" width="82" height="22" rx="3" fill="#fee2e2" stroke="#dc2626"/>
+                <text x="283" y="35" text-anchor="middle" font-size="9" fill="#b91c1c" font-family="ui-monospace, monospace">close ✗</text>
+
+                <line x1="0" y1="72" x2="330" y2="72" stroke="#e7e5e4" stroke-width="1"/>
+
+                <text x="0" y="90" font-size="9" fill="#94a3b8" font-family="ui-monospace, monospace">tick 2 → 仍持精确 binding，重试</text>
+                <rect x="8" y="98" width="112" height="22" rx="3" fill="#f5f5f4" stroke="#cbd5e1"/>
+                <text x="64" y="113" text-anchor="middle" font-size="8.5" fill="#475569" font-family="ui-monospace, monospace">binding 仍精确?</text>
+                <path d="M120 109 L140 109" stroke="#0f172a" stroke-width="1.2"/>
+                <path d="M140 106 L148 109 L140 112 Z" fill="#0f172a"/>
+                <rect x="148" y="98" width="82" height="22" rx="3" fill="#fee2e2" stroke="#dc2626"/>
+                <text x="189" y="113" text-anchor="middle" font-size="9" fill="#b91c1c" font-family="ui-monospace, monospace">close 重试</text>
+                <path d="M230 109 L246 109" stroke="#dc2626" stroke-width="1.2"/>
+                <path d="M246 106 L254 109 L246 112 Z" fill="#dc2626"/>
+                <rect x="254" y="98" width="70" height="22" rx="3" fill="#0f172a"/>
+                <text x="289" y="113" text-anchor="middle" font-size="8.5" fill="#e2e8f0" font-family="ui-monospace, monospace">才能清绑定</text>
+
+                <text x="8" y="142" font-size="8.5" fill="#64748b" font-family="ui-monospace, monospace">一旦 B 接手 → 结束旧重试，留警告</text>
+                <line x1="8" y1="150" x2="330" y2="150" stroke="#e7e5e4" stroke-width="1"/>
+                <text x="8" y="168" font-size="8.5" fill="#64748b" font-family="ui-monospace, monospace">GONE 不再是终点：它只说明进程没了，不代表浏览器关了</text>
+              </svg>
+
+              <div class="bg-emerald-50 border border-emerald-200 rounded p-2.5 mt-3">
+                <p class="text-[11px] text-emerald-900 leading-snug">
+                  <span class="mono">cleanup_pending</span> 从「只展示」变成「真重试」：
+                  interface（相 + retryable）与实现第一次一致，
+                  而那条本来还能定位浏览器的精确绑定，活到重试成功之后。
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-2 gap-6 text-sm">
+            <div>
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-2">Problem</p>
+              <p class="text-slate-700 leading-relaxed">
+                <span class="mono text-xs">_force</span> 里唯一产出 <span class="mono text-xs">CLEANUP_PENDING</span> 的浏览器分支，
+                前提是进程已被证明退出；下一次 tick 因此必然判 <span class="mono text-xs">GONE</span> 并立刻结束窗口。
+                <strong>关浏览器每窗口最多试一次</strong>，而 <span class="mono text-xs">_cleanup_target</span>
+                反手把 <span class="mono text-xs">browser_pid</span> / <span class="mono text-xs">browser_os_started</span>
+                抹成 <span class="mono text-xs">CLOSED</span>——那正是唯一还能定位这个浏览器的绑定。
+                一次瞬时失败留下的孤儿浏览器继续占着 profile 与调试端口（IS-43 的原始症状），
+                而界面在同一时刻说「正在重试收尾」。
+              </p>
+            </div>
+            <div>
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-2">Solution</p>
+              <p class="text-slate-700 leading-relaxed">
+                给这个相补回它自己声明的那个主体：关系仍是 <span class="mono text-xs">EXACT</span>（或 A 的 browser binding
+                仍精确、且无 B 接手）时，<span class="mono text-xs">tick</span> 对 <span class="mono text-xs">CLEANUP_PENDING</span>
+                重试 <span class="mono text-xs">close_browser</span>；<span class="mono text-xs">REPLACED</span> 一到就结束旧重试并留警告。
+                <strong>不是</strong>把 <span class="mono text-xs">GONE</span> 当成重试的终点。
+              </p>
+            </div>
+          </div>
+
+          <ul class="grid sm:grid-cols-2 gap-x-8 gap-y-1.5 text-sm text-slate-700 list-disc pl-5">
+            <li><strong>locality</strong>：「失败后怎么再试一次」从「无处」收回 <span class="mono text-xs">StopWatch</span> 一处</li>
+            <li><strong>depth</strong>：相的 interface 与实现一致</li>
+            <li>精确绑定活到重试成功，孤儿浏览器有主</li>
+            <li>测试 seam 现成：<span class="mono text-xs">RecordingStopRuntime.fail_close</span></li>
+          </ul>
+
+          <div class="bg-stone-100 border border-stone-200 rounded p-3 text-xs text-slate-600 leading-relaxed">
+            <strong>承诺写下来了，但没有一条测试碰过它。</strong>
+            <span class="mono">.scratch/stop-target/spec.md</span> 的 :37 / :142 / :248 三处把它写成既有规则
+            （验收第 11 条还专门描述「browser cleanup pending 时出现 B 会停止旧重试」——而旧重试根本不存在）；
+            <span class="mono">docs/ui_live.html:282</span> 写着「正在重试收尾」。
+            全仓 <span class="mono">grep CLEANUP tests/</span> 只命中一条断言：适配器拒关时如实上报，
+            没有一条驱动过第二次尝试，也没有一条碰过替身上的 <span class="mono">fail_close</span>。
+            <br class="mb-1" />
+            <span class="text-slate-500">
+              <strong>一处口径要收</strong>：<span class="mono">stop_request.py:366-368</span> 确实把
+              <span class="mono">CLEANUP_PENDING</span> 列为 <span class="mono">retryable</span>，
+              但这个字段<strong>生产里无人读</strong>——<span class="mono">gui.py</span> 那几处
+              <span class="mono">"retryable": True</span> 是它自己硬编码的，界面只按
+              <span class="mono">stopping == "cleanup_pending"</span> 出文案。
+              所以承诺的来源是规格与 UI 文案这两处，不是这个字段。</span>
+          </div>
+
+          <div class="bg-emerald-50 border border-emerald-200 rounded p-3 text-xs text-emerald-900 leading-relaxed">
+            <strong>实跑（替身推时钟）</strong>：<span class="mono">RecordingStopRuntime(fail_close=True)</span> →
+            tick 1 得 <span class="mono">cleanup_pending / browser_close_failed</span>，
+            tick 2 直接回 <span class="mono">IDLE</span>；
+            actions 记的是 <span class="mono">[bind, terminate, close_browser, release]</span>——
+            <span class="mono">close_browser</span> 只出现 <strong>1 次</strong>，
+            而 <span class="mono">crawler_process</span> 行已被删掉（浏览器事实先被写成 <span class="mono">CLOSED</span>）。
+            另一条进 <span class="mono">CLEANUP_PENDING</span> 的路（<span class="mono">:529-537</span>，DB 出错那条）
+            <strong>确实会重试</strong>——所以问题只出在关浏览器这一条上。
+            常态配置 <span class="mono">config.toml:52 start_browser = true</span>，所以这里真有浏览器可留。
+          </div>
+        </article>
+
+        <!-- ═══════════════ 03 ═══════════════ -->
+        <article id="c03" class="space-y-6 border-t-2 border-slate-900 pt-8">
+          <div class="flex items-start justify-between gap-4 flex-wrap">
+            <div>
+              <p class="font-mono text-xs text-slate-400 mb-1">03</p>
+              <h2 class="font-serif text-2xl text-slate-900">一条惰性的参数线，和一个为它而写的测试</h2>
+            </div>
+            <div class="flex gap-2 items-center">
+              <span class="text-xs px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 font-medium">Strong</span>
+              <span class="text-xs px-2.5 py-1 rounded-full bg-slate-100 text-slate-600">mock</span>
+            </div>
+          </div>
+
+          <p class="font-mono text-xs text-slate-500 leading-relaxed">
+            bestseller_monitor/detail_visit.py:58 · :71 · :84 · :111 · :119 · :135 · :140 · :155 · :170 · bestseller_monitor/click_listing.py:165 · bestseller_monitor/pipeline.py:471 · tests/test_detail_visit.py:57
+          </p>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <!-- BEFORE -->
+            <div class="rounded-lg border border-stone-200 bg-white p-5">
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-4">Before · 七句挡在一道永远轮不到它的门前</p>
+
+              <div class="stack border border-stone-300 rounded p-4 space-y-2">
+                <p class="mono text-[11px] text-slate-500">try: …</p>
+                <p class="mono text-[11px] text-slate-400 pl-3 dead">except self._reraise: raise</p>
+                <p class="mono text-[11px] text-slate-600 pl-3">except BROWSER_IO_ERRORS as exc: …</p>
+              </div>
+
+              <p class="text-[11px] text-slate-500 mt-3 leading-relaxed">
+                这句话在同一个 module 里出现 <strong>7 次</strong>。它想拦住的是「停止异常别被浏览器
+                错误处理器吞掉」——可下面那句只捕
+                <span class="mono">PlaywrightError / TimeoutError / OSError / ConnectionError</span>，
+                而六个停止异常没有一个落在里面。
+              </p>
+
+              <div class="mt-3 grid grid-cols-2 gap-2 text-[11px]">
+                <div class="border border-slate-300 rounded p-2 bg-stone-50">
+                  <p class="text-slate-400 mb-1">六个停止异常的父类</p>
+                  <p class="mono text-slate-600">RuntimeError ×5<br />Exception ×1</p>
+                </div>
+                <div class="border border-red-200 rounded p-2 hatch">
+                  <p class="text-red-700 mb-1">与 BROWSER_IO_ERRORS 相交</p>
+                  <p class="mono text-red-800">0 个</p>
+                </div>
+              </div>
+
+              <div class="mt-3 rounded border border-red-200 bg-white p-3">
+                <p class="text-[11px] text-red-900 leading-snug">
+                  <strong>实跑</strong>：保留形参、只删掉那 7 句 → 全套
+                  <span class="mono">463 项全过</span>。对抗性复核者另用
+                  <span class="mono">exec</span> 到内存里独立复现了一次，同样 463 项 0 失败。
+                  删前删后的 traceback 结构一致（帧序、异常类型、文案相同，只有行号随删除位移）。
+                </p>
+              </div>
+            </div>
+
+            <!-- AFTER -->
+            <div class="rounded-lg border border-stone-200 bg-white p-5">
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-4">After · 参数线撤掉，环也自己散了</p>
+
+              <div class="stack border border-stone-300 rounded p-4 space-y-2">
+                <p class="mono text-[11px] text-slate-500">try: …</p>
+                <p class="mono text-[11px] text-slate-600 pl-3">except BROWSER_IO_ERRORS as exc: …</p>
+              </div>
+
+              <p class="text-[11px] text-slate-500 mt-3 leading-relaxed">
+                停止异常本来就不在这句的捕获范围里，它们一直原样上抛——
+                <span class="mono">test_detail_visit.py:70-114</span> 用真的六个异常证明的就是这件事，
+                而那条用例<strong>根本没有传</strong> <span class="mono">reraise</span>。
+              </p>
+
+              <div class="deep rounded p-4 mt-3 text-white">
+                <p class="text-[11px] text-slate-300 leading-relaxed">
+                  参数、冻结字段、辅助函数的形参一起消失；<br />
+                  <span class="mono">click_listing</span> 不必再为了拿一个常量<br />
+                  在函数体里延迟 import <span class="mono">pipeline</span>。
+                </p>
+              </div>
+
+              <div class="mt-3">
+                <pre class="mermaid">
+flowchart LR
+  P[pipeline] --> B[browser_pw]
+  B --> C[click_listing]
+  C -.->|延迟 import| P
+  classDef cyc stroke:#dc2626,stroke-width:2px;
+  class C,P cyc
+                </pre>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-2 gap-6 text-sm">
+            <div>
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-2">Problem</p>
+              <p class="text-slate-700 leading-relaxed">
+                <span class="mono text-xs">reraise</span> 从 <span class="mono text-xs">begin_detail_visit</span> 的形参，
+                经 <span class="mono text-xs">ReadyDetailVisit</span> 的冻结字段，再进 <span class="mono text-xs">_read_raw_html</span>，
+                在 7 处写成同一句没有作用的 <span class="mono text-xs">except</span>。
+                <strong>它的取值对任何输入都不改变结果</strong>——和候选 02 那次撤掉的
+                <span class="mono text-xs">punished</span> 形参是同一种形状，只是更宽：那一个穿五个 module，
+                这一个还额外把一个 import 环引了出来。
+              </p>
+            </div>
+            <div>
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-2">Solution</p>
+              <p class="text-slate-700 leading-relaxed">
+                整条线撤掉：形参、冻结字段、<span class="mono text-xs">_read_raw_html</span> 的形参、7 句
+                <span class="mono text-xs">except</span>，以及 <span class="mono text-xs">click_listing</span> 那句延迟 import
+                与 <span class="mono text-xs">pipeline</span> 侧多出来的那个实参。
+                停止异常仍然原样上抛——它本来就是这样。
+              </p>
+            </div>
+          </div>
+
+          <ul class="grid sm:grid-cols-2 gap-x-8 gap-y-1.5 text-sm text-slate-700 list-disc pl-5">
+            <li><strong>interface 变窄</strong>：两处形参 + 一个冻结字段消失</li>
+            <li>import 环消失：延迟 import 那句消失</li>
+            <li>测试不再为保住机制而造异常类</li>
+            <li><strong>deletion test 通过</strong>：删掉它，复杂度不挪给任何调用方</li>
+          </ul>
+
+          <div class="bg-red-50 border border-red-200 rounded p-3 text-xs text-red-900 leading-relaxed">
+            <strong>它的作用域比那 7 句还大，而且它只在一件事上有效。</strong>
+            复核时把一个<strong>同时落在两个集合里</strong>的
+            <span class="mono">class WeirdIO(PlaywrightError)</span> 传进 <span class="mono">reraise</span>：
+            删那 7 句<strong>之前</strong>它原样上抛，<strong>之后</strong>变成
+            <span class="mono">ReadFailedVisit</span>。也就是说这 7 句只在两集相交时才有用——
+            而今天不相交，所以它们是惰性的。
+            对照：<span class="mono">pipeline.py:319</span> 是同款
+            <span class="mono">except STOP_WITH_OUTCOME: raise</span>，但后面跟着
+            <span class="mono">except Exception</span> 兜底，<strong>那句是活的</strong>。
+            惰性只源于 <span class="mono">detail_visit</span> 这一侧的兜底集比停止集<strong>窄</strong>。
+            删掉 <span class="mono">reraise</span> 等于放弃「万一将来
+            <span class="mono">BROWSER_IO_ERRORS</span> 放宽、或停止分类扩到
+            <span class="mono">OSError</span>」的那份保险——这是取舍，不是纯删。
+            <span class="mono">.scratch/detail-visit-observation/spec.md:88-91</span> 写过原样穿透的承诺，
+            但没有任何测试钉住这个不变量。
+          </div>
+
+          <div class="bg-amber-50 border border-amber-200 rounded p-3 text-xs text-amber-900 leading-relaxed">
+            <strong>它是被一条测试养着的</strong>：<span class="mono">test_detail_visit.py:57-68</span>
+            用自造的 <span class="mono">class Stop(Exception)</span> 传进 <span class="mono">reraise=(Stop,)</span>
+            来验证「原样抛出」。而删掉那 7 句之后这条用例<strong>照样通过</strong>——
+            因为 <span class="mono">Stop</span> 本就不是浏览器错误，它压根没被拦过。
+            它锁住的只是「形参还在」，锁不住行为；真正证明这件事的是隔壁那条
+            （真的六个停止异常、不传 <span class="mono">reraise</span>）。删机制就该连它一起删。
+            <br class="mb-1" />
+            <span class="text-amber-800/80">
+              顺带作废一条旧论据：<span class="mono">.scratch/dead-weight/spec.md:20</span> 曾把
+              「两处 <span class="mono">reraise</span>」当作 <span class="mono">STOP_WITH_OUTCOME</span>
+              有活消费者的依据——本条举出的正是那两处。
+            </span>
+          </div>
+        </article>
+      </section>
+
+      <!-- ─────────────── top recommendation ─────────────── -->
+      <section id="top-recommendation" class="border-t-2 border-slate-900 pt-8">
+        <div class="rounded-xl border-2 border-slate-900 bg-white p-7 space-y-4">
+          <p class="text-xs uppercase tracking-[0.2em] text-slate-500">Top recommendation</p>
+          <h2 class="font-serif text-2xl text-slate-900">先做 01：验证判据读两份证据</h2>
+          <p class="text-slate-700 leading-relaxed">
+            它是本轮唯一一条<strong>跑起来能看见的</strong>：构造输入满足判据自己的定义，
+            在真仓 HEAD 上 <span class="mono text-xs">observe()</span> 40 秒不返回、每秒空转 43 万圈，
+            而那条分支没有超时、没有别的出口（能出来的三个口子全都不靠这个判据）。
+            它也是唯一一条<strong>两个调用方两种症状</strong>的（详情路径挂住、榜单路径静默跳过），
+            所以「把两套判据收成一份」这一处改动同时修掉两处；
+            而且判据认的那一幕<strong>仓库里有案</strong>——206 份存档原页里有 7 份正长这样。
+            修法不需要新写判据：三样证据已经在 <span class="mono text-xs">guard</span> 里了，
+            要收的只是<strong>读数</strong>。
+          </p>
+          <a href="#c01" class="inline-block text-sm text-emerald-700 underline underline-offset-4">↑ 回到 01 的卡片</a>
+        </div>
+      </section>
+
+      <!-- ─────────────── filtered out ─────────────── -->
+      <section class="border-t border-stone-200 pt-6 space-y-3">
+        <p class="text-xs uppercase tracking-wider text-slate-400">本轮扫描过、但没到 Strong 的（按你的要求不列入正文）</p>
+        <div class="text-xs text-slate-600 leading-relaxed space-y-2">
+          <p>
+            <strong>够不着的是同一类</strong>：两份实现今天取值完全相同、只是未来会漂开。
+            卡片 DOM 词汇散在三处（常量 + 两份同算法 JS，16 层上限都一样，只有截断 200/120 不同）；
+            <span class="mono">shop_rounds.offer_count</span> 两个写入方算式不同（商品数 vs 行数），
+            而它唯一的读方恰恰是为了发现不一致而存在——但两者同事务写入，按构造不可能不一致；
+            creation proof 在 <span class="mono">browser_proc</span> 里算两遍。
+          </p>
+          <p>
+            <strong>被 09-18 判过、本轮复核仍未上调</strong>：界面会话账（认领轮次 / 段计时 / 暂停旗）散在五个可变属性上，
+            其中 <span class="mono">start_ts</span> 全仓零读方；<span class="mono">Config</span> 五个字段零读方
+            （其中 <span class="mono">base_url</span>、<span class="mono">data_dir</span>、<span class="mono">screenshot_dir</span>
+            写进了出厂 <span class="mono">config.toml</span>，改了没有反应）；<span class="mono">browser_enabled</span>
+            是关闭与否的第二个判据。
+          </p>
+          <p>
+            <strong>本轮新看到、但只有 locality 收益</strong>：<span class="mono">clear_crawler_process</span> /
+            <span class="mono">clear_stop_request</span> 的「不给目标」分支零穿行；
+            <span class="mono">_drop_shops_active</span> 是 <span class="mono">_drop_column("shops","active")</span> 的逐字重写；
+            <span class="mono">views.py</span> 里 8 处裸 SQL 绕开数据层，与 <span class="mono">Database</span>
+            上已有方法逐字重复；<span class="mono">idx_event_log_verification</span> 没有任何查询能用上；
+            <span class="mono">reset_.../start_ts</span> 一类只写不读的字段；<span class="mono">login_chrome.py</span>
+            自己重写了一份拉起浏览器（自带硬编码 Edge 路径），而 CONTEXT.md 说那条定义只在
+            <span class="mono">browser_pw</span> 一处。
+          </p>
+          <p>
+            <strong>已裁定，不重报</strong>：ADR-0027 挂起的候选 05–07；IS-53 / IS-54；
+            09-19 刚删的那批（<span class="mono">rounds.phase</span>、<span class="mono">STOP_EXCEPTIONS</span>、
+            payload 的 <span class="mono">"html"</span> 键、<span class="mono">browser_pw</span> 的旧名 re-export、
+            <span class="mono">navigate_detail</span> 的 <span class="mono">cfg</span>）。
+          </p>
+        </div>
+      </section>
+
+      <footer class="border-t border-stone-200 pt-6 flex justify-between items-baseline flex-wrap gap-3">
+        <p class="font-mono text-xs text-slate-500">bestseller · 架构审查 · 2026-09-19 · HEAD 17c4640</p>
+        <p class="text-xs text-slate-500">本轮未改动任何代码</p>
+      </footer>
+    </main>
+  </body>
+</html>
