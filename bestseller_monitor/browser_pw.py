@@ -329,7 +329,7 @@ def close_session(pw, br, *, publish_browser=None) -> None:
     _release_if_clean(resources)
 
 
-def navigate_detail(page, product_url: str, cfg: Config, emit=None) -> OpenedDetail:
+def navigate_detail(page, product_url: str, emit=None) -> OpenedDetail:
     """导航到详情页并交回页面句柄；等待、guard 与读取由 detail_visit 负责。"""
     if emit:
         m = re.search(r"/(?:offer|item)/(\d+)\.html", product_url)

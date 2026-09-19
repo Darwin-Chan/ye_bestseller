@@ -20,7 +20,6 @@ CREATE TABLE IF NOT EXISTS rounds (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT NOT NULL,
     finished_at TEXT,
-    phase TEXT NOT NULL DEFAULT 'listing',
     note TEXT,
     detail_budget_limit INTEGER,
     run_date TEXT,
@@ -703,10 +702,6 @@ class RoundTally:
 class Database:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
-
-    def set_phase(self, round_id: int, phase: str) -> None:
-        self.conn.execute("UPDATE rounds SET phase=? WHERE id=?", (phase, round_id))
-        self.conn.commit()
 
     def completed_listing_keys(self, round_id: int) -> set[str]:
         """本轮榜单已完成的店铺编号：三条驱动路径靠它决定续跑时跳过谁。

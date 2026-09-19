@@ -49,7 +49,7 @@ class P1Tests(unittest.TestCase):
         events: list[tuple[str, dict]] = []
 
         opened = browser_pw.navigate_detail(
-            page, "https://detail.1688.com/offer/111.html", crawler_cfg(),
+            page, "https://detail.1688.com/offer/111.html",
             emit=lambda event, **kw: events.append((event, kw)))
 
         self.assertEqual([event for event, _ in events], ["detail_nav"],
@@ -375,11 +375,10 @@ class P1Tests(unittest.TestCase):
         conn = connect(db_path)
         try:
             row = conn.execute(
-                "SELECT id, terminal_reason, phase, finished_at, note FROM rounds "
+                "SELECT id, terminal_reason, finished_at, note FROM rounds "
                 "ORDER BY id DESC LIMIT 1"
             ).fetchone()
             self.assertEqual(row["terminal_reason"], "DENY_EXCEEDED")
-            self.assertEqual(row["phase"], "done")
             self.assertIsNotNone(row["finished_at"])
             self.assertIn("不可续跑", row["note"])
             self.assertEqual(new_round(Database(conn)), row["id"] + 1)
@@ -396,11 +395,10 @@ class P1Tests(unittest.TestCase):
         conn = connect(db_path)
         try:
             row = conn.execute(
-                "SELECT id, terminal_reason, phase, finished_at, note FROM rounds "
+                "SELECT id, terminal_reason, finished_at, note FROM rounds "
                 "ORDER BY id DESC LIMIT 1"
             ).fetchone()
             self.assertEqual(row["terminal_reason"], "DAY_BOUNDARY")
-            self.assertEqual(row["phase"], "done")
             self.assertIsNotNone(row["finished_at"])
             self.assertEqual(row["note"], DAY_BOUNDARY_NOTE)
             self.assertEqual(new_round(Database(conn)), row["id"] + 1)
@@ -496,11 +494,10 @@ class P1Tests(unittest.TestCase):
         conn = connect(db_path)
         try:
             row = conn.execute(
-                "SELECT terminal_reason, phase, finished_at, note FROM rounds "
+                "SELECT terminal_reason, finished_at, note FROM rounds "
                 "ORDER BY id DESC LIMIT 1"
             ).fetchone()
             self.assertEqual(row["terminal_reason"], "DETAIL_BUDGET_EXHAUSTED")
-            self.assertEqual(row["phase"], "done")
             self.assertIsNotNone(row["finished_at"])
             self.assertEqual(row["note"], pipeline.DETAIL_BUDGET_NOTE)
         finally:

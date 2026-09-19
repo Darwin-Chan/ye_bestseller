@@ -400,7 +400,6 @@ def _record_shop_stop(db: Database, round_id: int, shop: Shop, exc: BaseExceptio
 
 def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop], page,
                     emit=None, deny_tracker=None) -> None:
-    db.set_phase(round_id, "listing")
     done = db.completed_listing_keys(round_id)
     human = Humanizer(cfg)
     for shop in shops:
@@ -467,7 +466,7 @@ def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, 
         """补采的详情访问：adapter 只导航，访问 module 负责当前页面的读取。"""
         visit = detail_visit.begin_detail_visit(
             lambda: browser_pw.navigate_detail(
-                page, offer["product_url"], cfg, emit=emit_detail),
+                page, offer["product_url"], emit=emit_detail),
             cfg, emit=emit_detail, deny_tracker=deny_tracker,
             shop_key=offer["shop_key"], reraise=STOP_WITH_OUTCOME,
         )

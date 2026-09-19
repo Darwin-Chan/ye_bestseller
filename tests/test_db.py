@@ -29,6 +29,15 @@ class DbTests(unittest.TestCase):
         self.conn.close()
         self.tmp.cleanup()
 
+    def test_a_fresh_db_has_no_round_phase_column(self):
+        """建出来的库没有 `rounds.phase`：从没人读它，而 `terminal_reason` 严格更强。
+
+        老库留着那一列，代码既不读也不写——两种库都跑得动（见规格的兼容核对）。
+        """
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(rounds)")}
+
+        self.assertNotIn("phase", columns)
+
     def _add_shop(self, round_id):
         self.db.add_shop(round_id, "A01", "https://a.example/", "店铺A")
 

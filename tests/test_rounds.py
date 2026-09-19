@@ -215,7 +215,6 @@ class RoundModuleTests(unittest.TestCase):
 
         stale = self._row(first.round.id)
         self.assertEqual(stale["terminal_reason"], "DAY_BOUNDARY")
-        self.assertEqual(stale["phase"], "done")
         self.assertIsNotNone(stale["finished_at"])
         self.assertEqual(self._round_count(), 2)
 
@@ -246,7 +245,6 @@ class RoundModuleTests(unittest.TestCase):
         self.assertFalse(done.in_progress)
         row = self._row(opened.round.id)
         self.assertEqual(row["terminal_reason"], "COMPLETED")
-        self.assertEqual(row["phase"], "done")
         self.assertEqual(row["note"], "本轮正常完成")
         self.assertIsNotNone(row["finished_at"])
 

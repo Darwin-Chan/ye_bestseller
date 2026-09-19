@@ -143,11 +143,10 @@ def finish(db: Database, round: Round, reason: TerminalReason, *,
         raise RoundAlreadyFinished(
             f"轮次 #{round.id} 已经是 {current}，不能改写成 {reason.value}"
         )
-    phase = "abandoned" if reason is TerminalReason.ABANDONED else "done"
     finished_at = _utc_iso(now)
     db.conn.execute(
-        "UPDATE rounds SET terminal_reason=?, phase=?, finished_at=?, note=? WHERE id=?",
-        (reason.value, phase, finished_at, note, round.id),
+        "UPDATE rounds SET terminal_reason=?, finished_at=?, note=? WHERE id=?",
+        (reason.value, finished_at, note, round.id),
     )
     db.conn.commit()
     return Round(id=round.id, run_date=round.run_date,
@@ -284,7 +283,7 @@ def _load_round(db: Database, row) -> Round:
 
 def _create_round(db: Database, request: RoundRequest, started_at: str) -> Round:
     cur = db.conn.execute(
-        "INSERT INTO rounds(started_at, phase, run_date) VALUES (?, 'listing', ?)",
+        "INSERT INTO rounds(started_at, run_date) VALUES (?, ?)",
         (started_at, request.run_date),
     )
     round_id = int(cur.lastrowid)

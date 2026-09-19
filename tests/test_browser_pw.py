@@ -1,4 +1,5 @@
 """详情页 parser 判据与导航 adapter。"""
+import inspect
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -18,12 +19,21 @@ class ReadableTests(unittest.TestCase):
 
 
 class NavigateDetailTests(unittest.TestCase):
+    def test_navigation_takes_no_config(self):
+        """导航只做「到那一页」：等待、判据与读取都不吃配置（候选 02 同款死形参）。
+
+        这条非用签名不可——少掉 `cfg` 之后，多传一个位置实参会被**静默**绑到 `emit` 上，
+        不报错、事件却发不出去。
+        """
+        self.assertEqual(list(inspect.signature(browser_pw.navigate_detail).parameters),
+                         ["page", "product_url", "emit"])
+
     def test_navigation_returns_the_opened_detail_without_reading_html(self):
         page = MagicMock()
         events = []
 
         opened = browser_pw.navigate_detail(
-            page, "https://detail.1688.com/offer/11.html", MagicMock(),
+            page, "https://detail.1688.com/offer/11.html",
             emit=lambda event, **kw: events.append((event, kw)),
         )
 
