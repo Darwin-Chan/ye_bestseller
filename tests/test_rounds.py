@@ -144,6 +144,24 @@ class RoundMigrationTests(unittest.TestCase):
         self.assertEqual(after["run_date"], "2026-09-08")
         self.assertEqual(after["terminal_reason"], "COMPLETED")
 
+    def test_connecting_drops_the_legacy_phase_column(self):
+        """已有库连上来就把 `rounds.phase` 删掉：留着它，旧行是 `done`、新行永远停在默认
+        `'listing'`——那正是「只停写、留列」被否掉的理由（见 `.scratch/round-phase-and-nav-cfg/`）。
+
+        新库建表就没有这一列；这条管的是**已有库**，真库也在内。
+        """
+        self._legacy_db([("2026-09-08T15:13:11+00:00", "完成", None)])
+
+        conn = connect(self.path)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(rounds)")}
+            count = conn.execute("SELECT COUNT(*) FROM rounds").fetchone()[0]
+        finally:
+            conn.close()
+
+        self.assertNotIn("phase", columns)
+        self.assertEqual(count, 1, "删列不该动行")
+
     def test_legacy_status_mapping_stays_within_terminal_reason(self):
         known = {reason.value for reason in TerminalReason}
         self.assertIn(LEGACY_UNKNOWN_REASON, known)

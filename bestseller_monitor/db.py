@@ -553,6 +553,7 @@ _MIGRATIONS: tuple[_Migration, ...] = (
     _add_column("rounds", "run_date", "TEXT"),
     _add_column("rounds", "terminal_reason", "TEXT"),
     _Migration("rounds_legacy_status_columns", _rounds_legacy_status_columns),
+    _drop_column("rounds", "phase"),
     _add_column("detail_opportunities", "offer_id", "TEXT"),
     _drop_column("skus", "main_image_url"),
     _drop_column("snapshots", "stock_delta"),
