@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 
 from . import sound
 from . import stop_request
@@ -128,31 +129,40 @@ def captcha_visible(page) -> bool:
         return False
 
 
-def _page_evidence(page) -> tuple[str, str, bool]:
-    """读一次页面上的三样证据：地址、正文、可见验证容器。
+@dataclass(frozen=True)
+class _PageEvidence:
+    """页面上的三样证据：地址、正文、可见验证容器。"""
+
+    url: str
+    body: str
+    captcha: bool
+
+
+def _page_evidence(page) -> _PageEvidence:
+    """读一次页面上的三样证据。
 
     判据与它的解除判定都从这一份读起（ADR-0030）。各读各的就会给出互相矛盾的答案，
     而「要人工介入」与「介入已经解除」本来就是同一件事的两种读法。
     """
-    return (page.url or ""), body_text(page), captcha_visible(page)
+    return _PageEvidence(page.url or "", body_text(page), captcha_visible(page))
 
 
-def _intervention_of(url: str, body: str, captcha: bool) -> str | None:
+def _intervention_of(evidence: _PageEvidence) -> str | None:
     """三样证据 → 需不需要人工介入。纯函数，判据只有这一份。"""
-    lowered = (url or "").lower()
-    if is_login_url(lowered):
+    url = evidence.url.lower()
+    if is_login_url(url):
         return "登录墙"
-    if is_punish_url(lowered):
+    if is_punish_url(url):
         return "滑块"
     for m in SLIDER_MARKERS:
-        if m in body:
+        if m in evidence.body:
             return "滑块"
-    if captcha:
+    if evidence.captcha:
         # 可见验证容器：只有当页面确实带验证文案，或不是“点我反馈”这种纯反爬拦截页时，才算滑块
-        if any(m in body for m in SLIDER_MARKERS) or ("点我反馈" not in body):
+        if any(m in evidence.body for m in SLIDER_MARKERS) or ("点我反馈" not in evidence.body):
             return "滑块"
     for m in LOGIN_MARKERS:
-        if m in body and len(body) < 3000:
+        if m in evidence.body and len(evidence.body) < 3000:
             return "登录墙"
     return None
 
@@ -165,7 +175,7 @@ def intervention_kind(page) -> str | None:
 
     判据只有这一份：`resolved` 是它的另一种读法，不再自己认一遍证据（ADR-0030）。
     """
-    return _intervention_of(*_page_evidence(page))
+    return _intervention_of(_page_evidence(page))
 
 
 def resolved(page) -> bool:
@@ -176,14 +186,16 @@ def resolved(page) -> bool:
     循环的每一步都在等一个永远不为假的判据，而确认窗口拿这个「已解决」把自己判成误报
     （ADR-0030）。
 
-    读不到证据时回 `False`——与 `intervention_kind` 上抛是有意的不同：那是判据，异常交给
-    调用方；这是轮询谓词，「读不到」只说明还不能停。
+    读**不出**证据时回 `False`（还没解除、继续等）——与 `intervention_kind` 上抛是有意的
+    不同：那是判据，异常交给调用方；这是轮询谓词，「读不到」只说明还不能停。注意这说的是
+    **读证据出错**：`body_text` / `captcha_visible` 自己把异常吞成空证据，那种情况判据给
+    `None`、这里便是 `True`，与「页面确实没有信号」不可分。这层区分先于本条存在（改前的
+    `resolved` 也这样），记在 ADR-0030 的挂账里。
     """
     try:
-        evidence = _page_evidence(page)
+        return _intervention_of(_page_evidence(page)) is None
     except Exception:
         return False
-    return _intervention_of(*evidence) is None
 
 
 def ready_detail_page(page, cfg: Config, *, emit=None,

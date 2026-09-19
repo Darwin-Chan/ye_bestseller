@@ -234,8 +234,7 @@ class DetailVisitTests(unittest.TestCase):
 
         page.become_wall("请登录后查看商品详情")   # 弹窗打开之后才出现的登录墙
         with patch.object(guard, "time", GuardClock(step=10.0)), \
-             patch.object(guard.sound, "play_alarm"), \
-             patch.object(detail_visit.time, "sleep"):
+             patch.object(guard.sound, "play_alarm"):
             with self.assertRaises(guard.InterventionTimeout):
                 self.assert_returns_within(lambda: visit.observe(PRODUCT_URL), 3.0,
                                            release=page.solve)

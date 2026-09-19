@@ -181,6 +181,30 @@ class InterventionResolutionTests(unittest.TestCase):
         self.assertIsNone(guard.intervention_kind(page))
         self.assertTrue(guard.resolved(page))
 
+    def test_the_judgment_is_a_pure_function_of_the_evidence(self):
+        """判定只吃三样证据、不碰页面对象——这是「读一次、判一次」的兑现处。
+
+        判据能脱离页面被直接检验，才说得上「两种读法出自同一份证据」。下面三行里第三行
+        还把一条**当前行为**钉住了：淘宝那种「亲，访问被拒绝」拦截页（正文里挂着导航的
+        「亲，请登录」与「点我反馈」）今天判成「登录墙」，于是会响铃等人。容器那一支里那句
+        「点我反馈」的豁免管不着它 —— 豁免要真管用，得是一条在判定开头就早退的规则，
+        而那需要真登录墙样本做对照（见 ADR-0030 挂账）。改这条规则时，这里会红。
+        """
+        from bestseller_monitor.guard import _PageEvidence, _intervention_of
+
+        product = "https://detail.1688.com/offer/11.html"
+        # 那一页的真实正文取自 round_10/693147504013.html 的渲染文本
+        block_page = ("淘宝网 - 淘！我喜欢 亲，请登录 免费注册 消息 手机逛淘宝 淘宝网首页 "
+                      "我的淘宝 已买到的宝贝 我的足迹 购物车 0 收藏夹 亲，访问被拒绝 "
+                      "可能因为：请检查是否使用了代理软件或 VPN 哦~ 了解更多原因 寻找答案 "
+                      "点我反馈 阿里巴巴集团|淘宝网|天猫|1688")
+
+        self.assertIsNone(_intervention_of(_PageEvidence(product, "正常的商品详情页", False)))
+        self.assertEqual(_intervention_of(_PageEvidence(product, "请登录后查看商品详情", False)),
+                         "登录墙")
+        self.assertEqual(_intervention_of(_PageEvidence(product, block_page, False)),
+                         "登录墙")
+
     def test_a_body_only_signal_survives_the_confirmation_window(self):
         """落在 DOM 上的信号不该被确认窗口当成「没有落点的瞬时报错」丢掉。
 
