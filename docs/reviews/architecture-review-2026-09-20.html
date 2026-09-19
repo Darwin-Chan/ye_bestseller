@@ -1,0 +1,609 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>架构审查 · bestseller · 2026-09-20</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+    </script>
+    <style>
+      .seam { stroke-dasharray: 5 5; }
+      .dead { text-decoration: line-through; opacity: .45; }
+      .hatch { background-image: repeating-linear-gradient(45deg, #fee2e2 0 6px, #fef2f2 6px 12px); }
+      .stack { background-image: repeating-linear-gradient(45deg, #f5f5f4 0 6px, #fafaf9 6px 12px); }
+      .mono { font-variant-ligatures: none; }
+      .wire { width: 1px; background: #cbd5e1; }
+      .wire-red { width: 1px; background: #dc2626; }
+    </style>
+  </head>
+  <body class="bg-stone-50 text-slate-900 font-sans antialiased">
+    <main class="max-w-5xl mx-auto px-6 py-14 space-y-14">
+
+      <!-- ─────────────── header ─────────────── -->
+      <header class="space-y-6">
+        <div class="flex items-baseline justify-between flex-wrap gap-3">
+          <p class="text-xs uppercase tracking-[0.2em] text-slate-500">Bestseller / architecture field notes</p>
+          <p class="font-mono text-xs text-slate-500">HEAD 5d94d21 · 20 Sep 2026</p>
+        </div>
+        <h1 class="font-serif text-4xl leading-tight text-slate-900">
+          同一次失败，<br class="hidden sm:block" />
+          两条路各自读了一半
+        </h1>
+        <p class="text-sm text-slate-600 max-w-3xl leading-relaxed">
+          本轮只列 <span class="text-emerald-700 font-medium">Strong</span>。三条的形态是同一种：
+          <strong>一条规则只落在一侧</strong>——商品级的异常兜底只写在补采那一侧、点击语义只抄进诊断工具而没走生产
+          seam、停止窗口的恢复路径只长在生产 adapter 上。扫描范围：
+          <span class="mono">bestseller_monitor/</span> 全 21 个 module + <span class="mono">gui.py</span> +
+          <span class="mono">tools/</span> + 测试面，三路并行；三条都另做了对抗性复核，其中候选 01 <strong>实跑复现</strong>过
+          （两侧同一次 <span class="mono">PlaywrightError</span> 并排跑，见卡内）。
+          最近 80 次提交的热点：<span class="mono">stop_request</span> 21 次、<span class="mono">browser_pw</span> 21 次、
+          <span class="mono">pipeline</span> 20 次、<span class="mono">test_p1</span> 17 次、<span class="mono">gui</span> 14 次、
+          <span class="mono">db</span> 14 次。已对照 <span class="mono">CONTEXT.md</span> 与 ADR-0001–0030；
+          ADR-0027 挂起的候选 05–07、以及 09-11 起各轮已落地的候选均未重报。
+        </p>
+        <div class="flex flex-wrap gap-x-6 gap-y-2 text-xs text-slate-500 pt-2 border-t border-stone-200">
+          <span class="flex items-center gap-2"><span class="inline-block w-4 h-3 border border-slate-400 bg-white"></span>module</span>
+          <span class="flex items-center gap-2"><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="#64748b" stroke-width="1.5" class="seam"/></svg>seam</span>
+          <span class="flex items-center gap-2"><svg width="26" height="8"><line x1="0" y1="4" x2="20" y2="4" stroke="#dc2626" stroke-width="1.5"/><path d="M20 1 L26 4 L20 7 Z" fill="#dc2626"/></svg>只落在一侧 / 走不到</span>
+          <span class="flex items-center gap-2"><span class="inline-block w-4 h-3 bg-slate-900"></span>深 module</span>
+        </div>
+      </header>
+
+      <section id="candidates" class="space-y-14">
+
+        <!-- ═══════════════ 01 ═══════════════ -->
+        <article id="c01" class="space-y-6 border-t-2 border-slate-900 pt-8">
+          <div class="flex items-start justify-between gap-4 flex-wrap">
+            <div>
+              <p class="font-mono text-xs text-slate-400 mb-1">01</p>
+              <h2 class="font-serif text-2xl text-slate-900">
+                一个商品的意外异常，两条路两种后果
+              </h2>
+            </div>
+            <div class="flex gap-2 items-center pt-1">
+              <span class="text-xs px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 font-medium">Strong</span>
+              <span class="text-xs px-2.5 py-1 rounded-full bg-slate-100 text-slate-600 font-mono">in-process</span>
+            </div>
+          </div>
+
+          <div class="font-mono text-xs text-slate-500 space-y-0.5">
+            <p>click_listing.py:186-189 · click_listing.py:110-129 · detail_visit.py:35-40, 128, 141</p>
+            <p>pipeline.py:416-431 · pipeline.py:319-322 · pipeline.py:474-476 · tests/test_click_listing.py:163-173</p>
+          </div>
+
+          <!-- before / after -->
+          <div class="grid md:grid-cols-2 gap-5">
+            <div class="rounded-lg border border-slate-200 bg-white p-4">
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">今天 · 同一个 <span class="mono">PlaywrightError</span></p>
+              <div class="space-y-1.5 text-[11px] mono">
+                <div class="rounded border border-slate-300 bg-stone-100 px-2 py-1 text-center text-slate-600">
+                  begin_detail_visit → ReadFailedVisit(error, observation)
+                </div>
+                <div class="flex justify-center gap-10 pt-1">
+                  <div class="flex flex-col items-center gap-1">
+                    <span class="text-[10px] text-slate-400">读 .error</span>
+                    <div class="wire h-4"></div>
+                  </div>
+                  <div class="flex flex-col items-center gap-1">
+                    <span class="text-[10px] text-slate-400">读 .observation</span>
+                    <div class="wire h-4"></div>
+                  </div>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                  <div class="space-y-1.5">
+                    <p class="text-[10px] text-slate-500 text-center">点击路径 click_listing</p>
+                    <div class="rounded border border-red-300 hatch px-2 py-1 text-center text-red-800">raise visit.error</div>
+                    <div class="flex justify-center"><div class="wire-red h-3"></div></div>
+                    <div class="rounded border border-slate-300 bg-white px-2 py-1 text-center text-slate-600">ShopWalk.run（无兜底）</div>
+                    <div class="flex justify-center"><div class="wire-red h-3"></div></div>
+                    <div class="rounded border border-slate-300 bg-white px-2 py-1 text-center text-slate-600">
+                      _run_listing_pw 只接<br />STOP_WITH_OUTCOME / ListingLoadFailed
+                    </div>
+                    <div class="flex justify-center"><div class="wire-red h-3"></div></div>
+                    <div class="rounded border border-red-300 hatch px-2 py-1 text-center text-red-800">
+                      整轮结束（traceback）<br />后面所有店一个不跑 · 失败行 0 条
+                    </div>
+                  </div>
+                  <div class="space-y-1.5">
+                    <p class="text-[10px] text-slate-500 text-center">补采路径 pipeline</p>
+                    <div class="rounded border border-emerald-300 bg-emerald-50 px-2 py-1 text-center text-emerald-800">
+                      Observation.read_failed
+                    </div>
+                    <div class="flex justify-center"><div class="wire h-3"></div></div>
+                    <div class="rounded border border-slate-300 bg-white px-2 py-1 text-center text-slate-600">
+                      capture_observation<br />尝试额度 → 记一条失败行
+                    </div>
+                    <div class="flex justify-center"><div class="wire h-3"></div></div>
+                    <div class="rounded border border-emerald-300 bg-emerald-50 px-2 py-1 text-center text-emerald-800">
+                      正常返回 · 整轮继续
+                    </div>
+                    <p class="text-[10px] text-slate-400 pt-1 leading-snug">
+                      <span class="mono">_capture_pending_offers</span> 还另有一层兜底：
+                      「异常也记录失败，不中断整轮」
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="rounded-lg border border-slate-200 bg-white p-4">
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">改完 · 一次失败一个所有者</p>
+              <div class="space-y-2 text-[11px] mono">
+                <div class="rounded border border-slate-300 bg-stone-100 px-2 py-1 text-center text-slate-600">
+                  一次观测 = 一个值（读失败是它的一种）
+                </div>
+                <div class="flex justify-center"><div class="wire h-4"></div></div>
+                <div class="rounded-md border-2 border-slate-900 bg-slate-900 px-3 py-3 text-slate-100">
+                  <p class="text-[10px] uppercase tracking-wider text-slate-400 mb-2">这一趟意味着什么，只有一处说</p>
+                  <div class="space-y-1.5">
+                    <div class="rounded border border-slate-600 px-2 py-1">
+                      读失败 → 该商品一次失败 · 整轮继续
+                    </div>
+                    <div class="rounded border border-slate-600 px-2 py-1">
+                      编号未知 → 记卡片事件 · 整轮继续
+                    </div>
+                    <div class="rounded border border-slate-600 px-2 py-1">
+                      停 / deny 阈值 → 原样上抛（唯一该掀翻整轮的那族）
+                    </div>
+                  </div>
+                </div>
+                <div class="flex justify-center gap-10 pt-1">
+                  <div class="flex flex-col items-center gap-1">
+                    <div class="wire h-3"></div>
+                    <div class="rounded border border-slate-300 bg-white px-2 py-1 text-[10px] text-slate-600">点击路径</div>
+                  </div>
+                  <div class="flex flex-col items-center gap-1">
+                    <div class="wire h-3"></div>
+                    <div class="rounded border border-slate-300 bg-white px-2 py-1 text-[10px] text-slate-600">补采路径</div>
+                  </div>
+                </div>
+                <p class="text-[11px] text-slate-500 pt-2 leading-snug">
+                  两条路都只剩「各自怎么记事件、怎么计 deny」的差别，那不变量一次就够。
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-2 gap-6 text-sm">
+            <div>
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-2">Problem</p>
+              <p class="text-slate-700 leading-relaxed">
+                <span class="mono text-xs">ReadFailedVisit</span> 把同一个事实写了两遍（<span class="mono text-xs">.error</span>
+                与构造时就等于 <span class="mono text-xs">Observation.read_failed(exc)</span> 的 <span class="mono text-xs">.observation</span>，<span class="mono text-xs">detail_visit.py:128</span>），
+                两个调用方各取一半：点击路径 <span class="mono text-xs">raise visit.error</span>，补采路径 <span class="mono text-xs">return visit.observation</span>。
+                后果不是措辞差别，是<strong>同一个瞬时读失败，一边崩整轮、一边记一行</strong>。
+              </p>
+            </div>
+            <div>
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-2">Solution</p>
+              <p class="text-slate-700 leading-relaxed">
+                访问开始只交回<strong>一次观测</strong>，「这趟意味着什么」收进一处：读失败是观测的一种
+                （<span class="mono text-xs">read_failed</span> 已在），编号未知也是（<span class="mono text-xs">FailureKind</span> 加一类），
+                只有停止族与 deny 阈值才上抛。两条路径各自保留记事件与 deny 阶梯。
+              </p>
+            </div>
+          </div>
+
+          <ul class="grid sm:grid-cols-2 gap-x-8 gap-y-1.5 text-sm text-slate-700 list-disc pl-5">
+            <li><strong>locality</strong>：「商品级异常不许掀翻整轮」从一侧收回一处</li>
+            <li>两套并行词汇（<span class="mono text-xs">.error</span> / <span class="mono text-xs">_LateDenied</span>）一起消失</li>
+            <li>瞬时读失败不再让整轮带 traceback 退出</li>
+            <li>补采侧那句防御性 <span class="mono text-xs">RuntimeError</span>（<span class="mono text-xs">:474</span>）随之作废</li>
+          </ul>
+
+          <div class="bg-amber-50 border border-amber-200 rounded p-3 text-xs text-amber-900 leading-relaxed">
+            <strong>与 ADR-0023 冲突，但值得重开。</strong>
+            ADR-0023 明写了「已知商品身份的补采消费 observation 进入尝试重试；<em>身份未知的点击原样重抛 error</em>」。
+            重开的依据：这条分叉的两个前提都站不住——(1) 「编号尚未可靠取得」只对 <span class="mono">acquire</span>
+            失败那一半成立；初次 guard 失败时 <span class="mono">PlaywrightCard.acquire</span> 早已把弹窗地址里的
+            <span class="mono">offer_id</span> 填好（<span class="mono">click_listing.py:401-413</span>），本仓自己的用例
+            也正是用 <span class="mono">offer_id="11"</span> 覆盖这条路的；(2) ADR-0023 决定的是「观测必须在 guard
+            之后读」，没决定「同一个读失败一边崩整轮一边记一行」。ADR 真正要的不变量（停止族原样穿透、不写商品失败行）
+            不受影响。
+          </div>
+
+          <div class="bg-emerald-50 border border-emerald-200 rounded p-3 text-xs text-emerald-900 leading-relaxed">
+            <strong>实跑（两侧并排，同一次 <span class="mono">PlaywrightError</span>）</strong>：
+            <pre class="mono whitespace-pre-wrap text-[11px] leading-relaxed mt-1 text-emerald-950">点击路径：_run_listing_pw → 逃出 Error: guard 读取失败（瞬时）
+            A01 走过了：['店铺 A01 首屏']    A02 走过了：[]     本轮失败行：无
+补采路径：正常返回，没抛异常
+            本轮失败行：[('失败', attempt=1), ('失败', attempt=2)]</pre>
+            A02 那家店连首屏都没打开——异常在店铺循环里就出去了
+            （<span class="mono">pipeline.py:424/429</span> 只接两种），<span class="mono">run.py:98</span> 无兜底，
+            进程带 traceback 退出（轮次仍是「进行中」，可以续跑）。
+          </div>
+        </article>
+
+        <!-- ═══════════════ 02 ═══════════════ -->
+        <article id="c02" class="space-y-6 border-t-2 border-slate-900 pt-8">
+          <div class="flex items-start justify-between gap-4 flex-wrap">
+            <div>
+              <p class="font-mono text-xs text-slate-400 mb-1">02</p>
+              <h2 class="font-serif text-2xl text-slate-900">
+                诊断工具抄了一份点击语义，还养着一层只有它们用的私有别名
+              </h2>
+            </div>
+            <div class="flex gap-2 items-center pt-1">
+              <span class="text-xs px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 font-medium">Strong</span>
+              <span class="text-xs px-2.5 py-1 rounded-full bg-slate-100 text-slate-600 font-mono">in-process</span>
+            </div>
+          </div>
+
+          <div class="font-mono text-xs text-slate-500 space-y-0.5">
+            <p>tools/diag_card_urls.py:26-35, 51-69 · tools/diag_verify_state.py:24-31, 46-63</p>
+            <p>tools/diag_offer_id_presolve.py:341-347 · browser_pw.py:69-81 · click_listing.py:36, 470-519</p>
+            <p>对照：tools/sync_list_titles.py:69（已经在调生产 seam）</p>
+          </div>
+
+          <div class="grid md:grid-cols-2 gap-5">
+            <div class="rounded-lg border border-slate-200 bg-white p-4">
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">今天 · 三份副本，一条漂移的等待</p>
+              <div class="space-y-2 text-[11px] mono">
+                <div class="rounded border border-slate-300 bg-stone-100 px-2 py-2">
+                  <p class="text-slate-500 text-[10px]">生产 · click_listing.click_card()</p>
+                  <p class="text-slate-700">等待 <span class="text-slate-900 font-semibold">2500ms</span>（WAIT_POPUP_MS）</p>
+                  <p class="text-slate-700">弹窗缺席 → 另有同页跳转分支</p>
+                </div>
+                <div class="grid grid-cols-3 gap-2">
+                  <div class="rounded border border-red-300 hatch px-2 py-2">
+                    <p class="text-[10px] text-red-700">diag_card_urls</p>
+                    <p class="text-red-800 font-semibold">5000ms</p>
+                    <p class="text-[10px] text-red-700">无同页分支</p>
+                  </div>
+                  <div class="rounded border border-red-300 hatch px-2 py-2">
+                    <p class="text-[10px] text-red-700">diag_verify_state</p>
+                    <p class="text-red-800 font-semibold">4000ms</p>
+                    <p class="text-[10px] text-red-700">无同页分支</p>
+                  </div>
+                  <div class="rounded border border-red-300 hatch px-2 py-2">
+                    <p class="text-[10px] text-red-700">diag_offer_id_presolve</p>
+                    <p class="text-red-800 font-semibold">4000ms</p>
+                    <p class="text-[10px] text-red-700">无同页分支</p>
+                  </div>
+                </div>
+                <p class="text-[11px] text-slate-500 leading-snug">
+                  向上找 6 层可点祖先的那段 JS 三份逐字相同；同页跳转判据各自另写一遍，
+                  塞在 <span class="mono">except Exception</span> 里。
+                </p>
+                <div class="rounded border border-slate-300 bg-white px-2 py-2">
+                  <p class="text-[10px] text-slate-500">browser_pw（自称只做会话建立）</p>
+                  <p class="text-slate-700">_body_text / _captcha_visible / _is_punish_url / _resolved</p>
+                  <p class="text-slate-700">_PRODUCT_IMG_SEL / _click_text_in_frames / _WAIT_POPUP_MS</p>
+                  <p class="text-[10px] text-slate-500 mt-1">源码注：「本文件自己不用它们」「只给工具用」</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="rounded-lg border border-slate-200 bg-white p-4">
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">改完 · 工具走生产 seam</p>
+              <div class="rounded-md border-2 border-slate-900 bg-slate-900 p-3 text-slate-100 text-[11px] mono space-y-1.5">
+                <p class="text-[10px] uppercase tracking-wider text-slate-400">诊断工具只做观察与打印</p>
+                <div class="rounded border border-slate-600 px-2 py-1">click_listing.click_card(page, img, cfg)</div>
+                <div class="rounded border border-slate-600 px-2 py-1">listing.* ／ guard.*（判据的家）</div>
+              </div>
+              <div class="flex justify-center gap-3 pt-3 text-[10px] mono text-slate-500">
+                <span>diag_card_urls</span><span>diag_verify_state</span><span>diag_offer_id_presolve</span>
+                <span>sync_list_titles</span>
+              </div>
+              <div class="flex justify-center pt-2"><div class="wire h-4"></div></div>
+              <div class="rounded border border-emerald-300 bg-emerald-50 px-2 py-2 text-[11px] mono text-emerald-900">
+                browser_pw 的兼容别名层整层删掉<br />
+                <span class="text-[10px]">（连同 test_browser_pw.py:55 那份别名清单）</span>
+              </div>
+              <p class="text-[11px] text-slate-500 pt-3 leading-snug">
+                工具看到的等待、判据、同页分支第一次与生产同一份——诊断才有意义。
+              </p>
+            </div>
+          </div>
+
+          <div class="rounded-lg border border-slate-200 bg-white p-4">
+            <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">今天的依赖图：四条线里只有一条是真边</p>
+            <pre class="mermaid">
+flowchart LR
+  D1[diag_card_urls]:::tool
+  D2[diag_verify_state]:::tool
+  D3[diag_offer_id_presolve]:::tool
+  D4[sync_list_titles]:::tool
+  BP[browser_pw<br/>私有别名层 ×8]:::leak
+  CL[click_listing.click_card<br/>WAIT_POPUP_MS = 2500]:::deep
+  G[guard 判据]:::home
+  L[listing 页面原语]:::home
+  D1 -. 抄一份副本 .-> CL
+  D2 -. 抄一份副本 .-> CL
+  D3 -. 抄一份副本 .-> CL
+  D4 --> CL
+  D1 --> BP
+  D2 --> BP
+  D3 --> BP
+  D4 --> BP
+  BP --> G
+  BP --> L
+  classDef tool fill:#f5f5f4,stroke:#a8a29e;
+  classDef leak fill:#fee2e2,stroke:#dc2626,stroke-width:2px;
+  classDef deep fill:#0f172a,color:#e2e8f0,stroke:#0f172a;
+  classDef home fill:#ffffff,stroke:#94a3b8;
+            </pre>
+            <p class="text-[11px] text-slate-500 pt-1">
+              虚线是「自己抄了一份」，不是 import——所以它在依赖图上不可见，只在两边同时改动时才现形。
+            </p>
+          </div>
+
+          <div class="grid md:grid-cols-2 gap-6 text-sm">
+            <div>
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-2">Problem</p>
+              <p class="text-slate-700 leading-relaxed">
+                这三个工具的存在目的正是诊断生产点击路径，却各自维护一份副本：等待比生产宽一倍
+                （5000/4000 对 2500），并缺生产那条「无弹窗但页面已就地跳到详情」的分支——
+                于是<strong>工具里复现不出的现象，可能正是生产失败的原因</strong>。
+                同时 <span class="mono text-xs">browser_pw</span> 为它们保留着八个下划线别名，注释里自己写明
+                「本文件自己不用它们」。
+              </p>
+            </div>
+            <div>
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-2">Solution</p>
+              <p class="text-slate-700 leading-relaxed">
+                工具的页面装配一律走生产 seam：点击用 <span class="mono text-xs">click_listing.click_card</span>
+                （它本来就为诊断交回页面原始状态），选择器与滚动原语走 <span class="mono text-xs">listing</span>，
+                介入判据走 <span class="mono text-xs">guard</span>。工具与 <span class="mono text-xs">browser_pw</span>
+                的接口都随之变窄。
+              </p>
+            </div>
+          </div>
+
+          <ul class="grid sm:grid-cols-2 gap-x-8 gap-y-1.5 text-sm text-slate-700 list-disc pl-5">
+            <li><strong>deletion test</strong>：删副本，复杂度集中到 seam，不散往调用方</li>
+            <li>漂移不可能再发生（等待只有一个来源）</li>
+            <li><span class="mono text-xs">browser_pw</span> 的 interface 少八个只为外人存在的名字</li>
+            <li>先例已在：<span class="mono text-xs">sync_list_titles.py</span> 早就这么调</li>
+          </ul>
+
+          <div class="bg-emerald-50 border border-emerald-200 rounded p-3 text-xs text-emerald-900 leading-relaxed">
+            <strong>核过的</strong>：三个副本的等待值分别是 5000 / 4000 / 4000（<span class="mono">WAIT_POPUP_MS = 2500</span>）；
+            「没有 import 障碍」有现成反例——<span class="mono">tools/sync_list_titles.py:69</span> 已经在调
+            <span class="mono">click_listing.click_card</span>；别名层只被 <span class="mono">tools/</span> 与
+            一条钉住清单的用例（<span class="mono">tests/test_browser_pw.py:55</span>）使用。
+            ADR-0019 只管三个工具共用一个浏览器会话（调试端口 / profile / 收尾指纹），点击语义从未被它定过。
+          </div>
+        </article>
+
+        <!-- ═══════════════ 03 ═══════════════ -->
+        <article id="c03" class="space-y-6 border-t-2 border-slate-900 pt-8">
+          <div class="flex items-start justify-between gap-4 flex-wrap">
+            <div>
+              <p class="font-mono text-xs text-slate-400 mb-1">03</p>
+              <h2 class="font-serif text-2xl text-slate-900">
+                停止窗口的 seam 少写了一个方法，编排器只好去探
+              </h2>
+            </div>
+            <div class="flex gap-2 items-center pt-1">
+              <span class="text-xs px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 font-medium">Strong</span>
+              <span class="text-xs px-2.5 py-1 rounded-full bg-slate-100 text-slate-600 font-mono">ports &amp; adapters</span>
+            </div>
+          </div>
+
+          <div class="font-mono text-xs text-slate-500 space-y-0.5">
+            <p>stop_request.py:171-176（Protocol） · :179-222（可脚本化 adapter） · :236-259（rebind 定义）</p>
+            <p>:415-427（tick 用 hasattr 探它） · gui.py:131-132, 245-247</p>
+          </div>
+
+          <div class="grid md:grid-cols-2 gap-5">
+            <div class="rounded-lg border border-slate-200 bg-white p-4">
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">今天 · interface 五个方法，编排器用第六个</p>
+              <div class="space-y-2 text-[11px] mono">
+                <div class="rounded-md border-2 border-slate-900 p-3">
+                  <p class="text-[10px] uppercase tracking-wider text-slate-400 pb-1">StopRuntime（Protocol 声明的 interface）</p>
+                  <div class="grid grid-cols-2 gap-1 text-slate-700">
+                    <span class="rounded bg-stone-100 px-1.5 py-0.5">bind</span>
+                    <span class="rounded bg-stone-100 px-1.5 py-0.5">observe</span>
+                    <span class="rounded bg-stone-100 px-1.5 py-0.5">terminate</span>
+                    <span class="rounded bg-stone-100 px-1.5 py-0.5">close_browser</span>
+                    <span class="rounded bg-stone-100 px-1.5 py-0.5">release</span>
+                  </div>
+                </div>
+                <div class="flex items-center gap-2 pl-2">
+                  <div class="wire-red h-6"></div>
+                  <p class="text-red-700">
+                    <span class="mono">hasattr(self._runtime, "rebind")</span> —— 编排器去探一个
+                    interface 里没有的方法
+                  </p>
+                </div>
+                <div class="rounded border border-red-300 hatch px-2 py-1.5 text-red-800">
+                  rebind（只长在 ProcessStopRuntime 上）
+                </div>
+                <div class="grid grid-cols-2 gap-2 pt-1">
+                  <div class="rounded border border-slate-300 bg-white px-2 py-2">
+                    <p class="text-[10px] text-slate-500">ProcessStopRuntime · 生产</p>
+                    <p class="text-slate-700">有 rebind</p>
+                    <p class="text-[10px] text-slate-500">绑定被拒 → 下个 tick 重试</p>
+                  </div>
+                  <div class="rounded border border-red-300 hatch px-2 py-2">
+                    <p class="text-[10px] text-red-700">RecordingStopRuntime · 本 module 自带的测试 adapter</p>
+                    <p class="text-red-800">没 rebind</p>
+                    <p class="text-[10px] text-red-700">连「绑定暂时拿不到」这个状态都造不出来</p>
+                  </div>
+                </div>
+                <p class="text-[11px] text-slate-500 leading-snug pt-1">
+                  于是这条路既没被走过，也写不出用例——而「interface 就是测试面」正是它该兑现的。
+                </p>
+              </div>
+            </div>
+
+            <div class="rounded-lg border border-slate-200 bg-white p-4">
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">改完 · 恢复路径写进 interface</p>
+              <div class="space-y-2 text-[11px] mono">
+                <div class="rounded-md border-2 border-slate-900 bg-slate-900 p-3 text-slate-100">
+                  <p class="text-[10px] uppercase tracking-wider text-slate-400 pb-1">StopRuntime</p>
+                  <div class="grid grid-cols-2 gap-1">
+                    <span class="rounded bg-slate-700 px-1.5 py-0.5 text-slate-200">bind</span>
+                    <span class="rounded bg-slate-700 px-1.5 py-0.5 text-slate-200">observe</span>
+                    <span class="rounded bg-slate-700 px-1.5 py-0.5 text-slate-200">terminate</span>
+                    <span class="rounded bg-slate-700 px-1.5 py-0.5 text-slate-200">close_browser</span>
+                    <span class="rounded bg-slate-700 px-1.5 py-0.5 text-slate-200">release</span>
+                    <span class="rounded bg-emerald-600 px-1.5 py-0.5 text-white">rebind</span>
+                  </div>
+                </div>
+                <div class="flex justify-center"><div class="wire h-4"></div></div>
+                <div class="grid grid-cols-2 gap-2">
+                  <div class="rounded border border-slate-300 bg-white px-2 py-2">
+                    <p class="text-[10px] text-slate-500">ProcessStopRuntime</p>
+                    <p class="text-slate-700">rebind = 重新 bind 冻结的那个目标</p>
+                  </div>
+                  <div class="rounded border border-emerald-300 bg-emerald-50 px-2 py-2">
+                    <p class="text-[10px] text-emerald-700">RecordingStopRuntime</p>
+                    <p class="text-emerald-800">rebind = bind（替身第一次能表达「暂时拿不到」）</p>
+                  </div>
+                </div>
+                <div class="flex justify-center"><div class="wire h-4"></div></div>
+                <div class="rounded border border-emerald-300 bg-emerald-50 px-2 py-2 text-emerald-900">
+                  <span class="mono">tick</span> 里那条 <span class="mono">hasattr</span> 分支消失；
+                  重绑成了一件事：<span class="mono">bind</span> 拿不到就下个 tick 再来
+                </div>
+                <p class="text-[11px] text-slate-500 pt-2 leading-snug">
+                  测试 seam 现成：替身上加 <span class="mono">fail_bind=True</span>（或用现成的 <span class="mono">BindFailure</span>
+                  形态）就能驱动「第一次被拒、第二次成功」。
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-2 gap-6 text-sm">
+            <div>
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-2">Problem</p>
+              <p class="text-slate-700 leading-relaxed">
+                <span class="mono text-xs">bind</span> 拿不到句柄时交回 <span class="mono text-xs">capability=None</span>
+                （<span class="mono text-xs">:245-250</span>），此后每次 tick 都判 <span class="mono text-xs">UNVERIFIABLE</span>
+                并停在核验里——而 <span class="mono text-xs">UNVERIFIABLE</span> 的短路在 deadline 之前，窗口自己不会到点。
+                唯一的出路是 <span class="mono text-xs">tick</span> 里那次重绑，而 <span class="mono text-xs">hasattr</span>
+                把它挂在「这个 adapter 碰巧有没有这个方法」上：<strong>恢复能力取决于接线，不取决于不变量</strong>——
+                正是 ADR-0024 当初要把这种差别收进 module 的理由。
+              </p>
+            </div>
+            <div>
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-2">Solution</p>
+              <p class="text-slate-700 leading-relaxed">
+                把重绑写进 <span class="mono text-xs">StopRuntime</span>：两个 adapter 各实现一次，
+                <span class="mono text-xs">tick</span> 无条件调用。interface 从「拿得到句柄时怎么办」扩成
+                「拿不到时怎么办」——后者才是这个 seam 真正要回答的问题。
+              </p>
+            </div>
+          </div>
+
+          <ul class="grid sm:grid-cols-2 gap-x-8 gap-y-1.5 text-sm text-slate-700 list-disc pl-5">
+            <li><strong>depth</strong>：恢复语义进 interface，不再靠结构探测</li>
+            <li>替身第一次能表达生产的状态，这条路有测试面</li>
+            <li>新 adapter 不会静默失去重试</li>
+            <li>删除面：<span class="mono text-xs">hasattr</span> 分支一处 + 一个隐式契约</li>
+          </ul>
+
+          <div class="bg-emerald-50 border border-emerald-200 rounded p-3 text-xs text-emerald-900 leading-relaxed">
+            <strong>核过的</strong>：全仓 <span class="mono">grep rebind</span> 只有三处，全在
+            <span class="mono">stop_request.py</span>（定义 / <span class="mono">hasattr</span> / 调用），
+            测试里一次都没有；<span class="mono">RecordingStopRuntime</span> 是 StopWatch 测试唯一的 adapter
+            （<span class="mono">tests/test_stop_target.py</span> 的四处构造全是它），它的 <span class="mono">bind</span>
+            恒给非空 capability，所以连「<span class="mono">capability is None</span>」这个前置状态都造不出来。
+            生产可达性也核过：<span class="mono">ProcessStopRuntime.bind</span> 在
+            <span class="mono">OpenProcess</span> 被拒、或目标没有 OS 创建证明时交回 <span class="mono">None</span>；
+            卡住的后果是界面那句「上一次停止仍在核验或收尾，请稍后重试」一直成立
+            （<span class="mono">gui.py:245-247</span>），新的采集起不来。
+          </div>
+        </article>
+
+      </section>
+
+      <!-- ─────────────── 同轮被否掉 / 降级的 ─────────────── -->
+      <section id="tail" class="border-t-2 border-slate-300 pt-8 space-y-4">
+        <h2 class="font-serif text-xl text-slate-500">同轮被否掉 / 降级的</h2>
+        <p class="text-xs text-slate-500 leading-relaxed">
+          写下来是为了说明取舍不是没看见，也免得下一轮重新发现它们。<strong>没有一条够 Strong。</strong>
+        </p>
+        <ul class="space-y-2.5 text-sm text-slate-700">
+          <li class="border-l-2 border-slate-200 pl-4">
+            <strong>补采侧没有 adapter seam</strong>：<span class="mono text-xs">tests/test_p1.py:75-96</span>
+            一个用例打五个桩（<span class="mono text-xs">navigate_detail</span>、<span class="mono text-xs">ready_detail_page</span>、
+            <span class="mono text-xs">intervention_kind</span>、<span class="mono text-xs">is_deny_url</span>、
+            <span class="mono text-xs">extract_main_image</span>），还断言 <span class="mono text-xs">page.content.call_count == 2</span>
+            ——即 <span class="mono text-xs">ReadyDetailVisit</span> 内部轮询了几圈；而点击侧一份桩都不用。
+            「值对但弱」：它说明 seam 的缺口（<span class="mono text-xs">click_listing.py</span> 的 docstring 自陈当初就是为这个拆的 adapter），
+            但<strong>行为一字不变</strong>，够不上「摩擦是真的」那一条。
+          </li>
+          <li class="border-l-2 border-slate-200 pl-4">
+            <strong>降级：两个页面的进度各拼一遍</strong>（子代理报了 Strong）。
+            <span class="mono text-xs">views.run_view</span> 与 <span class="mono text-xs">result_view</span> 确实各拼一遍同 9 个键，
+            但口径本来就在 <span class="mono text-xs">round_tally</span> / <span class="mono text-xs">_shop_breakdown</span> /
+            <span class="mono text-xs">_round_counts</span> 一处持有，两个页面调的是同一批——重复的只是组装那几行，
+            「一致由一条用例保证」的说法我核出是错的（用例钉的是口径，不是组装）。够不上加深。
+          </li>
+          <li class="border-l-2 border-slate-200 pl-4">
+            <strong><span class="mono text-xs">retryable</span> 有两个所有者，两个都没读者</strong>：
+            <span class="mono text-xs">StopStatus.retryable</span> 由相算出（<span class="mono text-xs">:135, 369-370</span>），
+            全仓含测试零读者；<span class="mono text-xs">EffectResult.retryable</span> 恒 True（四个构造点无一传 False），
+            唯一读者是一条断言它 True 的用例；真正回答这个问题的是界面（<span class="mono text-xs">gui.py</span> 八处，六处写死
+            <span class="mono text-xs">"retryable": True</span>）。
+            09-19 的报告已经在候选 02 里把它记成「一处口径要收」，收口时没动它——记进挂账，下次动这条 seam 时一起。
+          </li>
+          <li class="border-l-2 border-slate-200 pl-4">
+            <strong>只写不读的字段</strong>：<span class="mono text-xs">RuntimeFacts.error</span>（真值枚举过：
+            它在与不在，<span class="mono text-xs">_relation</span> 的结论都相同）、
+            <span class="mono text-xs">StopCommand.round_id</span>（只有 PAUSE 分支读，ABORT 那半付了不用）、
+            <span class="mono text-xs">StopInFlight.kind/target/state</span>（重述 command，无读者）、
+            <span class="mono text-xs">gui.start_ts</span>（写两次，零读）。同一形状在 09-19 已当过候选，这次都是单字段规模，不单列。
+          </li>
+          <li class="border-l-2 border-slate-200 pl-4">
+            <strong><span class="mono text-xs">browser_proc.close_browser(launched_by_us=)</span></strong>：
+            生产唯一调用点恒传 <span class="mono text-xs">True</span>（<span class="mono text-xs">stop_request.py:311</span>），
+            <span class="mono text-xs">:170-172</span> 那条分支只有用例走得到；<span class="mono text-xs">port</span> 自称「只为日志」。
+            形状与 09-19 候选 03 一模一样，但它守的是一个破坏性边界——删它得先论证「缺 pid/proof 一律拒绝」已经够，
+            而 ADR-0028 正说授权来自绑定。留给下一轮带上下文再判。
+          </li>
+          <li class="border-l-2 border-slate-200 pl-4">
+            <strong>界面会话事实（已抓时长）没有所有者</strong>：<span class="mono text-xs">_current_elapsed</span> 一处读、
+            <span class="mono text-xs">start_run</span> / <span class="mono text-xs">resume_run</span> / <span class="mono text-xs">pause_run</span>
+            三处写同一组字段（<span class="mono text-xs">gui.py:141-145, 261-264, 300-303, 318-321</span>），
+            <span class="mono text-xs">CONTEXT.md</span> 专门为「界面会话事实」立过词。深化的形状清楚（变更收成几个转换 + 一个读法），
+            但没证明出可观察的错——够「值得探索」，不够这一轮的尺子。
+          </li>
+          <li class="border-l-2 border-slate-200 pl-4">
+            <strong>停止窗口只由界面推进</strong>：<span class="mono text-xs">_stop_watch.tick(conn)</span> 只在
+            <span class="mono text-xs">gui.py</span> 七处被调（<span class="mono text-xs">171/187/245/278/326/363/429</span>），
+            「每个入口都要记得 tick」没有落点——忘了就是强杀永不触发、<span class="mono text-xs">cleanup_pending</span>
+            永不重试。没构造出真实漏 tick 的路径，故不列。
+          </li>
+          <li class="border-l-2 border-slate-200 pl-4 text-slate-500">
+            另有三条子代理提出、我核后<strong>判为不成立</strong>：「这一轮该不该停有两个所有者」（判据只在
+            <span class="mono text-xs">rounds.ensure_workable</span>，其余是检查点）、
+            「<span class="mono text-xs">db.py</span> 该按组拆 module」（逐组 deletion test 都是搬家不是变小，
+            唯一例外正是 ADR-0027 挂起的候选 05）、「逐店 deny 是 N+1」（有专门索引，实测 0.80→0.09 秒）。
+          </li>
+        </ul>
+      </section>
+
+      <!-- ─────────────── top recommendation ─────────────── -->
+      <section id="top-recommendation" class="border-t-2 border-slate-900 pt-8">
+        <div class="rounded-lg border-2 border-slate-900 bg-white p-6 space-y-3">
+          <p class="text-xs uppercase tracking-[0.2em] text-slate-500">Top recommendation</p>
+          <h2 class="font-serif text-2xl text-slate-900">先做 01：一个商品的意外异常，两条路两种后果</h2>
+          <p class="text-sm text-slate-700 leading-relaxed max-w-3xl">
+            另外两条都是「机制与声明不符」，这一条是<strong>生产里会咬人的</strong>：一次瞬时的
+            <span class="mono text-xs">PlaywrightError</span> 就能让整轮带 traceback 退出、后面所有店一个不跑，
+            而同一次失败在补采侧只记一行、继续跑——两条路今天各自读了这个观测的一半。
+            修完之后另两条也更好做：02 的工具要调
+            <span class="mono text-xs">click_card</span>，而 01 正要把「这趟意味着什么」收进
+            <span class="mono text-xs">begin_detail_visit</span>；03 独立，随时可做。
+          </p>
+          <p class="text-xs text-slate-500">
+            <a href="#c01" class="underline decoration-dotted">回到候选 01</a>
+          </p>
+        </div>
+      </section>
+
+      <footer class="text-xs text-slate-400 pt-6 border-t border-stone-200 flex justify-between flex-wrap gap-2">
+        <span class="mono">architecture-review-2026-09-20 · HEAD 5d94d21 · 全套 476 项用例通过</span>
+        <span>扫描任务文件在 <span class="mono">.scratch/architecture-review-2026-09-20/</span></span>
+      </footer>
+
+    </main>
+  </body>
+</html>
