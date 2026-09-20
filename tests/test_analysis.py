@@ -6,7 +6,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright, expect
 from bestseller_monitor.db import connect, Database
 from helpers import new_round
-from bestseller_monitor.analysis import AnalysisConfig, AnalysisService
+from bestseller_monitor.analysis import AnalysisConfig, AnalysisService, calculate_inventory
 from bestseller_monitor.analysis_http import create_server
 
 class AnalysisBrowserTests(unittest.TestCase):
@@ -126,3 +126,46 @@ class AnalysisBrowserTests(unittest.TestCase):
         expect(self.page.get_by_role("article")).to_have_count(20)
         self.page.get_by_role("button", name="下一页").click()
         expect(self.page.get_by_role("article")).to_have_count(3)
+
+    def test_confirmation_unlocks_initial_ranking_and_sku_details(self):
+        self.dates()
+        self.page.get_by_role("button", name="下一步、进入同款确认").click()
+        expect(self.page.get_by_role("heading", name="初步畅销品")).not_to_be_visible()
+        self.page.get_by_role("button", name="确认当前分组").click()
+        expect(self.page.get_by_role("heading", name="初步畅销品")).to_be_visible()
+        self.page.get_by_text("01 杯子 · 20 销量", exact=True).click()
+        expect(self.page.get_by_text("红色 · 销量 20", exact=True)).to_be_visible()
+
+
+class InventoryCalculationTests(unittest.TestCase):
+    def test_sku_first_calculation_handles_baselines_missing_days_restock_and_multi_sku(self):
+        rows = [
+            {"shop_key": "A", "offer_id": "P", "sku_id": "down", "sku_name": "下降", "date": "2026-09-06", "stock": 120},
+            {"shop_key": "A", "offer_id": "P", "sku_id": "down", "sku_name": "下降", "date": "2026-09-07", "stock": 100},
+            {"shop_key": "A", "offer_id": "P", "sku_id": "down", "sku_name": "下降", "date": "2026-09-14", "stock": 80},
+            {"shop_key": "A", "offer_id": "P", "sku_id": "restock", "sku_name": "补货", "date": "2026-09-07", "stock": 50},
+            {"shop_key": "A", "offer_id": "P", "sku_id": "restock", "sku_name": "补货", "date": "2026-09-08", "stock": 90},
+            {"shop_key": "A", "offer_id": "Q", "sku_id": "future", "sku_name": "未来基准", "date": "2026-09-14", "stock": 30},
+        ]
+        result = calculate_inventory(rows, "2026-09-07", "2026-09-14")
+        product = result[("A", "P")]
+        self.assertEqual(product["sales"], 20)
+        down = next(s for s in product["skus"] if s["sku_id"] == "down")
+        self.assertEqual(down["points"][0]["sales"], 0)
+        self.assertEqual(down["points"][1]["stock"], 100)
+        self.assertEqual(down["points"][1]["color"], "yellow")
+        self.assertEqual(down["points"][-1]["sales"], 20)
+        restock = next(s for s in product["skus"] if s["sku_id"] == "restock")
+        self.assertEqual(restock["points"][1]["color"], "red")
+        self.assertEqual(restock["points"][1]["sales"], 0)
+        self.assertEqual(result[("A", "Q")]["skus"][0]["points"][0]["stock"], 30)
+
+    def test_product_sales_sum_skus_instead_of_diffing_total_stock(self):
+        rows = [
+            {"shop_key": "A", "offer_id": "P", "sku_id": "a", "date": "2026-09-07", "stock": 100},
+            {"shop_key": "A", "offer_id": "P", "sku_id": "a", "date": "2026-09-08", "stock": 80},
+            {"shop_key": "A", "offer_id": "P", "sku_id": "b", "date": "2026-09-07", "stock": 50},
+            {"shop_key": "A", "offer_id": "P", "sku_id": "b", "date": "2026-09-08", "stock": 90},
+        ]
+        result = calculate_inventory(rows, "2026-09-07", "2026-09-08")
+        self.assertEqual(result[("A", "P")]["sales"], 20)

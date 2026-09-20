@@ -9,7 +9,7 @@
 <section><label>开始日期 <input id="start" type="date"></label><h3>当日真实抓取</h3><div id="startCoverage">请选择日期</div></section>
 <section><label>结束日期 <input id="end" type="date"></label><h3>当日真实抓取</h3><div id="endCoverage">请选择日期</div></section></div>
 <p><button id="begin" class="primary">下一步、进入同款确认</button></p></section>
-<section id="reviewPage" hidden><div class="bar"><h2>确认同款</h2><button id="back">重新选择日期</button></div><p id="snapshotInfo"></p><p class="muted">当前提供固定库存核对；同款识别、销量计算、人工确认和暂存尚未开放。关闭程序后需重新分析。</p><div id="products"></div><div class="bar"><button id="prev">上一页</button><span id="pageInfo"></span><button id="next">下一页</button></div></section>
+<section id="reviewPage" hidden><div class="bar"><h2>确认同款</h2><button id="back">重新选择日期</button></div><p id="snapshotInfo"></p><p class="muted">当前为独立商品组；请逐组确认后查看初步畅销品排名。</p><div id="products"></div><section id="results" hidden><h2>初步畅销品</h2><div id="ranking"></div></section><div class="bar"><button id="prev">上一页</button><span id="pageInfo"></span><button id="next">下一页</button></div></section>
 </main><dialog id="notice"><p id="noticeText"></p><button id="noticeOK">继续</button></dialog>
 <script>
 const $ = id => document.getElementById(id);
@@ -94,25 +94,25 @@ function renderProducts() {
     const snapshot=currentSnapshot, offset=productPage*20;
     $('products').innerHTML=snapshot.products.slice(offset,offset+20).map((p,i)=>{
         const rows=inventoryByProduct.get(JSON.stringify([p.shop_key,p.offer_id]))||[];
-        const within=rows.filter(r=>r.date>=snapshot.start&&r.date<=snapshot.end);
-        const latest=within.reduce((a,b)=>!a||b.date>a.date?b:a,null);
-        const skus=new Map();
-        for(const row of rows) {
-            if(!skus.has(row.sku_id)) skus.set(row.sku_id,[]);
-            skus.get(row.sku_id).push(row);
-        }
         const group=snapshot.groups.find(g=>g.members.some(m=>m.shop_key===p.shop_key&&m.offer_id===p.offer_id));
-        return `<article><h3>${esc(group.id)} · ${esc(latest?.product_name||p.product_name||p.offer_id)}</h3>
-            <span>待确认</span><p>${esc(latest?.shop_name||p.shop_key)} · 商品 ${esc(p.offer_id)} · ${skus.size} 个 SKU</p>
-            ${[...skus].map(([id,obs])=>`<details open><summary>${esc(obs.at(-1).sku_name||id)} · SKU ${esc(id)}</summary>
-                <table><thead><tr><th>观测日期</th><th>实际库存</th><th>区间关系</th></tr></thead><tbody>
-                ${obs.map(r=>`<tr><td>${esc(r.date)}</td><td>${r.stock}</td><td>${r.date<snapshot.start?'开始日前基准候选':r.date>snapshot.end?'结束日后观测':'区间内'}</td></tr>`).join('')}
-                </tbody></table></details>`).join('')}</article>`;
+        const skuRows=p.skus||[];
+        return `<article><div class="bar"><h3>${esc(group.id)} · ${esc(p.product_name||p.offer_id)}</h3><button ${group.confirmed?'disabled':''} onclick="confirmGroup('${group.id}')">${group.confirmed?'已确认':'确认当前分组'}</button></div>
+            <p>${esc(p.shop_key)} · 商品 ${esc(p.offer_id)} · ${skuRows.length} 个 SKU · 区间销量 <b>${p.sales}</b> · <span class="group-status">${group.confirmed?"已确认":"待确认"}</span></p>
+            ${skuRows.map(sku=>`<details open><summary>${esc(sku.name)} · SKU ${esc(sku.sku_id)} · 销量 <b>${sku.sales}</b></summary><table><thead><tr><th>日期</th><th>库存</th><th>当日销量</th><th>状态</th></tr></thead><tbody>${sku.points.map(point=>`<tr><td>${point.date}</td><td>${point.stock ?? '—'}</td><td>${point.sales}</td><td>${point.color==='red'?'疑似补货':point.color==='yellow'?'当日未抓取库存':'正常观测'}</td></tr>`).join('')}</tbody></table></details>`).join('')}</article>`;
     }).join('');
     const pages=Math.ceil(snapshot.products.length/20);
     $('pageInfo').textContent=`${productPage+1} / ${pages}`;
     $('prev').disabled=productPage===0;
     $('next').disabled=productPage+1>=pages;
+    $('results').hidden=!snapshot.groups.length || !snapshot.groups.every(group=>group.confirmed);
+    if (!$('results').hidden) renderRanking();
+}
+async function confirmGroup(group) {
+    const snapshot=await api('/api/analysis',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:currentSnapshot.id,group})});
+    currentSnapshot=snapshot; renderProducts();
+}
+function renderRanking() {
+    $('ranking').innerHTML=[...currentSnapshot.products].sort((a,b)=>b.sales-a.sales).map((p,index)=>`<details class="rank"><summary><b>${String(index+1).padStart(2,'0')}</b> ${esc(p.product_name||p.offer_id)} · <b>${p.sales}</b> 销量</summary><p>${esc(p.shop_key)} · 商品 ${esc(p.offer_id)}</p><table><thead><tr><th>日期</th><th>库存</th><th>累计销量</th><th>状态</th></tr></thead><tbody>${p.points.map((point,i)=>`<tr><td>${point.date}</td><td>${point.stock ?? '—'}</td><td>${p.points.slice(0,i+1).reduce((sum,item)=>sum+item.sales,0)}</td><td>${point.color==='red'?'疑似补货':point.color==='yellow'?'当日未抓取库存':'正常观测'}</td></tr>`).join('')}</tbody></table>${(p.skus||[]).map(sku=>`<details open><summary>${esc(sku.name)} · 销量 ${sku.sales}</summary></details>`).join('')}</details>`).join('');
 }
 $('prev').onclick=()=>{if(productPage>0){productPage--;renderProducts()}};
 $('next').onclick=()=>{if((productPage+1)*20<currentSnapshot.products.length){productPage++;renderProducts()}};

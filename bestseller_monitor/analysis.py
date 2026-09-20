@@ -7,7 +7,7 @@ import threading
 import tomllib
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -99,11 +99,17 @@ class AnalysisService:
                 ORDER BY i.shop_key,i.offer_id
             """, (start, end))]
             shops = [dict(row) for row in conn.execute("SELECT * FROM shops ORDER BY shop_key")]
+        calculations = calculate_inventory(rows, start, end)
+        for product in products:
+            key = (product["shop_key"], product["offer_id"])
+            result = calculations.get(key, {"sales": 0, "points": [], "skus": []})
+            product.update(result)
         snapshot = {"id": uuid4().hex, "start": start, "end": end,
                     "frozen_at": utcnow(), "inventory": rows, "products": products,
                     "shops": shops, "groups": [
                         {"id": f"G{i+1}", "confirmed": False,
-                         "members": [{"shop_key": p["shop_key"], "offer_id": p["offer_id"]}]}
+                         "members": [{"shop_key": p["shop_key"], "offer_id": p["offer_id"]}],
+                         "sales": p["sales"]}
                         for i, p in enumerate(products)]}
         with self._lock:
             self._snapshots[snapshot["id"]] = snapshot
@@ -115,3 +121,64 @@ class AnalysisService:
             if snapshot is None:
                 raise ValueError("分析已不存在，请重新选择日期；本阶段尚不支持关闭程序后恢复")
             return copy.deepcopy(snapshot)
+
+    def confirm(self, analysis_id, group_id):
+        with self._lock:
+            snapshot = self._snapshots.get(analysis_id)
+            if snapshot is None:
+                raise ValueError("分析已不存在，请重新选择日期")
+            group = next((item for item in snapshot["groups"] if item["id"] == group_id), None)
+            if group is None:
+                raise ValueError("同款组不存在")
+            group["confirmed"] = True
+            return copy.deepcopy(snapshot)
+
+
+def _dates(start: str, end: str) -> list[str]:
+    first, last = date.fromisoformat(start), date.fromisoformat(end)
+    return [(first + timedelta(days=i)).isoformat() for i in range((last-first).days + 1)]
+
+
+def calculate_inventory(rows: list[dict], start: str, end: str) -> dict:
+    """Build SKU-first inventory points; this is the single calculation seam for the UI."""
+    dates = _dates(start, end)
+    by_sku = {}
+    for row in rows:
+        by_sku.setdefault((row["shop_key"], row["offer_id"], row["sku_id"]), []).append(row)
+    products = {}
+    for key, observations in by_sku.items():
+        observations.sort(key=lambda row: row["date"])
+        values = {row["date"]: row["stock"] for row in observations}
+        before = [d for d in values if d < start]
+        # When the start day has no observation, the nearest later observation
+        # may be inside the selected interval (for example on the end day).
+        after = [d for d in values if d > start]
+        prior = values[max(before)] if before else None
+        fallback = values[min(after)] if after else None
+        previous = None
+        points = []
+        for day in dates:
+            actual = day in values
+            stock = values[day] if actual else (previous if previous is not None else (prior if prior is not None else fallback))
+            if not actual and previous is None and prior is None and fallback is None:
+                stock = None
+            sales = 0 if previous is None or stock is None else max(previous-stock, 0)
+            if day == start:
+                sales = 0
+            color = "yellow" if not actual and stock is not None else (
+                "red" if previous is not None and stock is not None and stock > previous else "green"
+            )
+            points.append({"date": day, "stock": stock, "sales": sales, "color": color, "actual": actual})
+            previous = stock
+        product_key = key[:2]
+        bucket = products.setdefault(product_key, {"sales": 0, "points": [], "skus": []})
+        bucket["skus"].append({"sku_id": key[2], "name": observations[-1].get("sku_name") or key[2], "sales": sum(p["sales"] for p in points), "points": points})
+    for bucket in products.values():
+        bucket["sales"] = sum(sku["sales"] for sku in bucket["skus"])
+        bucket["points"] = [{
+            "date": day,
+            "stock": sum(sku["points"][i]["stock"] for sku in bucket["skus"] if sku["points"][i]["stock"] is not None) or None,
+            "sales": sum(sku["points"][i]["sales"] for sku in bucket["skus"]),
+            "color": "red" if any(sku["points"][i]["color"] == "red" for sku in bucket["skus"]) else "green",
+        } for i, day in enumerate(dates)]
+    return products
