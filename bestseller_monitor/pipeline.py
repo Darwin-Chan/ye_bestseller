@@ -1,4 +1,4 @@
-"""轮次调度：榜单 → 详情 → 差分 → 导出。"""
+"""轮次调度：榜单 → 详情。"""
 from __future__ import annotations
 
 import logging

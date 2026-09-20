@@ -1,4 +1,4 @@
-"""SQLite 数据层：轮次、店铺榜单、SKU 快照、差分更新。"""
+"""SQLite 数据层：轮次、店铺榜单、SKU 快照、每日库存。"""
 from __future__ import annotations
 
 import logging
@@ -98,7 +98,6 @@ CREATE TABLE IF NOT EXISTS inventory (
     sku_id TEXT NOT NULL,
     date TEXT NOT NULL,
     stock INTEGER,
-    diff INTEGER,
     price REAL,
     shop_name TEXT,
     product_name TEXT,
@@ -208,6 +207,16 @@ SNAPSHOT_SUCCESS_INDEX = "idx_snapshots_success_key"
 # 更不用把两张表 JOIN 起来逐行核对（1.5 秒）。它引用后加的两列，所以只能由迁移建
 # ——SCHEMA 比迁移先跑，老库的 snapshots 可能还没有这两列。
 ROUND_TALLY_INDEX = "idx_snapshots_round_counts"
+
+# 汇总导入的去重键（spec §9 / ADR-0032）：一次观测 = (店铺, 商品, 时刻, 图片结果)。
+# 不能写成 UNIQUE(..., content_hash)——content_hash 与 image_error 可能为 NULL，而 SQLite
+# 唯一索引里 NULL 互不相等，会漏掉所有图片失败的行；两列的空值用 COALESCE 折进表达式。
+# 列的表达式只在这里写一遍：建索引与写路径的回查共用（导入侧，票据 09，也用它）。
+# 索引由迁移建、不写进 SCHEMA：老库版本表若有重复键，UNIQUE 建不上——迁移可以跳过、
+# 库照开；SCHEMA 里失败则整个 executescript 中断，库打不开。
+VERSION_DEDUPE_KEY = ("shop_key", "offer_id", "observed_at",
+                      "COALESCE(content_hash,'')", "COALESCE(image_error,'')")
+VERSION_DEDUPE_INDEX = "idx_product_information_dedupe"
 
 # 过程页刷新的两条索引：逐店 deny 计数、逐店时间跨度（名字要与上面 SCHEMA 里的
 # 两条 CREATE INDEX 一致，tests/test_db.py 有用例守着）。
@@ -554,6 +563,32 @@ def _round_tally_index(conn: sqlite3.Connection, out: _ReportBuilder) -> bool:
     return True
 
 
+def _version_dedupe_index(conn: sqlite3.Connection, out: _ReportBuilder) -> bool:
+    """迁移：给版本表建汇总导入的去重索引（老库第一次开连接时建一次）。
+
+    建不动就跳过（老库版本表真有重复键时 UNIQUE 建不上）——与 `_drop_column` 同款：
+    一次迁移不该把库卡在打不开的状态；没建起来，下次开库会再试。
+    """
+    columns = {row[1] for row in
+               conn.execute('PRAGMA table_info("product_information_versions")').fetchall()}
+    if not {"shop_key", "offer_id", "observed_at", "content_hash", "image_error"} <= columns:
+        return False
+    if _has_index(conn, VERSION_DEDUPE_INDEX):
+        return False
+    try:
+        conn.execute(
+            f"CREATE UNIQUE INDEX {VERSION_DEDUPE_INDEX} ON product_information_versions"
+            f"({', '.join(VERSION_DEDUPE_KEY)})"
+        )
+    except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
+        # 重复键报的是 IntegrityError（不是 OperationalError），两条都要接住。
+        log.warning("版本表去重索引建不上，本次跳过（下次开库再试）：%s", exc)
+        return False
+    out.created_indexes.append(VERSION_DEDUPE_INDEX)
+    log.info("版本表去重索引迁移：建立 %s", VERSION_DEDUPE_INDEX)
+    return True
+
+
 _MIGRATIONS: tuple[_Migration, ...] = (
     _Migration("drop_shops_active", _drop_shops_active),
     _Migration("skus_primary_key_on_sku_id", _skus_primary_key_on_sku_id),
@@ -568,8 +603,10 @@ _MIGRATIONS: tuple[_Migration, ...] = (
     _add_column("detail_opportunities", "offer_id", "TEXT"),
     _drop_column("skus", "main_image_url"),
     _drop_column("snapshots", "stock_delta"),
+    _drop_column("inventory", "diff"),
     _Migration("snapshot_success_index", _snapshot_success_index),
     _Migration("round_tally_index", _round_tally_index),
+    _Migration("version_dedupe_index", _version_dedupe_index),
     _add_column("crawler_process", "process_os_started", "TEXT"),
     _add_column("crawler_process", "browser_state", "TEXT NOT NULL DEFAULT 'UNKNOWN'"),
     _add_column("crawler_process", "browser_port", "INTEGER"),
@@ -1213,8 +1250,9 @@ class Database:
                 if 'content' in image:
                     self.conn.execute('INSERT OR IGNORE INTO product_image_assets VALUES (?, ?, ?)',
                                       (image['hash'], image['mime'], image['content']))
+            # 同一秒里的同一次观测只留一条（VERSION_DEDUPE_INDEX）：重复提交不整单回滚。
             self.conn.execute(
-                'INSERT INTO product_information_versions '
+                'INSERT OR IGNORE INTO product_information_versions '
                 '(shop_key,offer_id,observed_at,observed_date,product_name,image_url,content_hash,image_error) '
                 'VALUES (?,?,?,?,?,?,?,?)',
                 (shop_key, offer_id, collected_at, cst_date(collected_at),
@@ -1251,7 +1289,7 @@ class Database:
 
         offer_level 为真表示本次是商品级观测（单规格商品的一条默认行），要清掉 SKU 级
         记录；反之清掉默认行。快照按本轮清，库存按当天清；更早日期的历史观测保留，
-        因为差分基准只取同一 SKU，不会跨粒度比较。
+        因为分析侧按 SKU 从 stock 序列自算销量，跨粒度的历史行不会落进同一条序列。
         """
         # 只有这一个取反操作随粒度变化，取值来自下面两个字面量，不来自外部输入。
         other = "<>" if offer_level else "="
@@ -1285,12 +1323,24 @@ class Database:
                 self.conn.execute('INSERT OR IGNORE INTO product_image_assets VALUES (?,?,?)',
                                   (image['hash'], image['mime'], image['content']))
             now = utcnow()
-            cursor = self.conn.execute('INSERT INTO product_information_versions '
-                '(shop_key,offer_id,observed_at,observed_date,product_name,image_url,content_hash,image_error) VALUES (?,?,?,?,?,?,?,?)',
+            # 同一秒里、同一图片结果的重试只留一条（VERSION_DEDUPE_INDEX）：被忽略时
+            # 那次观测已在案，按去重键把已有那一行的 id 交回去。
+            self.conn.execute(
+                'INSERT OR IGNORE INTO product_information_versions '
+                '(shop_key,offer_id,observed_at,observed_date,product_name,image_url,content_hash,image_error) '
+                'VALUES (?,?,?,?,?,?,?,?)',
                 (version['shop_key'], version['offer_id'], now, cst_date(now), None,
                  version['image_url'], image.get('hash'), image.get('error')))
+            new_version = self.conn.execute(
+                "SELECT id FROM product_information_versions WHERE "
+                + " AND ".join(f"{column}=?" for column in VERSION_DEDUPE_KEY)
+                + " ORDER BY id DESC LIMIT 1",
+                (version['shop_key'], version['offer_id'], now,
+                 image.get('hash') or '', image.get('error') or ''),
+            ).fetchone()['id']
             self.conn.commit()
-            return {'retried_version': version_id, 'new_version': cursor.lastrowid, 'image_error': image.get('error')}
+            return {'retried_version': version_id, 'new_version': new_version,
+                    'image_error': image.get('error')}
         except Exception:
             self.conn.rollback()
             raise
@@ -1313,34 +1363,28 @@ class Database:
         )
 
     def _upsert_inventory(self, rows: list[dict]) -> None:
-        """每次抓到 SKU 库存写一条每日库存；diff = 今日 stock − 最近一个更早日期 stock。"""
-        for r in rows:
-            sku_id = r.get("sku_id")
-            if not sku_id:
-                continue
-            day = cst_date(r.get("collected_at"))
-            stock = r.get("sku_stock")
-            price = r.get("sku_price")
-            prev = self.conn.execute(
-                "SELECT stock FROM inventory WHERE shop_key=? AND offer_id=? AND sku_id=? "
-                "AND date < ? ORDER BY date DESC LIMIT 1",
-                (r["shop_key"], r["offer_id"], sku_id, day),
-            ).fetchone()
-            diff = None
-            if prev is not None and stock is not None and prev["stock"] is not None:
-                diff = int(stock) - int(prev["stock"])
-            self.conn.execute(
-                "INSERT INTO inventory(shop_key, offer_id, sku_id, date, stock, diff, price, "
-                "shop_name, product_name, sku_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(shop_key, offer_id, sku_id, date) DO UPDATE SET "
-                "stock=excluded.stock, diff=excluded.diff, price=excluded.price, "
-                "shop_name=excluded.shop_name, product_name=excluded.product_name, "
-                "sku_name=excluded.sku_name",
-                (
-                    r["shop_key"], r["offer_id"], sku_id, day, stock, diff, price,
-                    r.get("shop_name"), r.get("product_name"), r.get("sku_name"),
-                ),
-            )
+        """每次抓到 SKU 库存写一条每日库存；同键覆盖本次观测值。
+
+        纯 upsert：不再为算差分逐行回查本表（ADR-0032，`inventory.diff` 已退役）。
+        """
+        inventory_rows = [
+            (r["shop_key"], r["offer_id"], r["sku_id"], cst_date(r.get("collected_at")),
+             r.get("sku_stock"), r.get("sku_price"), r.get("shop_name"),
+             r.get("product_name"), r.get("sku_name"))
+            for r in rows
+            if r.get("sku_id")
+        ]
+        if not inventory_rows:
+            return
+        self.conn.executemany(
+            "INSERT INTO inventory(shop_key, offer_id, sku_id, date, stock, price, "
+            "shop_name, product_name, sku_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(shop_key, offer_id, sku_id, date) DO UPDATE SET "
+            "stock=excluded.stock, price=excluded.price, "
+            "shop_name=excluded.shop_name, product_name=excluded.product_name, "
+            "sku_name=excluded.sku_name",
+            inventory_rows,
+        )
 
     def inventory_exists(self, shop_key: str, offer_id: str, date: str) -> bool:
         """某 (shop_key, offer_id, date) 是否已有完整库存记录。"""

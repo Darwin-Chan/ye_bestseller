@@ -11,6 +11,7 @@ from bestseller_monitor.db import (
     SCHEMA,
     SNAPSHOT_SUCCESS_INDEX,
     ShopTally,
+    VERSION_DEDUPE_INDEX,
     connect,
     cst_date,
 )
@@ -37,6 +38,13 @@ class DbTests(unittest.TestCase):
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(rounds)")}
 
         self.assertNotIn("phase", columns)
+
+    def test_a_fresh_db_has_no_inventory_diff_column(self):
+        """建出来的库没有 `inventory.diff`（ADR-0032）：它没有任何生产读方，
+        多机分片后基准也不再成立——口径随列一并退役。老库由迁移删列。"""
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(inventory)")}
+
+        self.assertNotIn("diff", columns)
 
     def _add_shop(self, round_id):
         self.db.add_shop(round_id, "A01", "https://a.example/", "店铺A")
@@ -706,7 +714,11 @@ class DbTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(tuple(sku), ("11", "S2", "a"))
 
-    def test_submit_inventory_diff_uses_previous_date_and_updates_same_day(self):
+    def test_submit_inventory_upserts_previous_days_and_updates_same_day(self):
+        """库存是纯 upsert：不同日期各一行、同日覆盖（值更新、不添行）。
+
+        写路径不再为算差分回查本表——按实测 2479 行/天，每天少约 2500 次查询（ADR-0032）。
+        """
         rid = new_round(self.db)
         base = dict(
             round_id=rid,
@@ -720,21 +732,68 @@ class DbTests(unittest.TestCase):
             main_image_url=None,
             attempt=1,
         )
-        for collected_at, stock in [
-            ("2026-09-04T02:00:00+00:00", 200),
-            ("2026-09-05T02:00:00+00:00", 160),
-            ("2026-09-05T03:00:00+00:00", 180),
-        ]:
-            self.db.submit_inventory_snapshot(
-                **base,
-                collected_at=collected_at,
-                sku_rows=[{"sku_id": "s1", "sku_name": "S", "sku_price": 1.0, "sku_stock": stock}],
-            )
-        row = self.conn.execute(
-            "SELECT stock, diff, date FROM inventory WHERE shop_key='A' AND offer_id='11' "
-            "AND date='2026-09-05'"
+        statements: list[str] = []
+        self.conn.set_trace_callback(statements.append)
+        try:
+            for collected_at, stock in [
+                ("2026-09-04T02:00:00+00:00", 200),
+                ("2026-09-05T02:00:00+00:00", 160),
+                ("2026-09-05T03:00:00+00:00", 180),
+            ]:
+                self.db.submit_inventory_snapshot(
+                    **base,
+                    collected_at=collected_at,
+                    sku_rows=[{"sku_id": "s1", "sku_name": "S", "sku_price": 1.0, "sku_stock": stock}],
+                )
+        finally:
+            self.conn.set_trace_callback(None)
+        rows = self.conn.execute(
+            "SELECT date, stock FROM inventory WHERE shop_key='A' AND offer_id='11' ORDER BY date"
+        ).fetchall()
+        self.assertEqual([tuple(row) for row in rows],
+                         [("2026-09-04", 200), ("2026-09-05", 180)],
+                         "同日第二次观测覆盖同一行；更早日期那一行不动")
+        reads = [sql for sql in statements
+                 if sql.lstrip().upper().startswith("SELECT") and "inventory" in sql.lower()]
+        self.assertEqual(reads, [], "写路径不该再为差分逐行回查本表（ADR-0032）")
+
+    def test_submit_twice_in_the_same_second_keeps_one_version_row(self):
+        """同一秒里、同一图片结果的同一次观测只留一条版本行（去重键见 VERSION_DEDUPE_INDEX）。
+
+        本机写路径与导入侧同走 INSERT OR IGNORE：重复提交不再撞唯一索引把整单回滚。
+        """
+        rid = new_round(self.db)
+        base = dict(
+            round_id=rid,
+            shop_key="A",
+            shop_url="https://a.example/",
+            shop_name="店铺A",
+            offer_id="11",
+            product_url="https://a/offer/11.html",
+            list_title="商品",
+            detail_title="商品详情",
+            main_image_url=None,
+            collected_at="2026-09-05T02:00:00+00:00",
+            attempt=1,
+        )
+        self.db.submit_inventory_snapshot(
+            **base,
+            sku_rows=[{"sku_id": "s1", "sku_name": "S", "sku_price": 1.0, "sku_stock": 160}],
+        )
+        self.db.submit_inventory_snapshot(
+            **{**base, "attempt": 2},
+            sku_rows=[{"sku_id": "s1", "sku_name": "S", "sku_price": 1.0, "sku_stock": 180}],
+        )
+
+        versions = self.conn.execute(
+            "SELECT observed_at, content_hash, image_error FROM product_information_versions "
+            "WHERE shop_key='A' AND offer_id='11'"
+        ).fetchall()
+        self.assertEqual(len(versions), 1, "同一次观测只留一条版本行")
+        inventory = self.conn.execute(
+            "SELECT stock FROM inventory WHERE shop_key='A' AND offer_id='11' AND sku_id='s1'"
         ).fetchone()
-        self.assertEqual(tuple(row), (180, -20, "2026-09-05"))
+        self.assertEqual(inventory["stock"], 180, "库存照常被后一次观测覆盖")
 
     def test_event_log_append_only_and_interval_per_channel(self):
         rid = new_round(self.db)
@@ -1083,8 +1142,9 @@ class SnapshotDedupeMigrationTests(unittest.TestCase):
                 self.assertEqual(report.deduped_snapshot_rows, 1,
                                  "缺索引的老库要靠这次去重才建得起唯一索引")
                 self.assertEqual(
-                    report.created_indexes, (SNAPSHOT_SUCCESS_INDEX, ROUND_TALLY_INDEX),
-                    "去重建起唯一索引之后，本轮计数的覆盖索引也一并补上")
+                    report.created_indexes,
+                    (SNAPSHOT_SUCCESS_INDEX, ROUND_TALLY_INDEX, VERSION_DEDUPE_INDEX),
+                    "去重建起唯一索引之后，本轮计数的覆盖索引与版本表去重索引也一并补上")
                 self.assertIn("snapshot_success_index", report.applied)
                 self.assertEqual(conn.execute(
                     "SELECT COUNT(*) FROM snapshots WHERE round_id=1 AND sku_id='red'"
@@ -1117,8 +1177,202 @@ class SnapshotDedupeMigrationTests(unittest.TestCase):
             try:
                 self.assertEqual(report.deduped_snapshot_rows, 0)
                 self.assertEqual(
-                    report.created_indexes, (SNAPSHOT_SUCCESS_INDEX, ROUND_TALLY_INDEX),
-                    "新库也在这次开库里建起本轮计数的覆盖索引")
+                    report.created_indexes,
+                    (SNAPSHOT_SUCCESS_INDEX, ROUND_TALLY_INDEX, VERSION_DEDUPE_INDEX),
+                    "新库也在这次开库里建起本轮计数的覆盖索引与版本表去重索引")
+            finally:
+                conn.close()
+
+
+class InventoryDiffRetirementTests(unittest.TestCase):
+    """票据 01：`inventory.diff` 退役 + 版本表汇总导入去重索引（ADR-0032、spec §9 §10）。
+
+    每台机器升级后首次开库自动、幂等地做完这两件事；重开不再付成本。
+    全新库只建表：没有 diff 列要删（那一段不出现），去重索引随这次开库建起
+    ——与 snapshot_success_index 同款，新库也如实报告自己建了索引。
+    """
+
+    @staticmethod
+    def _legacy_db(tmp: str) -> Path:
+        """造一个「inventory 还带着 diff 列、版本表还没有去重索引」的老库。"""
+        path = Path(tmp) / "legacy-diff.db"
+        raw = sqlite3.connect(path)
+        raw.executescript(SCHEMA)
+        raw.execute("ALTER TABLE inventory ADD COLUMN diff INTEGER")
+        raw.executemany(
+            "INSERT INTO inventory(shop_key, offer_id, sku_id, date, stock, diff, price, "
+            "shop_name, product_name, sku_name) VALUES "
+            "('A', '11', 's1', ?, ?, ?, 1.0, '店铺A', '商品', 'S')",
+            [("2026-09-04", 200, None), ("2026-09-05", 180, -20)],
+        )
+        raw.commit()
+        raw.close()
+        return path
+
+    @staticmethod
+    def _open_with_report(path: Path):
+        conn = db.open(path)
+        return conn, db.migrate(conn)
+
+    def test_first_open_drops_the_column_and_builds_the_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn, report = self._open_with_report(self._legacy_db(tmp))
+            try:
+                columns = {row[1] for row in conn.execute('PRAGMA table_info("inventory")')}
+                self.assertNotIn("diff", columns)
+                rows = conn.execute("SELECT date, stock FROM inventory ORDER BY date").fetchall()
+                self.assertEqual([tuple(row) for row in rows],
+                                 [("2026-09-04", 200), ("2026-09-05", 180)],
+                                 "删列只动列，不动行数据")
+                self.assertIn("drop_inventory_diff", report.applied)
+                self.assertIn("version_dedupe_index", report.applied)
+                self.assertIn(VERSION_DEDUPE_INDEX, report.created_indexes)
+                indexes = {row[1] for row in
+                           conn.execute('PRAGMA index_list("product_information_versions")')}
+                self.assertIn(VERSION_DEDUPE_INDEX, indexes)
+            finally:
+                conn.close()
+
+    def test_second_open_pays_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._legacy_db(tmp)
+            conn, _ = self._open_with_report(path)
+            conn.close()
+
+            conn, report = self._open_with_report(path)
+            try:
+                self.assertEqual(report.applied, (), "没有一段迁移需要动手")
+                self.assertEqual(report.created_indexes, ())
+            finally:
+                conn.close()
+
+    def test_a_fresh_library_only_builds_tables(self):
+        """全新库只建表：没有 diff 列要删；去重索引随第一次开库建起。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            conn, report = self._open_with_report(Path(tmp) / "fresh.db")
+            try:
+                self.assertNotIn("drop_inventory_diff", report.applied,
+                                 "全新库没有 diff 列，那一段不该动手")
+                self.assertIn(VERSION_DEDUPE_INDEX, report.created_indexes,
+                              "新库也如实报告自己建了这条索引")
+                columns = {row[1] for row in conn.execute('PRAGMA table_info("inventory")')}
+                self.assertNotIn("diff", columns, "建表即新形态")
+            finally:
+                conn.close()
+
+    def test_the_dedupe_index_folds_null_image_columns(self):
+        """去重键把 content_hash/image_error 的空值折进表达式：图片失败的行（两列都是
+        NULL）也要能去重——只写 UNIQUE(..., content_hash) 会漏掉它们，
+        SQLite 唯一索引里 NULL 互不相等（spec §9）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "fresh.db")
+            try:
+                insert = (
+                    "INSERT OR IGNORE INTO product_information_versions "
+                    "(shop_key, offer_id, observed_at, observed_date, product_name, "
+                    "image_url, content_hash, image_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                )
+                failed_image = ("A", "11", "2026-09-05T02:00:00+00:00", "2026-09-05",
+                                "商品", "https://img/11.jpg", None, None)
+                conn.execute(insert, failed_image)
+                conn.execute(insert, failed_image)
+                conn.commit()
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM product_information_versions").fetchone()[0]
+                self.assertEqual(count, 1, "同一次观测的图片失败行只留一条")
+
+                conn.execute(insert, ("A", "11", "2026-09-05T03:00:00+00:00",
+                                      "2026-09-05", "商品", "https://img/11.jpg", None, None))
+                conn.commit()
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM product_information_versions").fetchone()[0]
+                self.assertEqual(count, 2, "同一店铺商品的另一次观测是另一条")
+            finally:
+                conn.close()
+
+    def test_a_legacy_library_with_duplicate_version_keys_still_opens(self):
+        """老库版本表若已有重复键（正是本票前写路径能造出来的），UNIQUE 建不上：
+        这一段跳过并告警，库照开——一次迁移不该把库卡在打不开的状态。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy-dup-versions.db"
+            raw = sqlite3.connect(path)
+            raw.executescript(SCHEMA)
+            raw.executemany(
+                "INSERT INTO product_information_versions(shop_key, offer_id, observed_at, "
+                "observed_date, product_name, image_url, content_hash, image_error) "
+                "VALUES ('A', '11', '2026-09-05T02:00:00+00:00', '2026-09-05', '商品', "
+                "'https://img/11.jpg', NULL, 'offline')",
+                [(), ()],
+            )
+            raw.commit()
+            raw.close()
+
+            conn, report = self._open_with_report(path)
+            try:
+                self.assertNotIn(VERSION_DEDUPE_INDEX, report.created_indexes)
+                self.assertNotIn("version_dedupe_index", report.applied)
+                indexes = {row[1] for row in
+                           conn.execute('PRAGMA index_list("product_information_versions")')}
+                self.assertNotIn(VERSION_DEDUPE_INDEX, indexes, "建不上就跳过，重开再试")
+            finally:
+                conn.close()
+
+    def test_retry_in_the_same_second_reuses_the_observation_already_recorded(self):
+        """重试也是版本行写者：同一秒、同一图片结果的重试不撞键——那次观测已在案，
+        结果指回已有那一行（与提交路径同走 INSERT OR IGNORE）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "fresh.db")
+            database = Database(conn)
+            try:
+                rid = new_round(database)
+                database.submit_inventory_snapshot(
+                    round_id=rid, shop_key="A", shop_url="https://a.example/",
+                    shop_name="店铺A", offer_id="11", product_url="https://a/offer/11.html",
+                    list_title="商品", detail_title="商品详情",
+                    main_image_url="https://img/11.jpg",
+                    sku_rows=[{"sku_id": "s1", "sku_name": "S", "sku_price": 1.0,
+                               "sku_stock": 5}],
+                    collected_at="2026-09-05T02:00:00+00:00", attempt=1,
+                    image_evidence={"error": "offline"},
+                )
+                failed_id = conn.execute(
+                    "SELECT MAX(id) FROM product_information_versions").fetchone()[0]
+                with patch("bestseller_monitor.product_images.acquire",
+                           return_value={"error": "offline"}), \
+                     patch("bestseller_monitor.db.utcnow",
+                           return_value="2026-09-18T04:00:00+00:00"):
+                    first = database.retry_product_image(failed_id)
+                    second = database.retry_product_image(first["new_version"])
+                self.assertEqual(second["new_version"], first["new_version"],
+                                 "同一秒内的重复重试指回同一行")
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM product_information_versions").fetchone()[0]
+                self.assertEqual(count, 2, "原始失败行 + 一次重试行")
+            finally:
+                conn.close()
+
+    def test_the_old_program_hard_fails_writing_the_new_library(self):
+        """程序与库必须一起升（ADR-0032）：旧程序的 INSERT 里还写着 diff，打在新库上
+        当场报 `table inventory has no column named diff`，不再静默降级。
+
+        消息取证于 2026-09-20（SQLite 3.50.4 / Python 3.14.7，生产库迁移前的副本上复现）；
+        这条用例是随代码库常驻的回归守卫。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "fresh.db")
+            try:
+                with self.assertRaises(sqlite3.OperationalError) as ctx:
+                    conn.execute(
+                        "INSERT INTO inventory(shop_key, offer_id, sku_id, date, stock, diff, price, "
+                        "shop_name, product_name, sku_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                        "ON CONFLICT(shop_key, offer_id, sku_id, date) DO UPDATE SET "
+                        "stock=excluded.stock, diff=excluded.diff, price=excluded.price, "
+                        "shop_name=excluded.shop_name, product_name=excluded.product_name, "
+                        "sku_name=excluded.sku_name",
+                        ("A", "11", "s1", "2026-09-05", 180, -20, 1.0, "店铺A", "商品", "S"),
+                    )
+                self.assertEqual(str(ctx.exception),
+                                 "table inventory has no column named diff")
             finally:
                 conn.close()
 

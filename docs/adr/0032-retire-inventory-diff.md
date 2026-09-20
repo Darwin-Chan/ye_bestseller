@@ -1,6 +1,6 @@
 # 0032. `inventory.diff` 退役
 
-- 状态：已接受（设计定于 2026-09-20，实现未落地）
+- 状态：已接受（2026-09-20 实现落地，票据 01）
 - 日期：2026-09-20
 
 ## 背景
@@ -63,6 +63,13 @@
 SQLite 3.50.4（需要 ≥3.35）。仓库里没有视图、触发器、索引或外键引用该列；
 `_drop_column` 助手已有先例（`skus.main_image_url`），且自带"列不存在就跳过"的护栏，
 对「连接即迁移」是安全的。三台采集机与每台汇总机各在第一次开库时付一次（实测 0.05 秒）。
+
+**落地实证（2026-09-20，票据 01）**：在生产库副本上按连接即迁移跑通——22315 行 `inventory`，
+开库 61–76 毫秒（两次实测）完成删列与建索引；迁移报告如实列出两段动作（`drop_inventory_diff`、
+`version_dedupe_index`，建起 `idx_product_information_dedupe`），重开不再付成本；
+行数与 22249 行非空 `stock` 完好、`integrity_check` 通过。旧程序写新库的硬失败在副本上复现：
+`table inventory has no column named diff`（回归守卫：`tests/test_db.py` 的
+`InventoryDiffRetirementTests`）。迁移后分析链路照常出数（2026-09-07..09-13 窗口、20387 行）。
 
 **它不是单向门**：后悔了就是 `_add_column` 加回 + 从 `stock` 序列回填。
 

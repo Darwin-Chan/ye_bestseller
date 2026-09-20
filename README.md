@@ -44,7 +44,7 @@ python run.py --pages-per-shop 2 --max-detail 20 --limit-shops A01
 - 必须使用真实登录过的浏览器 profile（`config/config.toml` 的 `user_data_path`，现为 `F:/AI/bestseller_runtime/profiles/account1_edge`），首次请运行
   `python login_chrome.py` 扫码登录一次。
 - 出现滑块/登录墙时程序会暂停等待人工处理。
-- 中断后可再次运行续跑；库存差分按日期口径计算（当前日期库存 − 最近一个更早日期的库存），已放弃或中断轮写入的数据照常参与。
+- 中断后可再次运行续跑；已放弃或中断轮写入的数据照常参与。
 - 结果写入 `F:/AI/bestseller_runtime/data/bestseller.db`；解析失败的原始页面存 `F:/AI/bestseller_runtime/data/raw_pages/round_<轮次>/`；不再自动生成 CSV/Excel。运行数据已移出工作区（路径见 `config/config.toml`）。
 
 ## 打包与运行形态
