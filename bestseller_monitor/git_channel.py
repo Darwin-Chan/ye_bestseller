@@ -120,6 +120,14 @@ class GitChannel:
             f"远端一直有更快的提交。稍后再试；反复失败说明有另一台机器在同一条线上高频发布。"
         )
 
+    def head(self) -> str:
+        """当前提交的短哈希（导出报告里引用「发到了哪个提交」）。"""
+        args = ("-C", str(self.path), "rev-parse", "--short", "HEAD")
+        done = _run(*args)
+        if done.returncode != 0:
+            raise _failure("读取提交", args, done)
+        return done.stdout.strip()
+
     def reset_to_upstream(self, *, clean: bool = False) -> None:
         """把分支与工作区退回远端状态：未推送出去的提交与改动都会被撤掉。
 

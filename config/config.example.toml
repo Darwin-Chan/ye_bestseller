@@ -20,6 +20,10 @@ exchange_root = "exchange"
 git_access = "readwrite"
 # cos_access："readwrite"（采集机：限 img/* 前缀读写）或 "read_only"（纯汇总机：只 Get/Head）。
 cos_access = "readwrite"
+# 图片通道的桶名（腾讯云 COS 私有桶，key 形如 img/<哈希前2位>/<哈希>.<扩展名>）。
+# 「按机器改」；只记桶名不记密钥——AK 在仓库外（coscli 配置如 ~/.cos.yaml，或本地 secrets/）。
+# 留空 = 没配：导出照发结构化包，图片这半会如实报缺（数据交换台的检查步骤也会先说）。
+cos_bucket = "bestseller-exchange-1250000000"
 
 [run]
 # 每个店铺最多翻几页商品列表

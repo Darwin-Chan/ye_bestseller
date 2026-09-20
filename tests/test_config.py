@@ -116,6 +116,7 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(cfg.driver, "pw_cdp")
         self.assertTrue(cfg.machine_id, "示例必须带一个可用的本机编号占位")
+        self.assertTrue(cfg.cos_bucket, "示例必须带一个图片桶占位，图片通道才配得起来")
 
     def test_example_config_copied_as_config_toml_loads(self):
         """「本机从示例复制即可开跑」：复制品在任意位置都能加载，路径全部落在复制后的根里。"""
@@ -151,6 +152,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(cfg.machine_id, "m1")
             self.assertEqual(cfg.role, "collector")
             self.assertEqual(cfg.exchange_root, (Path(tmp) / "exchange").resolve())
+            self.assertEqual(cfg.cos_bucket, "", "没配桶：导出照发包，图片这半如实报缺")
             self.assertEqual(cfg.git_access, "readwrite")
             self.assertEqual(cfg.cos_access, "readwrite")
 
@@ -161,6 +163,7 @@ class ConfigTests(unittest.TestCase):
 machine_id = "m4"
 role = "merge_only"
 exchange_root = "run/exchange"
+cos_bucket = "bestseller-exchange-1250000000"
 git_access = "read_only"
 cos_access = "read_only"
 """
@@ -171,6 +174,7 @@ cos_access = "read_only"
             self.assertEqual(cfg.machine_id, "m4")
             self.assertEqual(cfg.role, "merge_only")
             self.assertEqual(cfg.exchange_root, (Path(tmp) / "run" / "exchange").resolve())
+            self.assertEqual(cfg.cos_bucket, "bestseller-exchange-1250000000")
             self.assertEqual(cfg.git_access, "read_only")
             self.assertEqual(cfg.cos_access, "read_only")
 
