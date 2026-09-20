@@ -120,9 +120,9 @@ function inventoryChart(points, sku=false) {
         cumulative+=p.sales;
         if(p.stock===null){previous=null;return;}
         const sy=190-cumulative/Math.max(1,total)*height;
-        if(previous!==null) marks+=`<line x1="${x(i-1)}" y1="${y(previous.stock)}" x2="${x(i)}" y2="${y(p.stock)}" stroke="#39856b"/><line x1="${x(i-1)}" y1="${190-(cumulative-p.sales)/Math.max(1,total)*height}" x2="${x(i)}" y2="${sy}" stroke="#5973b4" stroke-dasharray="4 3"/>`;
+        if(previous!==null && !p.segment_start) marks+=`<line x1="${x(i-1)}" y1="${y(previous.stock)}" x2="${x(i)}" y2="${y(p.stock)}" stroke="#39856b"/><line x1="${x(i-1)}" y1="${190-(cumulative-p.sales)/Math.max(1,total)*height}" x2="${x(i)}" y2="${sy}" stroke="#5973b4" stroke-dasharray="4 3"/>`;
         const tip=p.color==='red'?(sku?'库存增加，疑似补货，该时段销量设定为0':'存在疑似补货SKU'):p.color==='yellow'?'当日未抓取库存':'';
-        marks+=`<circle data-stock="${p.stock}" cx="${x(i)}" cy="${y(p.stock)}" r="4" fill="${{red:'#ce4c46',yellow:'#b68818',green:'#318763'}[p.color]}">${tip?`<title>${tip}</title>`:''}</circle><circle cx="${x(i)}" cy="${sy}" r="3" fill="#5973b4"/><text x="${x(i)}" y="215" text-anchor="middle" font-size="10">${p.date.slice(5)}</text>`;
+        marks+=`<circle data-date="${p.date}" data-stock="${p.stock}" cx="${x(i)}" cy="${y(p.stock)}" r="4" fill="${{red:'#ce4c46',yellow:'#b68818',green:'#318763'}[p.color]}">${tip?`<title>${tip}</title>`:''}</circle><circle cx="${x(i)}" cy="${sy}" r="3" fill="#5973b4"/><text x="${x(i)}" y="215" text-anchor="middle" font-size="10">${p.date.slice(5)}</text>`;
         previous=p;
     });
     return `<svg class="inventory-chart" viewBox="0 0 ${width} 230" role="img" aria-label="库存与累计销量" style="width:100%"><text x="10" y="16">库存 0–${maxStock}</text><text x="450" y="16">累计销量 0–${total}</text>${marks}</svg>`;

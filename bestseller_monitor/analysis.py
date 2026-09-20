@@ -177,9 +177,11 @@ def calculate_inventory(rows: list[dict], start: str, end: str) -> dict:
                 sku['sales'] = sum(p['sales'] for p in sku['points'])
                 skus.append(sku)
         bucket = {'skus': skus, 'sales': sum(s['sales'] for s in skus), 'points': []}
+        switches = {segment['start'] for segment in segments[1:]}
         for i, day in enumerate(dates):
             active = [s['points'][i] for s in skus if s['points'][i]['stock'] is not None]
             bucket['points'].append({'date': day, 'stock': sum(p['stock'] for p in active) if active else None,
+                                    'segment_start': day in switches,
                                     'sales': sum(p['sales'] for p in active),
                                     'color': 'red' if any(p['color'] == 'red' for p in active) else 'green'})
         result[key] = bucket

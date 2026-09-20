@@ -158,9 +158,53 @@ class AnalysisBrowserTests(unittest.TestCase):
         expect(self.page.locator('#ranking > details').first).to_contain_text('切换商品')
         expect(self.page.locator('#ranking > details > summary').first).to_contain_text('30')
         expect(self.page.locator('#ranking .inventory-chart').first).to_be_visible()
+        rank = self.page.locator('#ranking > details').first
+        expect(rank.locator('.inventory-chart').first.locator('line')).to_have_count(12)
+        default_chart = rank.locator('details .inventory-chart').first
+        expect(default_chart.locator('circle[data-stock]')).to_have_count(3)
+        expect(default_chart.locator('circle[data-date="2026-09-10"]')).to_have_count(0)
+        for day, stock in [(15, 20), (16, 0)]:
+            stamp = f'2026-09-{day}'
+            rid = new_round(self.db, 'A01', run_date=stamp)
+            self.db.submit_inventory_snapshot(
+                round_id=rid, shop_key='A01', shop_url='https://shop.example',
+                shop_name='店铺1', offer_id='22', product_url='https://detail.1688.com/offer/22.html',
+                list_title='切换商品', detail_title='切换商品', main_image_url='',
+                sku_rows=[dict(sku_id='default', sku_name='default', sku_stock=stock)],
+                collected_at=stamp+'T04:00:00+00:00', attempt=1)
+        # Existing analysis remains frozen after source changes.
+        self.page.reload()
+        expect(self.page.locator('#ranking > details > summary').first).to_contain_text('30')
+        self.page.get_by_role('button', name='重新选择日期').click()
+        self.dates()
+        self.page.get_by_label('结束日期', exact=True).fill('2026-09-16')
+        self.page.get_by_role('button', name='继续', exact=True).click()
+        self.page.get_by_role('button', name='下一步、进入同款确认').click()
+        expect(self.page.get_by_role('button', name='确认当前分组', exact=True)).to_have_count(2)
+        for remaining in (1, 0):
+            self.page.get_by_role('button', name='确认当前分组', exact=True).first.click()
+            expect(self.page.get_by_role('button', name='确认当前分组', exact=True)).to_have_count(remaining)
+        self.page.locator('#ranking > details > summary').first.click()
+        expect(self.page.locator('#ranking > details > summary').first).to_contain_text('50')
+        final_chart = self.page.locator('#ranking > details').first.locator('details .inventory-chart').last
+        expect(final_chart.locator('circle[data-stock]')).to_have_count(2)
+        expect(final_chart.locator('circle[data-stock="0"]')).to_have_count(1)
 
 
 class InventoryCalculationTests(unittest.TestCase):
+    def test_new_sku_and_missing_day_do_not_end_existing_sku(self):
+        rows = [dict(shop_key='A', offer_id='P', sku_id=sku,
+                     date=f'2026-09-{day:02}', stock=stock)
+                for day, sku, stock in [(7, 'a', 100), (9, 'a', 90),
+                                        (10, 'b', 50), (14, 'b', 40)]]
+        result = calculate_inventory(rows, '2026-09-07', '2026-09-14')[('A', 'P')]
+        self.assertEqual(result['sales'], 20)
+        self.assertEqual(result['points'][-1]['stock'], 130)
+        added = next(s for s in result['skus'] if s['sku_id'] == 'b')
+        self.assertIsNone(added['points'][0]['stock'])
+        self.assertEqual(added['points'][3]['sales'], 0)
+        self.assertEqual(result['skus'][0]['points'][1]['color'], 'yellow')
+
     def test_representation_segments_do_not_bridge_switches(self):
         observations = [(7, 'default', 100), (8, 'default', 90),
                         (10, 'white', 40), (10, 'cream', 60),
