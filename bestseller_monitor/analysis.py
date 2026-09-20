@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import base64
 import sqlite3
 import threading
 import tomllib
@@ -99,6 +100,27 @@ class AnalysisService:
                 ORDER BY i.shop_key,i.offer_id
             """, (start, end))]
             shops = [dict(row) for row in conn.execute("SELECT * FROM shops ORDER BY shop_key")]
+            has_history = conn.execute("SELECT 1 FROM sqlite_master WHERE name='product_information_versions'").fetchone()
+            for product in products:
+                version = conn.execute('''SELECT v.*, a.mime, a.content
+                    FROM product_information_versions v LEFT JOIN product_image_assets a
+                    ON a.content_hash=v.content_hash
+                    WHERE v.shop_key=? AND v.offer_id=? AND v.observed_date<=?
+                    ORDER BY v.observed_date DESC,v.observed_at DESC,v.id DESC LIMIT 1''',
+                    (product['shop_key'], product['offer_id'], end)).fetchone() if has_history else None
+                product['image_data'] = None
+                product['image_error'] = '该日期没有历史图片'
+                product['information_version'] = version['id'] if version else None
+                if version:
+                    product['product_name'] = version['product_name']
+                    product['image_hash'] = version['content_hash']
+                    product['image_error'] = version['image_error']
+                    if version['content']:
+                        product['image_data'] = 'data:'+version['mime']+';base64,'+base64.b64encode(version['content']).decode('ascii')
+                else:
+                    historical = [r for r in rows if r['shop_key']==product['shop_key'] and r['offer_id']==product['offer_id'] and r['date']<=end]
+                    product['product_name'] = max(historical, key=lambda r:r['date'])['product_name'] if historical else None
+                product['main_image_url'] = None
         calculations = calculate_inventory(rows, start, end)
         for product in products:
             key = (product["shop_key"], product["offer_id"])
@@ -132,6 +154,11 @@ class AnalysisService:
                 raise ValueError("同款组不存在")
             group["confirmed"] = True
             return copy.deepcopy(snapshot)
+
+    def source(self, offer_id):
+        with self._read() as conn:
+            row = conn.execute('SELECT product_url FROM products WHERE offer_id=?', (offer_id,)).fetchone()
+            return {'url': row['product_url'] if row else None}
 
 
 def _dates(start: str, end: str) -> list[str]:

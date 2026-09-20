@@ -87,6 +87,25 @@ class DetailTestCase(unittest.TestCase):
             (self.round_id, page_status))
 
 
+class ImageEvidenceTests(DetailTestCase):
+    def test_shared_capture_retries_image_and_persists_asset(self):
+        import io
+        from PIL import Image
+        stream = io.BytesIO()
+        Image.new('RGB', (1, 1), 'red').save(stream, format='PNG')
+        observation = self.payload()
+        observation.payload['main_image_url'] = 'https://image.example/item.png'
+        with patch('bestseller_monitor.product_images.urlopen',
+                   side_effect=[OSError('temporary'), io.BytesIO(stream.getvalue())]) as fetch:
+            result = self.capture(self.target(), self.observe(observation))
+        self.assertEqual(result.outcome, detail.Outcome.SUBMITTED)
+        self.assertEqual(fetch.call_count, 2)
+        version = self.rows('SELECT * FROM product_information_versions')[0]
+        self.assertIsNotNone(version['content_hash'])
+        self.assertIsNone(version['image_error'])
+        self.assertEqual(self.rows('SELECT content FROM product_image_assets')[0]['content'], stream.getvalue())
+
+
 class SameDaySkipTests(DetailTestCase):
     """同日去重：今天采过的商品不重复访问详情，也不消耗详情预算（ADR-0001）。"""
 

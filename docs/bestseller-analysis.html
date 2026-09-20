@@ -11,6 +11,7 @@
 <p><button id="begin" class="primary">下一步、进入同款确认</button></p></section>
 <section id="reviewPage" hidden><div class="bar"><h2>确认同款</h2><button id="back">重新选择日期</button></div><p id="snapshotInfo"></p><p class="muted">当前为独立商品组；请逐组确认后查看初步畅销品排名。</p><div id="products"></div><section id="results" hidden><h2>初步畅销品</h2><div id="ranking"></div></section><div class="bar"><button id="prev">上一页</button><span id="pageInfo"></span><button id="next">下一页</button></div></section>
 </main><dialog id="notice"><p id="noticeText"></p><button id="noticeOK">继续</button></dialog>
+<dialog id="imageViewer" aria-label="商品图片"><img id="largeImage" alt="商品主图" style="max-width:100%;max-height:70vh"><button onclick="this.closest('dialog').close()">关闭大图</button></dialog>
 <script>
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, character => ({
@@ -90,14 +91,34 @@ function show(snapshot) {
     renderProducts();
     history.replaceState(null,'','#analysis='+snapshot.id);
 }
+function productPhoto(p) {
+    return p.image_data?`<button aria-label="放大商品图片" onclick="showProductImage(this)"><img alt="${esc(p.product_name)}" src="${esc(p.image_data)}" style="width:100px;height:100px;object-fit:contain"></button>`:`<span title="${esc(p.image_error)}">历史图片缺失</span>`;
+}
+function showProductImage(button) {
+    $('largeImage').src=button.querySelector('img').src;
+    $('imageViewer').showModal();
+}
+function sourceIcon(p) {
+    return /^https?:\/\//i.test(p.product_url||'')?`<a aria-label="商品源地址" title="商品源地址" href="${esc(p.product_url)}" target="_blank" rel="noopener noreferrer" onclick="openCurrentSource(event,'${esc(p.offer_id)}')">↗</a>`:'<span aria-disabled="true" title="暂无商品源地址" style="color:#aaa">↗</span>';
+}
+async function openCurrentSource(event, offer) {
+    event.preventDefault(); event.stopPropagation();
+    const tab=window.open('about:blank','_blank');
+    if(tab)tab.opener=null;
+    try {
+        const data=await api('/api/source?offer='+encodeURIComponent(offer));
+        if(!/^https?:\/\//i.test(data.url||''))throw new Error('暂无商品源地址');
+        if(tab)tab.location=data.url;
+    } catch(e) {if(tab)tab.close();error(e);}
+}
 function renderProducts() {
     const snapshot=currentSnapshot, offset=productPage*20;
     $('products').innerHTML=snapshot.products.slice(offset,offset+20).map((p,i)=>{
         const rows=inventoryByProduct.get(JSON.stringify([p.shop_key,p.offer_id]))||[];
         const group=snapshot.groups.find(g=>g.members.some(m=>m.shop_key===p.shop_key&&m.offer_id===p.offer_id));
         const skuRows=p.skus||[];
-        return `<article><div class="bar"><h3>${esc(group.id)} · ${esc(p.product_name||p.offer_id)}</h3><button ${group.confirmed?'disabled':''} onclick="confirmGroup('${group.id}')">${group.confirmed?'已确认':'确认当前分组'}</button></div>
-            <p>${esc(p.shop_key)} · 商品 ${esc(p.offer_id)} · ${skuRows.length} 个 SKU · 区间销量 <b>${p.sales}</b> · <span class="group-status">${group.confirmed?"已确认":"待确认"}</span></p>
+        return `<article><div class="bar"><h3>${esc(group.id)} · ${esc(p.product_name||p.offer_id)} ${sourceIcon(p)}</h3><button ${group.confirmed?'disabled':''} onclick="confirmGroup('${group.id}')">${group.confirmed?'已确认':'确认当前分组'}</button></div>
+            ${productPhoto(p)}<p>${esc(p.shop_key)} · 商品 ${esc(p.offer_id)} · ${skuRows.length} 个 SKU · 区间销量 <b>${p.sales}</b> · <span class="group-status">${group.confirmed?"已确认":"待确认"}</span></p>
             ${skuRows.map(sku=>`<details open><summary>${esc(sku.name)} · 第 ${sku.segment} 段 · SKU ${esc(sku.sku_id)} · 销量 <b>${sku.sales}</b></summary><table><thead><tr><th>日期</th><th>库存</th><th>当日销量</th><th>状态</th></tr></thead><tbody>${sku.points.map(point=>`<tr><td>${point.date}</td><td>${point.stock ?? '—'}</td><td>${point.sales}</td><td>${point.color==='inactive'?'不在有效段':point.color==='red'?'疑似补货':point.color==='yellow'?'当日未抓取库存':'正常观测'}</td></tr>`).join('')}</tbody></table></details>`).join('')}</article>`;
     }).join('');
     const pages=Math.ceil(snapshot.products.length/20);

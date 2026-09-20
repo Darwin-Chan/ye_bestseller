@@ -40,13 +40,89 @@ class AnalysisBrowserTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join()
 
-    def submit(self, day, stock):
+    def submit(self, day, stock, *, name='杯子', image_url='', image_evidence=None):
         rid = new_round(self.db, "A01", run_date=day)
         self.db.submit_inventory_snapshot(round_id=rid, shop_key="A01", shop_url="https://shop.example",
             shop_name="店铺1", offer_id="11", product_url="https://detail.1688.com/offer/11.html",
-            list_title="杯子", detail_title="杯子", main_image_url="", sku_rows=[
+            list_title=name, detail_title=name, main_image_url=image_url, image_evidence=image_evidence, sku_rows=[
                 {"sku_id":"red", "sku_name":"红色", "sku_stock":stock}],
             collected_at=day+"T04:00:00+00:00", attempt=1)
+
+    def test_historical_images_survive_source_failure_and_keep_names_paired(self):
+        import io
+        import struct
+        import zlib
+        from unittest.mock import patch
+        from bestseller_monitor.product_images import acquire
+
+        def png(rgb):
+            def chunk(kind, data):
+                return struct.pack('>I', len(data))+kind+data+struct.pack('>I', zlib.crc32(kind+data))
+            return (b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0))
+                    +chunk(b'IDAT', zlib.compress(b'\0'+rgb))+chunk(b'IEND', b''))
+
+        url = 'https://images.example/current.png'
+        for day, name, color in [('2026-09-07', '旧款杯子', b'\xff\0\0'),
+                                 ('2026-09-14', '新款杯子', b'\0\xff\0')]:
+            with patch('bestseller_monitor.product_images.urlopen', return_value=io.BytesIO(png(color))):
+                self.submit(day, 100, name=name, image_url=url, image_evidence=acquire(url))
+        old = self.service.start('2026-09-06', '2026-09-07')['products'][0]
+        new = self.service.start('2026-09-07', '2026-09-14')['products'][0]
+        self.assertNotEqual(old['image_hash'], new['image_hash'])
+        self.assertEqual(old['product_name'], '旧款杯子')
+        self.assertEqual(new['product_name'], '新款杯子')
+        with patch('bestseller_monitor.product_images.urlopen', side_effect=OSError('offline')):
+            self.page.get_by_label('开始日期', exact=True).fill('2026-08-31')
+            self.page.get_by_label('结束日期', exact=True).fill('2026-09-07')
+            self.page.get_by_role('button', name='下一步、进入同款确认').click()
+            expect(self.page.get_by_role('heading', name='G1 · 旧款杯子')).to_be_visible()
+            self.page.get_by_role('button', name='放大商品图片').click()
+            expect(self.page.get_by_role('dialog', name='商品图片')).to_be_visible()
+            self.assertTrue(self.page.locator('#largeImage').evaluate('(img)=>img.complete && img.naturalWidth===1'))
+            self.assertEqual(self.page.locator('#largeImage').get_attribute('src'), old['image_data'])
+            self.page.get_by_role('button', name='关闭大图').click()
+            source = self.page.get_by_role('link', name='商品源地址')
+            expect(source).to_have_attribute('target', '_blank')
+            expect(source).to_have_attribute('href', 'https://detail.1688.com/offer/11.html')
+            self.conn.execute("UPDATE products SET product_url='https://detail.1688.com/offer/11.html?current=1' WHERE offer_id='11'")
+            self.conn.commit()
+            self.page.context.route('https://detail.1688.com/**', lambda route: route.fulfill(body='current source'))
+            with self.page.expect_popup() as opened:
+                source.click()
+            opened.value.wait_for_url('**/11.html?current=1')
+            opened.value.close()
+            self.page.get_by_role('button', name='重新选择日期').click()
+            self.dates()
+            self.page.get_by_role('button', name='下一步、进入同款确认').click()
+            expect(self.page.get_by_role('heading', name='G1 · 新款杯子')).to_be_visible()
+            self.assertEqual(self.page.get_by_role('img', name='新款杯子').get_attribute('src'), new['image_data'])
+            failure = acquire(url)
+        self.submit('2026-09-15', 80, name='失败版本', image_url=url, image_evidence=failure)
+        failed = self.service.start('2026-09-07', '2026-09-15')['products'][0]
+        self.assertIsNone(failed['image_data'])
+        self.assertIn('offline', failed['image_error'])
+        with patch('bestseller_monitor.product_images.urlopen', return_value=io.BytesIO(png(b'\0\xff\0'))):
+            self.submit('2026-09-16', 70, name='重试版本', image_url=url+'?new', image_evidence=acquire(url+'?new'))
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM product_image_assets').fetchone()[0], 2)
+        self.submit('2026-09-17', 60, image_url=url, image_evidence={'content': b'\x89PNG\r\n\x1a\ninvalid'})
+        self.assertIsNone(self.service.start('2026-09-07', '2026-09-17')['products'][0]['image_data'])
+        with patch('bestseller_monitor.product_images.urlopen', side_effect=AssertionError('opening must not fetch')):
+            for _ in range(2):
+                reopened = connect(self.path)
+                self.assertEqual(reopened.execute('SELECT COUNT(*) FROM product_image_assets').fetchone()[0], 2)
+                reopened.close()
+
+    def test_legacy_inventory_never_borrows_current_image(self):
+        self.conn.execute('DELETE FROM product_information_versions')
+        self.conn.execute("UPDATE products SET main_image_url='https://images.example/current.png'")
+        self.conn.commit()
+        product = self.service.start('2026-09-07', '2026-09-14')['products'][0]
+        self.assertIsNone(product['image_data'])
+        self.assertEqual(product['image_error'], '该日期没有历史图片')
+        self.dates()
+        self.page.get_by_role('button', name='下一步、进入同款确认').click()
+        expect(self.page.get_by_text('历史图片缺失', exact=True)).to_be_visible()
+        expect(self.page.get_by_role('button', name='放大商品图片')).to_have_count(0)
 
     def dates(self):
         self.page.get_by_label("开始日期", exact=True).fill("2026-09-07")

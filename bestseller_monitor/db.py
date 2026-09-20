@@ -16,6 +16,17 @@ from .parse import DEFAULT_SKU_ID
 log = logging.getLogger(__name__)
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS product_image_assets (
+    content_hash TEXT PRIMARY KEY, mime TEXT NOT NULL, content BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS product_information_versions (
+    id INTEGER PRIMARY KEY, shop_key TEXT NOT NULL, offer_id TEXT NOT NULL,
+    observed_at TEXT NOT NULL, observed_date TEXT NOT NULL, product_name TEXT,
+    image_url TEXT, content_hash TEXT REFERENCES product_image_assets(content_hash),
+    image_error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_product_information_date
+ON product_information_versions(shop_key, offer_id, observed_date, observed_at);
 CREATE TABLE IF NOT EXISTS rounds (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT NOT NULL,
@@ -1127,6 +1138,7 @@ class Database:
         sku_rows: list[dict],
         collected_at: str,
         attempt: int,
+        image_evidence: dict | None = None,
     ) -> None:
         """原子提交一次完整商品库存快照。
 
@@ -1191,6 +1203,22 @@ class Database:
                 offer_id, product_url, detail_name or None, image_url or None,
             )
             self._upsert_skus(normalized)
+            image = image_evidence or {'error': '未取得历史图片'}
+            if 'content' in image:
+                from .product_images import evidence
+                try:
+                    image = evidence(image['content'])
+                except ValueError as exc:
+                    image = {'error': str(exc)}
+                if 'content' in image:
+                    self.conn.execute('INSERT OR IGNORE INTO product_image_assets VALUES (?, ?, ?)',
+                                      (image['hash'], image['mime'], image['content']))
+            self.conn.execute(
+                'INSERT INTO product_information_versions '
+                '(shop_key,offer_id,observed_at,observed_date,product_name,image_url,content_hash,image_error) '
+                'VALUES (?,?,?,?,?,?,?,?)',
+                (shop_key, offer_id, collected_at, cst_date(collected_at),
+                 detail_name or snapshot_name, image_url, image.get('hash'), image.get('error')))
             # 粒度由本次提交的行决定：只有默认行是商品级观测，其余是 SKU 级观测。
             self._clear_other_granularity(
                 round_id, shop_key, offer_id, cst_date(collected_at),

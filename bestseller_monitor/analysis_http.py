@@ -38,6 +38,8 @@ def create_server(service, port=0):
                         return self.reply(PAGE.read_bytes(), content_type="text/html; charset=utf-8")
                     if route.path == "/api/settings":
                         return self.reply(service.settings())
+                    if route.path == "/api/source":
+                        return self.reply(service.source(query['offer'][0]))
                     if route.path == "/api/coverage":
                         return self.reply(service.coverage(query["date"][0]))
                     if route.path == "/api/analysis":

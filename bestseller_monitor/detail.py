@@ -245,6 +245,8 @@ def _capture_attempts(db: Database, cfg: Config, human, round_id: int, target: D
                 human.sleep(human.retry_delay(attempt))
             continue
 
+        from .product_images import acquire
+        image_evidence = acquire(payload.get('main_image_url'))
         db.submit_inventory_snapshot(
             round_id=round_id,
             shop_key=target.shop_key,
@@ -258,6 +260,7 @@ def _capture_attempts(db: Database, cfg: Config, human, round_id: int, target: D
             sku_rows=payload["rows"],
             collected_at=utcnow(),
             attempt=attempt,
+            image_evidence=image_evidence,
         )
         # 提交之后再看一次：已提交的数据保留，停止判定不回滚它。
         rounds.ensure_workable(db, round_id, utcnow())
