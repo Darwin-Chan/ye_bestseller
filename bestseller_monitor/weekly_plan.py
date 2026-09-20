@@ -91,6 +91,16 @@ class PlanHistory:
         return {w: self.assignments[w][shop_key]
                 for w in self.weeks if shop_key in self.assignments[w]}
 
+    def assigned_load(self, machines: Iterable[str], weeks: int) -> dict[str, int]:
+        """近 weeks 份已发布计划里各机器被指派的页数之和（取各周计划里的旧值）。"""
+        load = dict.fromkeys(machines, 0)
+        for w in self.weeks[: max(weeks, 0)]:
+            week_pages = self.pages[w]
+            for key, machine in self.assignments[w].items():
+                if machine in load:
+                    load[machine] += week_pages[key]
+        return load
+
 
 def read_history(documents: Iterable[Mapping[str, Any]], *, before_week: str) -> PlanHistory:
     """把已发布的历史计划文件整理成算法与 .md 都要的视图。
@@ -126,7 +136,9 @@ def read_history(documents: Iterable[Mapping[str, Any]], *, before_week: str) ->
         for key, machine in raw_assignments.items():
             if key not in week_pages:
                 raise PlanError(f"历史计划 {week}：assignments 里的 {key} 不在 shops 快照里")
-            assignments.setdefault(week, {})[key] = str(machine)
+            if not isinstance(machine, str):
+                raise PlanError(f"历史计划 {week}：{key} 的机器标识不是字符串：{machine!r}")
+            assignments.setdefault(week, {})[key] = machine
         pages[week] = week_pages
 
     weeks = tuple(sorted(seen, key=_parse_week, reverse=True))
@@ -176,12 +188,7 @@ def generate_plan(
     history = read_history(history_documents, before_week=week)
 
     # 平衡窗口：近 balance_weeks-1 周的被指派页数，取各周计划里的旧值
-    hist_load = dict.fromkeys(roster, 0)
-    for w in history.weeks[: max(balance_weeks - 1, 0)]:
-        week_pages = history.pages[w]
-        for key, machine in history.assignments[w].items():
-            if machine in hist_load:
-                hist_load[machine] += week_pages[key]
+    hist_load = history.assigned_load(roster, balance_weeks - 1)
 
     load = dict.fromkeys(roster, 0)
     assignments: dict[str, str] = {}
@@ -205,8 +212,6 @@ def generate_plan(
             forbidden.pop()                                  # 丢最老的一条约束
             dropped += 1
             eligible = [m for m in roster if m not in forbidden]
-        if not eligible:
-            raise PlanError("机器名册为空，无法分配")
 
         pick = min(eligible, key=lambda m: (hist_load[m] + load[m], load[m]))
         assignments[shop.key] = pick

@@ -6,17 +6,21 @@
 // 用法：node tools/check_plan_parity.mjs
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
-const html = readFileSync(
-  join(root, ".scratch", "multi-machine-collection", "prototype", "allocation-demo.html"),
-  "utf8",
-);
+const htmlPath = join(root, ".scratch", "multi-machine-collection", "prototype", "allocation-demo.html");
+if (!existsSync(htmlPath)) {
+  console.error("找不到原型对照基准：" + htmlPath);
+  console.error("本脚本只在带 .scratch 的检出（本机）上可用；仓库自带的逐格基准是");
+  console.error("tests/fixtures/plan_parity_expected.json，随 pytest 跑（见 tests/test_weekly_plan.py）。");
+  process.exit(2);
+}
+const html = readFileSync(htmlPath, "utf8");
 const begin = html.indexOf("/* ==MODULE-BEGIN==");
 const end = html.indexOf("/* ==MODULE-END== */");
 if (begin < 0 || end < 0) throw new Error("HTML 里找不到模块标记");
