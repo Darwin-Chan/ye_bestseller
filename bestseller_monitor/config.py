@@ -33,6 +33,47 @@ def _driver(v: object) -> str:
     return driver
 
 
+# 机器角色档位（spec §10）：采集机 = 采集 + 导出 + 汇总；纯汇总机 = 只汇总与展示。
+ROLE_COLLECTOR = "collector"
+ROLE_MERGE_ONLY = "merge_only"
+_ROLE_GLOSS = {ROLE_COLLECTOR: "采集机", ROLE_MERGE_ONLY: "纯汇总机"}
+
+# 凭据档位（spec §11）：只记档位、不记密钥；密钥在仓库外（~/.ssh、secrets/ 或 coscli 配置）。
+# readwrite = 采集机档（git 可写、COS 限 img/* 读写）；read_only = 纯汇总机档（push/上传被拒即档位正确）。
+ACCESS_READWRITE = "readwrite"
+ACCESS_READ_ONLY = "read_only"
+_ACCESS_TIERS = (ACCESS_READWRITE, ACCESS_READ_ONLY)
+
+
+def _machine_id(machine: dict, config_path: pathlib.Path) -> str:
+    machine_id = str(machine.get("machine_id") or "").strip()
+    if not machine_id:
+        raise ValueError(
+            "配置缺 machine.machine_id：本机在交换区里的唯一编号，"
+            "三台采集机写 m1/m2/m3，纯汇总机自取（如 m4）。\n"
+            f"照 {config_path.with_name('config.example.toml')} 的 [machine] 一节补齐。"
+        )
+    return machine_id
+
+
+def _role(v: object) -> str:
+    role = str(v or ROLE_COLLECTOR)
+    if role not in _ROLE_GLOSS:
+        legal = "、".join(f'"{name}"（{gloss}）' for name, gloss in _ROLE_GLOSS.items())
+        raise ValueError(f"配置 machine.role = {role!r} 非法：只接受 {legal}。")
+    return role
+
+
+def _access(key: str, v: object) -> str:
+    tier = str(v or ACCESS_READWRITE)
+    if tier not in _ACCESS_TIERS:
+        raise ValueError(
+            f"配置 machine.{key} = {tier!r} 非法："
+            f'只接受 "{ACCESS_READWRITE}" 或 "{ACCESS_READ_ONLY}"。'
+        )
+    return tier
+
+
 @dataclass
 class Config:
     root: pathlib.Path
@@ -72,13 +113,26 @@ class Config:
     read_delay_sec: tuple[float, float]
     retry_base_sec: float
     retry_jitter_sec: float
+    # 机器身份与交换区（spec §10，配置里的 [machine] 一节）
+    machine_id: str
+    role: str                 # ROLE_COLLECTOR / ROLE_MERGE_ONLY
+    exchange_root: pathlib.Path
+    git_access: str           # ACCESS_READWRITE / ACCESS_READ_ONLY（只记档位，不记密钥）
+    cos_access: str
     # 命令行显式指定的翻页上限（None = 没有显式覆盖）；优先级见 effective_pages_limit()
     pages_per_shop_override: int | None = None
 
     @classmethod
     def from_file(cls, path: pathlib.Path, root: pathlib.Path | None = None) -> "Config":
-        with open(path, "rb") as fh:
-            raw = tomllib.load(fh)
+        try:
+            with open(path, "rb") as fh:
+                raw = tomllib.load(fh)
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"找不到配置：{path}\n"
+                f"请复制 {path.with_name('config.example.toml')} 为 {path}，"
+                "再改成本机的值（machine.machine_id、运行目录与交换区根）。"
+            ) from None
         root = root or pathlib.Path(path).resolve().parent.parent
 
         def p(*keys: str) -> pathlib.Path:
@@ -90,15 +144,30 @@ class Config:
         run = raw["run"]
         human = raw["human"]
         browser = raw["browser"]
+        machine = raw.get("machine", {})
+        if not isinstance(machine, dict):
+            raise ValueError(
+                f"配置的 machine 必须是一张 [machine] 表（现在是 {type(machine).__name__}）："
+                "机器编号、角色、交换区根与凭据档位都写在 [machine] 一节里。"
+            )
+        data_dir = p("paths", "data_dir")
+        exchange_raw = str(machine.get("exchange_root") or "").strip()
+        exchange_root = ((root / exchange_raw).resolve() if exchange_raw
+                         else data_dir.parent / "exchange")
 
         return cls(
             root=root,
             shop_csv=p("paths", "shop_csv"),
             db_file=p("paths", "db_file"),
-            data_dir=p("paths", "data_dir"),
+            data_dir=data_dir,
             logs_dir=p("paths", "logs_dir"),
             screenshot_dir=p("paths", "screenshot_dir"),
             raw_page_dir=p("paths", "raw_page_dir"),
+            machine_id=_machine_id(machine, path),
+            role=_role(machine.get("role")),
+            exchange_root=exchange_root,
+            git_access=_access("git_access", machine.get("git_access")),
+            cos_access=_access("cos_access", machine.get("cos_access")),
             user_data_path=p("browser", "user_data_path"),
             chrome_path=str(browser.get("chrome_path", "")),
             driver=_driver(browser.get("driver")),

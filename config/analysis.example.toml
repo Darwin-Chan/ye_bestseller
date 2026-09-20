@@ -1,13 +1,19 @@
+# 分析配置（示例）。仓库只追踪这一份示例；真配置 config/analysis.toml 每台机器自建、
+# 已在 .gitignore 里，不进代码仓（与 shops.example.csv 同款做法）。
+#
+# 用法：复制本文件为 config/analysis.toml，把 database / cache 改成本机的路径。
+# 相对路径以本配置所在目录（config/）为基准。
+
 [analysis]
-# 分析专用配置；相对路径以本配置所在目录为基准。
-database = "F:/AI/bestseller_runtime/data/bestseller.db"
+# 现有库存数据库；「按机器改」（采集机上是本机采集库，再按需换数据源）。
+database = "../data/bestseller.db"
 # ISO 星期：1=周一，7=周日。只是提醒，不调度采集。
 full_capture_weekday = 1
 
 [matching]
 # disabled：不调用模型；direct：主模型接收图片；caption：独立视觉模型先提取证据。
 mode = "disabled"
-cache = "F:/AI/bestseller_runtime/data/matching.sqlite"
+cache = "../data/matching.sqlite"
 concurrency = 2
 candidates = 6
 

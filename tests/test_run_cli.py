@@ -50,6 +50,9 @@ data_dir = "data"
 logs_dir = "logs"
 screenshot_dir = "screenshots"
 raw_page_dir = "raw_pages"
+
+[machine]
+machine_id = "m1"
 """
 
 # shops.csv 里配了 pages 的店：它是命令行覆盖要压过去的那一层

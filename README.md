@@ -16,6 +16,12 @@ python -m playwright install chromium
 ## 配置
 
 - 复制 `config/shops.example.csv` 为 `config/shops.csv`，填入真实店铺 key/名称/URL。
+- 复制 `config/config.example.toml` 为 `config/config.toml`（采集配置）、
+  `config/analysis.example.toml` 为 `config/analysis.toml`（分析配置）：
+  **真配置含机器专属值（路径、端口、机器编号），每台机器自建、不进代码仓**；
+  仓库只追踪含全部键与占位说明的示例。采集配置的 `[machine]` 一节声明本机编号
+  `machine_id`、角色（`collector` 采集机 / `merge_only` 纯汇总机）、交换区根目录与
+  git / COS 的凭据档位（只记档位，密钥在仓库外）；缺 `machine_id` 或角色写错时启动报错点名。
 - 编辑 `config/config.toml` 调整页数上限、延迟、上限与路径（全部延迟走配置）。
 
 ## 运行
@@ -63,6 +69,21 @@ python tools/build_gui_exe.py
 ```
 
 脚本会顺带断言产物里没有项目代码（`bestseller_monitor` / `gui`）。
+
+## 多机分片采集（机制按实现票落地中）
+
+三台采集机各自采集，通过**交换区**（git 私有库 + 对象存储图片）互递数据、各自汇总；
+通道选型与容量测算见 [docs/三机汇总通道调研.md](docs/三机汇总通道调研.md)。
+
+- **周计划**：打开程序时（命令行则开跑前）采集程序自动 pull `plan` 库 → 同步店铺清单 →
+  确认（不存在就生成并发布）本周计划——各店归哪台机器、各给多少页；开始页默认勾选本机份额，
+  人核对用 `plan` 库里的 `plan/<年>-W<周>.md`。生成算法与发布步骤在实现票落地中。
+- **数据交换台**（脚本 `exchange.py`，窗口标题用中文名）：手工触发一次运行——导出本机周包、
+  拉取别人的包、汇总进本机库、写本机视角周报；`--only export|merge` 可只跑一半。实现票落地中。
+- **凭据**：每台机器自己的 SSH key 与 COS AK；纯汇总机只持只读档（push / 上传被拒即预期）。
+  密钥都放仓库外，`config.toml` 只记档位。
+- 上机步骤（m1 增量与 m2/m3 接入）在 `.scratch/multi-machine-collection/spec.md` §12——
+  机器本地文档，不在代码仓内；上机清单随实现票产出后入档。
 
 ## 校准说明
 

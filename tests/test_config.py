@@ -8,6 +8,12 @@ from bestseller_monitor.config import Config, Shop, effective_pages_limit, load_
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# 机器身份一节（spec §10）：跑得动的最小配置也必须声明本机编号
+MACHINE_BLOCK = """
+[machine]
+machine_id = "m1"
+"""
+
 # 最小可用配置：路径写成相对值，由 root 参数解析，避免 Windows 反斜杠的 TOML 转义问题
 MINIMAL_CONFIG = """
 [run]
@@ -41,7 +47,7 @@ data_dir = "data"
 logs_dir = "logs"
 screenshot_dir = "screenshots"
 raw_page_dir = "raw_pages"
-"""
+""" + MACHINE_BLOCK
 
 
 class ConfigTests(unittest.TestCase):
@@ -72,10 +78,15 @@ class ConfigTests(unittest.TestCase):
                 load_shops(p)
 
     @staticmethod
-    def _write_config(tmp: str) -> Path:
+    def _write_raw(tmp: str, text: str) -> Path:
+        """把一段完整配置文本放进临时目录当 config.toml（缺键/非法值的用例自己拼）。"""
         path = Path(tmp) / "config.toml"
-        path.write_text(MINIMAL_CONFIG, encoding="utf-8")
+        path.write_text(text, encoding="utf-8")
         return path
+
+    @classmethod
+    def _write_config(cls, tmp: str) -> Path:
+        return cls._write_raw(tmp, MINIMAL_CONFIG)
 
     @staticmethod
     def _write_config_with_driver(tmp: str, value: str) -> Path:
@@ -98,11 +109,29 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual(cfg.driver, "pw_cdp")
 
-    def test_shipped_config_passes_its_own_validation(self):
-        """出厂配置必须被自己的校验接受——合法驱动值只在代码里声明一处（IS-23 审查发现）。"""
-        cfg = Config.from_file(ROOT / "config" / "config.toml", root=ROOT)
+    def test_shipped_example_config_passes_its_own_validation(self):
+        """出厂的是示例配置（真配置每台自建、不进仓库，spec §10）：示例含全部键、必须被自己的
+        校验接受——合法驱动值只在代码里声明一处（IS-23 审查发现）。"""
+        cfg = Config.from_file(ROOT / "config" / "config.example.toml", root=ROOT)
 
         self.assertEqual(cfg.driver, "pw_cdp")
+        self.assertTrue(cfg.machine_id, "示例必须带一个可用的本机编号占位")
+
+    def test_example_config_copied_as_config_toml_loads(self):
+        """「本机从示例复制即可开跑」：复制品在任意位置都能加载，路径全部落在复制后的根里。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_dir = Path(tmp) / "config"
+            cfg_dir.mkdir()
+            copied = cfg_dir / "config.toml"
+            copied.write_text(
+                (ROOT / "config" / "config.example.toml").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+
+            cfg = Config.from_file(copied)
+
+            self.assertTrue(cfg.db_file.is_relative_to(Path(tmp).resolve()),
+                            "示例里的路径必须是相对路径，复制到新机器才成立")
 
     def test_config_rejects_a_retired_driver(self):
         """配置里写着已下线的驱动就报错，不静默换一条路径跑（IS-23 / ADR-0010）。"""
@@ -113,6 +142,98 @@ class ConfigTests(unittest.TestCase):
             message = str(ctx.exception)
             self.assertIn("drission", message)
             self.assertIn("pw_cdp", message)
+
+    def test_machine_identity_is_read_with_defaults(self):
+        """机器身份（spec §10）：machine_id 必填；角色/交换区根/凭据档位缺省 = 采集机口径。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Config.from_file(self._write_config(tmp), root=Path(tmp))
+
+            self.assertEqual(cfg.machine_id, "m1")
+            self.assertEqual(cfg.role, "collector")
+            self.assertEqual(cfg.exchange_root, (Path(tmp) / "exchange").resolve())
+            self.assertEqual(cfg.git_access, "readwrite")
+            self.assertEqual(cfg.cos_access, "readwrite")
+
+    def test_machine_block_declares_role_exchange_root_and_tiers(self):
+        """纯汇总机口径在配置里全量声明（spec §11）：只记档位、不记密钥。"""
+        block = """
+[machine]
+machine_id = "m4"
+role = "merge_only"
+exchange_root = "run/exchange"
+git_access = "read_only"
+cos_access = "read_only"
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_raw(tmp, MINIMAL_CONFIG.replace(MACHINE_BLOCK, block))
+            cfg = Config.from_file(path, root=Path(tmp))
+
+            self.assertEqual(cfg.machine_id, "m4")
+            self.assertEqual(cfg.role, "merge_only")
+            self.assertEqual(cfg.exchange_root, (Path(tmp) / "run" / "exchange").resolve())
+            self.assertEqual(cfg.git_access, "read_only")
+            self.assertEqual(cfg.cos_access, "read_only")
+
+    def test_missing_machine_id_is_named_at_startup(self):
+        """缺 machine_id 启动报错点名，并指向示例（spec §10）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_raw(tmp, MINIMAL_CONFIG.replace(MACHINE_BLOCK, ""))
+
+            with self.assertRaises(ValueError) as ctx:
+                Config.from_file(path, root=Path(tmp))
+
+            message = str(ctx.exception)
+            self.assertIn("machine_id", message)
+            self.assertIn("config.example.toml", message)
+
+    def test_illegal_role_is_named(self):
+        """角色档位写错了启动报错点名两个合法值，不静默按采集机跑。"""
+        text = MINIMAL_CONFIG.replace(
+            'machine_id = "m1"', 'machine_id = "m1"\nrole = "summary"')
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_raw(tmp, text)
+
+            with self.assertRaises(ValueError) as ctx:
+                Config.from_file(path, root=Path(tmp))
+
+            message = str(ctx.exception)
+            self.assertIn("summary", message)
+            self.assertIn("collector", message)
+            self.assertIn("merge_only", message)
+
+    def test_illegal_access_tier_is_named(self):
+        """凭据档位只认 readwrite / read_only（spec §11），写别的启动报错点名。"""
+        text = MINIMAL_CONFIG.replace(
+            'machine_id = "m1"', 'machine_id = "m1"\ncos_access = "upload"')
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_raw(tmp, text)
+
+            with self.assertRaises(ValueError) as ctx:
+                Config.from_file(path, root=Path(tmp))
+
+            message = str(ctx.exception)
+            self.assertIn("cos_access", message)
+            self.assertIn("upload", message)
+            self.assertIn("read_only", message)
+
+    def test_non_table_machine_section_is_named(self):
+        """machine 写成单值（不是 [machine] 表）也要点名报错，而不是抛 AttributeError。"""
+        text = 'machine = "m1"\n' + MINIMAL_CONFIG.replace(MACHINE_BLOCK, "")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_raw(tmp, text)
+
+            with self.assertRaises(ValueError) as ctx:
+                Config.from_file(path, root=Path(tmp))
+
+            self.assertIn("machine", str(ctx.exception))
+
+    def test_missing_real_config_points_at_the_example(self):
+        """真配置缺失（新机器还没自建）时报错直接指向示例文件（spec §10）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(FileNotFoundError) as ctx:
+                Config.from_file(Path(tmp) / "config.toml", root=Path(tmp))
+
+            self.assertIn("config.example.toml", str(ctx.exception))
 
     def test_config_without_export_dir_still_loads(self):
         """同步导出链已删除，配置里不再有导出目录这个概念。"""

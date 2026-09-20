@@ -111,6 +111,21 @@ class MatchingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             MatchingConfig(self.config.cache, concurrency=0)
 
+    def test_missing_analysis_config_points_at_the_example(self):
+        """分析配置同样示例化：真文件缺失时报错直接指向示例（spec §10）。"""
+        with self.assertRaises(FileNotFoundError) as ctx:
+            AnalysisConfig.from_file(Path(self.tmp.name) / 'analysis.toml')
+
+        self.assertIn('analysis.example.toml', str(ctx.exception))
+
+    def test_shipped_example_analysis_config_loads(self):
+        """分析配置同样示例化（spec §10）：出厂示例含全部键、照复制即可加载。"""
+        root = Path(__file__).resolve().parents[1]
+        config = AnalysisConfig.from_file(root / 'config' / 'analysis.example.toml')
+
+        self.assertEqual(config.database.name, 'bestseller.db')
+        self.assertIsNotNone(config.matching)
+
     def test_real_transport_refuses_redirect_without_forwarding_key(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         import threading

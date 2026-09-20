@@ -1,0 +1,93 @@
+# 本机采集配置（示例）。仓库只追踪这一份示例；真配置 config/config.toml 每台机器自建、
+# 已在 .gitignore 里，不进代码仓（与 shops.example.csv 同款做法）。
+#
+# 用法：复制本文件为 config/config.toml，把标了「按机器改」的值改成本机的。
+# 相对路径以仓库根为基准；上机时建议改成绝对路径（本机运行根，见上机清单）。
+# 多机分片采集的完整机制（交换区、周计划、数据交换台）见 README「多机分片采集」一节。
+
+[machine]
+# 本机编号（必填，缺失或为空启动即报错）：三台采集机 m1/m2/m3；纯汇总机也自取一个（如 m4）。
+# 「按机器改」：新机器复制示例后的第一件事。
+machine_id = "m1"
+# 角色档位："collector" = 采集机（采集 + 导出 + 汇总）；"merge_only" = 纯汇总机
+# （只汇总与展示，采集入口会被拒绝）。省略按 "collector" 处理。
+role = "collector"
+# 交换区根目录：4 个交换库（raw-m1 / raw-m2 / raw-m3 / plan）clone 的本地位置。
+# 「按机器改」，建议绝对路径；省略 = <data_dir 的上一级>/exchange。
+exchange_root = "exchange"
+# 凭据档位（只记档位、不记密钥；密钥都在仓库外：SSH 在 ~/.ssh，COS 走 coscli 配置或本地 secrets/）。
+# git_access："readwrite"（采集机：可 push 自己的 raw 库）或 "read_only"（纯汇总机：push 被拒 = 档位正确）。
+git_access = "readwrite"
+# cos_access："readwrite"（采集机：限 img/* 前缀读写）或 "read_only"（纯汇总机：只 Get/Head）。
+cos_access = "readwrite"
+
+[run]
+# 每个店铺最多翻几页商品列表
+max_pages_per_shop = 30
+# 单轮详情预算（允许进入详情的商品机会数，跨店累计；同一商品重试只算一次）
+max_detail_opportunities_per_round = 1000
+# 单个商品详情最多尝试次数
+max_attempts_per_page = 2
+# 失败率超过该比例时整轮暂停等人工决策
+fail_rate_limit = 0.10
+# 触发滑块/登录墙后等待人工处理的最长分钟数
+human_pause_minutes = 10
+# 判定“需要人工介入”前的确认窗口（秒）：瞬时报错信号在此窗口内自行消失则视为误报
+intervention_confirmation_sec = 2.0
+# 命中淘宝 deny/验证拦截页（反爬限流）时的退避时长（秒）：自动放慢，降低再次触发限流概率
+deny_backoff_sec = 30.0         # 商品第 1 次 deny 的退避
+deny_retry2_backoff_sec = 60.0  # 商品第 2 次 deny 的退避
+deny_window_minutes = 10        # deny 计数滚动窗口（分钟）
+deny_shop_limit = 7             # 窗口内该店 deny≥N -> 跳过该店
+deny_round_limit = 10           # 窗口内整轮 deny≥N -> 中止本轮
+# 是否打乱店铺内商品访问顺序（拟人化）
+shuffle_within_shop = true
+# 出现滑块/登录墙等需要人工干预时是否播放警报音
+alarm_on_intervention = true
+
+[human]
+# 详情页之间基础延迟（秒，随机取区间内值）
+detail_delay_sec = [0.8, 2]
+# 每 N 个详情页后插入一次较长的停顿（N 在该区间随机）
+long_pause_interval = [12, 20]
+long_pause_sec = [10, 20]
+# 每完成一批商品后休息
+batch_size = 300
+batch_rest_sec = [20, 40]
+# 列表页之间延迟
+list_delay_sec = [1.5, 3]
+# 点击/操作前等待
+action_delay_sec = [0.6, 1.5]
+# 页面加载完成后、读取数据前的等待
+read_delay_sec = [0.8, 1.5]
+# 失败重试：指数退避基础秒数 + 随机抖动秒数
+retry_base_sec = 5.0
+retry_jitter_sec = 2.0
+
+[browser]
+# 采集驱动只有一条（Playwright 连接接管 + 点击式列表，见 ADR-0010）。
+# 这里只接受 pw_cdp；写了别的值（含已下线的 drission / playwright）启动即报错。
+driver = "pw_cdp"
+# 统一使用实际登录过的用户数据目录（用普通进程拉起浏览器时就是它）。
+# 「按机器改」：每台机器有自己的 1688 账号与专用 profile；首次运行 python login_chrome.py 扫码登录。
+user_data_path = "profiles/account1_edge"
+# 用普通进程拉起的浏览器（必须是有头浏览器，没有 headless 开关）。Win10/11 的 Edge 默认位置：
+chrome_path = "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
+start_browser = true
+# 调试端口；本机若与别的程序打架再改（默认 9222）。
+attach_port = 9222
+timeout_ms = 45000
+base_url = "https://www.1688.com/"
+
+[paths]
+# 「按机器改」：全部指向本机运行根下的目录（上机清单建议绝对路径）。
+shop_csv = "config/shops.csv"
+db_file = "data/bestseller.db"
+data_dir = "data"
+logs_dir = "logs"
+screenshot_dir = "data/screenshots"
+raw_page_dir = "data/raw_pages"
+
+# 说明：页面/商品“就绪”类等待已改为「条件等待为主 + 上限兜底」，固定值在
+# browser_pw / listing 的代码常量里；人工介入的节拍（响铃间隔、确认轮询等）在
+# guard / sound 的代码常量里——都不再是配置项，本示例不再列出。

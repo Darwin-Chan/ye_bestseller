@@ -29,9 +29,16 @@ class AnalysisConfig:
 
     @classmethod
     def from_file(cls, path: Path) -> AnalysisConfig:
-        with path.open("rb") as stream:
-            document = tomllib.load(stream)
-            cfg = document['analysis']
+        try:
+            with path.open("rb") as stream:
+                document = tomllib.load(stream)
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"找不到分析配置：{path}\n"
+                f"请复制 {path.with_name('analysis.example.toml')} 为 {path}，"
+                "再改成本机的值（database、matching.cache 等）。"
+            ) from None
+        cfg = document['analysis']
         weekday = cfg.get("full_capture_weekday", 1)
         if type(weekday) is not int or not 1 <= weekday <= 7:
             raise ValueError("全量抓取提醒星期必须为 1 至 7")

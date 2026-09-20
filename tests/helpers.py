@@ -9,6 +9,7 @@ from uuid import uuid4
 from bestseller_monitor import single_instance
 from bestseller_monitor import rounds
 from bestseller_monitor.click_events import CardRef
+from bestseller_monitor.config import ACCESS_READWRITE, ROLE_COLLECTOR
 from bestseller_monitor.db import cst_date
 from bestseller_monitor.listing import ListingLoadFailed
 from bestseller_monitor.rounds import RoundRequest, ShopScope
@@ -72,6 +73,12 @@ def crawler_cfg(**overrides):
         "shop_csv": None,
         "driver": "pw_cdp",
         "ensure_dirs": None,
+        # 机器身份（spec §10）：中性的「本机」值，读它的用例自己覆盖。
+        "machine_id": "m-test",
+        "role": ROLE_COLLECTOR,
+        "exchange_root": _RAW_PAGE_DIR / "exchange",
+        "git_access": ACCESS_READWRITE,
+        "cos_access": ACCESS_READWRITE,
     }
     unknown = sorted(set(overrides) - set(values))
     if unknown:

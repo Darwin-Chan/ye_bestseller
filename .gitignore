@@ -35,6 +35,13 @@ profiles/
 *.xlsx
 config/shops.csv
 
+# 每台机器自建的真配置（含机器专属值；示例见 config/*.example.toml，不进代码仓）
+config/config.toml
+config/analysis.toml
+
+# 交换区（4 个交换库 raw-m1/raw-m2/raw-m3/plan 的 clone 位置）
+exchange/
+
 # 本地 Agent 配置、工单草稿与子代理交接目录（不上传）
 .claude/
 .codex/
