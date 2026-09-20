@@ -524,8 +524,8 @@ def _publish(channel: GitChannel, raw_dir: pathlib.Path, package_rel: str,
     return _PublishOutcome(published=True, unchanged=False, commit=channel.head())
 
 
-def _default_store(cfg) -> ImageStore | None:
-    """按配置搭图片库；没配桶时回 None（导出侧按「图片这半没做」如实报告）。"""
+def default_store(cfg) -> ImageStore | None:
+    """按配置搭图片库；没配桶时回 None（导出/导入两侧都按「图片这半没做」如实报告）。"""
     bucket = str(getattr(cfg, "cos_bucket", "") or "").strip()
     return CosCliImageStore(bucket) if bucket else None
 
@@ -571,7 +571,7 @@ def export(cfg, *, week: str | None = None, store: ImageStore | None = None) -> 
                             failure=outcome.failure)
 
     if store is None:
-        store = _default_store(cfg)
+        store = default_store(cfg)
     images = (upload_new_images(source, built.images, store) if store is not None else
               ImageUploadResult(failure=(
                   "配置缺 machine.cos_bucket：图片通道没有桶可用，包里的图这次没传。"

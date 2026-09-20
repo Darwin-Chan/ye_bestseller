@@ -70,3 +70,14 @@ class CosCliImageStore:
             local = pathlib.Path(tmp) / pathlib.Path(key).name
             local.write_bytes(data)
             self._run("cp", str(local), f"cos://{self.bucket}/{key}")
+
+    def fetch(self, key: str) -> bytes:
+        """取回 key 的字节：coscli 只吃文件路径，先 cp 到临时文件再读。"""
+        with tempfile.TemporaryDirectory(prefix="bestseller-image-") as tmp:
+            local = pathlib.Path(tmp) / pathlib.Path(key).name
+            self._run("cp", f"cos://{self.bucket}/{key}", str(local))
+            try:
+                return local.read_bytes()
+            except OSError as exc:
+                raise ImageStoreError(
+                    f"{COSCLI} cp 说成功了，但临时文件读不到（{key}）：{exc}") from exc

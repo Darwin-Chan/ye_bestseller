@@ -106,6 +106,34 @@ class CosCliTests(unittest.TestCase):
             with self.assertRaisesRegex(ImageStoreError, "403"):
                 self.store().upload(f"img/ab/{H1}.jpg", b"jpeg-bytes")
 
+    def test_fetch_downloads_through_a_temp_file_and_returns_the_bytes(self):
+        """汇总导入拉图用的取口：coscli 只吃文件路径，先 cp 到临时文件再读。"""
+        seen: dict[str, object] = {}
+
+        def fake_run(argv, **kwargs):
+            path = pathlib.Path(argv[3])
+            seen["argv"] = list(argv)
+            seen["path"] = path
+            path.write_bytes(b"jpeg-bytes")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        with mock.patch("bestseller_monitor.cos_store.subprocess.run",
+                        side_effect=fake_run):
+            data = self.store().fetch(f"img/ab/{H1}.jpg")
+
+        self.assertEqual(data, b"jpeg-bytes")
+        self.assertEqual(seen["argv"][:2], ["coscli", "cp"])
+        self.assertEqual(seen["argv"][2], f"cos://bucket/img/ab/{H1}.jpg")
+        self.assertFalse(seen["path"].exists(), "临时文件用完就清")
+
+    def test_fetch_failure_is_a_store_error(self):
+        done = subprocess.CompletedProcess([], 1, stdout="",
+                                           stderr="NoSuchKey: The specified key does not exist")
+        with mock.patch("bestseller_monitor.cos_store.subprocess.run",
+                        return_value=done):
+            with self.assertRaisesRegex(ImageStoreError, "NoSuchKey"):
+                self.store().fetch(f"img/ab/{H1}.jpg")
+
 
 if __name__ == "__main__":
     unittest.main()

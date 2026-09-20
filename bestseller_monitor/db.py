@@ -212,6 +212,65 @@ CREATE TABLE IF NOT EXISTS weekly_plan (
     plan_sha256 TEXT NOT NULL,
     PRIMARY KEY (week, shop_key)
 );
+
+-- 汇总导入账（spec §9；全部是本机账，不入交换集，实现见 merge.py）。
+
+-- 包哈希幂等账 + 每次导入的结果计数：同哈希再来直接跳过（重跑汇总是无害的）。
+CREATE TABLE IF NOT EXISTS import_packages (
+    package_sha256 TEXT PRIMARY KEY,
+    package_name TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    week TEXT,
+    generated_at TEXT,
+    format_version TEXT,
+    imported_at TEXT NOT NULL,
+    rows_total INTEGER NOT NULL DEFAULT 0,
+    rows_inserted INTEGER NOT NULL DEFAULT 0,
+    rows_replaced INTEGER NOT NULL DEFAULT 0,
+    conflicts INTEGER NOT NULL DEFAULT 0,
+    images_pulled INTEGER NOT NULL DEFAULT 0,
+    images_skipped INTEGER NOT NULL DEFAULT 0,
+    images_missing INTEGER NOT NULL DEFAULT 0
+);
+
+-- 冲突明细：同一 (日期, 店铺) 上两个不同机器标识的 claim（越权、降级、换周交接不清）。
+-- 「谁赢」由判据定、各台一致；「我见过这个冲突吗」取决于该机导入过哪些包，所以这是
+-- 本机视角的流水：每次导入碰到冲突追加一行，败方被覆盖与保留的行数在行上。
+CREATE TABLE IF NOT EXISTS import_conflicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    imported_at TEXT NOT NULL,
+    package_sha256 TEXT NOT NULL,
+    observed_date TEXT NOT NULL,
+    shop_key TEXT NOT NULL,
+    winner_side TEXT NOT NULL,
+    winner_machine TEXT NOT NULL,
+    winner_at TEXT NOT NULL,
+    loser_machine TEXT NOT NULL,
+    loser_at TEXT NOT NULL,
+    loser_rows_replaced INTEGER NOT NULL,
+    loser_rows_kept INTEGER NOT NULL
+);
+
+-- 取胜方账（观测表）：每个 (店铺, 日期) 当前取胜 claim 的 (时刻, 机器)。时刻本身仍由
+-- 版本行推导（不单独存），这张账只为记住取胜方是哪台机器——平局按 machine_id 定胜时，
+-- 合并必须知道库里这一组行是谁写的，否则同一批包换个导入顺序会得出不同的库。
+CREATE TABLE IF NOT EXISTS merge_claims (
+    shop_key TEXT NOT NULL,
+    observed_date TEXT NOT NULL,
+    claim_at TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    PRIMARY KEY (shop_key, observed_date)
+);
+
+-- 取胜方账（身份表）：(表, 主键) → 描述列当前取胜方的 (last_seen_at, 机器)。同理由：
+-- 描述列按最近一次观测取胜，增量合并要记得住"最近一次"是谁的。
+CREATE TABLE IF NOT EXISTS merge_seen (
+    table_name TEXT NOT NULL,
+    row_key TEXT NOT NULL,
+    seen_at TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    PRIMARY KEY (table_name, row_key)
+);
 """
 
 # 同一轮、店铺、商品和 SKU 至多一条成功快照：靠唯一索引保证（见 connect() 的迁移）。
