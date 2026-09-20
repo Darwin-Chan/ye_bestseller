@@ -142,6 +142,17 @@ echo ran >> "{self.sh_path(counter)}"
 exit 1
 ''')
 
+    def install_declining_commit_hook(self, clone: pathlib.Path, counter: pathlib.Path) -> None:
+        """pre-commit 钩子：每次提交记一笔并拒绝——模拟「提交这一步本身失败」。
+
+        这时刚写下的文件还没进任何提交（未跟踪）：只 reset 清不掉，是检验
+        「发布失败后不留假的重读对象」的那条路（见 `plan_step._reread_after_failed_publish`）。
+        """
+        hooks = clone / ".git" / "hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
+        script = f'#!/bin/sh\necho ran >> "{self.sh_path(counter)}"\nexit 1\n'
+        (hooks / "pre-commit").write_bytes(script.encode("utf-8"))
+
     def install_advancing_hook(self, clone: pathlib.Path, other: pathlib.Path) -> None:
         """pre-push 钩子：每次推送都让远端再前进一格——把推送重试次数用尽。"""
         self.install_pre_push(clone, f'''

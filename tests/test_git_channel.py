@@ -129,5 +129,32 @@ class PushTests(unittest.TestCase):
                          "非 non-fast-forward 的失败不许重试")
 
 
+class LocalChangesTests(unittest.TestCase):
+    """准备串开跑前的残迹自检：未提交改动与未跟踪文件都要看得见、清得掉。"""
+
+    def setUp(self):
+        self.box = GitSandbox(self)
+        self.remote = self.box.new_remote()
+        self.box.seed(self.remote, {"plan/2026-W38.json": "{}\n"})
+        self.mine = self.box.clone(self.remote, "plan")
+
+    def test_a_clean_clone_reports_nothing(self):
+        self.assertEqual(GitChannel(self.mine).local_changes(), [])
+
+    def test_uncommitted_and_untracked_debris_are_reported_and_discarded(self):
+        self.box.write_files(self.mine, {"plan/2026-W39.json": "{ 半截\n"})   # 未跟踪残迹
+        self.box.must("rm", "--", "plan/2026-W38.json", cwd=self.mine)       # 已删未提交
+
+        channel = GitChannel(self.mine)
+
+        self.assertEqual(len(channel.local_changes()), 2)
+
+        channel.reset_to_upstream(clean=True)
+
+        self.assertEqual(channel.local_changes(), [])
+        self.assertTrue((self.mine / "plan" / "2026-W38.json").exists(), "已跟踪文件退回远端状态")
+        self.assertFalse((self.mine / "plan" / "2026-W39.json").exists(), "未跟踪残迹被清掉")
+
+
 if __name__ == "__main__":
     unittest.main()

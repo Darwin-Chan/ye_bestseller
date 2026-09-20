@@ -76,6 +76,19 @@ class GitChannel:
         if done.returncode != 0 and not _UNBORN_REMOTE.search(done.stderr or ""):
             raise _failure("拉取", args, done)
 
+    def local_changes(self) -> list[str]:
+        """工作区里未提交的改动与未跟踪文件的 porcelain 清单；干净时为空。
+
+        准备串里的 pull 在有未提交改动时会直接失败，所以调用方要先问这一句：
+        上次写到一半崩掉留下的残迹得先收拾掉，否则这台机器每次开程序都卡在
+        「拉不动」（见 `plan_step._heal_dirty_clone`）。
+        """
+        args = ("-C", str(self.path), "status", "--porcelain")
+        done = _run(*args)
+        if done.returncode != 0:
+            raise _failure("查看状态", args, done)
+        return [line for line in done.stdout.splitlines() if line.strip()]
+
     def commit(self, message: str, paths: list[str | pathlib.Path]) -> bool:
         """提交这些路径的当前内容；没有可提交的变化时返回 False（不是错误）。"""
         names = [str(p) for p in paths]
@@ -107,13 +120,16 @@ class GitChannel:
             f"远端一直有更快的提交。稍后再试；反复失败说明有另一台机器在同一条线上高频发布。"
         )
 
-    def reset_to_upstream(self) -> None:
+    def reset_to_upstream(self, *, clean: bool = False) -> None:
         """把分支与工作区退回远端状态：未推送出去的提交与改动都会被撤掉。
 
         失败降级路径专用（推送没成功时把克隆还原干净，让下次开程序从头来）——
         正常流程里撤掉的只有本次刚写进去的那笔（同步开始时 pull 会先要求工作区干净）。
         中途撞上 rebase 冲突（`pull --rebase` 留下的现场）也一并清掉：不清的话克隆会
         卡在「变基进行中」，下次拉取直接失败。调用方手里的本机副本不受影响。
+
+        `clean=True` 时连未跟踪文件一起清掉（写给机器管理的克隆用：写进去的都立刻
+        提交、失败就退回，未跟踪的只可能是崩在半途的残迹）。
         """
         if any((self.path / ".git" / d).exists() for d in ("rebase-merge", "rebase-apply")):
             abort_args = ("-C", str(self.path), "rebase", "--abort")
@@ -124,6 +140,11 @@ class GitChannel:
         done = _run(*args)
         if done.returncode != 0:
             raise _failure("回退", args, done)
+        if clean:
+            clean_args = ("-C", str(self.path), "clean", "-fd")
+            done = _run(*clean_args)
+            if done.returncode != 0:
+                raise _failure("清未跟踪文件", clean_args, done)
 
 
 def _rejected(done: subprocess.CompletedProcess[str]) -> bool:

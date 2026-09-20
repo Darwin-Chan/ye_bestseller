@@ -197,6 +197,21 @@ CREATE TABLE IF NOT EXISTS stop_requests (
     ack_at TEXT,
     note TEXT
 );
+
+-- 本机计划表（spec §6）：本周计划的整周指派，界面与命令行读的同一份落库计划。
+-- 不入交换集——每台机器各存各的；存整周的行（不只本机那几行），账目与报告要对照
+-- 「计划说了什么」。来源记 拉取/本地缓存/生成，见 plan_step.PlanSource。
+CREATE TABLE IF NOT EXISTS weekly_plan (
+    week TEXT NOT NULL,
+    shop_key TEXT NOT NULL,
+    shop_name TEXT,
+    machine_id TEXT NOT NULL,
+    pages INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    stored_at TEXT NOT NULL,
+    plan_sha256 TEXT NOT NULL,
+    PRIMARY KEY (week, shop_key)
+);
 """
 
 # 同一轮、店铺、商品和 SKU 至多一条成功快照：靠唯一索引保证（见 connect() 的迁移）。
@@ -784,6 +799,39 @@ class Database:
             [(s.key, s.name, s.url, now, now) for s in shops],
         )
         self.conn.commit()
+
+    def replace_weekly_plan(self, week: str, rows, *, source: str, plan_sha256: str,
+                            stored_at: str) -> bool:
+        """把本周计划的整周指派写进本机计划表（每店一行），返回这次是否真的落了库。
+
+        `rows` 是 `(shop_key, shop_name, machine_id, pages)`；整周替换——新一份计划里
+        没有的店不会留下旧行。内容、来源与哈希都和库里那份一致时不动（重跑幂等：
+        连 `stored_at` 也不刷新，它是这份计划落库的时刻，不是重跑的时刻）。
+        """
+        new_rows = sorted((str(key), name, str(machine), int(pages))
+                          for key, name, machine, pages in rows)
+        current = self.conn.execute(
+            "SELECT shop_key, shop_name, machine_id, pages, source, plan_sha256 "
+            "FROM weekly_plan WHERE week=? ORDER BY shop_key", (week,)).fetchall()
+        unchanged = all(r["source"] == source and r["plan_sha256"] == plan_sha256
+                        for r in current) and \
+            [(r["shop_key"], r["shop_name"], r["machine_id"], r["pages"]) for r in current] == new_rows
+        if unchanged:
+            return False
+        with self.conn:                     # 整周一个事务：删旧行与插新行一起生效
+            self.conn.execute("DELETE FROM weekly_plan WHERE week=?", (week,))
+            self.conn.executemany(
+                "INSERT INTO weekly_plan(week, shop_key, shop_name, machine_id, pages, "
+                "source, stored_at, plan_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [(week, key, name, machine, pages, source, stored_at, plan_sha256)
+                 for key, name, machine, pages in new_rows],
+            )
+        return True
+
+    def weekly_plan(self, week: str):
+        """本机计划表里这一周的整周指派，按店铺编号排序；没落过库就是空列表。"""
+        return self.conn.execute(
+            "SELECT * FROM weekly_plan WHERE week=? ORDER BY shop_key", (week,)).fetchall()
 
     def record_crawler_process(self, pid: int, round_id: int | None,
                                note: str | None = None, *,
