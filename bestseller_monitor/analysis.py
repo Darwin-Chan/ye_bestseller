@@ -185,15 +185,31 @@ class AnalysisService:
             return copy.deepcopy(snapshot)
 
     def confirm(self, analysis_id, group_id):
+        return self.confirm_groups(analysis_id, [group_id])
+
+    def confirm_groups(self, analysis_id, group_ids):
+        return self._set_confirmation(analysis_id, group_ids, True)
+
+    def withdraw(self, analysis_id, group_id):
+        return self._set_confirmation(analysis_id, [group_id], False)
+
+    def _set_confirmation(self, analysis_id, group_ids, confirmed):
+        if not isinstance(group_ids, list) or not all(isinstance(g, str) for g in group_ids):
+            raise ValueError('请选择有效同款组')
         with self._lock:
             snapshot = self._snapshots.get(analysis_id)
             if snapshot is None:
                 raise ValueError("分析已不存在，请重新选择日期")
-            group = next((item for item in snapshot["groups"] if item["id"] == group_id), None)
-            if group is None:
+            targets = set(group_ids)
+            groups = [g for g in snapshot['groups'] if g['id'] in targets]
+            if len(groups) != len(targets):
                 raise ValueError("同款组不存在")
-            group["confirmed"] = True
-            snapshot['dirty'] = True
+            for group in groups:
+                if group['confirmed'] != confirmed:
+                    group['confirmed'] = confirmed
+                    # A withdrawn human decision must survive model retries.
+                    group['adjusted'] = True
+                    snapshot['dirty'] = True
             return copy.deepcopy(snapshot)
 
     def source(self, offer_id):

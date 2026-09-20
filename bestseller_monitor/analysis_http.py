@@ -49,9 +49,13 @@ def create_server(service, port=0):
                     if self.headers.get("Origin") != expected:
                         return self.reply({"error": "请求来源无效"}, 403)
                     length = int(self.headers.get("Content-Length", "0"))
-                    if not 0 < length <= 4096:
+                    if not 0 < length <= 1024 * 1024:
                         raise ValueError("请求大小无效")
                     data = json.loads(self.rfile.read(length))
+                    if data.get('action') == 'confirm_groups':
+                        return self.reply(service.confirm_groups(data['id'], data['groups']))
+                    if data.get('action') == 'withdraw':
+                        return self.reply(service.withdraw(data['id'], data['group']))
                     if data.get('action') == 'retry_matching':
                         return self.reply(service.retry_matching(data['id']))
                     if data.get('action') in ('move', 'remove'):
