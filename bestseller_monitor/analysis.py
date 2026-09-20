@@ -140,6 +140,53 @@ def _dates(start: str, end: str) -> list[str]:
 
 
 def calculate_inventory(rows: list[dict], start: str, end: str) -> dict:
+    """Infer representation segments from frozen observations, never SKU names."""
+    products = {}
+    for row in rows:
+        products.setdefault((row['shop_key'], row['offer_id']), []).append(row)
+    result = {}
+    for key, observations in products.items():
+        daily = {}
+        for row in observations:
+            daily.setdefault(row['date'], []).append(row)
+        segments = []
+        for day, observed in sorted(daily.items()):
+            shape = {r['sku_id'] == 'default' for r in observed}
+            if len(shape) != 1:
+                raise ValueError('同日存在相反规格形态，无法分析')
+            shape = shape.pop()
+            if not segments or segments[-1]['shape'] != shape:
+                segments.append({'start': day, 'shape': shape, 'rows': []})
+            segments[-1]['rows'].extend(observed)
+        skus = []
+        dates = _dates(start, end)
+        for index, segment in enumerate(segments):
+            lower = max(start, segment['start']) if index else start
+            upper = min(end, (date.fromisoformat(segments[index+1]['start']) - timedelta(days=1)).isoformat()) if index+1 < len(segments) else end
+            if lower > upper:
+                continue
+            calculated = _calculate_segment(segment['rows'], lower, upper)[key]
+            first_day = min(r['date'] for r in segment['rows'])
+            for sku in calculated['skus']:
+                first = min(r['date'] for r in segment['rows'] if r['sku_id'] == sku['sku_id'])
+                # A newly appearing SKU cannot be backfilled into an established shape.
+                active_start = max(lower, first) if first > first_day else lower
+                points = {p['date']: p for p in sku['points'] if p['date'] >= active_start}
+                sku['points'] = [points.get(day, {'date': day, 'stock': None, 'sales': 0, 'color': 'inactive', 'actual': False}) for day in dates]
+                sku['segment'] = index + 1
+                sku['sales'] = sum(p['sales'] for p in sku['points'])
+                skus.append(sku)
+        bucket = {'skus': skus, 'sales': sum(s['sales'] for s in skus), 'points': []}
+        for i, day in enumerate(dates):
+            active = [s['points'][i] for s in skus if s['points'][i]['stock'] is not None]
+            bucket['points'].append({'date': day, 'stock': sum(p['stock'] for p in active) if active else None,
+                                    'sales': sum(p['sales'] for p in active),
+                                    'color': 'red' if any(p['color'] == 'red' for p in active) else 'green'})
+        result[key] = bucket
+    return result
+
+
+def _calculate_segment(rows: list[dict], start: str, end: str) -> dict:
     """Build SKU-first inventory points; this is the single calculation seam for the UI."""
     dates = _dates(start, end)
     by_sku = {}

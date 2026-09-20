@@ -98,7 +98,7 @@ function renderProducts() {
         const skuRows=p.skus||[];
         return `<article><div class="bar"><h3>${esc(group.id)} · ${esc(p.product_name||p.offer_id)}</h3><button ${group.confirmed?'disabled':''} onclick="confirmGroup('${group.id}')">${group.confirmed?'已确认':'确认当前分组'}</button></div>
             <p>${esc(p.shop_key)} · 商品 ${esc(p.offer_id)} · ${skuRows.length} 个 SKU · 区间销量 <b>${p.sales}</b> · <span class="group-status">${group.confirmed?"已确认":"待确认"}</span></p>
-            ${skuRows.map(sku=>`<details open><summary>${esc(sku.name)} · SKU ${esc(sku.sku_id)} · 销量 <b>${sku.sales}</b></summary><table><thead><tr><th>日期</th><th>库存</th><th>当日销量</th><th>状态</th></tr></thead><tbody>${sku.points.map(point=>`<tr><td>${point.date}</td><td>${point.stock ?? '—'}</td><td>${point.sales}</td><td>${point.color==='red'?'疑似补货':point.color==='yellow'?'当日未抓取库存':'正常观测'}</td></tr>`).join('')}</tbody></table></details>`).join('')}</article>`;
+            ${skuRows.map(sku=>`<details open><summary>${esc(sku.name)} · 第 ${sku.segment} 段 · SKU ${esc(sku.sku_id)} · 销量 <b>${sku.sales}</b></summary><table><thead><tr><th>日期</th><th>库存</th><th>当日销量</th><th>状态</th></tr></thead><tbody>${sku.points.map(point=>`<tr><td>${point.date}</td><td>${point.stock ?? '—'}</td><td>${point.sales}</td><td>${point.color==='inactive'?'不在有效段':point.color==='red'?'疑似补货':point.color==='yellow'?'当日未抓取库存':'正常观测'}</td></tr>`).join('')}</tbody></table></details>`).join('')}</article>`;
     }).join('');
     const pages=Math.ceil(snapshot.products.length/20);
     $('pageInfo').textContent=`${productPage+1} / ${pages}`;
@@ -111,8 +111,24 @@ async function confirmGroup(group) {
     const snapshot=await api('/api/analysis',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:currentSnapshot.id,group})});
     currentSnapshot=snapshot; renderProducts();
 }
+function inventoryChart(points, sku=false) {
+    const width=680, height=160, stocks=points.filter(p=>p.stock!==null).map(p=>p.stock);
+    const maxStock=Math.max(1,...stocks), total=points.reduce((n,p)=>n+p.sales,0);
+    const x=i=>50+i*580/Math.max(1,points.length-1), y=v=>190-v/maxStock*height;
+    let cumulative=0, previous=null, marks='';
+    points.forEach((p,i)=>{
+        cumulative+=p.sales;
+        if(p.stock===null){previous=null;return;}
+        const sy=190-cumulative/Math.max(1,total)*height;
+        if(previous!==null) marks+=`<line x1="${x(i-1)}" y1="${y(previous.stock)}" x2="${x(i)}" y2="${y(p.stock)}" stroke="#39856b"/><line x1="${x(i-1)}" y1="${190-(cumulative-p.sales)/Math.max(1,total)*height}" x2="${x(i)}" y2="${sy}" stroke="#5973b4" stroke-dasharray="4 3"/>`;
+        const tip=p.color==='red'?(sku?'库存增加，疑似补货，该时段销量设定为0':'存在疑似补货SKU'):p.color==='yellow'?'当日未抓取库存':'';
+        marks+=`<circle data-stock="${p.stock}" cx="${x(i)}" cy="${y(p.stock)}" r="4" fill="${{red:'#ce4c46',yellow:'#b68818',green:'#318763'}[p.color]}">${tip?`<title>${tip}</title>`:''}</circle><circle cx="${x(i)}" cy="${sy}" r="3" fill="#5973b4"/><text x="${x(i)}" y="215" text-anchor="middle" font-size="10">${p.date.slice(5)}</text>`;
+        previous=p;
+    });
+    return `<svg class="inventory-chart" viewBox="0 0 ${width} 230" role="img" aria-label="库存与累计销量" style="width:100%"><text x="10" y="16">库存 0–${maxStock}</text><text x="450" y="16">累计销量 0–${total}</text>${marks}</svg>`;
+}
 function renderRanking() {
-    $('ranking').innerHTML=[...currentSnapshot.products].sort((a,b)=>b.sales-a.sales).map((p,index)=>`<details class="rank"><summary><b>${String(index+1).padStart(2,'0')}</b> ${esc(p.product_name||p.offer_id)} · <b>${p.sales}</b> 销量</summary><p>${esc(p.shop_key)} · 商品 ${esc(p.offer_id)}</p><table><thead><tr><th>日期</th><th>库存</th><th>累计销量</th><th>状态</th></tr></thead><tbody>${p.points.map((point,i)=>`<tr><td>${point.date}</td><td>${point.stock ?? '—'}</td><td>${p.points.slice(0,i+1).reduce((sum,item)=>sum+item.sales,0)}</td><td>${point.color==='red'?'疑似补货':point.color==='yellow'?'当日未抓取库存':'正常观测'}</td></tr>`).join('')}</tbody></table>${(p.skus||[]).map(sku=>`<details open><summary>${esc(sku.name)} · 销量 ${sku.sales}</summary></details>`).join('')}</details>`).join('');
+    $('ranking').innerHTML=[...currentSnapshot.products].sort((a,b)=>b.sales-a.sales).map((p,index)=>`<details class="rank"><summary><b>${String(index+1).padStart(2,'0')}</b> ${esc(p.product_name||p.offer_id)} · <b>${p.sales}</b> 销量</summary><p>${esc(p.shop_key)} · 商品 ${esc(p.offer_id)}</p>${inventoryChart(p.points)}<table><thead><tr><th>日期</th><th>库存</th><th>累计销量</th><th>状态</th></tr></thead><tbody>${p.points.map((point,i)=>`<tr><td>${point.date}</td><td>${point.stock ?? '—'}</td><td>${p.points.slice(0,i+1).reduce((sum,item)=>sum+item.sales,0)}</td><td>${point.color==='inactive'?'不在有效段':point.color==='red'?'疑似补货':point.color==='yellow'?'当日未抓取库存':'正常观测'}</td></tr>`).join('')}</tbody></table>${(p.skus||[]).map(sku=>`<details open><summary>${esc(sku.name)} · 销量 ${sku.sales}</summary><p>第 ${sku.segment} 个规格有效段</p>${inventoryChart(sku.points,true)}</details>`).join('')}</details>`).join('');
 }
 $('prev').onclick=()=>{if(productPage>0){productPage--;renderProducts()}};
 $('next').onclick=()=>{if((productPage+1)*20<currentSnapshot.products.length){productPage++;renderProducts()}};

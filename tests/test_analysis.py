@@ -136,8 +136,51 @@ class AnalysisBrowserTests(unittest.TestCase):
         self.page.get_by_text("01 杯子 · 20 销量", exact=True).click()
         expect(self.page.get_by_text("红色 · 销量 20", exact=True)).to_be_visible()
 
+    def test_switching_inventory_through_database_and_browser(self):
+        for day, values in [(7, [('default', 100)]), (8, [('default', 90)]),
+                            (10, [('white', 40), ('cream', 60)]),
+                            (14, [('white', 30), ('cream', 50)])]:
+            stamp = f'2026-09-{day:02}'
+            rid = new_round(self.db, 'A01', run_date=stamp)
+            self.db.submit_inventory_snapshot(
+                round_id=rid, shop_key='A01', shop_url='https://shop.example',
+                shop_name='店铺1', offer_id='22', product_url='https://detail.1688.com/offer/22.html',
+                list_title='切换商品', detail_title='切换商品', main_image_url='',
+                sku_rows=[dict(sku_id=sku, sku_name=sku, sku_stock=stock) for sku, stock in values],
+                collected_at=stamp+'T04:00:00+00:00', attempt=1)
+        self.dates()
+        self.page.get_by_role('button', name='下一步、进入同款确认').click()
+        expect(self.page.get_by_role('button', name='确认当前分组', exact=True)).to_have_count(2)
+        for remaining in (1, 0):
+            self.page.get_by_role('button', name='确认当前分组', exact=True).first.click()
+            expect(self.page.get_by_role('button', name='确认当前分组', exact=True)).to_have_count(remaining)
+        self.page.locator('#ranking > details > summary').first.click()
+        expect(self.page.locator('#ranking > details').first).to_contain_text('切换商品')
+        expect(self.page.locator('#ranking > details > summary').first).to_contain_text('30')
+        expect(self.page.locator('#ranking .inventory-chart').first).to_be_visible()
+
 
 class InventoryCalculationTests(unittest.TestCase):
+    def test_representation_segments_do_not_bridge_switches(self):
+        observations = [(7, 'default', 100), (8, 'default', 90),
+                        (10, 'white', 40), (10, 'cream', 60),
+                        (14, 'white', 30), (14, 'cream', 50)]
+        rows = [dict(shop_key='A', offer_id='P', sku_id=sku,
+                     date=f'2026-09-{day:02}', stock=stock)
+                for day, sku, stock in observations]
+        result = calculate_inventory(rows, '2026-09-07', '2026-09-14')[('A', 'P')]
+        self.assertEqual(result['sales'], 30)
+        self.assertEqual(result['points'][3]['stock'], 100)
+        self.assertIsNone(result['skus'][0]['points'][3]['stock'])
+        rows.extend([dict(shop_key='A', offer_id='P', sku_id='default',
+                          date='2026-09-15', stock=20),
+                     dict(shop_key='A', offer_id='P', sku_id='default',
+                          date='2026-09-16', stock=0)])
+        result = calculate_inventory(rows, '2026-09-07', '2026-09-16')[('A', 'P')]
+        self.assertEqual(result['sales'], 50)
+        self.assertEqual(result['points'][-1]['stock'], 0)
+        self.assertEqual(result['points'][-2]['sales'], 0)
+
     def test_sku_first_calculation_handles_baselines_missing_days_restock_and_multi_sku(self):
         rows = [
             {"shop_key": "A", "offer_id": "P", "sku_id": "down", "sku_name": "下降", "date": "2026-09-06", "stock": 120},
