@@ -39,10 +39,9 @@ def _git_env() -> dict[str, str]:
     return dict(os.environ, GIT_TERMINAL_PROMPT="0", LC_ALL="C")
 
 
-def _run(*args: str, cwd: pathlib.Path | None = None) -> subprocess.CompletedProcess[str]:
+def _run(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args],
-        cwd=str(cwd) if cwd is not None else None,
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         env=_git_env(),
     )
@@ -93,7 +92,7 @@ class GitChannel:
         raise _failure("提交", commit_args, done)
 
     def push(self, *, attempts: int = DEFAULT_PUSH_ATTEMPTS) -> None:
-        """先 pull --rebase 再 push；被 non-fast-forward 拒绝就重来，至多 attempts 次。"""
+        """先 pull --rebase 再 push；被 non-fast-forward 拒绝就重来，至多 attempts 次（含首次）。"""
         for _ in range(max(attempts, 1)):
             self.pull()
             args = ("-C", str(self.path), "push", "--porcelain")
@@ -104,17 +103,17 @@ class GitChannel:
                 raise _failure("推送", args, done)
             # 被拒：远端在本机 pull 之后又动了；下一轮 pull --rebase 会把本地提交接上去
         raise ChannelError(
-            f"推送被 non-fast-forward 拒绝，连续重试 {max(attempts, 1)} 次都没成功：\n"
+            f"推送被 non-fast-forward 拒绝，连续尝试 {max(attempts, 1)} 次都没成功：\n"
             f"远端一直有更快的提交。稍后再试；反复失败说明有另一台机器在同一条线上高频发布。"
         )
 
     def reset_to_upstream(self) -> None:
-        """把分支与工作区退回上游状态：撤掉还没推送出去的本地提交与改动。
+        """把分支与工作区退回远端状态：未推送出去的提交与改动都会被撤掉。
 
-        失败降级路径专用（推送没成功时把克隆还原干净，让下次开程序从头来）；
-        只可能撤掉本次刚写进去的内容——调用方手里的本机副本不受影响。
+        失败降级路径专用（推送没成功时把克隆还原干净，让下次开程序从头来）——
+        正常流程里撤掉的只有本次刚写进去的那笔（同步开始时 pull 会先要求工作区干净）。
         中途撞上 rebase 冲突（`pull --rebase` 留下的现场）也一并清掉：不清的话克隆会
-        卡在「变基进行中」，下次拉取直接失败。
+        卡在「变基进行中」，下次拉取直接失败。调用方手里的本机副本不受影响。
         """
         if any((self.path / ".git" / d).exists() for d in ("rebase-merge", "rebase-apply")):
             abort_args = ("-C", str(self.path), "rebase", "--abort")

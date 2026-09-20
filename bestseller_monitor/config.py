@@ -240,6 +240,19 @@ def effective_pages_limit(shop: Shop | None, cfg: Config) -> int:
     return int(cfg.max_pages_per_shop)
 
 
+def decode_shops_bytes(raw: bytes) -> str:
+    """shops.csv 的字节读法：UTF-8（带不带 BOM 都行）优先，失败退 GBK。
+
+    读取方（`load_shops`）与同步方（`shops_sync` 判内容哈希）用同一读法：
+    两侧对「同一份清单」的文本口径必须一致，否则 Excel 之类引起的编码差异
+    会被当成内容变化。
+    """
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("gbk", errors="replace")
+
+
 def load_shops(path: pathlib.Path) -> list[Shop]:
     """读取 shops.csv；跳过空行与 # 注释行；url 去空格。"""
     if not path.exists():
@@ -248,11 +261,7 @@ def load_shops(path: pathlib.Path) -> list[Shop]:
         )
     shops: list[Shop] = []
     seen: set[str] = set()
-    raw = path.read_bytes()
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        text = raw.decode("gbk", errors="replace")
+    text = decode_shops_bytes(path.read_bytes())
     reader = csv.DictReader(io.StringIO(text))
     for row in reader:
         key = (row.get("shop_key") or "").strip()

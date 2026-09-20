@@ -66,7 +66,7 @@ class ShopsSyncTestCase(unittest.TestCase):
     def shared_bytes(self) -> bytes:
         return (self.fresh_clone() / "shops.csv").read_bytes()
 
-    def sync(self) -> shops_sync.SyncOutcome:
+    def sync(self) -> shops_sync.SyncResult:
         return shops_sync.sync_shared_shops(self.local, self.plan)
 
 
@@ -79,7 +79,7 @@ class DirectionTests(ShopsSyncTestCase):
 
         outcome = self.sync()
 
-        self.assertEqual(outcome.action, shops_sync.ACTION_IN_SYNC)
+        self.assertEqual(outcome.action, shops_sync.SyncAction.IN_SYNC)
         self.assertFalse(outcome.warning)
 
     def test_encoding_and_line_ending_noise_is_not_a_change(self):
@@ -89,7 +89,7 @@ class DirectionTests(ShopsSyncTestCase):
 
         outcome = self.sync()
 
-        self.assertEqual(outcome.action, shops_sync.ACTION_IN_SYNC)
+        self.assertEqual(outcome.action, shops_sync.SyncAction.IN_SYNC)
 
     def test_only_local_changed_pushes(self):
         self.seed_shared(V1)
@@ -99,7 +99,7 @@ class DirectionTests(ShopsSyncTestCase):
 
         outcome = self.sync()
 
-        self.assertEqual(outcome.action, shops_sync.ACTION_PUSHED)
+        self.assertEqual(outcome.action, shops_sync.SyncAction.PUSHED)
         self.assertFalse(outcome.warning)
         self.assertEqual(self.shared_bytes().decode("utf-8-sig"), LOCAL_EDIT)
 
@@ -111,10 +111,12 @@ class DirectionTests(ShopsSyncTestCase):
 
         outcome = self.sync()
 
-        self.assertEqual(outcome.action, shops_sync.ACTION_PULLED)
+        self.assertEqual(outcome.action, shops_sync.SyncAction.PULLED)
         self.assertFalse(outcome.warning)
-        self.assertEqual(self.local.read_text(encoding="utf-8"), REPO_EDIT)
-        self.assertEqual(self.sync().action, shops_sync.ACTION_IN_SYNC,
+        self.assertEqual(self.local.read_text(encoding="utf-8-sig"), REPO_EDIT)
+        self.assertTrue(self.local.read_bytes().startswith(BOM),
+                        "拉下来的副本也写成共享清单的规范形态")
+        self.assertEqual(self.sync().action, shops_sync.SyncAction.IN_SYNC,
                          "拉完立刻再同步：已经一致，不重复拉")
 
     def test_both_changed_stops_and_shows_both_versions(self):
@@ -127,7 +129,7 @@ class DirectionTests(ShopsSyncTestCase):
 
         outcome = self.sync()
 
-        self.assertEqual(outcome.action, shops_sync.ACTION_CONFLICT)
+        self.assertEqual(outcome.action, shops_sync.SyncAction.CONFLICT)
         self.assertFalse(outcome.warning)
         self.assertIsNotNone(outcome.diff)
         self.assertIn("-A02", outcome.diff, "本机那版多出的行在差异里")
@@ -144,7 +146,7 @@ class DirectionTests(ShopsSyncTestCase):
 
         outcome = self.sync()
 
-        self.assertEqual(outcome.action, shops_sync.ACTION_CONFLICT)
+        self.assertEqual(outcome.action, shops_sync.SyncAction.CONFLICT)
 
 
 class FirstContactTests(ShopsSyncTestCase):
@@ -155,8 +157,9 @@ class FirstContactTests(ShopsSyncTestCase):
 
         outcome = self.sync()
 
-        self.assertEqual(outcome.action, shops_sync.ACTION_PULLED)
-        self.assertEqual(self.local.read_text(encoding="utf-8"), V1)
+        self.assertEqual(outcome.action, shops_sync.SyncAction.PULLED)
+        self.assertEqual(self.local.read_text(encoding="utf-8-sig"), V1)
+        self.assertTrue(self.local.read_bytes().startswith(BOM))
         self.assertEqual([s.key for s in load_shops(self.local)], ["A01"])
 
     def test_first_push_writes_a_bom_copy_that_load_shops_reads(self):
@@ -165,7 +168,7 @@ class FirstContactTests(ShopsSyncTestCase):
 
         outcome = self.sync()
 
-        self.assertEqual(outcome.action, shops_sync.ACTION_PUSHED)
+        self.assertEqual(outcome.action, shops_sync.SyncAction.PUSHED)
         copy = self.fresh_clone() / "shops.csv"
         self.assertTrue(copy.read_bytes().startswith(BOM), "推上去的清单必须带 BOM")
         self.assertEqual([s.name for s in load_shops(copy)], ["店一", "店二"])
@@ -176,7 +179,7 @@ class FirstContactTests(ShopsSyncTestCase):
 
         outcome = self.sync()
 
-        self.assertEqual(outcome.action, shops_sync.ACTION_PUSHED)
+        self.assertEqual(outcome.action, shops_sync.SyncAction.PUSHED)
         copy = self.fresh_clone() / "shops.csv"
         self.assertTrue(copy.read_bytes().startswith(BOM))
         self.assertEqual([s.name for s in load_shops(copy)], ["店一", "店二"])
@@ -203,7 +206,7 @@ class DegradationTests(ShopsSyncTestCase):
 
         outcome = self.sync()
 
-        self.assertEqual(outcome.action, shops_sync.ACTION_UNREACHABLE)
+        self.assertEqual(outcome.action, shops_sync.SyncAction.UNREACHABLE)
         self.assertTrue(outcome.warning)
         self.assertEqual(self.local.read_bytes(), before)
         self.assertIn("does not appear to be a git repository", outcome.message)
@@ -215,7 +218,7 @@ class DegradationTests(ShopsSyncTestCase):
 
         outcome = self.sync()
 
-        self.assertEqual(outcome.action, shops_sync.ACTION_UNREACHABLE)
+        self.assertEqual(outcome.action, shops_sync.SyncAction.UNREACHABLE)
         self.assertTrue(outcome.warning)
         self.assertTrue(self.local.exists())
 
@@ -230,14 +233,11 @@ class DegradationTests(ShopsSyncTestCase):
         self.write_local(LOCAL_EDIT)
         before = self.local.read_bytes()
         runs = self.box.tmp / "hook-runs"
-        self.box.install_pre_push(self.plan, f'''
-echo ran >> "{self.box.sh_path(runs)}"
-exit 1
-''')
+        self.box.install_declining_hook(self.plan, runs)
 
         outcome = self.sync()
 
-        self.assertEqual(outcome.action, shops_sync.ACTION_PUSH_FAILED)
+        self.assertEqual(outcome.action, shops_sync.SyncAction.PUSH_FAILED)
         self.assertTrue(outcome.warning)
         self.assertEqual(self.local.read_bytes(), before, "本机现值一分不动")
         self.assertEqual(self.shared_bytes().decode("utf-8-sig"), V1, "远端没被动过")
@@ -247,8 +247,8 @@ exit 1
                          "工作区干净")
 
         # 通道修好后（钩子撤掉）下次同步直接成：本地改动还在，方向仍是「只本机变」
-        (self.plan / ".git" / "hooks" / "pre-push").unlink()
-        self.assertEqual(self.sync().action, shops_sync.ACTION_PUSHED)
+        self.box.remove_pre_push(self.plan)
+        self.assertEqual(self.sync().action, shops_sync.SyncAction.PUSHED)
         self.assertEqual(self.shared_bytes().decode("utf-8-sig"), LOCAL_EDIT)
 
     def make_local_readonly(self) -> None:
@@ -269,18 +269,11 @@ exit 1
         self.box.write_files(other, {"shops.csv": CLASH_REPO})
         self.box.must("add", "--", "shops.csv", cwd=other)
         self.box.must("commit", "-m", "同一行的另一种改法", "--", "shops.csv", cwd=other)
-        marker = self.box.tmp / "hooked-once"
-        self.box.install_pre_push(self.plan, f'''
-if [ ! -f "{marker}" ]; then
-  touch "{marker}"
-  git -C "{self.box.sh_path(other)}" push -q
-fi
-exit 0
-''')
+        self.box.install_racing_hook(self.plan, other)
 
         outcome = self.sync()
 
-        self.assertEqual(outcome.action, shops_sync.ACTION_PUSH_FAILED)
+        self.assertEqual(outcome.action, shops_sync.SyncAction.PUSH_FAILED)
         self.assertTrue(outcome.warning)
         self.assertEqual(self.box.must("status", "--porcelain", cwd=self.plan), "",
                          "克隆不能卡在 rebase 现场")
@@ -292,9 +285,9 @@ exit 0
                          "本机现值一分不动")
 
         # 下一轮：方向判成「两边都变」，把两版差异摆到人面前
-        (self.plan / ".git" / "hooks" / "pre-push").unlink()
+        self.box.remove_pre_push(self.plan)
         follow_up = self.sync()
-        self.assertEqual(follow_up.action, shops_sync.ACTION_CONFLICT)
+        self.assertEqual(follow_up.action, shops_sync.SyncAction.CONFLICT)
         self.assertIn("-" + CLASH_LOCAL.splitlines()[-1], follow_up.diff)
 
     def test_push_lands_even_if_the_local_copy_cannot_be_rewritten(self):
@@ -304,7 +297,7 @@ exit 0
 
         outcome = self.sync()
 
-        self.assertEqual(outcome.action, shops_sync.ACTION_PUSHED)
+        self.assertEqual(outcome.action, shops_sync.SyncAction.PUSHED)
         self.assertFalse(outcome.warning)
         self.assertIn("写不动", outcome.message)
         self.assertEqual(self.shared_bytes().decode("utf-8-sig"), LOCAL_EDIT)
@@ -319,14 +312,14 @@ exit 0
 
         outcome = self.sync()
 
-        self.assertEqual(outcome.action, shops_sync.ACTION_PULL_FAILED)
+        self.assertEqual(outcome.action, shops_sync.SyncAction.PULL_FAILED)
         self.assertTrue(outcome.warning)
         self.assertIn("写不动", outcome.message)
         self.assertEqual(self.local.read_bytes(), before, "本机现值一分不动")
 
         os.chmod(self.local, stat.S_IREAD | stat.S_IWRITE)   # 处理好之后：下次同步拉成
-        self.assertEqual(self.sync().action, shops_sync.ACTION_PULLED)
-        self.assertEqual(self.local.read_text(encoding="utf-8"), REPO_EDIT)
+        self.assertEqual(self.sync().action, shops_sync.SyncAction.PULLED)
+        self.assertEqual(self.local.read_text(encoding="utf-8-sig"), REPO_EDIT)
 
 
 if __name__ == "__main__":

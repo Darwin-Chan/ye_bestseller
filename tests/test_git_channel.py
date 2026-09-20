@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import unittest
-from pathlib import Path
 
 from bestseller_monitor.git_channel import ChannelError, GitChannel
 from tests.git_repos import GitSandbox
@@ -91,14 +90,7 @@ class PushTests(unittest.TestCase):
         self.box.write_files(other, {"other.txt": "other\n"})
         self.box.must("add", "--", "other.txt", cwd=other)
         self.box.must("commit", "-m", "other", "--", "other.txt", cwd=other)
-        marker = self.box.tmp / "hooked-once"
-        self.box.install_pre_push(self.mine, f'''
-if [ ! -f "{marker}" ]; then
-  touch "{marker}"
-  git -C "{other}" push -q
-fi
-exit 0
-''')
+        self.box.install_racing_hook(self.mine, other)
         self.box.write_files(self.mine, {"mine.txt": "mine\n"})
         channel = GitChannel(self.mine)
         self.assertTrue(channel.commit("add mine.txt", [self.mine / "mine.txt"]))
@@ -112,11 +104,7 @@ exit 0
     def test_push_gives_up_after_the_attempt_budget(self):
         """远端每次都抢先动一格：重试用尽就报错，不无限打转。"""
         other = self.box.clone(self.remote, "other")
-        self.box.install_pre_push(self.mine, f'''
-git -C "{other}" commit --allow-empty -qm tick
-git -C "{other}" push -q
-exit 0
-''')
+        self.box.install_advancing_hook(self.mine, other)
         self.box.write_files(self.mine, {"mine.txt": "mine\n"})
         channel = GitChannel(self.mine)
         self.assertTrue(channel.commit("add mine.txt", [self.mine / "mine.txt"]))
@@ -129,10 +117,7 @@ exit 0
     def test_push_does_not_retry_failures_other_than_rejection(self):
         """钩子拒绝（凭据被拒、网络断也同此路）：只试一次，原样报错。"""
         runs = self.box.tmp / "hook-runs"
-        self.box.install_pre_push(self.mine, f'''
-echo ran >> "{runs}"
-exit 1
-''')
+        self.box.install_declining_hook(self.mine, runs)
         self.box.write_files(self.mine, {"mine.txt": "mine\n"})
         channel = GitChannel(self.mine)
         self.assertTrue(channel.commit("add mine.txt", [self.mine / "mine.txt"]))

@@ -45,6 +45,7 @@ class GitSandbox:
 
     def __init__(self, test: unittest.TestCase, prefix: str = "bestseller-git-"):
         self.tmp = pathlib.Path(tempfile.mkdtemp(prefix=prefix))
+        self._hooks = 0
         test.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
         empty_global = self.tmp / "empty-gitconfig"
@@ -114,6 +115,40 @@ class GitSandbox:
         hooks.mkdir(parents=True, exist_ok=True)
         script = "#!/bin/sh\n" + script.replace("\r\n", "\n").lstrip("\n")
         (hooks / "pre-push").write_bytes(script.encode("utf-8"))
+
+    def remove_pre_push(self, clone: pathlib.Path) -> None:
+        (clone / ".git" / "hooks" / "pre-push").unlink()
+
+    def install_racing_hook(self, clone: pathlib.Path, other: pathlib.Path) -> None:
+        """pre-push 钩子：只生效一次，把 other 里备好的提交抢先推上远端。
+
+        用来制造「远端在本机 pull 之后、push 落地之前又动了」——non-fast-forward
+        拒绝（含抢跑窗口的陈旧信息保护）发生的唯一窗口。
+        """
+        self._hooks += 1
+        marker = self.tmp / f"raced-{self._hooks}"
+        self.install_pre_push(clone, f'''
+if [ ! -f "{self.sh_path(marker)}" ]; then
+  touch "{self.sh_path(marker)}"
+  git -C "{self.sh_path(other)}" push -q
+fi
+exit 0
+''')
+
+    def install_declining_hook(self, clone: pathlib.Path, counter: pathlib.Path) -> None:
+        """pre-push 钩子：每次推送记一笔并拒绝——凭据被拒、网络断那类不可重试的失败。"""
+        self.install_pre_push(clone, f'''
+echo ran >> "{self.sh_path(counter)}"
+exit 1
+''')
+
+    def install_advancing_hook(self, clone: pathlib.Path, other: pathlib.Path) -> None:
+        """pre-push 钩子：每次推送都让远端再前进一格——把推送重试次数用尽。"""
+        self.install_pre_push(clone, f'''
+git -C "{self.sh_path(other)}" commit --allow-empty -qm tick
+git -C "{self.sh_path(other)}" push -q
+exit 0
+''')
 
     def sh_path(self, path: pathlib.Path) -> str:
         """给钩子脚本里用的路径写法：正斜杠，sh 里不担心反斜杠转义。"""
