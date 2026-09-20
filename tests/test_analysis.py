@@ -166,7 +166,7 @@ class AnalysisBrowserTests(unittest.TestCase):
         expect(self.page.get_by_role("dialog")).to_contain_text("当前存在运行中的库存抓取程序")
         self.page.get_by_role("button", name="继续").click()
         expect(self.page.get_by_role("heading", name="确认同款")).to_be_visible()
-        expect(self.page.get_by_text("待确认", exact=True)).to_be_visible()
+        expect(self.page.locator("#groupDetail .group-status")).to_have_text("待确认")
         expect(self.page.get_by_role("table")).to_contain_text("80")
         self.submit("2026-09-14", 55)
         self.page.reload()
