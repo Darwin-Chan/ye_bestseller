@@ -114,6 +114,10 @@ class AnalysisBrowserTests(unittest.TestCase):
         self.assertEqual(inventories, [tuple(r) for r in self.conn.execute('SELECT * FROM inventory')])
         self.assertIsNone(self.service.start('2026-09-07', '2026-09-17')['products'][0]['image_data'])
         self.assertEqual(self.service.start('2026-09-07', '2026-09-18')['products'][0]['image_hash'], new['image_hash'])
+        incomplete = self.service.start('2026-09-07', '2026-09-18')['products'][0]
+        self.assertIsNone(incomplete['product_name'])
+        self.assertFalse(incomplete['information_complete'])
+        self.assertIn('名称待重新观测', incomplete['information_note'])
         with patch('bestseller_monitor.product_images.urlopen', side_effect=AssertionError('opening must not fetch')):
             for _ in range(2):
                 reopened = connect(self.path)

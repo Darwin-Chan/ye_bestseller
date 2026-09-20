@@ -126,7 +126,7 @@ function renderProducts() {
         const group=snapshot.groups.find(g=>g.members.some(m=>m.shop_key===p.shop_key&&m.offer_id===p.offer_id));
         const skuRows=p.skus||[];
         return `<article><div class="bar"><h3>${esc(group.id)} · ${esc(p.product_name||p.offer_id)} ${sourceIcon(p)}</h3><button ${group.confirmed?'disabled':''} onclick="confirmGroup('${group.id}')">${group.confirmed?'已确认':'确认当前分组'}</button></div>
-            ${productPhoto(p)}<p>${esc(p.shop_key)} · 商品 ${esc(p.offer_id)} · ${skuRows.length} 个 SKU · 区间销量 <b>${p.sales}</b> · <span class="group-status">${group.confirmed?"已确认":"待确认"}</span></p>
+            ${productPhoto(p)}${p.information_note?`<p class="muted">${esc(p.information_note)}</p>`:''}<p>${esc(p.shop_key)} · 商品 ${esc(p.offer_id)} · ${skuRows.length} 个 SKU · 区间销量 <b>${p.sales}</b> · <span class="group-status">${group.confirmed?"已确认":"待确认"}</span></p>
             ${skuRows.map(sku=>`<details open><summary>${esc(sku.name)} · 第 ${sku.segment} 段 · SKU ${esc(sku.sku_id)} · 销量 <b>${sku.sales}</b></summary><table><thead><tr><th>日期</th><th>库存</th><th>当日销量</th><th>状态</th></tr></thead><tbody>${sku.points.map(point=>`<tr><td>${point.date}</td><td>${point.stock ?? '—'}</td><td>${point.sales}</td><td>${point.color==='inactive'?'不在有效段':point.color==='red'?'疑似补货':point.color==='yellow'?'当日未抓取库存':'正常观测'}</td></tr>`).join('')}</tbody></table></details>`).join('')}</article>`;
     }).join('');
     const pages=Math.ceil(snapshot.products.length/20);

@@ -111,10 +111,14 @@ class AnalysisService:
                 product['image_data'] = None
                 product['image_error'] = '该日期没有历史图片'
                 product['information_version'] = version['id'] if version else None
+                product['information_complete'] = bool(version and version['product_name'] and version['content_hash'])
+                product['information_note'] = ''
                 if version:
                     product['product_name'] = version['product_name']
                     product['image_hash'] = version['content_hash']
                     product['image_error'] = version['image_error']
+                    if not version['product_name']:
+                        product['information_note'] = '仅图片证据：名称待重新观测，尚未形成完整商品信息版本'
                     if version['content']:
                         product['image_data'] = 'data:'+version['mime']+';base64,'+base64.b64encode(version['content']).decode('ascii')
                 else:

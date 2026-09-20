@@ -1287,7 +1287,7 @@ class Database:
             now = utcnow()
             cursor = self.conn.execute('INSERT INTO product_information_versions '
                 '(shop_key,offer_id,observed_at,observed_date,product_name,image_url,content_hash,image_error) VALUES (?,?,?,?,?,?,?,?)',
-                (version['shop_key'], version['offer_id'], now, cst_date(now), version['product_name'],
+                (version['shop_key'], version['offer_id'], now, cst_date(now), None,
                  version['image_url'], image.get('hash'), image.get('error')))
             self.conn.commit()
             return {'retried_version': version_id, 'new_version': cursor.lastrowid, 'image_error': image.get('error')}
