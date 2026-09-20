@@ -47,6 +47,12 @@ RUN_AT = dt.datetime(2026, 9, 20, 19, 41, tzinfo=CST)
 IMG_HASH = "ab" + "1" * 62
 
 
+def todo_of(report: str) -> str:
+    """报告「下次该做什么」那一节的正文：节号随冲突节在不在（四 / 五）变。"""
+    marker = "## 五、下次该做什么" if "## 五、下次该做什么" in report else "## 四、下次该做什么"
+    return report.split(marker)[1]
+
+
 class FakeImageStore:
     """图片库替身：只记 key 与字节，模拟「桶里已有什么」。取不到就报 ImageStoreError。"""
 
@@ -106,7 +112,9 @@ def seed_coverage(conn: sqlite3.Connection, coverage, *, observed_at="10:00:00",
                                for shop_key, day in coverage])
     conn.executemany(
         "INSERT INTO inventory(shop_key, offer_id, sku_id, date, stock, price, "
-        "shop_name, product_name, sku_name) VALUES (?,?,?,?,?,?,?,?,?)",
+        "shop_name, product_name, sku_name) VALUES (?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(shop_key, offer_id, sku_id, date) DO UPDATE SET "
+        "stock=excluded.stock, price=excluded.price",
         [(shop_key, f"{shop_key}-o1", "s1", day, 5, 1.5, f"店铺{shop_key}",
           f"商品{shop_key}-o1", "规格一") for shop_key, day in coverage])
     if image_hash is not None:
@@ -245,7 +253,7 @@ class CleanRunTests(unittest.TestCase):
         self.assertIn("**结果**：干净（退出码 0）· 缺口 0 · 冲突 0 · 还没来的包 0", report)
         self.assertIn("**本次运行**：导出已发布 · 新收 2 个包（34 行）", report)
         for title in ("## 一、本机发布", "## 二、收进来的包", "## 三、缺口与还没来的",
-                      "## 五、下次该做什么"):
+                      "## 四、下次该做什么"):
             self.assertIn(title, report)
         self.assertNotIn("## 四、冲突", report)     # 干净场景不出现冲突节（样例的同形）
         self.assertIn("W38-m1.db.gz", report)
@@ -340,7 +348,7 @@ class WeeklyReportTests(unittest.TestCase):
         self.assertIn("- 明细记在本机导入账（本机视角：导入 raw-m3 时发现）；冲突不入交换区",
                       report)
         # 五、下次该做什么：三件（还没来的包 / 别再勾选 A02 / 本机缺的一天）
-        todo = report.split("## 五、下次该做什么")[1]
+        todo = todo_of(report)
         self.assertIn("raw-m2 的 W38 还没发布或没拉到", todo)
         self.assertIn("提醒本机操作者：不要手工勾选本期不归本机的店（A02）", todo)
         self.assertIn("本机缺一天（A03 09-17 —— 当天采集在详情预算耗尽后中止）无法回填",
@@ -359,7 +367,7 @@ class WeeklyReportTests(unittest.TestCase):
         report = world.report()
         self.assertIn("- raw-m3 缺一天：A02 09-16 —— 计划里该采到，收到的包里没有这一天",
                       report)
-        todo = report.split("## 五、下次该做什么")[1]
+        todo = todo_of(report)
         self.assertIn("raw-m3 的包缺一天（A02 09-16）", todo)
 
 
@@ -418,7 +426,7 @@ class ExitCodeTwoTests(unittest.TestCase):
         # 硬失败不拦汇总这半：m3 的包照样收进来了
         self.assertEqual(len(outcome.imports), 1)
         self.assertIn("1. 导出没成功（见第一节）：修好通道后重跑一次",
-                      report.split("## 五、下次该做什么")[1])
+                      todo_of(report))
 
     def test_merge_only_machine_asked_to_only_export_did_nothing(self):
         world = ConsoleWorld(self, machine_id="m4", role=ROLE_MERGE_ONLY)
@@ -483,7 +491,7 @@ class PullAndImageTroubleTests(unittest.TestCase):
         self.assertEqual(outcome.exit_code, 1)
         self.assertEqual([note.ok for note in outcome.pulls if note.repo == "raw-m2"], [False])
         report = world.report()
-        self.assertIn("raw-m2 拉不动（", report.split("## 五、下次该做什么")[1])
+        self.assertIn("raw-m2 拉不动（", todo_of(report))
 
     def test_images_that_cannot_be_fetched_are_counted_in_the_report(self):
         world = ConsoleWorld(self)
@@ -497,7 +505,7 @@ class PullAndImageTroubleTests(unittest.TestCase):
         report = world.report()
         self.assertIn("- 图片：先拉图再插行，仍缺的如实记（本次 1 张）", report)
         self.assertIn("这次有 1 张图没拉到（见第二节），如实记一笔",
-                      report.split("## 五、下次该做什么")[1])
+                      todo_of(report))
         # 缺图不挡导入：行照插
         self.assertEqual(world.conn.execute(
             "SELECT COUNT(*) FROM inventory WHERE shop_key='A03'").fetchone()[0], 7)
@@ -506,29 +514,43 @@ class PullAndImageTroubleTests(unittest.TestCase):
 class ExportOwnershipTests(unittest.TestCase):
     """导出只发「自己那份」（票据 10 的报告口径逼出来的）：导入回来的行不以本机名义再发。"""
 
-    def test_imported_rows_are_not_re_exported_under_this_machines_name(self):
-        world = ConsoleWorld(self)
-        world.plan(("A01", "m1", 3), ("A03", "m3", 3))
-        world.crawls([("A01", day) for day in DAYS])
-        world.publish("m3", [("A03", day) for day in DAYS])
-        world.run()                       # 全链：m1 发了自己的包、收进 m3 的
+    def setUp(self):
+        self.world = ConsoleWorld(self)
+        self.world.plan(("A01", "m1", 3), ("A03", "m3", 3))
+        self.world.crawls([("A01", day) for day in DAYS])
+        self.world.publish("m3", [("A03", day) for day in DAYS])
+        self.world.run()                 # 全链：m1 发了自己的包、收进 m3 的
 
-        # 收完别人的行，本机库里 A03 的行都在；再打一份包，里面只能有本机自己的 A01
-        package = world.box.tmp / "again.db"
-        export.build_package(world.db_path, package, week=WEEK, machine_id="m1",
+    def _rebuild(self) -> Path:
+        package = self.world.box.tmp / "again.db"
+        export.build_package(self.world.db_path, package, week=WEEK, machine_id="m1",
                              crawl_in_progress=False,
                              generated_at=dt.datetime(2026, 9, 21, 9, 0, tzinfo=CST))
+        return package
+
+    def test_imported_rows_are_not_re_exported_under_this_machines_name(self):
+        # 收完别人的行，本机库里 A03 的行都在；再打一份包，里面只能有本机自己的 A01
+        package = self._rebuild()
         shops = {row[0] for row in _package_query(
             package, "SELECT DISTINCT shop_key FROM inventory WHERE date BETWEEN "
                      "'2026-09-14' AND '2026-09-20'")}
         self.assertEqual(shops, {"A01"})
-        versions = _package_query(
-            package, "SELECT COUNT(*) FROM product_information_versions")
-        self.assertEqual(versions, [(7,)])
+        self.assertEqual(_package_query(
+            package, "SELECT COUNT(*) FROM product_information_versions"), [(7,)])
         # 身份表同理：A03 的商品行不进（描述列的最近写者是 m3）
-        offers = {row[0] for row in _package_query(
-            package, "SELECT offer_id FROM products")}
+        offers = {row[0] for row in _package_query(package, "SELECT offer_id FROM products")}
         self.assertEqual(offers, {"A01-o1"})
+
+    def test_a_group_this_machine_recrawled_later_is_exported_again(self):
+        # 导入之后本机又采过这一组（越权补采/交接）：账里的时刻对不上了，按本机算——
+        # 这一组必须照发，否则本机与全世界分叉、真冲突也不再浮出来
+        self.world.crawls([("A03", "2026-09-16")], observed_at="18:00:00")
+
+        package = self._rebuild()
+
+        self.assertEqual(_package_query(
+            package, "SELECT shop_key, date FROM inventory WHERE shop_key='A03'"),
+            [("A03", "2026-09-16")])
 
 
 def _package_query(package: Path, sql: str):
@@ -537,6 +559,38 @@ def _package_query(package: Path, sql: str):
         return conn.execute(sql).fetchall()
     finally:
         conn.close()
+
+
+class PlanRepoPullTests(unittest.TestCase):
+    """拉取也管 plan 库（spec §7「对另外三个库 pull」）：纯汇总机不跑准备串，靠这一趟保鲜。"""
+
+    def test_the_plan_clone_is_pulled_along_with_the_raw_repos(self):
+        world = ConsoleWorld(self)
+        world.plan(("A01", "m1", 3))
+        world.crawls([("A01", day) for day in DAYS])
+        remote = world.box.new_remote("plan.git")
+        world.box.clone(remote, "exchange/plan")
+        work = world.box.clone(remote, "plan-work")
+        world.box.commit_push(work, {"machines.json": '["m1", "m2", "m3"]\n'},
+                              message="roster")
+
+        outcome = world.run()
+
+        self.assertIn("plan", [note.repo for note in outcome.pulls])
+        self.assertEqual((world.root / "plan" / "machines.json").read_text(encoding="utf-8"),
+                         '["m1", "m2", "m3"]\n')
+
+
+class ReasonGlossCoverageTests(unittest.TestCase):
+    """报告的缺口理由要盖住轮次的全部终态：新增一个终态时在这里点名，别静默降级。"""
+
+    def test_every_terminal_reason_has_a_report_gloss(self):
+        from bestseller_monitor.rounds import TerminalReason
+
+        missing = [reason.value for reason in TerminalReason
+                   if reason.value not in exchange_mod._REASON_GLOSS]
+
+        self.assertEqual(missing, [])
 
 
 class ExchangeReadPortTests(unittest.TestCase):
@@ -561,8 +615,9 @@ class ExchangeReadPortTests(unittest.TestCase):
 
         found = export.week_packages(world.root, WEEK)
 
-        self.assertEqual([machine for machine, _path, _rel in found], ["m2"])
-        self.assertEqual(found[0][2], f"raw-m2/data/2026/W38-m2.db.gz")
+        self.assertEqual([ref.machine for ref in found], ["m2"])
+        self.assertEqual(found[0].rel, "raw-m2/data/2026/W38-m2.db.gz")
+        self.assertEqual(found[0].path.name, "W38-m2.db.gz")
 
     def test_package_shop_days_reads_the_coverage_in_the_window(self):
         world = ConsoleWorld(self)

@@ -55,6 +55,7 @@ from bestseller_monitor import crawler_identity
 from bestseller_monitor.cos_store import CosCliImageStore
 from bestseller_monitor.db import CST, cst_date
 from bestseller_monitor.git_channel import ChannelError, GitChannel
+from bestseller_monitor.identity_key import identity_row_key_sql
 from bestseller_monitor.image_store import ImageStore, ImageStoreError, image_key
 from bestseller_monitor.weekly_plan import iso_week_label, week_monday
 from bestseller_monitor.weekly_plan import week_window as plan_week_window
@@ -107,27 +108,36 @@ class _PackageTable:
         return f"CREATE TABLE {self.name} ({', '.join(parts)});"
 
 
-# 观测表只发「自己那份」：一个 (店铺, 日期) 组的行归取胜 claim 的机器（`merge_claims`
-# 记着它，票据 09）。本机采的组不在账里（含本机取胜的组）→ 照发；账说归别人 → 不发——
-# 不然导入回来的行会以本机名义再发一遍：别的机器收回去就是同一批数据两个 claim
-# （幻影冲突、来源换手），「同周重跑不产生多余提交」也不再成立（票据 10 的报告要求
-# 第二次运行仍是「无新提交」，三份原型样例都按这条画）。
+# 观测表只发「自己那份」：一个 (店铺, 日期) 组的行归取胜 claim 的机器（`merge_claims`，
+# 票据 09）。本机采的组不在账里（含本机取胜的组）→ 照发；账说归别人 → 不发——不然
+# 导入回来的行会以本机名义再发一遍：别的机器收回去就是同一批数据两个 claim（幻影冲突、
+# 来源换手），「同周重跑不产生多余提交」也不再成立（票据 10 的报告要求第二次运行仍是
+# 「无新提交」，三份原型样例都按这条画）。
+#
+# 认账要连**时刻**一起对（与 `merge._local_claim` 同一课）：时刻对不上说明本机导入之后
+# 又采过这一组（越权补采、逃生口自由采集、周中交接、晚间补采），库里已是本机的新 claim、
+# 账还没刷新——那种组必须照发，否则本机与全世界分叉、真冲突也不再浮出来。
 _OWNED_OBSERVED = (
     "NOT EXISTS (SELECT 1 FROM merge_claims c WHERE c.shop_key = {table}.shop_key "
-    "AND c.observed_date = {table}.{date} AND c.machine_id <> :machine)")
-# 身份表同理，按 `merge_seen`（描述列最近一次观测的写者）：本机写的、或没有账的照发。
-# row_key 的拼法与 merge 侧一致：主键列用 char(31) 相连（见 merge._merge_identity）。
+    "AND c.observed_date = {table}.{date} AND c.machine_id <> :machine "
+    "AND c.claim_at = (SELECT MAX(v.observed_at) FROM product_information_versions v "
+    "WHERE v.shop_key = {table}.shop_key AND v.observed_date = {table}.{date}))")
+# 身份表同理，按 `merge_seen`（描述列最近一次观测的写者）与同一套时刻判据
+# （`merge._seen_machine`：账里的 seen_at 等于本机现读到的 last_seen_at 才认账）；
+# 行键的拼法在 `identity_key` 一处（SQL 版由分隔符码点现推）。
 _OWNED_IDENTITY = (
     "NOT EXISTS (SELECT 1 FROM merge_seen s WHERE s.table_name = '{name}' "
-    "AND s.row_key = {key} AND s.machine_id <> :machine)")
+    "AND s.row_key = {key} AND s.machine_id <> :machine "
+    "AND s.seen_at = COALESCE({table}.last_seen_at, ''))")
 
 
 def _owned_observed(table: str, date: str) -> str:
     return _OWNED_OBSERVED.format(table=table, date=date)
 
 
-def _owned_identity(name: str, key: str) -> str:
-    return _OWNED_IDENTITY.format(name=name, key=key)
+def _owned_identity(name: str, primary_key: tuple[str, ...]) -> str:
+    key = identity_row_key_sql(f"{name}.{column}" for column in primary_key)
+    return _OWNED_IDENTITY.format(name=name, key=key, table=name)
 
 
 EXCHANGE_TABLES: tuple[_PackageTable, ...] = (
@@ -138,7 +148,7 @@ EXCHANGE_TABLES: tuple[_PackageTable, ...] = (
         primary_key=("shop_key",),
         slice_sql=f"SELECT {{cols}} FROM shops WHERE shop_key IN ({_WEEK_SHOPS}) "
                   "AND {owned} ORDER BY {cols}",
-        owned=_owned_identity("shops", "shops.shop_key"),
+        owned=_owned_identity("shops", ("shop_key",)),
     ),
     _PackageTable(
         "products",
@@ -148,7 +158,7 @@ EXCHANGE_TABLES: tuple[_PackageTable, ...] = (
         primary_key=("offer_id",),
         slice_sql=f"SELECT {{cols}} FROM products WHERE offer_id IN ({_WEEK_OFFERS}) "
                   "AND {owned} ORDER BY {cols}",
-        owned=_owned_identity("products", "products.offer_id"),
+        owned=_owned_identity("products", ("offer_id",)),
     ),
     _PackageTable(
         "skus",
@@ -157,7 +167,7 @@ EXCHANGE_TABLES: tuple[_PackageTable, ...] = (
         primary_key=("offer_id", "sku_id"),
         slice_sql=f"SELECT {{cols}} FROM skus WHERE offer_id IN ({_WEEK_OFFERS}) "
                   "AND {owned} ORDER BY {cols}",
-        owned=_owned_identity("skus", "skus.offer_id || char(31) || skus.sku_id"),
+        owned=_owned_identity("skus", ("offer_id", "sku_id")),
     ),
     _PackageTable(
         "inventory",
@@ -234,9 +244,21 @@ def package_week(name: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def week_packages(exchange_root: str | pathlib.Path, week: str
-                  ) -> tuple[tuple[str, pathlib.Path, str], ...]:
-    """交换区里某一周的包：`(机器, 包文件路径, 相对交换区根的路径)`，按机器与文件名排序。
+@dataclasses.dataclass(frozen=True)
+class PackageRef:
+    """交换区里的一个周包：哪台机器发的、包文件在哪、相对交换区根的路径。
+
+    `machine` 与 `rel` 都从路径本身读出来（`raw-<机器>/data/<年>/<周>-<机器>.db.gz`），
+    找包的人不必自己再解析一遍文件名。
+    """
+
+    machine: str
+    path: pathlib.Path
+    rel: str
+
+
+def week_packages(exchange_root: str | pathlib.Path, week: str) -> tuple[PackageRef, ...]:
+    """交换区里某一周的包，按机器与文件名排序。
 
     只读本机交换区**已经有**的克隆（不拉取），一个包都不解压——读包内容是调用方的事
     （`merge.package_shop_days` / `merge.import_package`）。年目录取周编号里的 ISO 年：
@@ -244,7 +266,7 @@ def week_packages(exchange_root: str | pathlib.Path, week: str
     """
     iso = week_monday(week).isocalendar()
     year_dir, week_no = str(iso.year), iso.week
-    found: list[tuple[str, pathlib.Path, str]] = []
+    found: list[PackageRef] = []
     for repo in sorted(pathlib.Path(exchange_root).glob("raw-*")):
         machine = repo.name[len("raw-"):]
         if not repo.is_dir() or not machine:
@@ -253,7 +275,8 @@ def week_packages(exchange_root: str | pathlib.Path, week: str
             if package_week(path.name) != week_no or \
                     not path.name[: -len(PACKAGE_SUFFIX)].endswith(f"-{machine}"):
                 continue
-            found.append((machine, path, f"{repo.name}/data/{year_dir}/{path.name}"))
+            found.append(PackageRef(machine=machine, path=path,
+                                    rel=f"{repo.name}/data/{year_dir}/{path.name}"))
     return tuple(found)
 
 

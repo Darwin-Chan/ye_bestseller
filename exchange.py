@@ -35,9 +35,6 @@ from bestseller_monitor.weekly_plan import PlanError  # noqa: E402
 
 WINDOW_TITLE = "数据交换台"
 
-_VERDICT = {console.EXIT_CLEAN: "干净", console.EXIT_NEEDS_LOOK: "有需要人看一眼的地方",
-            console.EXIT_NOTHING_DONE: "本机没做成事"}
-
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -160,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n>>> {exc}\n")
         return console.EXIT_NOTHING_DONE
     print(f"\n报告：{outcome.report_path}")
-    print(f"退出码 {outcome.exit_code}：{_VERDICT[outcome.exit_code]}")
+    print(f"退出码 {outcome.exit_code}：{console.VERDICT[outcome.exit_code]}")
     return outcome.exit_code
 
 

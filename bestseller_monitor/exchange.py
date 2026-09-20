@@ -9,7 +9,8 @@
   致命的（本机没做成事），其余检查结果只记注记。
 - **导出**：`export.export`（票据 08 的一致性快照 + 周包 + 图片只传新增）。纯汇总机跳过并
   明示（保留入口不藏）；导出失败不拦汇总这半，如实记进报告与退出码。
-- **拉取**：对另外的每个 `raw-*` 库 pull。拉不动记一笔（需要人看一眼），不拦汇总。
+- **拉取**：对另外的每个交换库 pull（别的 `raw-*` 库 + `plan` 库——纯汇总机不跑采集
+  准备串，plan 克隆靠这一趟保鲜）。拉不动记一笔（需要人看一眼），不拦汇总。
 - **汇总**：交换区里本周别人发的包逐个 `merge.import_package`（票据 09 的确定性合并、
   同哈希幂等跳过）；本机自己的包不收。
 - **报告**：`<交换区根>/报告/<年>-W<周>.md`——**一周一份、同周重跑重写同一份**，
@@ -53,6 +54,10 @@ ONLY_MERGE = "merge"
 EXIT_CLEAN = 0                      # 干净
 EXIT_NEEDS_LOOK = 1                 # 有需要人看一眼的
 EXIT_NOTHING_DONE = 2               # 本机没做成事（给以后挂计划任务留的判据）
+
+# 退出码的人话（报告「结果」行与命令行收尾共用一处）：spec §7 的三个数各对应一句。
+VERDICT = {EXIT_CLEAN: "干净", EXIT_NEEDS_LOOK: "有需要人看一眼的地方",
+           EXIT_NOTHING_DONE: "本机没做成事"}
 
 # 轮次终态 → 报告里那句人话（spec §8 的样例：「当天采集在详情预算耗尽后中止」）。
 _REASON_GLOSS = {
@@ -238,12 +243,20 @@ def _self_crawled_days(db: Database, week: str, machine_id: str,
 
 
 def _pull_others(cfg, machine_id: str, say) -> tuple[PullNote, ...]:
-    """对另外的每个 raw-* 库 pull（本机的那个归导出这半管）。"""
+    """对另外的每个交换库 pull：别的 raw 库 + `plan` 库（spec §7「对另外三个库 pull」）。
+
+    plan 库跟着拉是纯汇总机那条线的要紧事：它不跑采集准备串，不拉就永远停在 clone
+    时那份；采集机上重复拉一次无害（同内容是个空动作）。没 clone 的目录跳过——那是
+    上机清单第 9 步的事，检查步骤会点名。
+    """
     root = pathlib.Path(cfg.exchange_root)
+    repos = {path for path in root.glob("raw-*") if path.is_dir()}
+    repos.discard(root / f"raw-{machine_id}")
+    plan_repo = root / plan_step.PLAN_REPO_DIR
+    if plan_repo.is_dir():
+        repos.add(plan_repo)
     notes: list[PullNote] = []
-    for path in sorted(root.glob("raw-*")):
-        if not path.is_dir() or path.name == f"raw-{machine_id}":
-            continue
+    for path in sorted(repos, key=lambda p: p.name):
         try:
             GitChannel(path).pull()
         except ChannelError as exc:
@@ -260,17 +273,17 @@ def _merge_week(cfg, db: Database, *, week: str, machine_id: str, store,
     """把交换区里本周别人发的包逐个收进本机库（同哈希自动跳过）。本机自己的包不收。"""
     root = pathlib.Path(cfg.exchange_root)
     imported: dict[pathlib.Path, merge.ImportResult] = {}
-    for machine, path, _rel in export.week_packages(root, week):
-        if machine == machine_id:
+    for ref in export.week_packages(root, week):
+        if ref.machine == machine_id:
             continue
-        result = merge.import_package(db.conn, path, machine_id=machine_id, store=store)
-        imported[path] = result
+        result = merge.import_package(db.conn, ref.path, machine_id=machine_id, store=store)
+        imported[ref.path] = result
         if result.failed:
-            say(f"导入 {path.name}：没导成（{_first_line(result.failure)}）")
+            say(f"导入 {ref.path.name}：没导成（{_first_line(result.failure)}）")
         elif result.skipped:
-            say(f"跳过 {path.name}：已导入过（同哈希）")
+            say(f"跳过 {ref.path.name}：已导入过（同哈希）")
         else:
-            say(f"导入 {path.name}：新增 {result.rows_inserted:,} 行、"
+            say(f"导入 {ref.path.name}：新增 {result.rows_inserted:,} 行、"
                 f"覆盖 {result.rows_replaced:,} 行、冲突 {result.conflicts} 处、"
                 f"拉图 {result.images_pulled} 张")
     if not imported:
@@ -372,24 +385,25 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
     plan = plan_step.stored_plan(db, week)
     days = _week_days(week, now)
     packages = export.week_packages(root, week)
+    plan_of_shop = ({row.shop_key: row.machine_id for row in plan.rows}
+                    if plan is not None else {})
 
-    packages_rows = []
-    for machine, path, _rel in packages:
-        if machine == machine_id:
-            continue
-        packages_rows.append(_package_row(db, machine, path, imported.get(path)))
+    packages_rows = tuple(
+        _package_row(db, ref, imported.get(ref.path))
+        for ref in packages if ref.machine != machine_id)
 
-    planned = {row.machine_id for row in plan.rows} if plan is not None else set()
-    arrived = {machine for machine, _path, _rel in packages}
+    planned = set(plan_of_shop.values())
+    arrived = {ref.machine for ref in packages}
     missing = tuple(sorted(m for m in planned if m != machine_id and m not in arrived))
 
     gaps = _gaps(db, plan, week=week, days=days, machine_id=machine_id, packages=packages,
                  missing=missing)
     conflicts = _conflicts(db, week=week, machine_id=machine_id, plan=plan)
     image_missing_total = sum(result.images_missing for result in imported.values())
-    todo = _todo(machine_id=machine_id, week=week, plan=plan, gaps=gaps, conflicts=conflicts,
-                 missing=missing, pulls=pulls, export_result=export_result,
-                 imported=imported, image_missing_total=image_missing_total)
+    todo = _todo(machine_id=machine_id, week=week, plan_of_shop=plan_of_shop, gaps=gaps,
+                 conflicts=conflicts, missing=missing, pulls=pulls,
+                 export_result=export_result, imported=imported,
+                 image_missing_total=image_missing_total)
 
     failures: list[str] = []
     if export_result is not None and export_result.failed:
@@ -405,7 +419,7 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
     return RunOutcome(
         week=week, machine_id=machine_id, role=role, ran_at=now, check=check,
         export=export_result, export_note=export_note, pulls=pulls,
-        imports=tuple(imported.values()), merge_ran=merge_ran, packages=tuple(packages_rows),
+        imports=tuple(imported.values()), merge_ran=merge_ran, packages=packages_rows,
         gaps=gaps, conflicts=conflicts, missing_machines=missing, todo=todo,
         summary=_summary(only=only, export_result=export_result, export_note=export_note,
                          imported=imported, merge_ran=merge_ran),
@@ -413,15 +427,14 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
         exit_code=(EXIT_NOTHING_DONE if failures
                    else EXIT_NEEDS_LOOK if soft else EXIT_CLEAN),
         self_shops=plan.machine_keys(machine_id) if plan is not None else (),
-        plan_known=plan is not None,
-        plan_of_shop=({row.shop_key: row.machine_id for row in plan.rows}
-                      if plan is not None else {}))
+        plan_known=plan is not None, plan_of_shop=plan_of_shop)
 
 
-def _package_row(db: Database, machine: str, path: pathlib.Path,
+def _package_row(db: Database, ref: export.PackageRef,
                  result: merge.ImportResult | None) -> PackageRow:
     """一行：这次的导入结果优先；汇总没跑（或没碰它）时回落到幂等账里的状态。"""
-    row = PackageRow(repo=f"raw-{machine}", week_short=f"W{export.package_week(path.name)}",
+    row = PackageRow(repo=f"raw-{ref.machine}",
+                     week_short=f"W{export.package_week(ref.path.name)}",
                      rows=None, inserted=None, replaced=None, conflicts=None, images=None,
                      result="")
     if result is not None and result.failed:
@@ -433,14 +446,15 @@ def _package_row(db: Database, machine: str, path: pathlib.Path,
             row, rows=result.rows_total, inserted=result.rows_inserted,
             replaced=result.rows_replaced, conflicts=result.conflicts,
             images=(result.images_pulled, result.images_bytes), result="已导入")
-    known = _ledger_row(db.conn, path)
+    known = _ledger_row(db.conn, ref.path)
     if known is not None:
         return dataclasses.replace(row, rows=known["rows_total"], result="已导入过")
     return dataclasses.replace(row, result="还没汇总")
 
 
 def _gaps(db: Database, plan, *, week: str, days: tuple[dt.date, ...], machine_id: str,
-          packages: tuple, missing: tuple[str, ...]) -> tuple[GapLine, ...]:
+          packages: tuple[export.PackageRef, ...], missing: tuple[str, ...]
+          ) -> tuple[GapLine, ...]:
     """计划 × 收到的包：缺 = 计划里该采到的（店铺 × 日期）在哪都没有。
 
     覆盖的判据是「本机库 ∪ 交换区里全部包的覆盖」——口径是「在收到的包里找不到」
@@ -454,11 +468,11 @@ def _gaps(db: Database, plan, *, week: str, days: tuple[dt.date, ...], machine_i
     local = {(str(row[0]), str(row[1])) for row in db.conn.execute(
         "SELECT DISTINCT shop_key, date FROM inventory WHERE date BETWEEN ? AND ?", span)}
     coverage: set[tuple[str, str]] = set()
-    for _machine, path, rel in packages:
+    for ref in packages:
         try:
-            coverage |= merge.package_shop_days(path, days[0], days[-1])
+            coverage |= merge.package_shop_days(ref.path, days[0], days[-1])
         except (OSError, EOFError, sqlite3.Error) as exc:
-            log.warning("缺口检查读不动包 %s：%s（该包的导入失败会另行报出）", rel, exc)
+            log.warning("缺口检查读不动包 %s：%s（该包的导入失败会另行报出）", ref.rel, exc)
     gaps: list[GapLine] = []
     for row in plan.rows:
         for day in days:
@@ -543,7 +557,23 @@ def _summary(*, only, export_result, export_note, imported, merge_ran) -> str:
     return " · ".join(parts)
 
 
-def _todo(*, machine_id, week, plan, gaps, conflicts, missing, pulls, export_result,
+def _day_count(count: int) -> str:
+    return "一天" if count == 1 else f"{count} 天"
+
+
+def _by_machine(gaps: tuple[GapLine, ...]) -> list[tuple[str, list[GapLine]]]:
+    """按份额归属的机器分组（机器标识排序）——缺口节与待办节共用。"""
+    return [(machine, [gap for gap in gaps if gap.machine == machine])
+            for machine in sorted({gap.machine for gap in gaps})]
+
+
+def _gap_detail(gaps: list[GapLine], *, reasons: bool) -> str:
+    """一组缺口的行内明细；`reasons` 带上理由（本机份额才有人话理由可带）。"""
+    return "；".join(f"{gap.shop_key} {gap.date[5:]}" + (f" —— {gap.reason}" if reasons else "")
+                     for gap in gaps)
+
+
+def _todo(*, machine_id, week, plan_of_shop, gaps, conflicts, missing, pulls, export_result,
           imported, image_missing_total) -> tuple[str, ...]:
     """「下次该做什么」：从这次运行的事实与账里长出来。"""
     week_short = week.split("-")[1]
@@ -552,7 +582,6 @@ def _todo(*, machine_id, week, plan, gaps, conflicts, missing, pulls, export_res
         items.append(f"raw-{machine} 的 {week_short} 还没发布或没拉到。它发布后重跑一次"
                      "汇总就能收进来（重复导入是安全的）")
 
-    plan_of_shop = {row.shop_key: row.machine_id for row in plan.rows} if plan else {}
     self_over: list[str] = []
     for entry in conflicts:
         planned = plan_of_shop.get(entry.shop_key)
@@ -567,17 +596,13 @@ def _todo(*, machine_id, week, plan, gaps, conflicts, missing, pulls, export_res
         items.append(f"还有 {len(unexplained)} 处冲突不是本机多采造成的（见第四节）："
                      "确认是越权、降级逃生口还是换周交接不清")
 
-    mine = [g for g in gaps if g.machine == machine_id]
-    if mine:
-        count = "一天" if len(mine) == 1 else f"{len(mine)} 天"
-        detail = "；".join(f"{g.shop_key} {g.date[5:]} —— {g.reason}" for g in mine)
-        items.append(f"本机缺{count}（{detail}）无法回填，不影响下周")
-    others = [g for g in gaps if g.machine != machine_id]
-    for machine in sorted({g.machine for g in others}):
-        group = [g for g in others if g.machine == machine]
-        count = "一天" if len(group) == 1 else f"{len(group)} 天"
-        detail = "；".join(f"{g.shop_key} {g.date[5:]}" for g in group)
-        items.append(f"raw-{machine} 的包缺{count}（{detail}）：历史日期补不了，如实记一笔")
+    if mine := [gap for gap in gaps if gap.machine == machine_id]:
+        items.append(f"本机缺{_day_count(len(mine))}（{_gap_detail(mine, reasons=True)}）"
+                     "无法回填，不影响下周")
+    others = [gap for gap in gaps if gap.machine != machine_id]
+    for machine, group in _by_machine(tuple(others)):
+        items.append(f"raw-{machine} 的包缺{_day_count(len(group))}"
+                     f"（{_gap_detail(group, reasons=False)}）：历史日期补不了，如实记一笔")
 
     for pull in pulls:
         if not pull.ok:
@@ -587,10 +612,10 @@ def _todo(*, machine_id, week, plan, gaps, conflicts, missing, pulls, export_res
             items.append("导出没成功（见第一节）：修好通道后重跑一次")
         elif export_result.images is not None and export_result.images.failure is not None:
             items.append("图片通道这趟没传成（见第一节）：通道恢复后重跑一次导出就能补上")
-    failed_imports = [r for r in imported.values() if r.failed]
-    for result in failed_imports:
-        items.append(f"{result.package} 没导成（见第二节）：修好后重跑一次"
-                     "（重跑等价于首次导入，安全）")
+    for result in imported.values():
+        if result.failed:
+            items.append(f"{result.package} 没导成（见第二节）：修好后重跑一次"
+                         "（重跑等价于首次导入，安全）")
     if image_missing_total:
         items.append(f"这次有 {image_missing_total} 张图没拉到（见第二节），如实记一笔")
 
@@ -624,8 +649,6 @@ def _side_text(outcome: RunOutcome, entry: ConflictEntry, machine: str, at: str)
 
 
 def _render(outcome: RunOutcome) -> str:
-    verdict = {EXIT_CLEAN: "干净", EXIT_NEEDS_LOOK: "有需要人看一眼的地方",
-               EXIT_NOTHING_DONE: "本机没做成事"}[outcome.exit_code]
     monday, sunday = weekly_plan.week_window(outcome.week)
     span = f"{monday.month}月{monday.day}日 – {sunday.month}月{sunday.day}日"
     lines = [
@@ -634,7 +657,8 @@ def _render(outcome: RunOutcome) -> str:
         f"本机 **{outcome.machine_id}**（{ROLE_GLOSS[outcome.role]}）· "
         f"{outcome.ran_at:%Y-%m-%d %H:%M} 运行 · 覆盖 {span}",
         "",
-        f"**结果**：{verdict}（退出码 {outcome.exit_code}）· 缺口 {len(outcome.gaps)} · "
+        f"**结果**：{VERDICT[outcome.exit_code]}（退出码 {outcome.exit_code}）· "
+        f"缺口 {len(outcome.gaps)} · "
         f"冲突 {len(outcome.conflicts)} · 还没来的包 {len(outcome.missing_machines)}",
         f"**本次运行**：{outcome.summary}",
         "",
@@ -721,20 +745,17 @@ def _gaps_section(outcome: RunOutcome) -> list[str]:
     else:
         mine = [gap for gap in outcome.gaps if gap.machine == outcome.machine_id]
         if mine:
-            count = "一天" if len(mine) == 1 else f"{len(mine)} 天"
             first, *rest = mine
-            out.append(f"- 本机缺{count}：{first.shop_key} {first.date[5:]} —— {first.reason}"
-                       "（历史日期补不了，如实记一笔）")
+            out.append(f"- 本机缺{_day_count(len(mine))}：{first.shop_key} {first.date[5:]}"
+                       f" —— {first.reason}（历史日期补不了，如实记一笔）")
             for gap in rest:
                 out.append(f"- 本机还缺：{gap.shop_key} {gap.date[5:]} —— {gap.reason}"
                            "（历史日期补不了，如实记一笔）")
             wrote = True
         others = [gap for gap in outcome.gaps if gap.machine != outcome.machine_id]
-        for machine in sorted({gap.machine for gap in others}):
-            group = [gap for gap in others if gap.machine == machine]
-            count = "一天" if len(group) == 1 else f"{len(group)} 天"
-            detail = "；".join(f"{gap.shop_key} {gap.date[5:]}" for gap in group)
-            out.append(f"- raw-{machine} 缺{count}：{detail} —— 计划里该采到，"
+        for machine, group in _by_machine(tuple(others)):
+            out.append(f"- raw-{machine} 缺{_day_count(len(group))}："
+                       f"{_gap_detail(group, reasons=False)} —— 计划里该采到，"
                        "收到的包里没有这一天（历史日期补不了，如实记一笔）")
             wrote = True
         if outcome.missing_machines:
@@ -769,6 +790,8 @@ def _conflicts_section(outcome: RunOutcome) -> list[str]:
 
 
 def _todo_section(outcome: RunOutcome) -> list[str]:
-    out = ["## 五、下次该做什么"]
+    # 节号跟着「冲突」节的在不在走：干净场景没有第四节，待办就是「四」（样例一/二的样子）
+    number = "五" if outcome.conflicts else "四"
+    out = [f"## {number}、下次该做什么"]
     out += [f"{index}. {item}" for index, item in enumerate(outcome.todo, start=1)]
     return out

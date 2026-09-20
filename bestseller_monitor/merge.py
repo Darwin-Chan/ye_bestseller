@@ -56,6 +56,7 @@ from collections.abc import Iterable, Iterator
 
 from bestseller_monitor import export
 from bestseller_monitor.db import VERSION_DEDUPE_KEY, utcnow
+from bestseller_monitor.identity_key import identity_row_key
 from bestseller_monitor.image_store import ImageStore, ImageStoreError, image_key
 from bestseller_monitor.parse import DEFAULT_SKU_ID
 
@@ -581,7 +582,7 @@ def _merge_identity(conn: sqlite3.Connection, spec: _Identity, rows: list[dict],
     pk_where = " AND ".join(f"{name}=?" for name in pk)
     for row in rows:
         pk_values = tuple(row.get(name) for name in pk)
-        row_key = "\x1f".join(str(value) for value in pk_values)
+        row_key = identity_row_key(pk_values)     # 与导出侧的过滤同源（identity_key）
         existing = conn.execute(
             f"SELECT * FROM {spec.table} WHERE {pk_where}", pk_values).fetchone()
         package_seen = (row.get("last_seen_at") or "", pkg_machine)
