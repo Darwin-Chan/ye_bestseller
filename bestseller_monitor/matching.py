@@ -13,7 +13,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.request import Request, urlopen
+from urllib.request import Request, HTTPRedirectHandler, build_opener
 from urllib.parse import urlsplit
 
 from PIL import Image
@@ -60,6 +60,16 @@ class MatchingConfig:
 
 class ModelFailure(Exception):
     pass
+
+
+class NoModelRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ModelFailure('模型地址发生重定向，请配置最终服务地址')
+
+
+def urlopen(request, timeout):
+    # Never forward a provider credential to a redirect destination.
+    return build_opener(NoModelRedirect()).open(request, timeout=timeout)
 
 
 def request_json(config, content, instruction):

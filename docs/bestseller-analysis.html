@@ -9,7 +9,7 @@
 <section><label>开始日期 <input id="start" type="date"></label><h3>当日真实抓取</h3><div id="startCoverage">请选择日期</div></section>
 <section><label>结束日期 <input id="end" type="date"></label><h3>当日真实抓取</h3><div id="endCoverage">请选择日期</div></section></div>
 <p><button id="begin" class="primary">下一步、进入同款确认</button></p></section>
-<section id="reviewPage" hidden><div class="bar"><h2>确认同款</h2><button id="back">重新选择日期</button></div><p id="snapshotInfo"></p><p class="muted">建议分组均待人工确认；低把握或失败商品可重试模型匹配。</p><button id="retryMatching" onclick="retryMatching()">重试模型匹配</button><div id="products"></div><section id="results" hidden><h2>初步畅销品</h2><div id="ranking"></div></section><div class="bar"><button id="prev">上一页</button><span id="pageInfo"></span><button id="next">下一页</button></div></section>
+<section id="reviewPage" hidden><div class="bar"><h2>确认同款</h2><button id="back">重新选择日期</button></div><p id="snapshotInfo"></p><p class="muted">建议分组均待人工确认；失败项可重试模型匹配。低把握判断保留缓存，需人工核对。</p><button id="retryMatching" onclick="retryMatching()">重试模型匹配</button><div id="products"></div><section id="results" hidden><h2>初步畅销品</h2><div id="ranking"></div></section><div class="bar"><button id="prev">上一页</button><span id="pageInfo"></span><button id="next">下一页</button></div></section>
 </main><dialog id="notice"><p id="noticeText"></p><button id="noticeOK">继续</button></dialog>
 <dialog id="imageViewer" aria-label="商品图片"><img id="largeImage" alt="商品主图" style="max-width:100%;max-height:70vh"><button onclick="this.closest('dialog').close()">关闭大图</button></dialog>
 <script>

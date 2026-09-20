@@ -14,8 +14,9 @@ from playwright.sync_api import expect
 
 import test_analysis as browser_fixture
 from bestseller_monitor.matching import (MatchingConfig, MatchingService, ModelConfig,
-                                         candidate_pairs, identity)
+                                         candidate_pairs, identity, request_json, ModelFailure)
 from bestseller_monitor.product_images import evidence
+from bestseller_monitor.analysis import AnalysisConfig
 from helpers import new_round
 
 
@@ -44,6 +45,7 @@ class ModelTransport:
         self.text_only = False
         self.decisions = {}
         self.fail_names = set()
+        self.confidence = .99
 
     def __call__(self, request, timeout):
         payload = json.loads(request.data)
@@ -62,7 +64,7 @@ class ModelTransport:
             if self.fail_comparisons or names in self.fail_names:
                 raise OSError('provider error with secret-value')
             visual = [str(im.getpixel((0, 0))) for im in images] or [item['text'] for item in content if item.get('text', '').startswith('Image evidence:')]
-            result = {'same': self.decisions.get(names, visual[0] == visual[1]), 'confidence': .99}
+            result = {'same': self.decisions.get(names, visual[0] == visual[1]), 'confidence': self.confidence}
         for im in images:
             im.close()
         return io.BytesIO(json.dumps({'choices': [{'message': {'content': json.dumps(result)}}]}).encode())
@@ -96,6 +98,50 @@ class MatchingTests(unittest.TestCase):
         MatchingService(self.config).suggest(products, singles(products))
         self.assertEqual(len(self.transport.calls), after)
         self.assertEqual(products[0]['origin'], '信息变更')
+
+    def test_configuration_keeps_inventory_read_only_and_secrets_out_of_settings(self):
+        path = Path(self.tmp.name)/'analysis.toml'
+        path.write_text('[analysis]\ndatabase="inventory.sqlite"\n[matching]\nmode="caption"\ncache="judgments.sqlite"\nconcurrency=3\n[matching.model]\nkey_env="DEEPSEEK_API_KEY"\n[matching.vision]\nmodel="vision"\nkey_env="VISION_API_KEY"\n', encoding='utf-8')
+        config = AnalysisConfig.from_file(path)
+        self.assertEqual(config.matching.cache, path.parent/'judgments.sqlite')
+        self.assertEqual(config.matching.concurrency, 3)
+        self.assertNotIn('secret-value', repr(config))
+        with self.assertRaises(ValueError):
+            AnalysisConfig(config.database, matching=MatchingConfig(config.database))
+        with self.assertRaises(ValueError):
+            MatchingConfig(self.config.cache, concurrency=0)
+
+    def test_real_transport_refuses_redirect_without_forwarding_key(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+        import bestseller_monitor.matching as matching
+        hits = []
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+            def do_POST(self):
+                hits.append(self.path)
+                self.send_response(302)
+                self.send_header('Location', '/destination')
+                self.end_headers()
+            def do_GET(self):
+                hits.append(self.path)
+                self.send_response(200)
+                self.end_headers()
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            # Restore the real transport while keeping the environment fixture.
+            from urllib.request import build_opener
+            with patch('bestseller_monitor.matching.urlopen', side_effect=lambda request, timeout: build_opener(matching.NoModelRedirect()).open(request, timeout=timeout)):
+                with self.assertRaises(ModelFailure):
+                    request_json(ModelConfig(endpoint=f'http://127.0.0.1:{server.server_port}/model'), [], 'test')
+            self.assertEqual(hits, ['/model'])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
 
     def test_text_only_endpoint_and_failures_never_fake_visual_match(self):
         products = [product(1), product(2)]
@@ -160,6 +206,17 @@ class MatchingTests(unittest.TestCase):
         prior_members = copy.deepcopy(groups[0]['members'])
         self.assertEqual(matcher.suggest(products, groups)[0]['members'], prior_members)
 
+    def test_low_confidence_is_visible_stable_and_never_automatically_merged(self):
+        products = [product(1), product(2)]
+        self.transport.confidence = .4
+        matcher = MatchingService(self.config)
+        groups = matcher.suggest(products, singles(products))
+        self.assertEqual(len(groups), 2)
+        self.assertIn('低把握', products[0]['matching_status'])
+        count = len(self.transport.calls)
+        self.assertEqual(len(matcher.suggest(products, groups)), 2)
+        self.assertEqual(len(self.transport.calls), count)
+
 
 class MatchingBrowserTests(unittest.TestCase):
     setUp = browser_fixture.AnalysisBrowserTests.setUp
@@ -200,6 +257,28 @@ class MatchingBrowserTests(unittest.TestCase):
             self.page.get_by_role('button', name='重试模型匹配').click()
             expect(self.page.get_by_role('button', name='已确认')).to_have_count(1)
             rid = self.conn.execute("SELECT MAX(round_id) FROM snapshots WHERE shop_key='A01'").fetchone()[0]
+            calls = len(transport.calls)
+            # Only the URL changes: same bytes and name reuse judgments in a new analysis.
+            self.db.submit_inventory_snapshot(round_id=rid, shop_key='A01', shop_url='https://shop.example', shop_name='店铺1',
+                offer_id='11', product_url='https://detail.1688.com/offer/11.html', list_title='月牙杯', detail_title='月牙杯',
+                main_image_url='https://img.example/new-url', sku_rows=[dict(sku_id='red', sku_name='红色', sku_stock=80)],
+                collected_at='2026-09-14T04:00:00+00:00', attempt=1, image_evidence=picture('red'))
+            self.page.get_by_role('button', name='重新选择日期').click()
+            self.dates()
+            self.page.get_by_role('button', name='下一步、进入同款确认').click()
+            expect(self.page.get_by_text('缓存', exact=True).first).to_be_visible()
+            self.assertEqual(len(transport.calls), calls)
+            # Same URL, new image bytes: new evidence and new suggestions.
+            self.db.submit_inventory_snapshot(round_id=rid, shop_key='A01', shop_url='https://shop.example', shop_name='店铺1',
+                offer_id='11', product_url='https://detail.1688.com/offer/11.html', list_title='月牙杯', detail_title='月牙杯',
+                main_image_url='https://img.example/new-url', sku_rows=[dict(sku_id='red', sku_name='红色', sku_stock=80)],
+                collected_at='2026-09-14T04:00:00+00:00', attempt=1, image_evidence=picture('green'))
+            self.page.get_by_role('button', name='重新选择日期').click()
+            self.dates()
+            self.page.get_by_role('button', name='下一步、进入同款确认').click()
+            expect(self.page.get_by_text('信息变更', exact=True)).to_be_visible()
+            expect(self.page.get_by_role('article')).to_have_count(3)
+            self.assertEqual(len(transport.calls), calls+2)
             self.db.submit_inventory_snapshot(round_id=rid, shop_key='A01', shop_url='https://shop.example', shop_name='店铺1',
                 offer_id='11', product_url='https://detail.1688.com/offer/11.html', list_title='名称变更杯', detail_title='名称变更杯',
                 main_image_url='', sku_rows=[dict(sku_id='red', sku_name='红色', sku_stock=80)],
