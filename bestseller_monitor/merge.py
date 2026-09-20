@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import datetime as dt
 import gzip
 import hashlib
 import logging
@@ -130,6 +131,7 @@ class _ImagePull:
     """图片这一趟做了什么（在导入事务之外）。"""
 
     pulled: int = 0
+    pulled_bytes: int = 0
     skipped: int = 0
     missing: tuple[str, ...] = ()
     note: str | None = None
@@ -153,6 +155,7 @@ class ImportResult:
     rows_replaced: int = 0
     conflicts: int = 0
     images_pulled: int = 0
+    images_bytes: int = 0             # 这次拉回来的图片字节（报告里「68（6.8 MB）」那半）
     images_skipped: int = 0
     images_missing: int = 0
     images_note: str | None = None
@@ -166,6 +169,20 @@ class ImportResult:
 def package_sha256(package_path: pathlib.Path) -> str:
     """包身份：包文件内容的 SHA-256（发布形态是 `.db.gz`；同内容重打包字节一致）。"""
     return hashlib.sha256(pathlib.Path(package_path).read_bytes()).hexdigest()
+
+
+def package_shop_days(package_path: pathlib.Path, start: dt.date,
+                      end: dt.date) -> frozenset[tuple[str, str]]:
+    """包覆盖的（店铺 × 日期）集合，只看窗口内的库存行。
+
+    只读地开包（`.db` 与发布形态 `.db.gz` 都行）；包读不动时照常抛错，由调用方
+    按「这个包怎么处理」决定（跳过记一笔，或按导入失败报）。
+    """
+    with open_package(package_path) as pkg:
+        return frozenset(
+            (str(shop_key), str(day)) for shop_key, day in pkg.execute(
+                "SELECT DISTINCT shop_key, date FROM inventory "
+                "WHERE date BETWEEN ? AND ?", (start.isoformat(), end.isoformat())))
 
 
 @contextlib.contextmanager
@@ -234,7 +251,8 @@ def import_package(conn: sqlite3.Connection, package_path: pathlib.Path, *,
         conn.rollback()
         return ImportResult(
             package_path.name, sha, machine_id=str(meta["machine_id"]), week=str(meta["week"]),
-            images_pulled=images.pulled, images_skipped=images.skipped,
+            images_pulled=images.pulled, images_bytes=images.pulled_bytes,
+            images_skipped=images.skipped,
             images_missing=len(images.missing), images_note=images.note,
             failure=f"整包没有导入（已全部回滚）：{exc}")
 
@@ -303,6 +321,7 @@ def _pull_images(conn: sqlite3.Connection, assets: list[tuple[str, str]],
             "照 config/config.example.toml 的 [machine] 一节补上桶名后重跑。"))
 
     pulled = 0
+    pulled_bytes = 0
     missing: list[str] = []
     note = None
     bad_bytes = 0
@@ -323,10 +342,12 @@ def _pull_images(conn: sqlite3.Connection, assets: list[tuple[str, str]],
         conn.execute("INSERT OR IGNORE INTO product_image_assets VALUES (?, ?, ?)",
                      (content_hash, mime, data))
         pulled += 1
+        pulled_bytes += len(data)
     if bad_bytes:
         note = (note + "；" if note else "") + f"有 {bad_bytes} 张取回的内容对不上哈希，按缺记"
     conn.commit()                                # 图片独立落库：合并事务回滚不回滚它们
-    return _ImagePull(pulled=pulled, skipped=skipped, missing=tuple(missing), note=note)
+    return _ImagePull(pulled=pulled, pulled_bytes=pulled_bytes, skipped=skipped,
+                      missing=tuple(missing), note=note)
 
 
 # ---------- 合并 ----------
@@ -362,7 +383,8 @@ def _merge_all(conn: sqlite3.Connection, rows: dict[str, list[dict]], *, meta: d
     return ImportResult(
         package=package_name, sha256=sha, machine_id=pkg_machine, week=str(meta["week"]),
         rows_total=rows_total, rows_inserted=counts.inserted, rows_replaced=counts.replaced,
-        conflicts=conflicts, images_pulled=images.pulled, images_skipped=images.skipped,
+        conflicts=conflicts, images_pulled=images.pulled, images_bytes=images.pulled_bytes,
+        images_skipped=images.skipped,
         images_missing=len(images.missing), images_note=images.note)
 
 

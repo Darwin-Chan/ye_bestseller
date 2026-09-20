@@ -37,7 +37,8 @@ def _driver(v: object) -> str:
 # 机器角色档位（spec §10）：采集机 = 采集 + 导出 + 汇总；纯汇总机 = 只汇总与展示。
 ROLE_COLLECTOR = "collector"
 ROLE_MERGE_ONLY = "merge_only"
-_ROLE_GLOSS = {ROLE_COLLECTOR: "采集机", ROLE_MERGE_ONLY: "纯汇总机"}
+# 档位的中文名一处写死：配置校验的报错、数据交换台的报告与窗口都用它。
+ROLE_GLOSS = {ROLE_COLLECTOR: "采集机", ROLE_MERGE_ONLY: "纯汇总机"}
 
 # 凭据档位（spec §11）：只记档位、不记密钥；密钥在仓库外（~/.ssh、secrets/ 或 coscli 配置）。
 # readwrite = 采集机档（git 可写、COS 限 img/* 读写）；read_only = 纯汇总机档（push/上传被拒即档位正确）。
@@ -59,8 +60,8 @@ def _machine_id(machine: dict, config_path: pathlib.Path) -> str:
 
 def _role(v: object) -> str:
     role = str(v or ROLE_COLLECTOR)
-    if role not in _ROLE_GLOSS:
-        legal = "、".join(f'"{name}"（{gloss}）' for name, gloss in _ROLE_GLOSS.items())
+    if role not in ROLE_GLOSS:
+        legal = "、".join(f'"{name}"（{gloss}）' for name, gloss in ROLE_GLOSS.items())
         raise ValueError(f"配置 machine.role = {role!r} 非法：只接受 {legal}。")
     return role
 

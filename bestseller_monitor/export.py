@@ -11,6 +11,11 @@
   被本周版本行引用的（只带元数据，字节不进包，spec §3）；身份表（`shops`/`products`/`skus`）
   收本周观测碰到的那些行。每周一片，全部周包的并集 = 全量——补历史（W36/W37）与冷启动重放
   都靠这一条。
+- **只发「自己那份」**（票据 10 的报告口径逼出来的第一条，spec §9 的交换集不含来源列）：
+  观测表按 (店铺, 日期) 组过滤——组归取胜 claim 的机器（`merge_claims`，票据 09），本机采的
+  组照发、账说归别人的不发；身份表按 `merge_seen` 的最近写者同理。不滤的话，导进来的行会
+  以本机名义再发一遍，别的机器收回去就成了同一批数据两个 claim（幻影冲突、来源换手），
+  而且合并之后再导出永远「有新数据」，原型样例二（同周第二次：无新提交）对不上。
 - **缺图的行**：汇总来的版本行可能带 `content_hash` 而本机没有对应资产行（图还没拉到）。
   这种行不进清单——key 的扩展名无从得知；有字节的那台机器的包列着它，别人从那份清单取。
 - 元数据表 `exchange_meta` 是键值对：`machine_id`、`week`、`generated_at`、`format_version`
@@ -41,6 +46,7 @@ import gzip
 import hashlib
 import json
 import pathlib
+import re
 import sqlite3
 import tempfile
 from collections.abc import Iterable, Mapping
@@ -79,12 +85,15 @@ class _PackageTable:
     """包内一张交换集表：列（列名, 声明）按包里的列序、主键、按周窗口取数的 SQL。
 
     DDL、INSERT 的列序、内容摘要都从 `columns` 这一处生成——三份各写一遍就会悄悄错列。
+    `owned` 是「这一行归本机」的过滤条件（见 `_OWNED_*`）：观测表按 (店铺, 日期) 组的
+    取胜 claim、身份表按最近一次观测的写者。切片 SQL 用 `{owned}` 占位。
     """
 
     name: str
     columns: tuple[tuple[str, str], ...]
     primary_key: tuple[str, ...] = ()
-    slice_sql: str = ""                   # 用 {cols} 占位列清单
+    slice_sql: str = ""                   # 用 {cols} / {owned} 占位
+    owned: str = ""
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -98,6 +107,29 @@ class _PackageTable:
         return f"CREATE TABLE {self.name} ({', '.join(parts)});"
 
 
+# 观测表只发「自己那份」：一个 (店铺, 日期) 组的行归取胜 claim 的机器（`merge_claims`
+# 记着它，票据 09）。本机采的组不在账里（含本机取胜的组）→ 照发；账说归别人 → 不发——
+# 不然导入回来的行会以本机名义再发一遍：别的机器收回去就是同一批数据两个 claim
+# （幻影冲突、来源换手），「同周重跑不产生多余提交」也不再成立（票据 10 的报告要求
+# 第二次运行仍是「无新提交」，三份原型样例都按这条画）。
+_OWNED_OBSERVED = (
+    "NOT EXISTS (SELECT 1 FROM merge_claims c WHERE c.shop_key = {table}.shop_key "
+    "AND c.observed_date = {table}.{date} AND c.machine_id <> :machine)")
+# 身份表同理，按 `merge_seen`（描述列最近一次观测的写者）：本机写的、或没有账的照发。
+# row_key 的拼法与 merge 侧一致：主键列用 char(31) 相连（见 merge._merge_identity）。
+_OWNED_IDENTITY = (
+    "NOT EXISTS (SELECT 1 FROM merge_seen s WHERE s.table_name = '{name}' "
+    "AND s.row_key = {key} AND s.machine_id <> :machine)")
+
+
+def _owned_observed(table: str, date: str) -> str:
+    return _OWNED_OBSERVED.format(table=table, date=date)
+
+
+def _owned_identity(name: str, key: str) -> str:
+    return _OWNED_IDENTITY.format(name=name, key=key)
+
+
 EXCHANGE_TABLES: tuple[_PackageTable, ...] = (
     _PackageTable(
         "shops",
@@ -105,7 +137,8 @@ EXCHANGE_TABLES: tuple[_PackageTable, ...] = (
          ("first_seen_at", "TEXT"), ("last_seen_at", "TEXT")),
         primary_key=("shop_key",),
         slice_sql=f"SELECT {{cols}} FROM shops WHERE shop_key IN ({_WEEK_SHOPS}) "
-                  "ORDER BY {cols}",
+                  "AND {owned} ORDER BY {cols}",
+        owned=_owned_identity("shops", "shops.shop_key"),
     ),
     _PackageTable(
         "products",
@@ -114,7 +147,8 @@ EXCHANGE_TABLES: tuple[_PackageTable, ...] = (
          ("last_seen_at", "TEXT")),
         primary_key=("offer_id",),
         slice_sql=f"SELECT {{cols}} FROM products WHERE offer_id IN ({_WEEK_OFFERS}) "
-                  "ORDER BY {cols}",
+                  "AND {owned} ORDER BY {cols}",
+        owned=_owned_identity("products", "products.offer_id"),
     ),
     _PackageTable(
         "skus",
@@ -122,7 +156,8 @@ EXCHANGE_TABLES: tuple[_PackageTable, ...] = (
          ("first_seen_at", "TEXT NOT NULL"), ("last_seen_at", "TEXT")),
         primary_key=("offer_id", "sku_id"),
         slice_sql=f"SELECT {{cols}} FROM skus WHERE offer_id IN ({_WEEK_OFFERS}) "
-                  "ORDER BY {cols}",
+                  "AND {owned} ORDER BY {cols}",
+        owned=_owned_identity("skus", "skus.offer_id || char(31) || skus.sku_id"),
     ),
     _PackageTable(
         "inventory",
@@ -132,7 +167,8 @@ EXCHANGE_TABLES: tuple[_PackageTable, ...] = (
          ("product_name", "TEXT"), ("sku_name", "TEXT")),
         primary_key=("shop_key", "offer_id", "sku_id", "date"),
         slice_sql="SELECT {cols} FROM inventory WHERE date BETWEEN :start AND :end "
-                  "ORDER BY {cols}",
+                  "AND {owned} ORDER BY {cols}",
+        owned=_owned_observed("inventory", "date"),
     ),
     _PackageTable(
         "product_information_versions",
@@ -141,7 +177,9 @@ EXCHANGE_TABLES: tuple[_PackageTable, ...] = (
          ("product_name", "TEXT"), ("image_url", "TEXT"),
          ("content_hash", "TEXT"), ("image_error", "TEXT")),
         slice_sql="SELECT {cols} FROM product_information_versions "
-                  "WHERE observed_date BETWEEN :start AND :end ORDER BY {cols}",
+                  "WHERE observed_date BETWEEN :start AND :end "
+                  "AND {owned} ORDER BY {cols}",
+        owned=_owned_observed("product_information_versions", "observed_date"),
     ),
     _PackageTable(
         "product_image_assets",
@@ -149,8 +187,9 @@ EXCHANGE_TABLES: tuple[_PackageTable, ...] = (
         primary_key=("content_hash",),
         slice_sql="SELECT {cols} FROM product_image_assets WHERE content_hash IN ("
                   "SELECT content_hash FROM product_information_versions "
-                  "WHERE observed_date BETWEEN :start AND :end AND content_hash IS NOT NULL) "
-                  "ORDER BY {cols}",
+                  "WHERE observed_date BETWEEN :start AND :end AND content_hash IS NOT NULL "
+                  "AND {owned}) ORDER BY {cols}",
+        owned=_owned_observed("product_information_versions", "observed_date"),
     ),
 )
 
@@ -182,6 +221,42 @@ def package_rel_path(week: str, machine_id: str) -> str:
     return f"data/{year}/W{number}-{machine_id}{PACKAGE_SUFFIX}"
 
 
+# 包文件名里的周号：`W39-m2.db.gz` 为准，spec 字面的裸周号 `39-m2.db.gz` 也认
+# （年份由 data/<年> 目录钉住，机器标识是文件名末尾的后缀）。
+_PACKAGE_WEEK = re.compile(r"^W?(\d{1,2})-")
+
+
+def package_week(name: str) -> int | None:
+    """包文件名里的周号；不是包、认不出周号时返回 None。"""
+    if not name.endswith(PACKAGE_SUFFIX):
+        return None
+    match = _PACKAGE_WEEK.match(name[: -len(PACKAGE_SUFFIX)])
+    return int(match.group(1)) if match else None
+
+
+def week_packages(exchange_root: str | pathlib.Path, week: str
+                  ) -> tuple[tuple[str, pathlib.Path, str], ...]:
+    """交换区里某一周的包：`(机器, 包文件路径, 相对交换区根的路径)`，按机器与文件名排序。
+
+    只读本机交换区**已经有**的克隆（不拉取），一个包都不解压——读包内容是调用方的事
+    （`merge.package_shop_days` / `merge.import_package`）。年目录取周编号里的 ISO 年：
+    2026-W01 的周一落在 2025-12-29，目录仍是 data/2026/（与 `package_rel_path` 同一口径）。
+    """
+    iso = week_monday(week).isocalendar()
+    year_dir, week_no = str(iso.year), iso.week
+    found: list[tuple[str, pathlib.Path, str]] = []
+    for repo in sorted(pathlib.Path(exchange_root).glob("raw-*")):
+        machine = repo.name[len("raw-"):]
+        if not repo.is_dir() or not machine:
+            continue
+        for path in sorted((repo / "data" / year_dir).glob(f"*{PACKAGE_SUFFIX}")):
+            if package_week(path.name) != week_no or \
+                    not path.name[: -len(PACKAGE_SUFFIX)].endswith(f"-{machine}"):
+                continue
+            found.append((machine, path, f"{repo.name}/data/{year_dir}/{path.name}"))
+    return tuple(found)
+
+
 def read_package_meta(conn: sqlite3.Connection) -> dict:
     """把 exchange_meta 折成调用方要的形状：机器、周、时刻、口径版本、是否在采、各表行数。"""
     raw = {key: value for key, value in
@@ -196,19 +271,20 @@ def read_package_meta(conn: sqlite3.Connection) -> dict:
     }
 
 
-def _read_week_slice(source: pathlib.Path, week: str) -> dict[str, list[tuple]]:
+def _read_week_slice(source: pathlib.Path, week: str, machine_id: str) -> dict[str, list[tuple]]:
     """在源库的一个只读事务里读完本周切片：一致快照，且看不见未提交的事务。
 
     只读连接（`mode=ro`）不跑迁移、不写源库；WAL 下读事务与正在跑的采集互不打架。
+    `machine_id` 供「只发自己那份」的过滤（见 `_OWNED_OBSERVED` / `_OWNED_IDENTITY`）。
     """
     uri = f"{source.resolve().as_uri()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     try:
         conn.execute("BEGIN")
-        params = dict(zip(("start", "end"), week_window(week)))
+        params = dict(zip(("start", "end"), week_window(week)), machine=machine_id)
         slice_: dict[str, list[tuple]] = {}
         for table in EXCHANGE_TABLES:
-            sql = table.slice_sql.format(cols=", ".join(table.names))
+            sql = table.slice_sql.format(cols=", ".join(table.names), owned=table.owned)
             slice_[table.name] = [tuple(row) for row in conn.execute(sql, params)]
         conn.rollback()
         return slice_
@@ -224,7 +300,7 @@ def build_package(source: pathlib.Path, package_path: pathlib.Path, *, week: str
     带 `generated_at`（北京时刻）与 `crawl_in_progress`——它们是这一份包的元数据，
     不影响内容摘要（同数据重跑仍是同一份内容）。
     """
-    slice_ = _read_week_slice(pathlib.Path(source), week)
+    slice_ = _read_week_slice(pathlib.Path(source), week, machine_id)
     package_path = pathlib.Path(package_path)
     package_path.parent.mkdir(parents=True, exist_ok=True)
     if package_path.exists():
