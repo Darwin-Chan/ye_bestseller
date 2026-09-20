@@ -52,6 +52,8 @@ def create_server(service, port=0):
                     if not 0 < length <= 4096:
                         raise ValueError("请求大小无效")
                     data = json.loads(self.rfile.read(length))
+                    if data.get('action') == 'retry_matching':
+                        return self.reply(service.retry_matching(data['id']))
                     if "group" in data:
                         return self.reply(service.confirm(data["id"], data["group"]))
                     return self.reply(service.start(data["start"], data["end"], data.get("acknowledged") is True))

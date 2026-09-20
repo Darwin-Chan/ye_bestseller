@@ -14,24 +14,42 @@ from uuid import uuid4
 
 from . import crawler_identity
 from .db import utcnow
+from .matching import MatchingConfig, MatchingService, ModelConfig
 
 
 @dataclass(frozen=True)
 class AnalysisConfig:
     database: Path
     full_capture_weekday: int = 1  # ISO: Monday=1
+    matching: MatchingConfig | None = None
+
+    def __post_init__(self):
+        if self.matching and self.matching.cache.resolve() == self.database.resolve():
+            raise ValueError('同款缓存不能使用库存数据库')
 
     @classmethod
     def from_file(cls, path: Path) -> AnalysisConfig:
         with path.open("rb") as stream:
-            cfg = tomllib.load(stream)["analysis"]
+            document = tomllib.load(stream)
+            cfg = document['analysis']
         weekday = cfg.get("full_capture_weekday", 1)
         if type(weekday) is not int or not 1 <= weekday <= 7:
             raise ValueError("全量抓取提醒星期必须为 1 至 7")
         database = Path(cfg["database"])
         if not database.is_absolute():
             database = path.resolve().parent / database
-        return cls(database.resolve(), weekday)
+        matching = None
+        if 'matching' in document:
+            options = document['matching']
+            cache = Path(options.get('cache', 'matching.sqlite'))
+            if not cache.is_absolute():
+                cache = path.resolve().parent / cache
+            if cache.resolve() == database.resolve():
+                raise ValueError('同款缓存不能使用库存数据库')
+            matching = MatchingConfig(cache.resolve(), ModelConfig(**options.get('model', {})),
+                ModelConfig(**options['vision']) if 'vision' in options else None,
+                options.get('mode', 'disabled'), options.get('concurrency', 2), options.get('candidates', 6))
+        return cls(database.resolve(), weekday, matching)
 
 
 class AnalysisService:
@@ -40,6 +58,7 @@ class AnalysisService:
         self.running = running or crawler_identity.is_running
         self._snapshots = {}
         self._lock = threading.Lock()
+        self.matcher = MatchingService(config.matching) if config.matching and config.matching.mode != 'disabled' else None
 
     @contextmanager
     def _read(self):
@@ -138,8 +157,25 @@ class AnalysisService:
                          "sales": p["sales"]}
                         for i, p in enumerate(products)]}
         with self._lock:
+            self._match(snapshot)
             self._snapshots[snapshot["id"]] = snapshot
         return copy.deepcopy(snapshot)
+
+    def _match(self, snapshot):
+        if self.matcher:
+            snapshot['groups'] = self.matcher.suggest(snapshot['products'], snapshot['groups'], snapshot.get('excluded', ()))
+        else:
+            for p in snapshot['products']:
+                p.update(origin='新商品', match_label='暂无匹配同款', candidate_groups=[], matching_status='模型匹配未启用')
+
+    def retry_matching(self, analysis_id):
+        with self._lock:
+            if analysis_id not in self._snapshots:
+                raise ValueError('分析已不存在')
+            snapshot = copy.deepcopy(self._snapshots[analysis_id])
+            self._match(snapshot)
+            self._snapshots[analysis_id] = snapshot
+            return copy.deepcopy(snapshot)
 
     def get(self, analysis_id):
         with self._lock:

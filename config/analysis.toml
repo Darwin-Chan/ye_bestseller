@@ -3,3 +3,23 @@
 database = "F:/AI/bestseller_runtime/data/bestseller.db"
 # ISO 星期：1=周一，7=周日。只是提醒，不调度采集。
 full_capture_weekday = 1
+
+[matching]
+# disabled：不调用模型；direct：主模型接收图片；caption：独立视觉模型先提取证据。
+mode = "disabled"
+cache = "F:/AI/bestseller_runtime/data/matching.sqlite"
+concurrency = 2
+candidates = 6
+
+[matching.model]
+endpoint = "https://api.deepseek.com/v1/chat/completions"
+model = "deepseek-chat"
+key_env = "DEEPSEEK_API_KEY"
+timeout = 30
+
+# caption 模式必须另配支持 image_url 输入的真实视觉服务。
+# [matching.vision]
+# endpoint = "https://your-vision-service/v1/chat/completions"
+# model = "your-vision-model"
+# key_env = "VISION_API_KEY"
+# timeout = 30

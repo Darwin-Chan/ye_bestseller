@@ -9,7 +9,7 @@
 <section><label>开始日期 <input id="start" type="date"></label><h3>当日真实抓取</h3><div id="startCoverage">请选择日期</div></section>
 <section><label>结束日期 <input id="end" type="date"></label><h3>当日真实抓取</h3><div id="endCoverage">请选择日期</div></section></div>
 <p><button id="begin" class="primary">下一步、进入同款确认</button></p></section>
-<section id="reviewPage" hidden><div class="bar"><h2>确认同款</h2><button id="back">重新选择日期</button></div><p id="snapshotInfo"></p><p class="muted">当前为独立商品组；请逐组确认后查看初步畅销品排名。</p><div id="products"></div><section id="results" hidden><h2>初步畅销品</h2><div id="ranking"></div></section><div class="bar"><button id="prev">上一页</button><span id="pageInfo"></span><button id="next">下一页</button></div></section>
+<section id="reviewPage" hidden><div class="bar"><h2>确认同款</h2><button id="back">重新选择日期</button></div><p id="snapshotInfo"></p><p class="muted">建议分组均待人工确认；低把握或失败商品可重试模型匹配。</p><button id="retryMatching" onclick="retryMatching()">重试模型匹配</button><div id="products"></div><section id="results" hidden><h2>初步畅销品</h2><div id="ranking"></div></section><div class="bar"><button id="prev">上一页</button><span id="pageInfo"></span><button id="next">下一页</button></div></section>
 </main><dialog id="notice"><p id="noticeText"></p><button id="noticeOK">继续</button></dialog>
 <dialog id="imageViewer" aria-label="商品图片"><img id="largeImage" alt="商品主图" style="max-width:100%;max-height:70vh"><button onclick="this.closest('dialog').close()">关闭大图</button></dialog>
 <script>
@@ -87,7 +87,7 @@ function show(snapshot) {
     $('end').value=snapshot.end;
     $('datePage').hidden=true;
     $('reviewPage').hidden=false;
-    $('snapshotInfo').textContent=`${snapshot.start} — ${snapshot.end} · 数据固定于 ${snapshot.frozen_at} · ${snapshot.groups.length} 个待确认单商品组`;
+    $('snapshotInfo').textContent=`${snapshot.start} — ${snapshot.end} · 数据固定于 ${snapshot.frozen_at} · ${snapshot.groups.length} 个同款组`;
     renderProducts();
     history.replaceState(null,'','#analysis='+snapshot.id);
 }
@@ -119,23 +119,32 @@ async function refreshSourceLinks() {
     }));
 }
 window.addEventListener('focus', refreshSourceLinks);
+function groupProducts(group) {
+    return group.members.map(m=>currentSnapshot.products.find(p=>p.shop_key===m.shop_key&&p.offer_id===m.offer_id)).sort((a,b)=>b.sales-a.sales);
+}
 function renderProducts() {
     const snapshot=currentSnapshot, offset=productPage*20;
-    $('products').innerHTML=snapshot.products.slice(offset,offset+20).map((p,i)=>{
-        const rows=inventoryByProduct.get(JSON.stringify([p.shop_key,p.offer_id]))||[];
-        const group=snapshot.groups.find(g=>g.members.some(m=>m.shop_key===p.shop_key&&m.offer_id===p.offer_id));
-        const skuRows=p.skus||[];
-        return `<article><div class="bar"><h3>${esc(group.id)} · ${esc(p.product_name||p.offer_id)} ${sourceIcon(p)}</h3><button ${group.confirmed?'disabled':''} onclick="confirmGroup('${group.id}')">${group.confirmed?'已确认':'确认当前分组'}</button></div>
-            ${productPhoto(p)}${p.information_note?`<p class="muted">${esc(p.information_note)}</p>`:''}<p>${esc(p.shop_key)} · 商品 ${esc(p.offer_id)} · ${skuRows.length} 个 SKU · 区间销量 <b>${p.sales}</b> · <span class="group-status">${group.confirmed?"已确认":"待确认"}</span></p>
-            ${skuRows.map(sku=>`<details open><summary>${esc(sku.name)} · 第 ${sku.segment} 段 · SKU ${esc(sku.sku_id)} · 销量 <b>${sku.sales}</b></summary><table><thead><tr><th>日期</th><th>库存</th><th>当日销量</th><th>状态</th></tr></thead><tbody>${sku.points.map(point=>`<tr><td>${point.date}</td><td>${point.stock ?? '—'}</td><td>${point.sales}</td><td>${point.color==='inactive'?'不在有效段':point.color==='red'?'疑似补货':point.color==='yellow'?'当日未抓取库存':'正常观测'}</td></tr>`).join('')}</tbody></table></details>`).join('')}</article>`;
+    $('products').innerHTML=snapshot.groups.slice(offset,offset+20).map(group=>{
+        const members=groupProducts(group), p=members[0];
+        return `<article><div class="bar"><h3>${esc(group.id)} · ${esc(p.product_name||p.offer_id)}</h3><button ${group.confirmed?'disabled':''} onclick="confirmGroup('${group.id}')">${group.confirmed?'已确认':'确认当前分组'}</button></div><p>同款组销量 <b>${group.sales}</b> · ${members.length} 个商品</p><span class="group-status">${group.confirmed?'已确认':'待确认'}</span>${members.map(p=>`
+            <section class="matching-member"><h4>${esc(p.product_name||p.offer_id)} ${sourceIcon(p)}</h4>${productPhoto(p)}<div class="matching-tags"><span>${esc(p.origin)}</span> · <span>${esc(p.match_label)}</span></div><p class="muted">${esc(p.matching_status)}</p>${p.information_note?`<p class="muted">${esc(p.information_note)}</p>`:''}<p>${esc(p.shop_key)} · 商品 ${esc(p.offer_id)} · ${p.skus.length} 个 SKU · 区间销量 <b>${p.sales}</b></p>
+            ${(p.candidate_groups||[]).filter(id=>id!==group.id).length?`<aside><b>其他疑似归组</b><p>${p.candidate_groups.filter(id=>id!==group.id).map(id=>esc(id)).join('、')}</p></aside>`:''}
+            ${p.skus.map(sku=>`<details open><summary>${esc(sku.name)} · 第 ${sku.segment} 段 · SKU ${esc(sku.sku_id)} · 销量 <b>${sku.sales}</b></summary><table><thead><tr><th>日期</th><th>库存</th><th>当日销量</th><th>状态</th></tr></thead><tbody>${sku.points.map(point=>`<tr><td>${point.date}</td><td>${point.stock ?? '—'}</td><td>${point.sales}</td><td>${point.color==='inactive'?'不在有效段':point.color==='red'?'疑似补货':point.color==='yellow'?'当日未抓取库存':'正常观测'}</td></tr>`).join('')}</tbody></table></details>`).join('')}</section>`).join('')}</article>`;
     }).join('');
-    const pages=Math.ceil(snapshot.products.length/20);
+    const pages=Math.max(1,Math.ceil(snapshot.groups.length/20));
     $('pageInfo').textContent=`${productPage+1} / ${pages}`;
     $('prev').disabled=productPage===0;
     $('next').disabled=productPage+1>=pages;
     $('results').hidden=!snapshot.groups.length || !snapshot.groups.every(group=>group.confirmed);
     if (!$('results').hidden) renderRanking();
     refreshSourceLinks();
+}
+async function retryMatching() {
+    $('retryMatching').disabled=true;
+    try {
+        currentSnapshot=await api('/api/analysis',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:currentSnapshot.id,action:'retry_matching'})});
+        productPage=0; renderProducts();
+    } catch(e) {error(e);} finally {$('retryMatching').disabled=false;}
 }
 async function confirmGroup(group) {
     const snapshot=await api('/api/analysis',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:currentSnapshot.id,group})});
@@ -158,10 +167,10 @@ function inventoryChart(points, sku=false) {
     return `<svg class="inventory-chart" viewBox="0 0 ${width} 230" role="img" aria-label="库存与累计销量" style="width:100%"><text x="10" y="16">库存 0–${maxStock}</text><text x="450" y="16">累计销量 0–${total}</text>${marks}</svg>`;
 }
 function renderRanking() {
-    $('ranking').innerHTML=[...currentSnapshot.products].sort((a,b)=>b.sales-a.sales).map((p,index)=>`<details class="rank"><summary><b>${String(index+1).padStart(2,'0')}</b> ${esc(p.product_name||p.offer_id)} · <b>${p.sales}</b> 销量</summary><p>${esc(p.shop_key)} · 商品 ${esc(p.offer_id)}</p>${inventoryChart(p.points)}<table><thead><tr><th>日期</th><th>库存</th><th>累计销量</th><th>状态</th></tr></thead><tbody>${p.points.map((point,i)=>`<tr><td>${point.date}</td><td>${point.stock ?? '—'}</td><td>${p.points.slice(0,i+1).reduce((sum,item)=>sum+item.sales,0)}</td><td>${point.color==='inactive'?'不在有效段':point.color==='red'?'疑似补货':point.color==='yellow'?'当日未抓取库存':'正常观测'}</td></tr>`).join('')}</tbody></table>${(p.skus||[]).map(sku=>`<details open><summary>${esc(sku.name)} · 销量 ${sku.sales}</summary><p>第 ${sku.segment} 个规格有效段</p>${inventoryChart(sku.points,true)}</details>`).join('')}</details>`).join('');
+    $('ranking').innerHTML=currentSnapshot.groups.map(g=>{const members=groupProducts(g);return {...members[0],sales:g.sales,skus:members.flatMap(p=>p.skus),points:members[0].points.map((point,i)=>({...point,stock:members.every(p=>p.points[i].stock===null)?null:members.reduce((n,p)=>n+(p.points[i].stock??0),0),sales:members.reduce((n,p)=>n+p.points[i].sales,0),color:members.some(p=>p.points[i].color==='red')?'red':'green',segment_start:members.some(p=>p.points[i].segment_start)}))}}).sort((a,b)=>b.sales-a.sales).map((p,index)=>`<details class="rank"><summary><b>${String(index+1).padStart(2,'0')}</b> ${esc(p.product_name||p.offer_id)} · <b>${p.sales}</b> 销量</summary><p>${esc(p.shop_key)} · 商品 ${esc(p.offer_id)}</p>${inventoryChart(p.points)}<table><thead><tr><th>日期</th><th>库存</th><th>累计销量</th><th>状态</th></tr></thead><tbody>${p.points.map((point,i)=>`<tr><td>${point.date}</td><td>${point.stock ?? '—'}</td><td>${p.points.slice(0,i+1).reduce((sum,item)=>sum+item.sales,0)}</td><td>${point.color==='inactive'?'不在有效段':point.color==='red'?'疑似补货':point.color==='yellow'?'当日未抓取库存':'正常观测'}</td></tr>`).join('')}</tbody></table>${(p.skus||[]).map(sku=>`<details open><summary>${esc(sku.name)} · 销量 ${sku.sales}</summary><p>第 ${sku.segment} 个规格有效段</p>${inventoryChart(sku.points,true)}</details>`).join('')}</details>`).join('');
 }
 $('prev').onclick=()=>{if(productPage>0){productPage--;renderProducts()}};
-$('next').onclick=()=>{if((productPage+1)*20<currentSnapshot.products.length){productPage++;renderProducts()}};
+$('next').onclick=()=>{if((productPage+1)*20<currentSnapshot.groups.length){productPage++;renderProducts()}};
 async function begin(acknowledged = false) {
     if (busy) return;
     clearError();
