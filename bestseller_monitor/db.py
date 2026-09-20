@@ -271,6 +271,23 @@ CREATE TABLE IF NOT EXISTS merge_seen (
     machine_id TEXT NOT NULL,
     PRIMARY KEY (table_name, row_key)
 );
+
+-- 越权与计划外账（spec §6）：本机在计划之外采过的店。越权 = 店在本周计划里、但归别台机器
+-- （放行并上报）；计划外 = 逃生口自由采集（拉不到计划库且本地没有本周计划）或计划没说到
+-- 这家店。不入交换集；汇总侧拿它给冲突补「计划外多采」这层说明（票据 10）。只记偏离——
+-- "实际采了哪些"仍是 rounds.run_date × shop_rounds 的现成答案，不在这里重记。
+CREATE TABLE IF NOT EXISTS plan_deviations (
+    round_id INTEGER NOT NULL,
+    run_date TEXT NOT NULL,
+    week TEXT NOT NULL,
+    shop_key TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    planned_machine TEXT,
+    reason TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY (round_id, shop_key)
+);
 """
 
 # 同一轮、店铺、商品和 SKU 至多一条成功快照：靠唯一索引保证（见 connect() 的迁移）。
@@ -832,6 +849,24 @@ class WeeklyPlanRow:
     pages: int
 
 
+@dataclass(frozen=True)
+class PlanDeviationRow:
+    """计划外账的一行：某轮里一家越权/计划外采过的店（判定见 plan_step）。
+
+    `kind` 取 `plan_step.DeviationKind`；`planned_machine` 只在越权时有值（计划归谁），
+    逃生口自由采集时为 None。
+    """
+
+    round_id: int
+    run_date: str
+    week: str
+    shop_key: str
+    machine_id: str
+    kind: str
+    planned_machine: str | None
+    reason: str
+
+
 class Database:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
@@ -900,6 +935,35 @@ class Database:
         """本机计划表里这一周的整周指派，按店铺编号排序；没落过库就是空列表。"""
         return self.conn.execute(
             "SELECT * FROM weekly_plan WHERE week=? ORDER BY shop_key", (week,)).fetchall()
+
+    def record_plan_deviations(self, rows, *, recorded_at: str) -> None:
+        """把一轮里越权/计划外采过的店写进计划外账（本机账，不入交换集）。
+
+        `rows` 是 `PlanDeviationRow` 序列。同一轮重跑（续跑）重复记账不产生重复行——
+        主键是 (轮次, 店铺)。
+        """
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO plan_deviations(round_id, run_date, week, shop_key, "
+            "machine_id, kind, planned_machine, reason, recorded_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(r.round_id, r.run_date, r.week, r.shop_key, r.machine_id, r.kind,
+              r.planned_machine, r.reason, recorded_at) for r in rows],
+        )
+        self.conn.commit()
+
+    def plan_deviations(self, *, week: str | None = None, round_id: int | None = None):
+        """计划外账的行（可按周或按轮次过滤），按日期、店铺排序；没记过就是空列表。"""
+        where, params = [], []
+        if week is not None:
+            where.append("week=?")
+            params.append(week)
+        if round_id is not None:
+            where.append("round_id=?")
+            params.append(round_id)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        return self.conn.execute(
+            f"SELECT * FROM plan_deviations{clause} ORDER BY run_date, shop_key", params,
+        ).fetchall()
 
     def record_crawler_process(self, pid: int, round_id: int | None,
                                note: str | None = None, *,

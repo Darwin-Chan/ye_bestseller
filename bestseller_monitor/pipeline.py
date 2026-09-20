@@ -149,16 +149,18 @@ def round_shops(db: Database, round_id: int, cfg: Config) -> list[Shop]:
 
 
 def requested_round_shops(cfg: Config, limit_keys: set[str] | None = None, *,
-                          week: str | None = None) -> list[Shop]:
+                          week: str | None = None, free: bool = False) -> list[Shop]:
     """本次调用要用的店铺范围。
 
     limit_keys 给出时是明确的范围请求（命令行 `--limit-shops` 或界面勾选）：
     与今天进行中的轮次不一致就由 open() 拒绝。
     为 None 表示「开始或续跑」：今天已有进行中的轮次就按轮次自身的范围续跑，
     否则取**本周落库计划**里归本机的店（不再从 active 全取，spec §6）；本周还没有
-    落库计划（开轮前的准备没做成）就没有可采的店，返回空——默认拒绝开轮由入口定
-    （逃生口入口见票据 07）。`week` 由调用方给（开轮前的准备刚算出的那个）：不给
-    才按今天的北京日期现算，免得跨夜时两处各算一周。
+    落库计划（开轮前的准备没做成）就没有可采的店，返回空——默认拒绝开轮由入口定。
+    `free=True` 是逃生口放行的自由采集（拉不到计划库、本地也没有本周计划）：这时候
+    范围回到本机清单里启用的店（spec §6 降级表那一行，记账见 `plan_step.record_deviations`）。
+    `week` 由调用方给（开轮前的准备刚算出的那个）：不给才按今天的北京日期现算，
+    免得跨夜时两处各算一周。
 
     两个读法都经 `plan_step.stored_plan` / `visible_shops`：界面陈列与这里读的是
     同一份落库计划，谁都不解析计划文件。
@@ -174,7 +176,7 @@ def requested_round_shops(cfg: Config, limit_keys: set[str] | None = None, *,
         if active is not None:
             return round_shops(db, active.id, cfg)
         if plan is None:
-            return []
+            return plan_step.visible_shops(cfg, plan) if free else []
         mine = set(plan.machine_keys(cfg.machine_id))
         return [shop for shop in plan_step.visible_shops(cfg, plan) if shop.key in mine]
     finally:
@@ -215,12 +217,16 @@ class CrawlerAlreadyRunning(RuntimeError):
     """已有采集进程在跑：同一时刻至多一个，由会话锁保证（见 single_instance）。"""
 
 
-def run_round(cfg: Config, shops: list[Shop]) -> None:
+def run_round(cfg: Config, shops: list[Shop], *, deviations=()) -> None:
     """开始或续跑一轮。
 
     shops 是本次调用请求的店铺范围：今天已有进行中的轮次时范围必须一致，否则
     open() 拒绝；跨日则由 open() 先给旧轮按跨天中止收尾再新建。真正交给驱动的
     处理列表永远取自轮次自身，续跑不会因为配置变化而增删店铺。
+
+    `deviations` 是这次范围相对本周计划的偏离（越权 / 计划外，判定与文案见
+    `plan_step.plan_deviations`）：轮次打开后写进轮次备注与本机计划外账——空元组
+    就是不偏离（多数情况，什么都不写）。
 
     「同一时刻至多一个采集进程」在这里守着：界面与命令行共用同一把会话锁，
     抢不到的那一方抛 CrawlerAlreadyRunning，不建轮次、不写快照（命令行入口在读配置
@@ -232,12 +238,12 @@ def run_round(cfg: Config, shops: list[Shop]) -> None:
             "已有采集进程在运行：同一时刻只能跑一轮，等它结束或在界面里中止它。"
         )
     try:
-        _run_round_locked(cfg, shops)
+        _run_round_locked(cfg, shops, deviations)
     finally:
         lock.release()
 
 
-def _run_round_locked(cfg: Config, shops: list[Shop]) -> None:
+def _run_round_locked(cfg: Config, shops: list[Shop], deviations=()) -> None:
     """拿到采集锁之后真正干活的部分。"""
     cfg.ensure_dirs()
     conn = connect(cfg.db_file)
@@ -250,6 +256,8 @@ def _run_round_locked(cfg: Config, shops: list[Shop]) -> None:
         )
         opened = rounds.open(db, request)
         round_id = opened.round.id
+        # 放行并上报（spec §6）：越权/计划外的店在轮次打开后立刻留痕（备注 + 本机账）。
+        plan_step.record_deviations(db, opened.round, cfg.machine_id, deviations)
         # 身份行只给界面看「谁在跑」；是不是真的还有进程在跑以会话锁为准。
         started_at = db.record_crawler_process(
             pid=os.getpid(), round_id=round_id, note=_command_note(),

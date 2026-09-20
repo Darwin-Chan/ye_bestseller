@@ -132,7 +132,7 @@ def finish(db: Database, round: Round, reason: TerminalReason, *,
     if reason is TerminalReason.LEGACY_UNKNOWN:
         raise ValueError("「历史未分类」只能由迁移写入，不能作为轮次终态提交")
     row = db.conn.execute(
-        "SELECT terminal_reason FROM rounds WHERE id=?", (round.id,)
+        "SELECT terminal_reason, note FROM rounds WHERE id=?", (round.id,)
     ).fetchone()
     if row is None:
         raise ValueError(f"轮次不存在：{round.id}")
@@ -146,12 +146,32 @@ def finish(db: Database, round: Round, reason: TerminalReason, *,
     finished_at = _utc_iso(now)
     db.conn.execute(
         "UPDATE rounds SET terminal_reason=?, finished_at=?, note=? WHERE id=?",
-        (reason.value, finished_at, note, round.id),
+        (reason.value, finished_at, _merged_note(row["note"], note), round.id),
     )
     db.conn.commit()
     return Round(id=round.id, run_date=round.run_date,
                  shop_keys=round.shop_keys, reason=reason,
                  started_at=round.started_at, finished_at=finished_at)
+
+
+def set_note(db: Database, round_id: int, note: str) -> None:
+    """给轮次写下备注：开轮时的留痕（越权补采、计划外采集）走这里。
+
+    与收尾备注（`finish` 的 `note`）是两件事，互不覆盖——收尾的接在后面，两类都留住。
+    """
+    cur = db.conn.execute("UPDATE rounds SET note=? WHERE id=?", (note, round_id))
+    if cur.rowcount == 0:
+        raise ValueError(f"轮次不存在：{round_id}")
+    db.conn.commit()
+
+
+def _merged_note(existing: str | None, note: str | None) -> str | None:
+    """收尾备注不吞掉开轮时写下的备注：新的接在后面。"""
+    if not existing:
+        return note
+    if not note:
+        return existing
+    return f"{existing}\n{note}"
 
 
 def active_round(db: Database, run_date: str | None = None) -> Round | None:

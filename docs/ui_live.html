@@ -57,7 +57,7 @@
   .modal-mask{position:absolute;inset:0;background:rgba(15,23,42,.35)}
   .modal-box{position:relative;background:#fff;border-radius:12px;padding:22px 24px;width:340px;box-shadow:0 12px 32px rgba(0,0,0,.2)}
   .modal-title{font-size:16px;font-weight:700;color:var(--txt)}
-  .modal-sub{font-size:12.5px;color:var(--mut);margin-top:8px;line-height:1.5}
+  .modal-sub{font-size:12.5px;color:var(--mut);margin-top:8px;line-height:1.5;white-space:pre-line}
   .modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:18px}
 </style>
 </head>
@@ -85,7 +85,7 @@
       </div>
       <p class="muted" style="margin:12px 0 0;white-space:pre-line" id="todaySummary">—</p>
       <div class="banner warn" id="activeRoundBanner" style="display:none"></div>
-      <div class="banner" id="planBanner" style="display:none"></div>
+      <div class="banner" id="planBanner" style="display:none;white-space:pre-line"></div>
       <div style="text-align:right;margin-top:12px;display:none" id="crawlerActions">
         <button class="btn danger" id="abortForeignBtn">中止正在跑的这一轮（放弃）</button>
       </div>
@@ -103,7 +103,7 @@
         <thead><tr><th style="width:40px">✓</th><th>店铺</th><th>抓取页数</th><th class="col-gray">今日已抓取商品</th><th class="col-gray">今日已抓取SKU</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
-      <p class="muted" style="margin:10px 0 0">默认勾选：今日已抓取商品数 &lt; 抓取页数×30；未勾选任意店铺时禁止开始。</p>
+      <p class="muted" style="margin:10px 0 0">默认勾选：本周计划里归本机的店；标着「本周计划归 …」的是别机的店（越权补采，默认不勾，勾上会记进计划外账）。未勾选任意店铺时禁止开始。</p>
       <div style="margin-top:16px;text-align:right">
         <button class="btn" id="startBtn">开始抓取</button>
       </div>
@@ -183,8 +183,8 @@
 <div id="confirmModal">
   <div class="modal-mask"></div>
   <div class="modal-box">
-    <div class="modal-title">确认终止本轮抓取？</div>
-    <div class="modal-sub">已抓取数据已被存储，未抓取数据将被忽略。</div>
+    <div class="modal-title" id="confirmTitle">确认终止本轮抓取？</div>
+    <div class="modal-sub" id="confirmSub">已抓取数据已被存储，未抓取数据将被忽略。</div>
     <div class="modal-actions">
       <button class="btn ghost" id="confirmCancel">取消</button>
       <button class="btn danger" id="confirmOk">确定</button>
@@ -313,8 +313,11 @@
     const total = d.total_shops;
     const rows = d.shops.map((s, i) => {
       const chk = s.default_checked ? "checked" : "";
+      // 越权店（计划归别机）：默认不勾之外，点名它本周归谁（spec §6 的「放行并上报」）
+      const planned = s.plan_machine
+        ? ` <span class="muted">（本周计划归 ${s.plan_machine}）</span>` : "";
       return `<tr><td class="chk"><input type="checkbox" data-i="${i}" ${chk}></td>` +
-        `<td><b>${s.key}</b> ${s.name}</td><td>${s.pages} 页</td>` +
+        `<td><b>${s.key}</b> ${s.name}${planned}</td><td>${s.pages} 页</td>` +
         `<td class="col-gray">${s.products}</td><td class="col-gray">${s.skus}</td></tr>`;
     }).join("");
     $("rows").innerHTML = rows;
@@ -333,13 +336,28 @@
     $("selCnt").textContent = "已选 " + n + " / " + (api && api.__shops ? api.__shops.length : 0);
   }
 
-  async function startRun() {
+  async function startRun(ignorePlan) {
     const boxes = [...document.querySelectorAll("#rows input:checked")];
     if (boxes.length === 0) { alert("请至少勾选一个店铺再开始抓取"); return; }
     const keys = boxes.map(b => api.__shops[+b.dataset.i].key);
-    const r = await callApi("start_run", keys);
+    const r = await callApi("start_run", keys, !!ignorePlan);
     if (!r) return;
-    if (!r.ok) { alert(r.error || "启动失败"); return; }
+    if (!r.ok) {
+      if (r.escape_hatch) {
+        // 拉不到计划库、本地也没有本周计划：默认不开轮，这里给显式逃生口（spec §6）。
+        openConfirm({
+          title: "拉不到本周计划，默认不开轮",
+          sub: (r.error || "") +
+            "\n\n继续将按「自由采集 + 记账为计划外」运行：本轮勾选的店都会记进计划外账，" +
+            "汇总侧会按冲突处理。要现在这样开轮吗？",
+          ok: "按计划外采集开轮",
+          action: () => startRun(true),
+        });
+        return;
+      }
+      alert(r.error || "启动失败");
+      return;
+    }
     hasStartedRun = true;
     switchTab("run");
     startPolling();
@@ -423,7 +441,18 @@
     if (!r.ok) { alert(r.error || "继续失败"); return; }
     startPolling();
   }
-  function openConfirm() { $("confirmModal").classList.add("show"); }
+  // ---------- 确认弹窗 ----------
+  // 一次只问一件事：默认文案是中止本轮；带 opts 时换成那件事的文案与动作
+  // （如逃生口确认，spec §6 降级表最后一行）。
+  let confirmAction = null;
+  function openConfirm(opts) {
+    opts = opts || {};
+    $("confirmTitle").textContent = opts.title || "确认终止本轮抓取？";
+    $("confirmSub").textContent = opts.sub || "已抓取数据已被存储，未抓取数据将被忽略。";
+    $("confirmOk").textContent = opts.ok || "确定";
+    confirmAction = opts.action || null;
+    $("confirmModal").classList.add("show");
+  }
   function closeConfirm() { $("confirmModal").classList.remove("show"); }
   async function doAbort() {
     await callApi("abort_run");
@@ -472,12 +501,19 @@
   // ---------- 初始化 ----------
   function init() {
     api = window.pywebview.api;
-    $("startBtn").onclick = startRun;
+    // 事件处理器包一层：onclick 会把事件对象当第一个参数传进来，不能让它冒充 ignorePlan
+    $("startBtn").onclick = () => startRun(false);
     $("pauseBtn").onclick = pauseRun;
-    $("abortBtn").onclick = openConfirm;
-    $("abortForeignBtn").onclick = openConfirm;
+    $("abortBtn").onclick = () => openConfirm();
+    $("abortForeignBtn").onclick = () => openConfirm();
     $("confirmCancel").onclick = closeConfirm;
-    $("confirmOk").onclick = async () => { closeConfirm(); await doAbort(); };
+    $("confirmOk").onclick = async () => {
+      const act = confirmAction;
+      closeConfirm();
+      confirmAction = null;
+      if (act) { await act(); return; }   // 弹窗问的那件事
+      await doAbort();
+    };
     $("resumeBtn").onclick = resumeRun;
     $("backBtn").onclick = () => switchTab("start");
     $("selAllBtn").onclick = () => setAllShops(true);

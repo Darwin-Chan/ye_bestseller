@@ -269,6 +269,118 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
             page.close()
 
 
+PLAN_GUARD_MOCK_API = r"""
+window.__calls = [];
+window.__ignorePlanFlags = [];
+const SHOPS = [
+  {key:"A01", name:"店铺A", products:180, skus:1038, pages:23, default_checked:true,
+   plan_machine:""},
+  {key:"A02", name:"店铺B", products:0, skus:0, pages:8, default_checked:false,
+   plan_machine:"m2"},
+];
+window.pywebview = { platform: "edgechromium", api: {
+  get_start: async () => ({
+    ov: {products: 180, skus: 1038},
+    summary: {started: false, rounds: 0, text: ""},
+    shops: SHOPS, total_shops: 2, start_hint: "", plan_note: "", crawler: null,
+  }),
+  get_run: async () => ({running: false, manually_paused: false, has_round: false}),
+  get_result: async () => ({has_round: false}),
+  start_run: async (keys, ignorePlan) => {
+    window.__calls.push(["start_run", keys]);
+    window.__ignorePlanFlags.push(!!ignorePlan);
+    if (!ignorePlan) {
+      return {ok: false, escape_hatch: true,
+              error: "开轮前准备没通过，本次不开轮：拉不到计划库，且本地没有本周计划。"};
+    }
+    return {ok: true};
+  },
+  pause_run: async () => ({ok: true}),
+  resume_run: async () => ({ok: true}),
+  abort_run: async () => ({ok: true}),
+}};
+"""
+
+
+class UiLivePlanGuardTests(unittest.TestCase):
+    """票据 07：越权文案与降级逃生口在前端的表现（spec §6 的越权与降级表最后一行）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._pw = sync_playwright().start()
+        try:
+            cls.browser = cls._pw.chromium.launch(channel="msedge", headless=True)
+        except Exception as exc:  # noqa: BLE001
+            cls._pw.stop()
+            cls._pw = None
+            raise unittest.SkipTest(f"没有可用的 Edge/Playwright 浏览器：{exc}")
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._pw is not None:
+            cls.browser.close()
+            cls._pw.stop()
+
+    def open_page(self):
+        page = self.browser.new_page(viewport={"width": 1100, "height": 1000})
+        page.add_init_script(PLAN_GUARD_MOCK_API)
+        page.goto(HTML_URI)
+        page.wait_for_selector("#rows input", timeout=5000)
+        return page
+
+    def test_an_overreach_shop_names_the_machine_the_plan_gives_it_to(self):
+        page = self.open_page()
+        try:
+            rows = page.eval_on_selector_all(
+                "#rows tr", "els => els.map(e => e.textContent)")
+
+            self.assertIn("本周计划归 m2", rows[1], "越权店要点名归谁，不泛泛说「越权」")
+            self.assertNotIn("本周计划归", rows[0], "归本机的店不点名")
+            self.assertFalse(
+                page.eval_on_selector("#rows tr:nth-child(2) input", "el => el.checked"),
+                "越权店默认不勾")
+        finally:
+            page.close()
+
+    def test_a_refused_start_confirms_before_free_collection(self):
+        """默认拒绝开轮：先确认再说后果；确认后按计划外采集开轮（第二次调用带旗标）。"""
+        page = self.open_page()
+        try:
+            page.click("#startBtn")
+            page.wait_for_selector("#confirmModal.show", timeout=5000)
+
+            sub = page.inner_text("#confirmSub")
+            self.assertIn("拉不到计划库", sub, "确认文案要先说为什么被拒")
+            self.assertIn("自由采集", sub)
+            self.assertIn("计划外", sub, "要说清继续跑的代价：这一轮记计划外")
+            self.assertEqual(page.evaluate("window.__ignorePlanFlags"), [False],
+                             "确认之前不许放行")
+
+            page.click("#confirmOk")
+            page.wait_for_function(
+                "() => window.__ignorePlanFlags.length === 2", timeout=5000)
+            self.assertEqual(page.evaluate("window.__ignorePlanFlags"), [False, True])
+            page.wait_for_selector('.step.active[data-tab="run"]', timeout=5000)
+        finally:
+            page.close()
+
+    def test_cancelling_the_escape_hatch_stays_on_the_start_page(self):
+        page = self.open_page()
+        try:
+            page.click("#startBtn")
+            page.wait_for_selector("#confirmModal.show", timeout=5000)
+
+            page.click("#confirmCancel")
+
+            self.assertFalse(page.is_visible("#confirmModal"))
+            self.assertEqual(page.evaluate("window.__ignorePlanFlags"), [False],
+                             "取消不重发：没有第二次 start_run")
+            self.assertEqual(
+                page.eval_on_selector(".step.active .lbl", "el => el.textContent"), "开始")
+        finally:
+            page.close()
+
+
 class UiLivePollingTests(unittest.TestCase):
     """界面轮询要防重入（IS-38）。
 

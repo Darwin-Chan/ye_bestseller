@@ -20,7 +20,7 @@ import unittest
 from unittest import mock
 
 from bestseller_monitor import db as dbmod
-from bestseller_monitor import export, merge
+from bestseller_monitor import export, merge, plan_step, rounds
 from bestseller_monitor.db import CST
 from bestseller_monitor.image_store import ImageStoreError, image_key
 
@@ -435,6 +435,42 @@ class LocalCollectionTests(MergeCase):
             self.rows(conn, "SELECT seen_at, machine_id FROM merge_seen "
                             "WHERE table_name='shops' AND row_key='A01'"),
             [(D16_1000, "m3")])
+
+
+class OverreachConflictTests(MergeCase):
+    """票据 07 的联验点：越权补采的重复在汇总侧长成冲突，两边的账对得上号。
+
+    本机 m1 越权采了 A01（本周计划归 m2）——采集侧的账（`plan_deviations`，轮次备注同源）
+    记着「计划外多采」；计划机 m2 的包进来后，同一 (日期, 店铺) 上两个 claim 合成一条
+    冲突。报告据此写「本机 …（计划外多采）与计划机 … 都采到」是票据 10 的事；这里先钉
+    两边账的字段齐全、标识对得上（本机库的采集行直插，与上面同款夹具）。
+    """
+
+    def test_the_overreach_duplicate_becomes_a_conflict_both_ledgers_can_explain(self):
+        conn = self.local("m1")
+        db = dbmod.Database(conn)
+        crawl_locally(conn, observed_at=D16_1000, stock=7)      # 本机越权采的那一遍
+        opened = rounds.open(db, rounds.RoundRequest(
+            DAY, (rounds.ShopScope("A01", "https://a01.example/", "店铺甲"),)))
+        plan_step.record_deviations(
+            db, opened.round, "m1",
+            (plan_step.PlanDeviation(
+                "A01", plan_step.DeviationKind.OVERREACH, "m2", "本周计划归 m2"),),
+            now=dt.datetime(2026, 9, 16, 18, 0, tzinfo=CST))
+        package = self.package("m2", machine_world(D16_0900, stock=5))  # 计划机的包
+
+        self.import_(conn, package, machine_id="m1")
+
+        conflict = self.rows(
+            conn, "SELECT observed_date, shop_key, winner_machine, loser_machine "
+                  "FROM import_conflicts")
+        self.assertEqual(conflict, [(DAY, "A01", "m1", "m2")],
+                         "本机 10:00 采的未被 m2 09:00 的包覆盖；重复长成一条冲突")
+        deviation = self.rows(
+            conn, "SELECT run_date, shop_key, machine_id, kind, planned_machine "
+                  "FROM plan_deviations")
+        self.assertEqual(deviation, [(DAY, "A01", "m1", "overreach", "m2")],
+                         "采集侧账字段齐全，且 (日期, 店铺) 与冲突行对得上号")
 
 
 class IdempotencyTests(MergeCase):

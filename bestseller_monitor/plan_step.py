@@ -17,6 +17,10 @@
   → 默认拒绝开轮（`REFUSED`）并留显式逃生口；生成失败（pages 空缺点名、名册读不到）落到
   同样两行；计划文件在但读不动不猜也不覆盖，同样走降级；纯汇总机不检查、不生成、不发布；
   本机本周没店是合法空态（`idle`）。
+- **留痕**（放行并上报）：这一轮采了越权（店在计划内、本周归别人）或计划外（逃生口自由
+  采集、计划没说到）的店时，`record_deviations` 把偏离写进轮次备注与本机计划外账
+  （`db.plan_deviations`，不入交换集）；汇总侧据此给冲突加「计划外多采」那层说明。
+  判定与文案同源：`plan_deviations` 出判定，`deviation_note` 出人话。
 - **缺口检查**：只读交换区（本机已有的包，不拉取），比对本机库缺哪些店哪些日，
   只告警不拦、不自动合并——汇总始终保持手工触发。
 
@@ -47,10 +51,10 @@ import tempfile
 from collections.abc import Mapping
 from typing import Any
 
-from bestseller_monitor import shops_sync, weekly_plan
+from bestseller_monitor import rounds, shops_sync, weekly_plan
 from bestseller_monitor.canonical_text import normalized_text, text_digest
 from bestseller_monitor.config import ROLE_MERGE_ONLY, Shop, load_shops
-from bestseller_monitor.db import CST, Database, WeeklyPlanRow
+from bestseller_monitor.db import CST, Database, PlanDeviationRow, WeeklyPlanRow
 from bestseller_monitor.git_channel import ChannelError, GitChannel
 from bestseller_monitor.weekly_plan import PlanError
 
@@ -201,6 +205,84 @@ def visible_shops(cfg, plan: StoredPlan | None) -> list[Shop]:
     planned_keys = set(plan.pages()) if plan is not None else set()
     return [shop for shop in load_shops(cfg.shop_csv)
             if shop.active or shop.key in planned_keys]
+
+
+class DeviationKind(str, enum.Enum):
+    """这次采集相对本周计划的偏离（spec §6）：越权只剩一种，计划外是逃生口那一行。"""
+
+    OVERREACH = "overreach"      # 店在本周计划里、但归别台机器：放行并上报
+    OUT_OF_PLAN = "out_of_plan"  # 计划外：没有计划（逃生口自由采集）或计划没说到这家店
+
+
+@dataclasses.dataclass(frozen=True)
+class PlanDeviation:
+    """一家在计划之外采的店：种类、计划归谁（没有计划时为 None）与人话理由。
+
+    `reason` 就是给人看的那半句（「本周计划归 m2」）——轮次备注、账目与界面文案同源，
+    改口径只改这里一处。
+    """
+
+    shop_key: str
+    kind: DeviationKind
+    planned_machine: str | None
+    reason: str
+
+
+def plan_deviations(plan: StoredPlan | None, machine_id: str,
+                    shop_keys) -> tuple[PlanDeviation, ...]:
+    """这批店里哪些在计划之外（按店铺编号排序）。
+
+    计划在：归别机的算越权、计划没说到的算计划外；归本机的正常。计划没了（拉不到
+    计划库、本地也没有，逃生口放行的自由采集）：都算计划外。
+    """
+    planned = ({row.shop_key: row.machine_id for row in plan.rows}
+               if plan is not None else {})
+    deviations: list[PlanDeviation] = []
+    for key in sorted(set(shop_keys)):
+        if key in planned:
+            if planned[key] == machine_id:
+                continue
+            machine = planned[key]
+            deviations.append(PlanDeviation(key, DeviationKind.OVERREACH, machine,
+                                            f"本周计划归 {machine}"))
+        else:
+            reason = ("拉不到计划库、本地也没有本周计划（逃生口放行）"
+                      if plan is None else "本周计划没说到这家店")
+            deviations.append(PlanDeviation(key, DeviationKind.OUT_OF_PLAN, None, reason))
+    return tuple(deviations)
+
+
+def deviation_note(deviations) -> str:
+    """轮次备注里的一段话：放行了哪些越权/计划外的店，各自为什么。"""
+    groups = ((DeviationKind.OVERREACH, "越权补采"),
+              (DeviationKind.OUT_OF_PLAN, "计划外采集"))
+    parts = [f"{label}：" + "、".join(f"{d.shop_key}（{d.reason}）"
+                                      for d in deviations if d.kind is kind)
+             for kind, label in groups
+             if any(d.kind is kind for d in deviations)]
+    return "；".join(parts) + "——已放行，并记进本机计划外账（汇总侧会按冲突处理）。"
+
+
+def record_deviations(db: Database, round, machine_id: str, deviations, *,
+                      now: dt.datetime | None = None) -> None:
+    """把一轮里的越权/计划外写进轮次备注与计划外账（spec §6 的「放行并上报」）。
+
+    在轮次打开之后调用；`deviations` 为空就什么都不写。**同一轮以第一次记账为准**：
+    续跑再调用直接跳过——偏离是开轮那一刻的事实，计划后来变没变都不改写它（汇总侧
+    据此给冲突加「计划外多采」那层说明，票据 10）。
+    """
+    if not deviations or db.plan_deviations(round_id=round.id):
+        return
+    recorded_at = (now or dt.datetime.now(CST)).isoformat(timespec="seconds")
+    rounds.set_note(db, round.id, deviation_note(deviations))
+    db.record_plan_deviations(
+        [PlanDeviationRow(round_id=round.id, run_date=round.run_date,
+                          week=weekly_plan.week_label(round.run_date),
+                          shop_key=d.shop_key, machine_id=machine_id,
+                          kind=d.kind.value, planned_machine=d.planned_machine,
+                          reason=d.reason)
+         for d in deviations],
+        recorded_at=recorded_at)
 
 
 @dataclasses.dataclass(frozen=True)

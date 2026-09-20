@@ -37,6 +37,9 @@ class UiState:
     stop_grace_sec: float = 0.0
     elapsed_sec: float = 0.0
     start_error: str | None = None
+    # 这次开窗时的那次准备是降级来的（拉不到计划库、用了本地那份）：页面要标注
+    # 「未能确认最新」（spec §6 降级表）。事实源是界面那次准备，不是库里的计划表。
+    plan_stale: bool = False
 
 
 # ---------- 渲染：事实 → 页面上的字符串 ----------
@@ -160,11 +163,16 @@ def _start_shops(conn: sqlite3.Connection, shops, cfg, today: str, *,
                  plan: plan_step.StoredPlan | None, mine: frozenset[str]) -> list[dict]:
     out = []
     plan_pages = plan.pages() if plan is not None else None
+    planned = ({row.shop_key: row.machine_id for row in plan.rows}
+               if plan is not None else {})
     for shop in shops:
         products, skus = _inventory_counts(conn, today, shop.key)
         # 该店本轮实际翻页上限：四层优先取第一个有值的（命令行覆盖 > 计划快照 >
         # 店铺 pages > 全局默认），与抓取逻辑同一处口径
         pages = effective_pages_limit(shop, cfg, plan_pages=plan_pages)
+        # 越权店（店在计划内、本周归别人）：文案点名它归谁（票据 07）；归本机的店
+        # 与计划没说到的店都留空——「谁归谁」只有计划说得清。
+        planned_machine = "" if shop.key in mine else planned.get(shop.key, "")
         out.append({
             "key": shop.key,
             "name": shop.name,
@@ -173,6 +181,7 @@ def _start_shops(conn: sqlite3.Connection, shops, cfg, today: str, *,
             "pages": pages,
             # 默认勾选 = 本周计划里归本机的店（票据 06）；越权店默认不勾、可显式勾上
             "default_checked": shop.key in mine,
+            "plan_machine": planned_machine,
         })
     return out
 
@@ -194,14 +203,21 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
     """开始页取数：今日大盘、每店今日进度、以及「点开始会发生什么」的提示。
 
     默认勾选与页数都读**本周落库计划**（`plan_step.stored_plan`，与命令行同一份；
-    不解析计划文件）。本机本周没店（空手）是合法正常态：照常给出店铺表，另附一句
-    说明，不报错。
+    不解析计划文件）。越权店（计划归别机）默认不勾，并按 `plan_machine` 点名它归谁
+    （票据 07）。本机本周没店（空手）是合法正常态：照常给出店铺表，另附一句说明，
+    不报错。`state.plan_stale`（这次准备是降级来的）再加一句「未能确认最新」。
     """
     today = cst_date(now)
     db = Database(conn)
     plan = plan_step.stored_plan(db, weekly_plan.week_label(today))
     mine = frozenset(plan.machine_keys(str(cfg.machine_id))) if plan is not None else frozenset()
     idle = plan is not None and not mine
+    notes = []
+    if idle:
+        notes.append(f"本周计划（{plan.week}）里没有归本机的店（空手）——合法状态，不用开轮。")
+    if state.plan_stale:
+        notes.append("未能确认最新：这次没拉到计划库，用的是本地已落库的本周计划"
+                     "（发布后本周不重算，本地即权威）。")
     ov_products, ov_skus = _inventory_counts(conn, today)
     current = rounds.active_round(db, today)
     stale = None if current is not None else rounds.active_round(db)
@@ -222,8 +238,7 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
         "total_shops": len(shops),
         "start_hint": hint,
         "plan_idle": idle,
-        "plan_note": (f"本周计划（{plan.week}）里没有归本机的店（空手）——"
-                      "合法状态，不用开轮。" if idle else ""),
+        "plan_note": "\n".join(notes),
         # 页面按 `d.crawler.round_id` 说话，跨 pywebview 那一步走 JSON：给回普通 dict。
         "crawler": crawler.to_payload() if crawler is not None else None,
         "stopping": state.stopping,

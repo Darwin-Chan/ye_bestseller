@@ -4,7 +4,9 @@
   - GUI 只做启动器/监控，抓取仍由本机 `python run.py --limit-shops=...` 子进程执行。
   - 界面打开时在后台走一次「开轮前的一次准备」（spec §6，`plan_step.prepare_week`）：
     拉计划库 → 同步清单 → 确认/生成/发布本周计划 → 落库。开始页的默认勾选与页数
-    都读落库计划（与命令行同一份）；准备没通过则默认拒绝开轮（逃生口入口见票据 07）。
+    都读落库计划（与命令行同一份）；准备没通过则默认拒绝开轮——拉不到计划库、本地也
+    没有时点「开始」会先给确认（逃生口，按「自由采集 + 记账为计划外」跑）；用本地
+    那份降级开轮时页面标注「未能确认最新」。
   - GUI 读 data/bestseller.db 展示“今日/各店”数据；过程页上一次刷新回来之后才排下一次
     （节拍约 2 秒），慢查询不会把请求堆起来，暂停/中止也不必排在它们后面（IS-38）。
   - “暂停”＝写下停止请求，轮次保留为“进行中”（可续跑）。
@@ -174,6 +176,7 @@ class Api:
             stop_grace_sec=self._stop_watch.grace_sec,
             elapsed_sec=self._current_elapsed(),
             start_error=self._refused_start_message(),
+            plan_stale=self._prep_is_stale(),
         )
 
     # ---------- 开始页 ----------
@@ -221,6 +224,21 @@ class Api:
         if prep.status is plan_step.PrepStatus.SKIPPED_MERGE_ONLY:
             return "本机是纯汇总机（machine.role = merge_only）：不做采集。"
         return "开轮前准备没通过，本次不开轮：\n" + (prep.reason or "拉不到计划库，且本地没有本周计划。")
+
+    def _prep_this_week(self) -> plan_step.PrepResult | None:
+        """本界面刚做过、且属于本周的那次准备；没跑过或跨周就是 None。"""
+        prep = self._prep
+        return prep if prep is not None and prep.week == self._current_week() else None
+
+    def _escape_hatch_available(self) -> bool:
+        """这次拒绝有没有逃生口：只有「拉不到计划库、本地也没有」那一行有（纯汇总机没有）。"""
+        prep = self._prep_this_week()
+        return prep is not None and prep.escape_hatch_available
+
+    def _prep_is_stale(self) -> bool:
+        """这次准备是不是降级来的（用本地那份、未能确认最新）：页面要标注（票据 07）。"""
+        prep = self._prep_this_week()
+        return prep is not None and prep.stale
 
     def _refresh_shops(self, conn) -> None:
         """店铺全量的最新读法：本机启用的店 + 本周计划说到的店。
@@ -281,12 +299,19 @@ class Api:
             own_round_id=self.round_id,
         )
 
-    def _spawn_crawler(self, keys: list[str] | None = None):
-        """拉起采集子进程；keys 为空表示「开始或续跑」，范围由子进程按轮次决定。"""
+    def _spawn_crawler(self, keys: list[str] | None = None, *,
+                       ignore_plan: bool = False):
+        """拉起采集子进程；keys 为空表示「开始或续跑」，范围由子进程按轮次决定。
+
+        `ignore_plan=True` 是逃生口（界面确认后）：子进程在「拉不到计划库、本地也没有」
+        时照开轮，按「自由采集 + 记账为计划外」运行（run.py 的 `--ignore-plan`）。
+        """
         cmd = [_crawler_python(), str(PROJECT_ROOT / "run.py")]
         limit = ",".join(k for k in (keys or []) if k)
         if limit:
             cmd += ["--limit-shops", limit]
+        if ignore_plan:
+            cmd += ["--ignore-plan"]
         # 子进程静默运行：不弹控制台窗口，stdout/stderr 丢弃（详细日志仍写入 run.log）
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         self.proc = subprocess.Popen(
@@ -297,11 +322,14 @@ class Api:
             creationflags=flags,
         )
 
-    def start_run(self, keys: list[str]) -> dict:
+    def start_run(self, keys: list[str], ignore_plan: bool = False) -> dict:
+        """开始一轮；`ignore_plan=True` 只有界面确认过逃生口才会传（否则默认拒绝开轮）。"""
         with self._lock:
             reason = self._plan_block_reason()
             if reason is not None:
-                return {"ok": False, "error": reason}
+                escape = self._escape_hatch_available()
+                if not (ignore_plan and escape):
+                    return {"ok": False, "error": reason, "escape_hatch": escape}
             by_key = {shop.key: shop for shop in self.shops}
             missing = [key for key in keys if key not in by_key]
             if missing:
@@ -336,7 +364,7 @@ class Api:
             self._elapsed_base = 0.0
             self._run_start_ts = time.time()
             try:
-                self._spawn_crawler(keys)
+                self._spawn_crawler(keys, ignore_plan=ignore_plan)
             except Exception as exc:  # noqa: BLE001
                 return {"ok": False, "error": f"启动抓取失败：{exc}"}
             return {"ok": True}

@@ -5,12 +5,16 @@
     python run.py --pages-per-shop 2       # 冒烟：每家店只翻 2 页（压过计划快照）
     python run.py --max-detail 60          # 冒烟：全轮最多 60 个详情页
     python run.py --limit-shops A01,A02    # 只处理指定店铺
+    python run.py --ignore-plan            # 逃生口：拉不到计划库且本地没有本周计划时照开
+                                           # （自由采集 + 记账为计划外；计划可用时不生效）
 
 开跑前先走一次「开轮前的一次准备」（spec §6，与界面打开时同一步，见
 `plan_step.prepare_week`）：拉计划库 → 同步店铺清单 → 确认/生成/发布本周计划 →
 把整周计划落进本机计划表 → 缺口检查告警（只告警不拦）。拉不到计划库、本地也没有
-本周计划时**默认拒绝开轮**（退出码 `plan_step.PLAN_REFUSED_EXIT_CODE`）；逃生口
-（`--ignore-plan`，按「自由采集 + 记账为计划外」运行）见票据 07。
+本周计划时**默认拒绝开轮**（退出码 `plan_step.PLAN_REFUSED_EXIT_CODE`）——今天已有
+进行中的轮次时除外，那一轮按轮次自身续跑；逃生口 `--ignore-plan` 按「自由采集 +
+记账为计划外」运行。显式点名了归别台机器的店（`--limit-shops`）= 越权补采：**放行
+并上报**，记进轮次备注与本机计划外账（`plan_step.record_deviations`）。
 
 `--shops` 是人工冒烟的清单覆盖：开轮前的准备把它当作「本机清单副本」与计划库比对
 （两边都变会停下不猜，单边变化可能被推送）——拿临时清单冒烟时留意这一点。
@@ -28,14 +32,14 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from bestseller_monitor.config import Config, load_shops  # noqa: E402
-from bestseller_monitor.db import Database, connect  # noqa: E402
+from bestseller_monitor.db import Database, connect, cst_date  # noqa: E402
 from bestseller_monitor.pipeline import (  # noqa: E402
     CrawlerAlreadyRunning,
     requested_round_shops,
     run_round,
 )
 from bestseller_monitor.rounds import ScopeMismatch  # noqa: E402
-from bestseller_monitor import plan_step, single_instance, sound  # noqa: E402
+from bestseller_monitor import plan_step, rounds, single_instance, sound  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,6 +49,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pages-per-shop", type=int, default=None, help="覆盖每家店翻页上限")
     p.add_argument("--max-detail", type=int, default=None, help="覆盖单轮详情预算（商品机会数）")
     p.add_argument("--limit-shops", type=str, default=None, help="逗号分隔的 shop_key 白名单")
+    p.add_argument("--ignore-plan", action="store_true",
+                   help="拉不到计划库且本地没有本周计划时仍开轮（自由采集 + 记账为计划外）")
     p.add_argument("--no-shuffle", action="store_true", help="不随机打乱店内商品顺序")
     p.add_argument("--mode", choices=["shops"], default="shops",
                    help="仅支持 shops（商品URL模式已移除）")
@@ -85,24 +91,44 @@ def main() -> int:
     try:
         db.upsert_shops(all_shops)
         # 开轮前的一次准备（spec §6）：拉计划库 → 同步清单 → 确认/生成/发布本周计划 →
-        # 落库 → 缺口告警。界面打开时走的是同一步；逃生口入口见票据 07。
+        # 落库 → 缺口告警。界面打开时走的是同一步。
         prep = plan_step.prepare_week(cfg, db)
         for warning in prep.warnings:
             print(f"\n>>> {warning}\n")
+        free = False
         # 正向判据（can_start）：以后 PrepStatus 多了新结局也不会在这里被静默放行
         if not prep.can_start:
             if prep.status is plan_step.PrepStatus.SKIPPED_MERGE_ONLY:
                 print("本机是纯汇总机（machine.role = merge_only）：不做采集；"
                       "导出与汇总请跑数据交换台（exchange.py）。")
                 return 2
-            print(f"\n>>> 开轮前准备没通过，默认拒绝开轮：\n{prep.reason}\n")
-            return plan_step.PLAN_REFUSED_EXIT_CODE
+            # 「默认拒绝开轮」拦的是新开轮：今天已有进行中的轮次就按轮次自身续跑
+            # （逃生口开出来的那一轮也才续得下去）；真没路可走时给显式逃生口。
+            if rounds.active_round(db, cst_date()) is not None:
+                free = True
+                print("\n>>> 拉不到计划库、本地也没有本周计划：继续跑今天已开的那一轮"
+                      "（范围以轮次自身为准）。\n")
+            elif args.ignore_plan:
+                free = True
+                print("\n>>> 按 --ignore-plan 运行（逃生口）：自由采集 + 记账为计划外——"
+                      "本轮的店都会记进计划外账，汇总侧会按冲突处理。\n")
+            else:
+                print(f"\n>>> 开轮前准备没通过，默认拒绝开轮：\n{prep.reason}\n")
+                return plan_step.PLAN_REFUSED_EXIT_CODE
+        elif args.ignore_plan:
+            print("\n>>> 本周计划可用，--ignore-plan 不生效：范围仍按计划。\n")
         # 页数四层的计划层与轮次范围都从这份落库计划读（与界面同一份，不解析计划文件）
         plan = plan_step.stored_plan(db, prep.week)
         cfg = cfg.replace(plan_pages=plan.pages() if plan is not None else None)
         # 不带 --limit-shops 的裸运行是「开始或续跑」：今天已有进行中的轮次就按轮次
-        # 自身的范围续跑（续跑不得增删店铺），否则取本周计划里归本机的店。
-        shops = requested_round_shops(cfg, limit_keys, week=prep.week)
+        # 自身的范围续跑（续跑不得增删店铺），否则取本周计划里归本机的店；逃生口放行
+        # （free）时取本机清单里启用的店。
+        shops = requested_round_shops(cfg, limit_keys, week=prep.week, free=free)
+        # 越权/计划外的店：放行并上报——记账落在轮次备注与本机计划外账（run_round 里写）。
+        deviations = plan_step.plan_deviations(plan, cfg.machine_id,
+                                               [shop.key for shop in shops])
+        if deviations:
+            print(f"\n>>> {plan_step.deviation_note(deviations)}\n")
     finally:
         conn.close()
     if not shops:
@@ -132,7 +158,7 @@ def main() -> int:
     )
 
     try:
-        run_round(cfg, shops)
+        run_round(cfg, shops, deviations=deviations)
     except CrawlerAlreadyRunning as exc:
         # 同一时刻至多一个采集进程：抢不到锁就说清楚，并用一个只表示这件事的退出码，
         # 界面据此提示原因（launcher 与调用方不会把它当成一轮正常结束）。

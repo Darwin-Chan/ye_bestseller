@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_pw, guard, pipeline, rounds, weekly_plan
+from bestseller_monitor import browser_pw, guard, pipeline, plan_step, rounds, weekly_plan
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import CST, Database, connect, cst_date
 from bestseller_monitor.rounds import RoundRequest, ScopeMismatch, ShopScope
@@ -59,16 +59,24 @@ class RoundScopeWiringTests(unittest.TestCase):
     def _yesterday() -> str:
         return (datetime.now(CST) - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    def _run(self, shops, cfg=None):
+    def _run(self, shops, cfg=None, deviations=()):
         cfg = cfg or self._cfg()
         with isolated_locks(), patch.object(pipeline, "_run_pwcdp_round") as driver:
-            pipeline.run_round(cfg, shops)
+            pipeline.run_round(cfg, shops, deviations=deviations)
         return driver
 
     def _round_rows(self):
         conn = connect(self.db_path)
         try:
             return [dict(row) for row in conn.execute("SELECT * FROM rounds ORDER BY id")]
+        finally:
+            conn.close()
+
+    def _deviation_rows(self):
+        conn = connect(self.db_path)
+        try:
+            return [dict(row) for row in conn.execute(
+                "SELECT * FROM plan_deviations ORDER BY shop_key")]
         finally:
             conn.close()
 
@@ -167,6 +175,45 @@ class RoundScopeWiringTests(unittest.TestCase):
         shops = pipeline.requested_round_shops(self._cfg(), None)
 
         self.assertEqual(shops, [], "没有落库计划就没有可采的店（开轮前的准备先于这一步）")
+
+    def test_free_collection_covers_the_local_active_shops(self):
+        """逃生口放行的自由采集（拉不到计划库、本地也没有）：范围是本机清单的启用店。"""
+        shops = pipeline.requested_round_shops(self._cfg(), None, free=True)
+
+        self.assertEqual([shop.key for shop in shops], ["A01", "A02"])
+
+    def test_free_collection_still_respects_an_explicit_limit(self):
+        """界面逃生口确认后送的是勾选（limit_keys）：越权/自由采集都只采勾上的。"""
+        shops = pipeline.requested_round_shops(self._cfg(), {"A02"}, free=True)
+
+        self.assertEqual([shop.key for shop in shops], ["A02"])
+
+    def test_run_round_records_deviations_in_the_note_and_the_ledger(self):
+        """放行并上报（spec §6）：越权采的店进轮次备注与本机计划外账；续跑重复记账幂等。"""
+        deviations = (plan_step.PlanDeviation(
+            "A02", plan_step.DeviationKind.OVERREACH, "m3", "本周计划归 m3"),)
+
+        self._run([self._shop("A02")], deviations=deviations)
+
+        row = self._round_rows()[-1]
+        self.assertIn("越权补采", row["note"])
+        self.assertIn("m3", row["note"])
+        ledger = self._deviation_rows()
+        self.assertEqual(
+            [(r["round_id"], r["shop_key"], r["machine_id"], r["kind"], r["planned_machine"])
+             for r in ledger],
+            [(row["id"], "A02", "m-test", "overreach", "m3")])
+
+        self._run([self._shop("A02")], deviations=deviations)   # 同一天同范围 = 续跑
+        self.assertEqual(len(self._round_rows()), 1)
+        self.assertEqual(len(self._deviation_rows()), 1, "续跑再记账不产生重复行")
+
+    def test_run_round_without_deviations_leaves_no_note_or_ledger_rows(self):
+        self._run([self._shop("A01")])
+
+        row = self._round_rows()[-1]
+        self.assertIsNone(row["note"])
+        self.assertEqual(self._deviation_rows(), [])
 
     def test_a_planned_shop_deactivated_midweek_still_counts(self):
         """周中把店标停用不改变本周：计划已发布，本周仍按计划采它。"""

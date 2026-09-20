@@ -22,9 +22,10 @@ import tempfile
 import unittest
 
 from bestseller_monitor import db as dbm
-from bestseller_monitor import plan_step, shops_sync
+from bestseller_monitor import plan_step, rounds, shops_sync
 from bestseller_monitor.config import ROLE_MERGE_ONLY
 from bestseller_monitor.db import Database, WeeklyPlanRow
+from bestseller_monitor.rounds import RoundRequest, ShopScope
 from tests.git_repos import GitSandbox
 from tests.helpers import crawler_cfg
 
@@ -295,6 +296,137 @@ class VisibleShopsTests(unittest.TestCase):
 
         self.assertEqual([shop.key for shop in shops], ["A01", "A02"],
                          "本机清单里没有的行（被删了）：没有地址，采不了")
+
+
+class PlanDeviationTests(unittest.TestCase):
+    """这次要采的店里哪些在计划之外（spec §6）：越权只剩「店在计划内、本周归别人」一种。"""
+
+    def plan(self, *rows: WeeklyPlanRow) -> plan_step.StoredPlan:
+        return plan_step.StoredPlan(week=WEEK, rows=rows, plan_sha256="ab" * 32)
+
+    def test_a_shop_planned_for_another_machine_is_overreach_and_names_its_machine(self):
+        plan = self.plan(WeeklyPlanRow("A01", "店一", "m1", 23),
+                         WeeklyPlanRow("A02", "店二", "m2", 8))
+
+        deviations = plan_step.plan_deviations(plan, "m1", ["A01", "A02"])
+
+        self.assertEqual([d.shop_key for d in deviations], ["A02"], "归本机的那家不是偏离")
+        one = deviations[0]
+        self.assertEqual(one.kind, plan_step.DeviationKind.OVERREACH)
+        self.assertEqual(one.planned_machine, "m2")
+        self.assertEqual(one.reason, "本周计划归 m2", "文案要点名这家店本周归谁")
+
+    def test_a_shop_the_plan_never_mentions_is_out_of_plan(self):
+        plan = self.plan(WeeklyPlanRow("A01", "店一", "m1", 23))
+
+        deviations = plan_step.plan_deviations(plan, "m1", ["A01", "B07"])
+
+        self.assertEqual([(d.shop_key, d.kind, d.planned_machine) for d in deviations],
+                         [("B07", plan_step.DeviationKind.OUT_OF_PLAN, None)])
+        self.assertIn("没说到", deviations[0].reason)
+
+    def test_without_a_plan_every_shop_is_out_of_plan_for_the_escape_hatch(self):
+        """逃生口放行的自由采集：没有计划可对照，这一轮的店都记计划外。"""
+        deviations = plan_step.plan_deviations(None, "m1", ["A01", "A02"])
+
+        self.assertEqual([d.shop_key for d in deviations], ["A01", "A02"])
+        self.assertEqual([d.kind for d in deviations],
+                         [plan_step.DeviationKind.OUT_OF_PLAN] * 2)
+        self.assertIn("逃生口", deviations[0].reason, "理由就是降级表里「拉不到 + 本地没有」那一行")
+
+    def test_a_shop_nobody_asked_about_is_not_a_deviation(self):
+        plan = self.plan(WeeklyPlanRow("A01", "店一", "m1", 23),
+                         WeeklyPlanRow("A02", "店二", "m2", 8))
+
+        self.assertEqual(plan_step.plan_deviations(plan, "m1", ["A01"]), ())
+
+    def test_the_note_names_each_shop_and_what_kind_of_deviation_it_is(self):
+        plan = self.plan(WeeklyPlanRow("A01", "店一", "m1", 23),
+                         WeeklyPlanRow("A02", "店二", "m2", 8))
+
+        note = plan_step.deviation_note(
+            plan_step.plan_deviations(plan, "m1", ["A02", "B07"]))
+
+        self.assertIn("越权补采", note)
+        self.assertIn("A02（本周计划归 m2）", note)
+        self.assertIn("计划外采集", note)
+        self.assertIn("B07", note)
+
+
+class DeviationLedgerTests(unittest.TestCase):
+    """放行之后要留痕（spec §6）：轮次备注 + 本机计划外账（不入交换集，供汇总侧加说明）。"""
+
+    def setUp(self):
+        self.dir = pathlib.Path(tempfile.mkdtemp(prefix="bestseller-deviations-"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.conn = dbm.connect(self.dir / "crawler.db")
+        self.addCleanup(self.conn.close)
+        self.db = Database(self.conn)
+        self.round = rounds.open(self.db, RoundRequest(
+            "2026-09-21", (ShopScope("A02", "https://a02.example/", "店二"),))).round
+        self.deviations = (plan_step.PlanDeviation(
+            "A02", plan_step.DeviationKind.OVERREACH, "m2", "本周计划归 m2"),)
+
+    def test_records_every_field_the_summary_side_needs(self):
+        """账目字段齐全：日期、店铺、本机、种类、计划归谁、理由、时刻，一样不少。"""
+        plan_step.record_deviations(self.db, self.round, "m1", self.deviations,
+                                    now=dt.datetime.fromisoformat(NOW))
+
+        rows = self.db.plan_deviations()
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(
+            (row["round_id"], row["run_date"], row["week"], row["shop_key"],
+             row["machine_id"], row["kind"], row["planned_machine"], row["reason"],
+             row["recorded_at"]),
+            (self.round.id, "2026-09-21", WEEK, "A02", "m1", "overreach", "m2",
+             "本周计划归 m2", NOW))
+
+    def test_writes_the_round_note_too_and_the_terminal_note_does_not_eat_it(self):
+        plan_step.record_deviations(self.db, self.round, "m1", self.deviations,
+                                    now=dt.datetime.fromisoformat(NOW))
+
+        note = self.conn.execute(
+            "SELECT note FROM rounds WHERE id=?", (self.round.id,)).fetchone()["note"]
+        self.assertIn("A02", note, "轮次备注要点名是哪家店")
+        self.assertIn("m2", note, "以及本周它归谁")
+
+        rounds.finish(self.db, self.round, rounds.TerminalReason.COMPLETED, note="本轮正常完成")
+        combined = self.conn.execute(
+            "SELECT note FROM rounds WHERE id=?", (self.round.id,)).fetchone()["note"]
+        self.assertIn("A02", combined, "收尾备注追加在后面，不吞掉开轮时写下的留痕")
+        self.assertIn("本轮正常完成", combined)
+
+    def test_recording_the_same_round_again_is_idempotent(self):
+        """同一轮重跑（续跑）重复记账：账上仍是一行，不留重复。"""
+        plan_step.record_deviations(self.db, self.round, "m1", self.deviations,
+                                    now=dt.datetime.fromisoformat(NOW))
+        plan_step.record_deviations(self.db, self.round, "m1", self.deviations,
+                                    now=dt.datetime.fromisoformat(NEXT_RUN))
+
+        self.assertEqual(len(self.db.plan_deviations()), 1)
+
+    def test_the_first_record_wins_a_later_resume_does_not_rewrite_it(self):
+        """偏离是开轮那一刻的事实：计划后来变没变都不改写已经记下的那一行。"""
+        plan_step.record_deviations(self.db, self.round, "m1", self.deviations,
+                                    now=dt.datetime.fromisoformat(NOW))
+        later = (plan_step.PlanDeviation(
+            "A02", plan_step.DeviationKind.OUT_OF_PLAN, None,
+            "拉不到计划库、本地也没有本周计划（逃生口放行）"),)
+
+        plan_step.record_deviations(self.db, self.round, "m1", later,
+                                    now=dt.datetime.fromisoformat(NEXT_RUN))
+
+        rows = self.db.plan_deviations(round_id=self.round.id)
+        self.assertEqual([(r["kind"], r["planned_machine"]) for r in rows],
+                         [("overreach", "m2")], "第一次记账为准")
+
+    def test_nothing_recorded_when_the_scope_has_no_deviations(self):
+        plan_step.record_deviations(self.db, self.round, "m1", ())
+
+        self.assertEqual(self.db.plan_deviations(), [])
+        self.assertIsNone(self.conn.execute(
+            "SELECT note FROM rounds WHERE id=?", (self.round.id,)).fetchone()["note"])
 
 
 class FirstPublishTests(PrepWorldTestCase):

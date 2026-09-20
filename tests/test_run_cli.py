@@ -17,7 +17,7 @@ import run
 from bestseller_monitor import plan_step, single_instance, weekly_plan
 from bestseller_monitor.config import Config, Shop, effective_pages_limit
 from bestseller_monitor.db import Database, connect
-from helpers import store_weekly_plan
+from helpers import new_round, store_weekly_plan
 
 
 MINIMAL_CONFIG = """
@@ -218,6 +218,68 @@ class RunCliPlanTests(unittest.TestCase):
         round_call.assert_not_called()
         self.assertIn("拒绝开轮", out)
         self.assertIn("clone", out, "要说清是计划库没建起来还是别的")
+
+    def test_cli_ignore_plan_runs_free_collection_and_books_it_as_out_of_plan(self):
+        """逃生口放行（spec §6）：命令行 --ignore-plan 走「自由采集 + 记账为计划外」。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = self._env(tmp)
+
+            code, out, round_call = self._main(cfg_path, "--ignore-plan")
+
+        self.assertEqual(code, 0)
+        cfg, shops = round_call.call_args.args
+        self.assertEqual([shop.key for shop in shops], ["A01", "A02"],
+                         "自由采集：本机清单里启用的店")
+        deviations = round_call.call_args.kwargs["deviations"]
+        self.assertEqual([(d.shop_key, d.kind) for d in deviations],
+                         [("A01", plan_step.DeviationKind.OUT_OF_PLAN),
+                          ("A02", plan_step.DeviationKind.OUT_OF_PLAN)])
+        self.assertIn("计划外", out, "命令行要说清这次是按计划外记账跑的")
+
+    def test_cli_ignore_plan_is_a_no_op_when_the_plan_is_available(self):
+        """计划可用时 --ignore-plan 不该顺手把范围换成自由采集（它只是拒绝时的逃生口）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = self._env(tmp, plan=(("A01", "m1", 23), ("A02", "m2", 5)))
+
+            code, out, round_call = self._main(cfg_path, "--ignore-plan")
+
+        self.assertEqual(code, 0)
+        cfg, shops = round_call.call_args.args
+        self.assertEqual([shop.key for shop in shops], ["A01"], "范围仍按计划")
+        self.assertIn("--ignore-plan", out, "无路可退时才用它，这里要说明它没生效")
+
+    def test_cli_resumes_todays_round_even_without_a_plan(self):
+        """默认拒绝开轮只管新开轮：今天已有轮次（如逃生口开的）就按轮次自身续跑。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = self._env(tmp)
+            conn = connect(Path(tmp) / "bestseller.db")
+            try:
+                new_round(Database(conn), "A02")
+            finally:
+                conn.close()
+
+            code, out, round_call = self._main(cfg_path)
+
+        self.assertEqual(code, 0)
+        cfg, shops = round_call.call_args.args
+        self.assertEqual([shop.key for shop in shops], ["A02"],
+                         "续跑范围以轮次自身为准（spec §6），不被计划拦下")
+        self.assertIn("续跑", out)
+
+    def test_cli_names_the_overreach_shop_and_its_planned_machine(self):
+        """越权补采：放行并上报（spec §6）——命令行为此说一句，偏离交给记账。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = self._env(tmp, plan=(("A01", "m1", 23), ("A02", "m2", 5)))
+
+            code, out, round_call = self._main(cfg_path, "--limit-shops", "A02")
+
+        self.assertEqual(code, 0)
+        deviations = round_call.call_args.kwargs["deviations"]
+        self.assertEqual(
+            [(d.shop_key, d.kind, d.planned_machine) for d in deviations],
+            [("A02", plan_step.DeviationKind.OVERREACH, "m2")])
+        self.assertIn("越权", out)
+        self.assertIn("m2", out, "文案要点名这家店本周归谁，而不是泛泛说越权")
 
     def test_cli_reports_idle_as_a_legal_state(self):
         """本机本周没店（空手）：说清楚，不当错误，不开轮。"""

@@ -22,6 +22,7 @@ from bestseller_monitor.rounds import (
     finish,
     finish_if_open,
     open,
+    set_note,
 )
 
 LEGACY_ROUNDS_DDL = (
@@ -280,6 +281,29 @@ class RoundModuleTests(unittest.TestCase):
             finish(self.db, opened.round, TerminalReason.LEGACY_UNKNOWN)
 
         self.assertIsNone(self._row(opened.round.id)["terminal_reason"])
+
+    def test_a_note_written_at_open_survives_the_terminal_note(self):
+        """开轮时的留痕（越权/计划外）不因收尾被丢掉：终态备注追加在后面。"""
+        opened = open(self.db, RoundRequest("2026-09-12", _shops("A01")))
+        set_note(self.db, opened.round.id, "越权补采：A01（本周计划归 m2）")
+
+        finish(self.db, opened.round, TerminalReason.DAY_BOUNDARY, note=DAY_BOUNDARY_NOTE)
+
+        note = self._row(opened.round.id)["note"]
+        self.assertIn("越权补采", note)
+        self.assertIn(DAY_BOUNDARY_NOTE, note)
+
+    def test_a_late_terminal_note_without_text_keeps_the_open_note(self):
+        opened = open(self.db, RoundRequest("2026-09-12", _shops("A01")))
+        set_note(self.db, opened.round.id, "计划外采集：逃生口放行")
+
+        finish(self.db, opened.round, TerminalReason.COMPLETED)
+
+        self.assertEqual(self._row(opened.round.id)["note"], "计划外采集：逃生口放行")
+
+    def test_set_note_on_a_missing_round_is_refused(self):
+        with self.assertRaises(ValueError):
+            set_note(self.db, 999, "不该写进去")
 
     def test_settling_keeps_an_earlier_terminal_state_instead_of_failing(self):
         """迟到的收尾：轮次已被人工中止，采集进程到检查点才停——不覆盖、不报错。"""

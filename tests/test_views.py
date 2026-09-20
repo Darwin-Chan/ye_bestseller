@@ -124,6 +124,53 @@ class StartViewTests(ViewsTestCase):
         self.assertFalse(any(shop["default_checked"] for shop in view["shops"]))
         self.assertEqual(view["total_shops"], 2)
 
+    def test_an_overreach_shop_carries_the_machine_the_plan_gives_it_to(self):
+        """越权店（票据 07）：默认不勾之外，文案要点名它本周归谁——不泛泛说「越权」。"""
+        self.shops = [Shop("A01", "店铺A", "https://A01.example/"),
+                      Shop("A02", "店铺B", "https://A02.example/")]
+        self.store_plan(("A01", "m-test"), ("A02", "m2"))
+
+        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
+                                state=self.state, crawler=None, now=NOW)
+
+        shops = {shop["key"]: shop for shop in view["shops"]}
+        self.assertEqual(shops["A02"]["plan_machine"], "m2")
+        self.assertEqual(shops["A01"]["plan_machine"], "", "归本机的店不用点名")
+
+    def test_a_shop_the_plan_never_mentions_has_no_planned_machine(self):
+        """计划没说到的店不算越权：没有「本周计划归谁」可点。"""
+        self.shops = [Shop("A01", "店铺A", "https://A01.example/"),
+                      Shop("B07", "新店", "https://B07.example/")]
+        self.store_plan(("A01", "m-test"))
+
+        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
+                                state=self.state, crawler=None, now=NOW)
+
+        shops = {shop["key"]: shop for shop in view["shops"]}
+        self.assertEqual(shops["B07"]["plan_machine"], "")
+
+    def test_a_degraded_preparation_is_marked_as_unconfirmed_on_the_page(self):
+        """拉不到计划库、用的是本地那份：界面标注「未能确认最新」（spec §6 降级表）。"""
+        self.store_plan(("A01", "m-test"))
+
+        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
+                                state=views.UiState(plan_stale=True),
+                                crawler=None, now=NOW)
+
+        self.assertIn("未能确认最新", view["plan_note"])
+        self.assertFalse(view["plan_idle"])
+
+    def test_the_stale_note_composes_with_the_idle_note(self):
+        """空手与「未能确认最新」可以同时成立：两句话都要在。"""
+        self.store_plan(("A01", "m2"))
+
+        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
+                                state=views.UiState(plan_stale=True),
+                                crawler=None, now=NOW)
+
+        self.assertIn("未能确认最新", view["plan_note"])
+        self.assertIn("空手", view["plan_note"])
+
 
 class RunViewTests(ViewsTestCase):
     def setUp(self):

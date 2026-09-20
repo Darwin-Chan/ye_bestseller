@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import sqlite3
 import tempfile
@@ -11,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import gui
 from bestseller_monitor import browser_proc, db, plan_step, rounds, single_instance, \
     stop_request, weekly_plan
-from bestseller_monitor.config import Shop
+from bestseller_monitor.config import ROLE_MERGE_ONLY, Shop
 from bestseller_monitor.db import (CST, DETAIL_BUDGET_NOTE, Database, connect,
                                    cst_date, utcnow)
 from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
@@ -118,7 +119,7 @@ class GuiPlanWiringTests(unittest.TestCase):
         self.assertEqual(cached.status, plan_step.PrepStatus.READY_FROM_CACHE)
         with patch.object(Api, "_spawn_crawler") as spawn:
             self.assertTrue(api.start_run(["A01"])["ok"])
-            spawn.assert_called_once_with(["A01"])
+            spawn.assert_called_once_with(["A01"], ignore_plan=False)
 
     def test_start_run_is_refused_when_the_preparation_did_not_pass(self):
         api = self.api()
@@ -130,6 +131,62 @@ class GuiPlanWiringTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("准备", result["error"])
         spawn.assert_not_called()
+
+    def test_a_refused_start_offers_the_escape_hatch_to_the_interface(self):
+        """拉不到计划库、本地也没有：默认拒绝开轮，但带上旗标——界面据此给确认（票据 07）。"""
+        api = self.api()
+        api.prepare()
+
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            result = api.start_run(["A01"])
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["escape_hatch"])
+        spawn.assert_not_called()
+
+    def test_the_escape_hatch_spawns_the_free_collection_with_the_flag(self):
+        """界面确认后：放行开轮，子进程带 --ignore-plan（自由采集 + 记账为计划外）。"""
+        api = self.api()
+        api.prepare()
+
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            result = api.start_run(["A01"], ignore_plan=True)
+
+        self.assertTrue(result["ok"])
+        spawn.assert_called_once_with(["A01"], ignore_plan=True)
+
+    def test_the_merge_only_machine_gets_no_escape_hatch(self):
+        """纯汇总机不做采集：这条路没有逃生口，ignore_plan 也放不出去。"""
+        api = self.api(role=ROLE_MERGE_ONLY)
+        api.prepare()
+
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            result = api.start_run(["A01"], ignore_plan=True)
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["escape_hatch"])
+        spawn.assert_not_called()
+
+    def test_a_degraded_preparation_marks_the_start_page_as_unconfirmed(self):
+        """拉不到计划库、本地有那份：界面标注「未能确认最新」（spec §6 降级表）。"""
+        self.store_plan(("A01", "m-test", 23))
+        api = self.api()
+        self.assertEqual(api.prepare().status, plan_step.PrepStatus.READY_FROM_CACHE)
+
+        start = api.get_start()
+
+        self.assertIn("未能确认最新", start["plan_note"])
+
+    def test_a_stale_mark_from_another_week_is_not_shown(self):
+        """跨了周的那次准备不算数：这周的页面不该拿旧周的结局标「未能确认最新」。"""
+        self.store_plan(("A01", "m-test", 23))
+        api = self.api()
+        api.prepare()
+        api._prep = dataclasses.replace(api._prep, week="2026-W01")
+
+        start = api.get_start()
+
+        self.assertNotIn("未能确认最新", start["plan_note"])
 
     def test_start_run_without_a_preparation_lets_the_child_decide(self):
         """准备还没跑完（或没跑）时不拦：子进程 run.py 自己会做准备。"""
@@ -158,7 +215,16 @@ class GuiPlanWiringTests(unittest.TestCase):
 
         cmd = popen.call_args.args[0]
         self.assertNotIn("--pages-per-shop", cmd)
+        self.assertNotIn("--ignore-plan", cmd, "正常开轮不发逃生口旗标")
         self.assertIn("--limit-shops", cmd)
+
+    def test_the_spawned_command_carries_the_escape_hatch_flag(self):
+        api = self.api()
+
+        with patch.object(gui.subprocess, "Popen") as popen:
+            api._spawn_crawler(["A01"], ignore_plan=True)
+
+        self.assertIn("--ignore-plan", popen.call_args.args[0])
 
 
 class GuiWindowHeightTests(unittest.TestCase):
@@ -541,7 +607,7 @@ class GuiRoundScopeTests(unittest.TestCase):
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM rounds").fetchone()[0], 0)
             finally:
                 conn.close()
-            spawn.assert_called_once_with(["A02"])
+            spawn.assert_called_once_with(["A02"], ignore_plan=False)
 
     def test_start_run_reports_scope_mismatch_instead_of_merging(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -561,7 +627,7 @@ class GuiRoundScopeTests(unittest.TestCase):
 
             self.assertFalse(result["ok"])
             self.assertIn("范围", result["error"])
-            spawn.assert_called_once_with(["A01"])
+            spawn.assert_called_once_with(["A01"], ignore_plan=False)
             conn = connect(db_path)
             try:
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM rounds").fetchone()[0], 1)
