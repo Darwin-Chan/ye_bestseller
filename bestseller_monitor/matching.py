@@ -190,6 +190,21 @@ def candidate_pairs(products, limit):
     return sorted(pairs)
 
 
+def summarize_group(group, products_by_id):
+    """Use the same deterministic member order and SKU-derived totals for every edit."""
+    group['members'].sort(key=lambda m: (-products_by_id[identity(m)]['sales'], identity(m)))
+    group['sales'] = sum(products_by_id[identity(m)]['sales'] for m in group['members'])
+
+
+def _positive_evidence(conn):
+    positive = set()
+    for a, b, raw in conn.execute('SELECT evidence_a,evidence_b,result FROM judgments'):
+        result = json.loads(raw)
+        if result['same'] and result['confidence'] >= .8:
+            positive.add(frozenset((a, b)))
+    return positive
+
+
 def update_candidates(products, groups, positive, excluded):
     excluded = {frozenset(pair) for pair in excluded}
     fingerprints = {identity(p): version(p) for p in products}
@@ -229,11 +244,7 @@ class MatchingService:
     def refresh_candidates(self, products, groups, excluded=()):
         """Re-evaluate current group destinations using cached evidence, without regrouping."""
         with self._lock, closing(sqlite3.connect(self.config.cache.resolve().as_uri()+'?mode=ro', uri=True)) as conn:
-            positive = set()
-            for a, b, raw in conn.execute('SELECT evidence_a,evidence_b,result FROM judgments'):
-                result = json.loads(raw)
-                if result['same'] and result['confidence'] >= .8:
-                    positive.add(frozenset((a, b)))
+            positive = _positive_evidence(conn)
         update_candidates(products, groups, positive, excluded)
 
     def _suggest(self, products, groups, excluded):
@@ -322,11 +333,7 @@ class MatchingService:
             by_id = {identity(p): p for p in products}
             fingerprints = {key: version(p) for key, p in by_id.items()}
             # Keep previously judged relationships even when new recall candidates displace them.
-            known_positive = set()
-            for a, b, raw in conn.execute('SELECT evidence_a,evidence_b,result FROM judgments'):
-                result = json.loads(raw)
-                if result['same'] and result['confidence'] >= .8:
-                    known_positive.add(frozenset((a, b)))
+            known_positive = _positive_evidence(conn)
             neighbors = defaultdict(set)
             for relation in known_positive:
                 for a in relation:
@@ -360,8 +367,7 @@ class MatchingService:
                 assigned.add(key)
             original_ids = {frozenset(identity(m) for m in g['members']): g['id'] for g in groups}
             for g in output:
-                g['members'].sort(key=lambda m: (-by_id[identity(m)]['sales'], identity(m)))
-                g['sales'] = sum(by_id[identity(m)]['sales'] for m in g['members'])
+                summarize_group(g, by_id)
                 original = original_ids.get(frozenset(identity(m) for m in g['members']))
                 if original:
                     g['id'] = original

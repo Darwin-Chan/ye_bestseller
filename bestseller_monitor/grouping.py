@@ -1,6 +1,7 @@
 """Manual membership and exclusions belong to the current analysis draft."""
-from .matching import identity
 from uuid import uuid4
+
+from .matching import identity, summarize_group
 
 
 def edit_group(snapshot, action, group_id, member, target_id, matcher):
@@ -46,8 +47,7 @@ def edit_group(snapshot, action, group_id, member, target_id, matcher):
 def refresh(snapshot, matcher):
     products = {identity(p): p for p in snapshot['products']}
     for group in snapshot['groups']:
-        group['members'].sort(key=lambda m: (-products[identity(m)]['sales'], identity(m)))
-        group['sales'] = sum(products[identity(m)]['sales'] for m in group['members'])
+        summarize_group(group, products)
     if matcher:
         matcher.refresh_candidates(snapshot['products'], snapshot['groups'], snapshot.get('excluded', ()))
     else:
