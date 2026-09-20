@@ -12,6 +12,7 @@ from bestseller_monitor import pipeline, rounds, single_instance, stop_request
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import Database, DayBoundaryReached, connect, utcnow
 from bestseller_monitor.rounds import TerminalReason
+from frozen_clock import frozen_clock
 from helpers import crawler_cfg, isolated_locks
 
 SHOPS = [Shop("A01", "店铺A", "https://shop.example/")]
@@ -19,6 +20,7 @@ SHOPS = [Shop("A01", "店铺A", "https://shop.example/")]
 
 class CrawlerMutexTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(frozen_clock())
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tmp.name) / "test.db"
         self.cfg = crawler_cfg(db_file=self.db_path, driver="pw_cdp",

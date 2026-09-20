@@ -10,11 +10,13 @@ from unittest.mock import MagicMock, patch
 
 from bestseller_monitor import dedupe, detail, rounds
 from bestseller_monitor.db import Database, DayBoundaryReached, connect, cst_date, utcnow
+from frozen_clock import frozen_clock
 from helpers import crawler_cfg, new_round
 
 
 class DetailTestCase(unittest.TestCase):
     def setUp(self):
+        self.enterContext(frozen_clock())
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name)

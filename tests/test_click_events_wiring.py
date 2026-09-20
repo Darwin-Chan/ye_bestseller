@@ -14,11 +14,13 @@ from tools import analyze_click as ac
 from bestseller_monitor import click_listing, detail, detail_visit
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import Database, connect
+from frozen_clock import frozen_clock
 from helpers import FakeCard, ScriptedListing, crawler_cfg, new_round
 
 
 class ClickEventConsumptionTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(frozen_clock())
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.conn = connect(Path(tmp.name) / "click.db")

@@ -24,6 +24,7 @@ from bestseller_monitor.guard import (InterventionTimeout, RoundDenyExceeded,
                                       RoundPauseRequired, ShopDenyExceeded)
 from bestseller_monitor.listing import ListingLoadFailed
 from bestseller_monitor.rounds import RoundRequest, ShopScope
+from frozen_clock import frozen_clock
 from helpers import crawler_cfg, isolated_locks, new_round
 from tools import check_orphans
 
@@ -39,6 +40,7 @@ def _yesterday() -> str:
 
 class P1Tests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(frozen_clock())
         self.tmp = tempfile.TemporaryDirectory()
         self.conn = connect(Path(self.tmp.name) / "test.db")
         self.db = Database(self.conn)

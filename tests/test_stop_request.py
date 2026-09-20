@@ -10,11 +10,13 @@ from bestseller_monitor import browser_proc, guard, rounds, stop_request
 from bestseller_monitor.db import Database, DayBoundaryReached, connect, utcnow
 from bestseller_monitor.delay import Humanizer
 from bestseller_monitor.rounds import TerminalReason
+from frozen_clock import frozen_clock
 from helpers import crawler_cfg, new_round
 
 
 class StopRequestStoreTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(frozen_clock())
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.conn = connect(Path(self.tmp.name) / "test.db")

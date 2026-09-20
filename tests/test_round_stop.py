@@ -13,6 +13,7 @@ from bestseller_monitor.db import (CST, Database, DayBoundaryReached, DetailBudg
 from bestseller_monitor.guard import InterventionTimeout, RoundPauseRequired
 from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
 from bestseller_monitor.stop_request import StopRequested
+from frozen_clock import frozen_clock
 from helpers import crawler_cfg
 
 
@@ -52,6 +53,7 @@ class RoundStopRuleTests(unittest.TestCase):
         self.assertIn("人工介入未完成", paused.shop_note)
 
     def setUp(self):
+        self.enterContext(frozen_clock())
         self.tmp = tempfile.TemporaryDirectory()
         self.conn = connect(Path(self.tmp.name) / "test.db")
         self.db = Database(self.conn)

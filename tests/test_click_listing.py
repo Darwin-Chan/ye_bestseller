@@ -22,11 +22,13 @@ from bestseller_monitor.db import (Database, DayBoundaryReached, DetailBudgetExh
 from bestseller_monitor import guard
 from bestseller_monitor.guard import InterventionTimeout
 from bestseller_monitor.listing import ListingLoadFailed
+from frozen_clock import frozen_clock
 from helpers import crawler_cfg, FakeCard, ScriptedListing, new_round
 
 
 class ClickListingTestCase(unittest.TestCase):
     def setUp(self):
+        self.enterContext(frozen_clock())
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name)

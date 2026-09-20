@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from bestseller_monitor import browser_pw, click_listing, pipeline
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import Database, connect
+from frozen_clock import frozen_clock
 from helpers import crawler_cfg, new_round
 
 # 本轮已完成店铺（A01）的榜单行：续跑不该动它。
@@ -19,6 +20,7 @@ class ListingResumeTests(unittest.TestCase):
     """IS-33：一条已完成、一条未完成的店铺范围，续跑只抓未完成的那条。"""
 
     def setUp(self):
+        self.enterContext(frozen_clock())
         self.tmp = tempfile.TemporaryDirectory()
         self.conn = connect(Path(self.tmp.name) / "test.db")
         self.db = Database(self.conn)

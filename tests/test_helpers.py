@@ -1,10 +1,14 @@
 """测试夹具本身：采集配置替身要跟得上真配置（候选 06）。"""
 import dataclasses
+import tempfile
 import unittest
+from pathlib import Path
 
+from bestseller_monitor import rounds
 from bestseller_monitor.config import Config
-from bestseller_monitor.db import PARAMS_KEYS
-from helpers import crawler_cfg
+from bestseller_monitor.db import Database, PARAMS_KEYS, connect, utcnow
+from frozen_clock import FROZEN_DATE, FROZEN_NOW, frozen_clock
+from helpers import crawler_cfg, cst_date, new_round
 
 
 class CrawlerCfgTests(unittest.TestCase):
@@ -37,6 +41,46 @@ class CrawlerCfgTests(unittest.TestCase):
         """打错键名不许静默失效——否则「我明明设了」会变成一次假绿。"""
         with self.assertRaisesRegex(TypeError, "max_page_per_shop"):
             crawler_cfg(max_page_per_shop=3)
+
+
+class FrozenClockTests(unittest.TestCase):
+    """frozen_clock 的护栏：钉住采集链读到的钟，用例不再看真实钟（2026-09-20 深夜假红事件）。"""
+
+    def test_it_pins_the_clock_the_crawl_path_reads(self):
+        """采集路径的钟在各模块自己的命名空间里（`from .db import utcnow` 会留副本），
+        漏钉一个，23:55 之后跑套件还是会把「跨天」判给无辜的用例。"""
+        from bestseller_monitor import click_listing, detail, pipeline
+
+        with frozen_clock():
+            self.assertEqual(click_listing.utcnow(), FROZEN_NOW)
+            self.assertEqual(detail.utcnow(), FROZEN_NOW)
+            self.assertEqual(pipeline.utcnow(), FROZEN_NOW)
+            self.assertEqual(rounds.utcnow(), FROZEN_NOW)
+            self.assertEqual(cst_date(), FROZEN_DATE, "夹具建轮的「今天」也要同源")
+
+    def test_a_round_opened_under_the_frozen_clock_keeps_working(self):
+        """夹具的日期与判停读到的「现在」出自同一时刻：轮次照常可干活，不判停。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        conn = connect(Path(tmp.name) / "clock.db")
+        self.addCleanup(conn.close)
+        db = Database(conn)
+
+        with frozen_clock():
+            rid = new_round(db, "A01")
+            self.assertEqual(
+                conn.execute("SELECT run_date FROM rounds WHERE id=?", (rid,)).fetchone()[0],
+                FROZEN_DATE)
+            rounds.ensure_workable(db, rid, utcnow())
+
+    def test_it_gives_the_real_clock_back_afterwards(self):
+        """出上下文要还原——冻结漏给后面的用例，就成了一次跨用例的假绿。"""
+        from bestseller_monitor import click_listing
+
+        real = click_listing.utcnow
+        with frozen_clock():
+            self.assertIsNot(click_listing.utcnow, real)
+        self.assertIs(click_listing.utcnow, real)
 
 
 if __name__ == "__main__":
