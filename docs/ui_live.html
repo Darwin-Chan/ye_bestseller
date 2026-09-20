@@ -103,7 +103,7 @@
         <thead><tr><th style="width:40px">✓</th><th>店铺</th><th>抓取页数</th><th class="col-gray">今日已抓取商品</th><th class="col-gray">今日已抓取SKU</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
-      <p class="muted" style="margin:10px 0 0">默认勾选：本周计划里归本机的店；标着「本周计划归 …」的是别机的店（越权补采，默认不勾，勾上会记进计划外账）。未勾选任意店铺时禁止开始。</p>
+      <p class="muted" style="margin:10px 0 0">默认勾选：本周计划里归本机的店。标着「本周计划归 …」的是别机的店：越权补采默认不勾；勾上会打破「相邻周不同机器」这条风险分散约束，并在计划外账留痕。未勾选任意店铺时禁止开始。</p>
       <div style="margin-top:16px;text-align:right">
         <button class="btn" id="startBtn">开始抓取</button>
       </div>
@@ -314,8 +314,7 @@
     const rows = d.shops.map((s, i) => {
       const chk = s.default_checked ? "checked" : "";
       // 越权店（计划归别机）：默认不勾之外，点名它本周归谁（spec §6 的「放行并上报」）
-      const planned = s.plan_machine
-        ? ` <span class="muted">（本周计划归 ${s.plan_machine}）</span>` : "";
+      const planned = s.plan_label ? ` <span class="muted">（${s.plan_label}）</span>` : "";
       return `<tr><td class="chk"><input type="checkbox" data-i="${i}" ${chk}></td>` +
         `<td><b>${s.key}</b> ${s.name}${planned}</td><td>${s.pages} 页</td>` +
         `<td class="col-gray">${s.products}</td><td class="col-gray">${s.skus}</td></tr>`;

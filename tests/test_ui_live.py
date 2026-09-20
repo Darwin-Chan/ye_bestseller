@@ -274,9 +274,9 @@ window.__calls = [];
 window.__ignorePlanFlags = [];
 const SHOPS = [
   {key:"A01", name:"店铺A", products:180, skus:1038, pages:23, default_checked:true,
-   plan_machine:""},
+   plan_label:""},
   {key:"A02", name:"店铺B", products:0, skus:0, pages:8, default_checked:false,
-   plan_machine:"m2"},
+   plan_label:"本周计划归 m2"},
 ];
 window.pywebview = { platform: "edgechromium", api: {
   get_start: async () => ({

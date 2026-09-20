@@ -352,6 +352,21 @@ class PlanDeviationTests(unittest.TestCase):
         self.assertIn("计划外采集", note)
         self.assertIn("B07", note)
 
+    def test_the_overreach_note_names_the_constraint_it_breaks(self):
+        """spec §6：文案要让人看见破坏的是哪一条，而不只是「越权」两个字。"""
+        plan = self.plan(WeeklyPlanRow("A01", "店一", "m1", 23),
+                         WeeklyPlanRow("A02", "店二", "m2", 8))
+
+        note = plan_step.deviation_note(plan_step.plan_deviations(plan, "m1", ["A02"]))
+
+        self.assertIn("相邻周不同机器", note)
+
+    def test_the_escape_hatch_note_does_not_claim_a_broken_constraint(self):
+        """逃生口自由采集没有计划可违：别把「相邻周不同机器」这条约束算到它头上。"""
+        note = plan_step.deviation_note(plan_step.plan_deviations(None, "m1", ["A01"]))
+
+        self.assertNotIn("相邻周不同机器", note)
+
 
 class DeviationLedgerTests(unittest.TestCase):
     """放行之后要留痕（spec §6）：轮次备注 + 本机计划外账（不入交换集，供汇总侧加说明）。"""
@@ -372,7 +387,7 @@ class DeviationLedgerTests(unittest.TestCase):
         plan_step.record_deviations(self.db, self.round, "m1", self.deviations,
                                     now=dt.datetime.fromisoformat(NOW))
 
-        rows = self.db.plan_deviations()
+        rows = self.db.recorded_deviations()
         self.assertEqual(len(rows), 1)
         row = rows[0]
         self.assertEqual(
@@ -404,7 +419,7 @@ class DeviationLedgerTests(unittest.TestCase):
         plan_step.record_deviations(self.db, self.round, "m1", self.deviations,
                                     now=dt.datetime.fromisoformat(NEXT_RUN))
 
-        self.assertEqual(len(self.db.plan_deviations()), 1)
+        self.assertEqual(len(self.db.recorded_deviations()), 1)
 
     def test_the_first_record_wins_a_later_resume_does_not_rewrite_it(self):
         """偏离是开轮那一刻的事实：计划后来变没变都不改写已经记下的那一行。"""
@@ -417,14 +432,14 @@ class DeviationLedgerTests(unittest.TestCase):
         plan_step.record_deviations(self.db, self.round, "m1", later,
                                     now=dt.datetime.fromisoformat(NEXT_RUN))
 
-        rows = self.db.plan_deviations(round_id=self.round.id)
+        rows = self.db.recorded_deviations(round_id=self.round.id)
         self.assertEqual([(r["kind"], r["planned_machine"]) for r in rows],
                          [("overreach", "m2")], "第一次记账为准")
 
     def test_nothing_recorded_when_the_scope_has_no_deviations(self):
         plan_step.record_deviations(self.db, self.round, "m1", ())
 
-        self.assertEqual(self.db.plan_deviations(), [])
+        self.assertEqual(self.db.recorded_deviations(), [])
         self.assertIsNone(self.conn.execute(
             "SELECT note FROM rounds WHERE id=?", (self.round.id,)).fetchone()["note"])
 

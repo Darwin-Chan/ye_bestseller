@@ -125,7 +125,10 @@ class StartViewTests(ViewsTestCase):
         self.assertEqual(view["total_shops"], 2)
 
     def test_an_overreach_shop_carries_the_machine_the_plan_gives_it_to(self):
-        """越权店（票据 07）：默认不勾之外，文案要点名它本周归谁——不泛泛说「越权」。"""
+        """越权店（票据 07）：默认不勾之外，文案要点名它本周归谁——不泛泛说「越权」。
+
+        这句话与记账时写下的理由同源（plan_step.plan_deviations），界面只负责放进括号。
+        """
         self.shops = [Shop("A01", "店铺A", "https://A01.example/"),
                       Shop("A02", "店铺B", "https://A02.example/")]
         self.store_plan(("A01", "m-test"), ("A02", "m2"))
@@ -134,8 +137,8 @@ class StartViewTests(ViewsTestCase):
                                 state=self.state, crawler=None, now=NOW)
 
         shops = {shop["key"]: shop for shop in view["shops"]}
-        self.assertEqual(shops["A02"]["plan_machine"], "m2")
-        self.assertEqual(shops["A01"]["plan_machine"], "", "归本机的店不用点名")
+        self.assertEqual(shops["A02"]["plan_label"], "本周计划归 m2")
+        self.assertEqual(shops["A01"]["plan_label"], "", "归本机的店不用点名")
 
     def test_a_shop_the_plan_never_mentions_has_no_planned_machine(self):
         """计划没说到的店不算越权：没有「本周计划归谁」可点。"""
@@ -147,7 +150,7 @@ class StartViewTests(ViewsTestCase):
                                 state=self.state, crawler=None, now=NOW)
 
         shops = {shop["key"]: shop for shop in view["shops"]}
-        self.assertEqual(shops["B07"]["plan_machine"], "")
+        self.assertEqual(shops["B07"]["plan_label"], "")
 
     def test_a_degraded_preparation_is_marked_as_unconfirmed_on_the_page(self):
         """拉不到计划库、用的是本地那份：界面标注「未能确认最新」（spec §6 降级表）。"""

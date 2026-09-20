@@ -211,18 +211,21 @@ class Api:
             log.warning("开轮前准备：%s", warning)
         return result
 
-    def _plan_block_reason(self) -> str | None:
+    def _plan_block_reason(self, db: Database | None = None) -> str | None:
         """准备没通过就默认拒绝开轮（spec §6 降级表；逃生口入口见票据 07）。
 
         只认本界面刚做过、且是本周的那次准备：没跑过或跨了周就不拦——子进程 run.py
         开跑前自己会做准备，那里有同样的判定与同一条退出码（它的拒绝在这里也有文案，
-        见 `_refused_start_message`）。
+        见 `_refused_start_message`）。今天已有进行中的轮次同样不拦：那是续跑，范围
+        以轮次自身为准（与 run.py 同一条规则，逃生口开出来的那一轮也才续得下去）。
         """
-        prep = self._prep
-        if prep is None or prep.week != self._current_week() or prep.can_start:
+        prep = self._prep_this_week()
+        if prep is None or prep.can_start:
             return None
         if prep.status is plan_step.PrepStatus.SKIPPED_MERGE_ONLY:
             return "本机是纯汇总机（machine.role = merge_only）：不做采集。"
+        if db is not None and rounds.active_round(db, self._today()) is not None:
+            return None
         return "开轮前准备没通过，本次不开轮：\n" + (prep.reason or "拉不到计划库，且本地没有本周计划。")
 
     def _prep_this_week(self) -> plan_step.PrepResult | None:
@@ -325,25 +328,26 @@ class Api:
     def start_run(self, keys: list[str], ignore_plan: bool = False) -> dict:
         """开始一轮；`ignore_plan=True` 只有界面确认过逃生口才会传（否则默认拒绝开轮）。"""
         with self._lock:
-            reason = self._plan_block_reason()
-            if reason is not None:
-                escape = self._escape_hatch_available()
-                if not (ignore_plan and escape):
-                    return {"ok": False, "error": reason, "escape_hatch": escape}
-            by_key = {shop.key: shop for shop in self.shops}
-            missing = [key for key in keys if key not in by_key]
-            if missing:
-                return {"ok": False, "error": "勾选的店铺已不在配置中：" + "、".join(missing)}
-            request = RoundRequest(
-                run_date=self._today(),
-                shops=tuple(
-                    ShopScope(by_key[key].key, by_key[key].url, by_key[key].name)
-                    for key in keys
-                ),
-            )
             conn = self._open_conn()
             try:
                 self._stop_watch.tick(conn)
+                db = Database(conn)
+                reason = self._plan_block_reason(db)
+                if reason is not None:
+                    escape = self._escape_hatch_available()
+                    if not (ignore_plan and escape):
+                        return {"ok": False, "error": reason, "escape_hatch": escape}
+                by_key = {shop.key: shop for shop in self.shops}
+                missing = [key for key in keys if key not in by_key]
+                if missing:
+                    return {"ok": False, "error": "勾选的店铺已不在配置中：" + "、".join(missing)}
+                request = RoundRequest(
+                    run_date=self._today(),
+                    shops=tuple(
+                        ShopScope(by_key[key].key, by_key[key].url, by_key[key].name)
+                        for key in keys
+                    ),
+                )
                 if self._stop_watch.status.phase is not stop_request.StopPhase.IDLE:
                     return {"ok": False, "error": "上一次停止仍在核验或收尾，请稍后重试。",
                             "retryable": True}
@@ -353,7 +357,7 @@ class Api:
                     return {"ok": False, "error": _BUSY_ERROR}
                 # 只读地问一句会不会被拒：今天已有轮次但范围不同就给出可读理由。
                 # 轮次本身由采集子进程创建，启动失败不会留下空的「进行中」轮次。
-                rounds.check_scope(Database(conn), request)
+                rounds.check_scope(db, request)
             except ScopeMismatch as exc:
                 return {"ok": False, "error": str(exc)}
             finally:

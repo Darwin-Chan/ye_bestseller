@@ -188,6 +188,22 @@ class GuiPlanWiringTests(unittest.TestCase):
 
         self.assertNotIn("未能确认最新", start["plan_note"])
 
+    def test_start_run_resumes_todays_round_instead_of_blocking_without_a_plan(self):
+        """今天已有轮次（逃生口开出来的）：点开始是续跑——与 run.py 同一条规则，不拦。"""
+        api = self.api()
+        self.assertEqual(api.prepare().status, plan_step.PrepStatus.REFUSED)
+        conn = connect(self.db_path)
+        try:
+            new_round(Database(conn), "A01", run_date="2026-09-21")
+        finally:
+            conn.close()
+
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            result = api.start_run(["A01"])
+
+        self.assertTrue(result["ok"], "续跑不受「默认拒绝开轮」管（范围以轮次自身为准）")
+        spawn.assert_called_once_with(["A01"], ignore_plan=False)
+
     def test_start_run_without_a_preparation_lets_the_child_decide(self):
         """准备还没跑完（或没跑）时不拦：子进程 run.py 自己会做准备。"""
         api = self.api()

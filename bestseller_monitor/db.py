@@ -951,18 +951,11 @@ class Database:
         )
         self.conn.commit()
 
-    def plan_deviations(self, *, week: str | None = None, round_id: int | None = None):
-        """计划外账的行（可按周或按轮次过滤），按日期、店铺排序；没记过就是空列表。"""
-        where, params = [], []
-        if week is not None:
-            where.append("week=?")
-            params.append(week)
-        if round_id is not None:
-            where.append("round_id=?")
-            params.append(round_id)
-        clause = (" WHERE " + " AND ".join(where)) if where else ""
+    def recorded_deviations(self, *, round_id: int | None = None):
+        """计划外账里已经记下的行（可按轮次过滤），按日期、店铺排序；没记过就是空列表。"""
+        where, params = (" WHERE round_id=?", (round_id,)) if round_id is not None else ("", ())
         return self.conn.execute(
-            f"SELECT * FROM plan_deviations{clause} ORDER BY run_date, shop_key", params,
+            f"SELECT * FROM plan_deviations{where} ORDER BY run_date, shop_key", params,
         ).fetchall()
 
     def record_crawler_process(self, pid: int, round_id: int | None,

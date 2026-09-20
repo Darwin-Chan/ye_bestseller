@@ -19,8 +19,8 @@
   本机本周没店是合法空态（`idle`）。
 - **留痕**（放行并上报）：这一轮采了越权（店在计划内、本周归别人）或计划外（逃生口自由
   采集、计划没说到）的店时，`record_deviations` 把偏离写进轮次备注与本机计划外账
-  （`db.plan_deviations`，不入交换集）；汇总侧据此给冲突加「计划外多采」那层说明。
-  判定与文案同源：`plan_deviations` 出判定，`deviation_note` 出人话。
+  （`db.recorded_deviations` 读它，不入交换集）；汇总侧据此给冲突加「计划外多采」那层
+  说明。判定与文案同源：`plan_deviations` 出判定，`deviation_note` 出人话。
 - **缺口检查**：只读交换区（本机已有的包，不拉取），比对本机库缺哪些店哪些日，
   只告警不拦、不自动合并——汇总始终保持手工触发。
 
@@ -253,14 +253,21 @@ def plan_deviations(plan: StoredPlan | None, machine_id: str,
 
 
 def deviation_note(deviations) -> str:
-    """轮次备注里的一段话：放行了哪些越权/计划外的店，各自为什么。"""
+    """轮次备注里的一段话：放行了哪些越权/计划外的店，各自为什么。
+
+    越权那句要点名被打破的是哪条约束（「同一店铺相邻周不由同一台机器采集」的
+    风险分散）——spec §6：文案要让人看见破坏的是哪一条，而不只是「越权」两个字。
+    """
     groups = ((DeviationKind.OVERREACH, "越权补采"),
               (DeviationKind.OUT_OF_PLAN, "计划外采集"))
     parts = [f"{label}：" + "、".join(f"{d.shop_key}（{d.reason}）"
                                       for d in deviations if d.kind is kind)
              for kind, label in groups
              if any(d.kind is kind for d in deviations)]
-    return "；".join(parts) + "——已放行，并记进本机计划外账（汇总侧会按冲突处理）。"
+    note = "；".join(parts)
+    if any(d.kind is DeviationKind.OVERREACH for d in deviations):
+        note += "——打破了「相邻周不同机器」这条风险分散约束"
+    return note + "；已放行，并记进本机计划外账（汇总侧会按冲突处理）。"
 
 
 def record_deviations(db: Database, round, machine_id: str, deviations, *,
@@ -271,7 +278,7 @@ def record_deviations(db: Database, round, machine_id: str, deviations, *,
     续跑再调用直接跳过——偏离是开轮那一刻的事实，计划后来变没变都不改写它（汇总侧
     据此给冲突加「计划外多采」那层说明，票据 10）。
     """
-    if not deviations or db.plan_deviations(round_id=round.id):
+    if not deviations or db.recorded_deviations(round_id=round.id):
         return
     recorded_at = (now or dt.datetime.now(CST)).isoformat(timespec="seconds")
     rounds.set_note(db, round.id, deviation_note(deviations))
