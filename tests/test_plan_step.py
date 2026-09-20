@@ -273,7 +273,7 @@ class VisibleShopsTests(unittest.TestCase):
         self.cfg = crawler_cfg(machine_id="m1", shop_csv=self.shop_csv)
 
     def plan(self, *rows: WeeklyPlanRow) -> plan_step.StoredPlan:
-        return plan_step.StoredPlan(week=WEEK, rows=rows)
+        return plan_step.StoredPlan(week=WEEK, rows=rows, plan_sha256="ab" * 32)
 
     def test_without_a_plan_the_active_shops_are_the_universe(self):
         shops = plan_step.visible_shops(self.cfg, None)

@@ -5,19 +5,18 @@
 """
 import tempfile
 import unittest
-from datetime import date
 from pathlib import Path
 
 from bestseller_monitor import rounds, views, weekly_plan
 from bestseller_monitor.config import Shop
-from bestseller_monitor.db import Database, WeeklyPlanRow, connect
+from bestseller_monitor.db import Database, connect
 from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
-from helpers import crawler_cfg, new_round
+from helpers import crawler_cfg, new_round, store_weekly_plan
 
 # 固定时刻：北京时间 2026-09-13 12:00。三个页面的「今天」都由它决定。
 NOW = "2026-09-13T04:00:00+00:00"
 TODAY = "2026-09-13"
-WEEK = weekly_plan.iso_week_label(date.fromisoformat(TODAY))
+WEEK = weekly_plan.week_label(TODAY)
 
 
 class ViewsTestCase(unittest.TestCase):
@@ -32,12 +31,10 @@ class ViewsTestCase(unittest.TestCase):
         self.state = views.UiState()
 
     def store_plan(self, *assignments, pages=None):
-        """把本周计划落进本机计划表；assignments 是 (shop_key, machine_id)。"""
+        """assignments 是 (shop_key, machine_id)；pages 可覆盖各店预算（默认 3 页）。"""
         pages = pages or {}
-        self.db.replace_weekly_plan(
-            WEEK, [WeeklyPlanRow(key, f"店铺{key}", machine, pages.get(key, 3))
-                   for key, machine in assignments],
-            source="pulled", plan_sha256="ab" * 32, stored_at=NOW)
+        store_weekly_plan(self.db, WEEK,
+                          *[(key, machine, pages.get(key, 3)) for key, machine in assignments])
 
     def submit(self, round_id, offer_id, *skus, shop_key="A01"):
         """按库存快照提交的口径写一条成功观测（每项是 (sku_name, stock)）。"""

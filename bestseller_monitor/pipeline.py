@@ -1,7 +1,6 @@
 """轮次调度：榜单 → 详情。"""
 from __future__ import annotations
 
-import datetime as dt
 import logging
 import os
 import random
@@ -167,8 +166,7 @@ def requested_round_shops(cfg: Config, limit_keys: set[str] | None = None, *,
     conn = connect(cfg.db_file)
     try:
         db = Database(conn)
-        plan = plan_step.stored_plan(
-            db, week or weekly_plan.iso_week_label(dt.date.fromisoformat(cst_date())))
+        plan = plan_step.stored_plan(db, week or weekly_plan.week_label())
         if limit_keys is not None:
             return [shop for shop in plan_step.visible_shops(cfg, plan)
                     if shop.key in limit_keys]

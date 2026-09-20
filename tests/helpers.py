@@ -10,7 +10,7 @@ from bestseller_monitor import single_instance
 from bestseller_monitor import rounds
 from bestseller_monitor.click_events import CardRef
 from bestseller_monitor.config import ACCESS_READWRITE, ROLE_COLLECTOR
-from bestseller_monitor.db import cst_date
+from bestseller_monitor.db import WeeklyPlanRow, cst_date
 from bestseller_monitor.listing import ListingLoadFailed
 from bestseller_monitor.rounds import RoundRequest, ShopScope
 
@@ -116,6 +116,18 @@ def new_round(db, *shops, run_date: str | None = None) -> int:
             scopes.append(ShopScope(key, url, name))
     opened = rounds.open(db, RoundRequest(run_date or cst_date(), tuple(scopes)))
     return opened.round.id
+
+
+def store_weekly_plan(db, week: str, *assignments) -> None:
+    """把某一周的计划落进本机计划表；assignments 是 (shop_key, machine_id, pages)。
+
+    界面与命令行两条线的用例共用这一份（来源与哈希取中性固定值——用例关心的是
+    「计划说了什么」）。week 由用例显式给：注入的「现在」与真实时钟可以不同周。
+    """
+    db.replace_weekly_plan(
+        week, [WeeklyPlanRow(key, f"店铺{key}", machine, pages)
+               for key, machine, pages in assignments],
+        source="pulled", plan_sha256="ab" * 32, stored_at="2026-09-21T08:00:00+08:00")
 
 
 class GuardClock:

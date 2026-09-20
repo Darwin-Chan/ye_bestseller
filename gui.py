@@ -153,10 +153,15 @@ class Api:
         return self._elapsed_base
 
     def _refused_start_message(self) -> str | None:
-        """本界面拉起的采集子进程被「已有采集在跑」拒绝时，要显示的那句话。"""
-        if (self.proc is not None
-                and self.proc.poll() == single_instance.CRAWLER_BUSY_EXIT_CODE):
+        """本界面拉起的采集子进程被拒时，要显示的那句话（按子进程的退出码分流）。"""
+        if self.proc is None:
+            return None
+        code = self.proc.poll()
+        if code == single_instance.CRAWLER_BUSY_EXIT_CODE:
             return "已有采集进程在运行：本次启动被拒绝了，等它跑完再试。"
+        if code == plan_step.PLAN_REFUSED_EXIT_CODE:
+            return ("开轮前准备没通过：本次启动被拒绝了——本机没有可用的本周计划"
+                    "（拉不到计划库、本地也没落库）。")
         return None
 
     def _ui_state(self) -> views.UiState:
@@ -174,7 +179,7 @@ class Api:
     # ---------- 开始页 ----------
     def _current_week(self) -> str:
         """今天（北京时间）所在的周编号；计划表与准备步骤都按它对齐。"""
-        return weekly_plan.iso_week_label(dt.date.fromisoformat(self._today()))
+        return weekly_plan.week_label(self._today())
 
     def prepare(self) -> plan_step.PrepResult | None:
         """界面打开时的一次（开轮前）准备（spec §6）：与命令行开跑前同一步。
@@ -195,7 +200,8 @@ class Api:
         except Exception as exc:                       # noqa: BLE001
             log.warning("开轮前准备没做成（界面照常可用，子进程开轮前还会再准备一次）：%s", exc)
             return None
-        self._prep = result
+        with self._lock:                # 只锁这一次赋值：准备本身（含 git）不占锁
+            self._prep = result
         log.info("开轮前准备：%s（本周 %s，本机 %s 家店）",
                  result.status.value, result.week, len(result.my_shops))
         for warning in result.warnings:
@@ -206,16 +212,15 @@ class Api:
         """准备没通过就默认拒绝开轮（spec §6 降级表；逃生口入口见票据 07）。
 
         只认本界面刚做过、且是本周的那次准备：没跑过或跨了周就不拦——子进程 run.py
-        开跑前自己会做准备，那里有同样的判定与同一条退出码。
+        开跑前自己会做准备，那里有同样的判定与同一条退出码（它的拒绝在这里也有文案，
+        见 `_refused_start_message`）。
         """
         prep = self._prep
-        if prep is None or prep.week != self._current_week():
+        if prep is None or prep.week != self._current_week() or prep.can_start:
             return None
         if prep.status is plan_step.PrepStatus.SKIPPED_MERGE_ONLY:
             return "本机是纯汇总机（machine.role = merge_only）：不做采集。"
-        if prep.status is plan_step.PrepStatus.REFUSED:
-            return "开轮前准备没通过，本次不开轮：\n" + (prep.reason or "拉不到计划库，且本地没有本周计划。")
-        return None
+        return "开轮前准备没通过，本次不开轮：\n" + (prep.reason or "拉不到计划库，且本地没有本周计划。")
 
     def _refresh_shops(self, conn) -> None:
         """店铺全量的最新读法：本机启用的店 + 本周计划说到的店。

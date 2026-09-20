@@ -10,14 +10,14 @@ import io
 import sys
 import tempfile
 import unittest
-from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
 import run
 from bestseller_monitor import plan_step, single_instance, weekly_plan
 from bestseller_monitor.config import Config, Shop, effective_pages_limit
-from bestseller_monitor.db import Database, WeeklyPlanRow, connect, cst_date
+from bestseller_monitor.db import Database, connect
+from helpers import store_weekly_plan
 
 
 MINIMAL_CONFIG = """
@@ -99,15 +99,11 @@ class RunCliTests(unittest.TestCase):
         self.assertIsNone(cfg.pages_per_shop_override, "别的参数不该动页数覆盖")
 
 
-def store_weekly_plan(tmp_path: Path, *assignments) -> None:
+def seed_plan(tmp_path: Path, *assignments) -> None:
     """把本周计划落进本机计划表；assignments 是 (shop_key, machine_id, pages)。"""
     conn = connect(tmp_path / "bestseller.db")
     try:
-        week = weekly_plan.iso_week_label(date.fromisoformat(cst_date()))
-        Database(conn).replace_weekly_plan(
-            week, [WeeklyPlanRow(key, f"店{key}", machine, pages)
-                   for key, machine, pages in assignments],
-            source="pulled", plan_sha256="ab" * 32, stored_at="2026-09-21T08:00:00+08:00")
+        store_weekly_plan(Database(conn), weekly_plan.week_label(), *assignments)
     finally:
         conn.close()
 
@@ -125,7 +121,7 @@ class RunCliBusyTests(unittest.TestCase):
                 "A01,店一,https://a.1688.com/,3,1,\n",
                 encoding="utf-8",
             )
-            store_weekly_plan(tmp_path, ("A01", "m1", 3))   # 先备好本周计划，才走到抢锁
+            seed_plan(tmp_path, ("A01", "m1", 3))   # 先备好本周计划，才走到抢锁
             out = io.StringIO()
             busy = run.CrawlerAlreadyRunning("已有采集进程在运行：同一时刻只能跑一轮")
 
@@ -159,7 +155,7 @@ class RunCliPlanTests(unittest.TestCase):
         cfg_path.write_text(MINIMAL_CONFIG, encoding="utf-8")
         (tmp_path / "shops.csv").write_text(shops or self.SHOPS_CSV, encoding="utf-8")
         if plan:
-            store_weekly_plan(tmp_path, *plan)
+            seed_plan(tmp_path, *plan)
         return cfg_path
 
     def _main(self, cfg_path: Path, *argv: str, round_error: Exception | None = None):
@@ -233,6 +229,20 @@ class RunCliPlanTests(unittest.TestCase):
         self.assertEqual(code, 0)
         round_call.assert_not_called()
         self.assertIn("空手", out)
+
+    def test_cli_names_plan_shops_missing_from_the_local_list(self):
+        """计划里归本机、但本机清单里没有那个编号（周中删行）：点名，不说成「没有有效店铺」。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            only_other = ("shop_key,shop_name,shop_url,pages,active,offer_list_url\n"
+                          "B01,别家,https://b.1688.com/,3,1,\n")
+            cfg_path = self._env(tmp, shops=only_other, plan=(("A01", "m1", 23),))
+
+            code, out, round_call = self._main(cfg_path)
+
+        self.assertEqual(code, 2)
+        round_call.assert_not_called()
+        self.assertIn("A01", out)
+        self.assertIn("清单", out)
 
     def test_cli_refuses_when_the_lock_is_taken_even_with_a_plan(self):
         """准备过了也不越权：抢不到锁仍走「已有采集在跑」那条路（保持工单 02 的口径）。"""

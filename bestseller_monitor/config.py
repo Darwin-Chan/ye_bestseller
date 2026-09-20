@@ -242,15 +242,16 @@ def effective_pages_limit(shop: Shop | None, cfg: Config, *,
 
     计划快照来自落库的计划表（`plan_step.stored_plan`）：开轮进程把它挂在
     `cfg.plan_pages` 上（采集路径深处拿不到计划对象），刚从库里读到它的调用方
-    （界面取数）也可以显式传入。快照里的 0 与店铺 `pages` 的 0 同一语义——
-    「没配预算」，回落到下一层。
+    （界面取数）也可以显式传入。快照在就按快照算——计划是本周预算的权威
+    （「计划说 23 页就采 23 页」），快照里的 0 就是 0 页；店铺 `pages` 那层的
+    0/空是「没配」，回落到全局默认（沿用 IS-35 的老口径）。
     """
     override = getattr(cfg, "pages_per_shop_override", None)
     if override is not None:
         return int(override)
     if shop is not None:
         budget = plan_pages if plan_pages is not None else getattr(cfg, "plan_pages", None)
-        if budget and budget.get(shop.key):
+        if budget is not None and shop.key in budget:
             return int(budget[shop.key])
         if shop.pages:
             return int(shop.pages)

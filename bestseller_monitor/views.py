@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 from . import click_events, plan_step, rounds, weekly_plan
 from .config import effective_pages_limit
@@ -199,9 +199,8 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
     """
     today = cst_date(now)
     db = Database(conn)
-    plan = plan_step.stored_plan(db, weekly_plan.iso_week_label(date.fromisoformat(today)))
-    mine = frozenset(plan.machine_keys(str(getattr(cfg, "machine_id", "")))) \
-        if plan is not None else frozenset()
+    plan = plan_step.stored_plan(db, weekly_plan.week_label(today))
+    mine = frozenset(plan.machine_keys(str(cfg.machine_id))) if plan is not None else frozenset()
     idle = plan is not None and not mine
     ov_products, ov_skus = _inventory_counts(conn, today)
     current = rounds.active_round(db, today)

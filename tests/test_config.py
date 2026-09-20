@@ -320,10 +320,13 @@ cos_access = "read_only"
         partial = cfg.replace(plan_pages={"A02": 2})
         self.assertEqual(effective_pages_limit(configured, partial), 9)
 
-        # 快照里的 0 与店铺 pages 的 0 同一语义——「没配预算」，回落到下一层
+        # 计划快照在就按快照算（计划是本周预算的权威）：说 0 页就是 0 页
         zeros = cfg.replace(plan_pages={"A01": 0, "A02": 0})
-        self.assertEqual(effective_pages_limit(configured, zeros), 9)
-        self.assertEqual(effective_pages_limit(unconfigured, zeros), 3)
+        self.assertEqual(effective_pages_limit(configured, zeros), 0, "快照说 0 就 0")
+        self.assertEqual(effective_pages_limit(unconfigured, zeros), 0)
+        # 店铺那层的 0/空仍是「没配」，回落到全局默认（沿用 IS-35 的老口径）
+        self.assertEqual(effective_pages_limit(Shop("A03", "店三", "https://c.1688.com/",
+                                                    pages=0), cfg), 3)
 
 
 if __name__ == "__main__":

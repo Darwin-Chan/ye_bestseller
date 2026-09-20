@@ -166,6 +166,7 @@ class StoredPlan:
 
     week: str
     rows: tuple[WeeklyPlanRow, ...]     # 整周（含别机的行），按 shop_key 排序
+    plan_sha256: str                    # 这份计划文件的哈希（整周共一个，落库时记的）
 
     def pages(self) -> dict[str, int]:
         """整周的页数快照：shop_key → 本周预算（计划说了多少就多少）。"""
@@ -182,10 +183,12 @@ def stored_plan(db: Database, week: str) -> StoredPlan | None:
     这就是「界面与命令行读同一份落库计划」的那一份：两边都经这里读，谁都不解析
     计划库里的文件。落库由 `prepare_week` 做（发布物确认过才落，见模块 docstring）。
     """
+    raw = db.weekly_plan(week)
     rows = tuple(WeeklyPlanRow(row["shop_key"], row["shop_name"], row["machine_id"],
                                row["pages"])
-                 for row in db.weekly_plan(week))
-    return StoredPlan(week=week, rows=rows) if rows else None
+                 for row in raw)
+    return (StoredPlan(week=week, rows=rows, plan_sha256=str(raw[0]["plan_sha256"]))
+            if rows else None)
 
 
 def visible_shops(cfg, plan: StoredPlan | None) -> list[Shop]:
@@ -584,15 +587,13 @@ def prepare_week(cfg, db: Database, *, now: dt.datetime | None = None,
                                stored_at=now.isoformat(timespec="seconds"))
         status = PrepStatus.READY
     else:
-        stored = db.weekly_plan(week)
+        cached = stored_plan(db, week)      # 与界面/命令行同一读口：行形状与哈希都从这里取
         why = _fallback_reason(outcome, sync, sync_error, clone, week)
-        if stored:
+        if cached is not None:
             status = PrepStatus.READY_FROM_CACHE
             source = PlanSource.LOCAL_CACHE
-            db.replace_weekly_plan(week,
-                                   [WeeklyPlanRow(r["shop_key"], r["shop_name"],
-                                                  r["machine_id"], r["pages"]) for r in stored],
-                                   source=source.value, plan_sha256=stored[0]["plan_sha256"],
+            db.replace_weekly_plan(week, cached.rows, source=source.value,
+                                   plan_sha256=cached.plan_sha256,
                                    stored_at=now.isoformat(timespec="seconds"))
             warnings.append(f"用本地已落库的本周（{week}）计划继续——发布后本周不重算，"
                             f"本地即权威；未能确认最新。原因：{why}")
@@ -615,11 +616,11 @@ def prepare_week(cfg, db: Database, *, now: dt.datetime | None = None,
         if gaps.notes:
             warnings.append("缺口检查注记：" + "；".join(gaps.notes))
 
-    rows = db.weekly_plan(week)
-    my_shops = tuple(r["shop_key"] for r in rows if r["machine_id"] == machine)
+    stored = stored_plan(db, week)
+    my_shops = stored.machine_keys(machine) if stored is not None else ()
     return PrepResult(
         status=status, week=week, machine=machine, source=source,
-        plan_sha256=rows[0]["plan_sha256"] if rows else None,
+        plan_sha256=stored.plan_sha256 if stored is not None else None,
         my_shops=my_shops,
         idle=status in (PrepStatus.READY, PrepStatus.READY_FROM_CACHE) and not my_shops,
         warnings=tuple(warnings), reason=reason, shops_sync=sync, gaps=gaps,

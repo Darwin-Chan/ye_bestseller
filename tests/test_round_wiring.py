@@ -1,14 +1,14 @@
 import tempfile
 import unittest
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from bestseller_monitor import browser_pw, guard, pipeline, rounds, weekly_plan
 from bestseller_monitor.config import Shop
-from bestseller_monitor.db import CST, Database, WeeklyPlanRow, connect, cst_date
+from bestseller_monitor.db import CST, Database, connect, cst_date
 from bestseller_monitor.rounds import RoundRequest, ScopeMismatch, ShopScope
-from helpers import crawler_cfg, isolated_locks, new_round
+from helpers import crawler_cfg, isolated_locks, new_round, store_weekly_plan
 
 SHOP_CSV_HEADER = "shop_key,shop_name,shop_url,pages,active,offer_list_url"
 
@@ -38,14 +38,11 @@ class RoundScopeWiringTests(unittest.TestCase):
             encoding="utf-8")
 
     def _store_plan(self, *assignments):
-        """把本周计划落进本机计划表；assignments 是 (shop_key, machine_id)."""
+        """把本周计划落进本机计划表；assignments 是 (shop_key, machine_id)。"""
         conn = connect(self.db_path)
         try:
-            week = weekly_plan.iso_week_label(date.fromisoformat(cst_date()))
-            Database(conn).replace_weekly_plan(
-                week, [WeeklyPlanRow(key, f"店铺{key}", machine, 3)
-                       for key, machine in assignments],
-                source="pulled", plan_sha256="ab" * 32, stored_at="2026-09-21T08:00:00+08:00")
+            store_weekly_plan(Database(conn), weekly_plan.week_label(),
+                              *[(key, machine, 3) for key, machine in assignments])
         finally:
             conn.close()
 

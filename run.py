@@ -89,11 +89,12 @@ def main() -> int:
         prep = plan_step.prepare_week(cfg, db)
         for warning in prep.warnings:
             print(f"\n>>> {warning}\n")
-        if prep.status is plan_step.PrepStatus.SKIPPED_MERGE_ONLY:
-            print("本机是纯汇总机（machine.role = merge_only）：不做采集；"
-                  "导出与汇总请跑数据交换台（exchange.py）。")
-            return 2
-        if prep.status is plan_step.PrepStatus.REFUSED:
+        # 正向判据（can_start）：以后 PrepStatus 多了新结局也不会在这里被静默放行
+        if not prep.can_start:
+            if prep.status is plan_step.PrepStatus.SKIPPED_MERGE_ONLY:
+                print("本机是纯汇总机（machine.role = merge_only）：不做采集；"
+                      "导出与汇总请跑数据交换台（exchange.py）。")
+                return 2
             print(f"\n>>> 开轮前准备没通过，默认拒绝开轮：\n{prep.reason}\n")
             return plan_step.PLAN_REFUSED_EXIT_CODE
         # 页数四层的计划层与轮次范围都从这份落库计划读（与界面同一份，不解析计划文件）
@@ -111,6 +112,11 @@ def main() -> int:
         if prep.idle:
             print(f"本周计划（{prep.week}）里没有归本机的店（空手）：没有要采的店。")
             return 0
+        if prep.my_shops:
+            print("本周计划里归本机的店在本机清单里找不到："
+                  f"{'、'.join(prep.my_shops)}——先把它们补回 {cfg.shop_csv}（照上机清单"
+                  "第 11 步的清单同步），或等下一份计划；这一轮没有可采的店。")
+            return 2
         print("本机清单里没有有效店铺（active=1）。")
         return 2
 

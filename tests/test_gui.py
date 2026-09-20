@@ -3,7 +3,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -12,11 +12,11 @@ import gui
 from bestseller_monitor import browser_proc, db, plan_step, rounds, single_instance, \
     stop_request, weekly_plan
 from bestseller_monitor.config import Shop
-from bestseller_monitor.db import (CST, DETAIL_BUDGET_NOTE, Database, WeeklyPlanRow, connect,
+from bestseller_monitor.db import (CST, DETAIL_BUDGET_NOTE, Database, connect,
                                    cst_date, utcnow)
 from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
 from gui import Api
-from helpers import crawler_cfg, isolated_locks, new_round
+from helpers import crawler_cfg, isolated_locks, new_round, store_weekly_plan
 from tools import bench_refresh
 
 
@@ -75,11 +75,8 @@ class GuiPlanWiringTests(unittest.TestCase):
         """把本周计划落进本机计划表；assignments 是 (shop_key, machine_id, pages)。"""
         conn = connect(self.db_path)
         try:
-            week = weekly_plan.iso_week_label(date(2026, 9, 21))
-            Database(conn).replace_weekly_plan(
-                week, [WeeklyPlanRow(key, f"店{key}", machine, pages)
-                       for key, machine, pages in assignments],
-                source="pulled", plan_sha256="ab" * 32, stored_at="2026-09-21T08:00:00+08:00")
+            store_weekly_plan(Database(conn), weekly_plan.week_label("2026-09-21"),
+                              *assignments)
         finally:
             conn.close()
 
@@ -140,6 +137,15 @@ class GuiPlanWiringTests(unittest.TestCase):
 
         with patch.object(Api, "_spawn_crawler"):
             self.assertTrue(api.start_run(["A01"])["ok"])
+
+    def test_a_child_refused_by_the_plan_check_is_reported_on_the_page(self):
+        """子进程自己那一层被拒（准备没通过，退出码 5）：页面也要有文案，不能像没点过。"""
+        api = self.api()
+        api.proc = SimpleNamespace(poll=lambda: plan_step.PLAN_REFUSED_EXIT_CODE)
+
+        run = api.get_run()
+
+        self.assertIn("准备没通过", run["start_error"])
 
     def test_the_interface_never_sends_a_page_budget_override(self):
         """界面不提供改预算的入口：只有命令行能发 --pages-per-shop（spec §6）。"""

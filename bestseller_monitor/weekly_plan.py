@@ -28,6 +28,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from bestseller_monitor.config import Shop
+from bestseller_monitor.db import cst_date
 
 PLAN_ALGO_VERSION = "v1"
 DEFAULT_CONSTRAINT_WEEKS = 1
@@ -63,6 +64,15 @@ def iso_week_label(day: dt.date) -> str:
     """北京日期所在 ISO 周的周编号。"""
     iso = day.isocalendar()
     return f"{iso.year}-W{iso.week:02d}"
+
+
+def week_label(iso_date: str | None = None) -> str:
+    """「本周」的周编号：给北京日期串（YYYY-MM-DD）就折算它所在的 ISO 周，不给就取现在。
+
+    界面、命令行与导出判断「哪一周」都经这里——同一件事不再各处拼一遍
+    （`iso_week_label(date.fromisoformat(...))` 的写法人手一份迟早分家）。
+    """
+    return iso_week_label(dt.date.fromisoformat(iso_date or cst_date()))
 
 
 def week_window(week: str) -> tuple[dt.date, dt.date]:

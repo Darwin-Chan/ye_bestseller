@@ -21,6 +21,7 @@ from pathlib import Path
 
 from bestseller_monitor import weekly_plan
 from bestseller_monitor.config import Shop, load_shops
+from bestseller_monitor.db import cst_date
 from tests.plan_samples import (
     A13, FIXED_CLOCK, MACHINES, SCENARIOS, SHOPS, START_MONDAY, parity_view, run_scenario,
 )
@@ -32,6 +33,11 @@ class WeekLabelTests(unittest.TestCase):
     def test_iso_week_label_and_span(self):
         self.assertEqual(weekly_plan.iso_week_label(dt.date(2026, 9, 21)), "2026-W39")
         self.assertEqual(weekly_plan.week_span("2026-W39"), "9/21–9/27")
+
+    def test_week_label_takes_a_beijing_date_or_defaults_to_now(self):
+        """界面/命令行/导出判断「哪一周」的同一处读法。"""
+        self.assertEqual(weekly_plan.week_label("2026-09-21"), "2026-W39")
+        self.assertEqual(weekly_plan.week_label(), weekly_plan.week_label(cst_date()))
 
     def test_week_span_at_year_boundary_uses_iso_year(self):
         """2026-01-01（周四）落在跨年的 ISO 2026-W01：周一是 2025-12-29。"""
