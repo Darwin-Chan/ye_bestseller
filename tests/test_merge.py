@@ -548,6 +548,46 @@ class ProjectionTests(MergeCase):
                             "product_information_versions WHERE offer_id='11'"),
             [("商品一", None)])
 
+    def test_a_package_missing_an_identity_column_merges_over_an_existing_row(self):
+        """身份表缺列（旧包少一列）最易露馅的一路：本机已有同主键行、包侧取胜。"""
+        conn = self.local()
+        conn.execute(
+            "INSERT INTO products(offer_id, product_url, product_name, main_image_url, "
+            "first_seen_at, last_seen_at) VALUES ('11', 'https://old.example/', '旧名', "
+            "'https://img.example/old.jpg', ?, ?)", (SEEN_FIRST, D16_0900))
+        conn.commit()
+        package = self.package("m3", machine_world(D16_1000, stock=8, product_name="商品一"))
+        sqlite_conn = sqlite3.connect(package)
+        sqlite_conn.execute("ALTER TABLE products DROP COLUMN main_image_url")
+        sqlite_conn.commit()
+        sqlite_conn.close()
+
+        result = self.import_(conn, package)
+
+        self.assertFalse(result.failed, result.failure)
+        self.assertEqual(
+            self.rows(conn, "SELECT product_name, main_image_url FROM products "
+                            "WHERE offer_id='11'"),
+            [("商品一", None)],
+            "描述列整份取取胜方；包缺的列按 None，不拿本机旧值兜")
+
+    def test_a_package_missing_a_required_column_fails_cleanly(self):
+        """包缺 NOT NULL 的主键/时间列 = 不成一个完整的包：整包失败回滚，不是崩溃。"""
+        package = self.package("m2", machine_world(D16_0900, stock=5))
+        sqlite_conn = sqlite3.connect(package)
+        sqlite_conn.execute("ALTER TABLE products DROP COLUMN first_seen_at")
+        sqlite_conn.commit()
+        sqlite_conn.close()
+
+        conn = self.local()
+        result = self.import_(conn, package)
+
+        self.assertTrue(result.failed)
+        self.assertIn("已全部回滚", result.failure)
+        self.assertEqual(dump(conn), dump(dbmod.connect(self.tmp / "empty2.db")),
+                         "失败发生在中途（库存行已插过），整包仍然全回滚")
+        self.assertEqual(self.rows(conn, "SELECT * FROM import_packages"), [])
+
 
 class ImageTests(MergeCase):
     """验收 4：先拉图再插行；缺图照插、缺口如实。"""

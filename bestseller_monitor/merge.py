@@ -54,7 +54,7 @@ import tempfile
 from collections.abc import Iterable, Iterator
 
 from bestseller_monitor import export
-from bestseller_monitor.db import utcnow
+from bestseller_monitor.db import VERSION_DEDUPE_KEY, utcnow
 from bestseller_monitor.image_store import ImageStore, ImageStoreError, image_key
 from bestseller_monitor.parse import DEFAULT_SKU_ID
 
@@ -69,25 +69,28 @@ _OBSERVATION_DATE = {
     "product_information_versions": "observed_date",
 }
 
-# 版本表的行键（与 db.VERSION_DEDUPE_KEY 同一件事）里有两个可空列，比较一律走
-# COALESCE(...)=?，与去重索引的表达式一致；键相同时由取胜方替换的只有这两列
-# （observed_at 相同则 observed_date 由它推出，不重写）。
-_VERSION_PAYLOAD = ("product_name", "image_url")
+# 版本表同键的判别式与去重键同源（db.VERSION_DEDUPE_KEY 的表达式逐列绑定；那个注释
+# 里点名「导入侧也用它」）。键相同时由取胜方替换的是全部非键列——observed_date 虽是
+# observed_at 的派生值，也照取胜方整行落，口径不靠"本地旧值"兜底。
+_VERSION_MATCH = " AND ".join(f"{column}=?" for column in VERSION_DEDUPE_KEY)
+_VERSION_PAYLOAD = ("observed_date", "product_name", "image_url")
 
 
 @dataclasses.dataclass(frozen=True)
 class _Identity:
-    """身份表（交换律合成的三张表）：主键与「按最近一次观测取胜」的描述列。"""
+    """身份表（交换律合成的三张表）：表名与「按最近一次观测取胜」的描述列。
+
+    主键与全部列名都取自 `export.EXCHANGE_TABLES` 的同一份定义，不再抄一遍。
+    """
 
     table: str
-    pk: tuple[str, ...]
     description: tuple[str, ...]
 
 
 _IDENTITY_TABLES: tuple[_Identity, ...] = (
-    _Identity("shops", ("shop_key",), ("shop_name", "shop_url")),
-    _Identity("products", ("offer_id",), ("product_url", "product_name", "main_image_url")),
-    _Identity("skus", ("offer_id", "sku_id"), ("sku_name",)),
+    _Identity("shops", ("shop_name", "shop_url")),
+    _Identity("products", ("product_url", "product_name", "main_image_url")),
+    _Identity("skus", ("sku_name",)),
 )
 
 
@@ -216,9 +219,9 @@ def import_package(conn: sqlite3.Connection, package_path: pathlib.Path, *,
     except (sqlite3.Error, OSError, KeyError, ValueError) as exc:
         return ImportResult(package_path.name, sha, failure=f"包读不出来：{exc}")
 
-    images = _pull_images(conn, _package_assets(rows), store)
-
+    images = _ImagePull()
     try:
+        images = _pull_images(conn, _package_assets(rows), store)
         conn.commit()                            # 图片那半步先独立落库（先拉图、再插行）
         conn.execute("PRAGMA foreign_keys=OFF")  # 事务之外才有效：缺图的行照插（spec §9）
         try:
@@ -227,7 +230,7 @@ def import_package(conn: sqlite3.Connection, package_path: pathlib.Path, *,
                                   sha=sha, local_machine=machine_id, images=images)
         finally:
             conn.execute("PRAGMA foreign_keys=ON")
-    except (sqlite3.Error, OSError, ValueError) as exc:
+    except (sqlite3.Error, OSError, KeyError, ValueError) as exc:
         conn.rollback()
         return ImportResult(
             package_path.name, sha, machine_id=str(meta["machine_id"]), week=str(meta["week"]),
@@ -403,23 +406,23 @@ def _decide_claims(conn: sqlite3.Connection, rows: dict[str, list[dict]], pkg_ma
 
 
 def _local_claim(conn: sqlite3.Connection, key: tuple, local_machine: str) -> _Claim | None:
-    """本机侧 claim：时刻由本机版本行推导；机器取自取胜方账（没有就按本机）。
+    """本机侧 claim：跑与包侧同一段推导代码（`_claim_from`）；机器取自取胜方账。
 
     账里记的是上一个取胜方的 (时刻, 机器)。时刻对得上（就是这批行的最大 observed_at）
     才认账里的机器；对不上说明行是本机采集新写进去的，按本机。
     """
     shop_key, date = key
-    row = conn.execute(
-        "SELECT MAX(observed_at) AS at FROM product_information_versions "
-        "WHERE shop_key=? AND observed_date=?", (shop_key, date)).fetchone()
-    if row is None or not row["at"]:
-        return None
-    ledger = conn.execute(
-        "SELECT claim_at, machine_id FROM merge_claims WHERE shop_key=? AND observed_date=?",
-        (shop_key, date)).fetchone()
-    if ledger is not None and ledger["claim_at"] == row["at"]:
-        return _Claim(row["at"], ledger["machine_id"])
-    return _Claim(row["at"], local_machine)
+    times = [row["observed_at"] for row in conn.execute(
+        "SELECT observed_at FROM product_information_versions "
+        "WHERE shop_key=? AND observed_date=?", (shop_key, date))]
+    tag = local_machine
+    if times:
+        ledger = conn.execute(
+            "SELECT claim_at, machine_id FROM merge_claims WHERE shop_key=? AND observed_date=?",
+            (shop_key, date)).fetchone()
+        if ledger is not None and ledger["claim_at"] == max(times):
+            tag = str(ledger["machine_id"])
+    return _claim_from(times, tag)
 
 
 def _count_local_rows(conn: sqlite3.Connection, groups: dict[tuple, _Group]) -> None:
@@ -482,21 +485,25 @@ def _merge_inventory(conn: sqlite3.Connection, rows: list[dict],
             group.package_kept += 1
 
 
+def _other_form_predicate(sku_id) -> str:
+    """相反粒度的 sku_id 判别式：本行是商品级（默认行）时找 SKU 级行，反之找默认行。"""
+    return "<>" if str(sku_id) == DEFAULT_SKU_ID else "="
+
+
 def _opposite_form_locally(conn: sqlite3.Connection, shop_key, offer_id, date, sku_id) -> bool:
     """本机在同一个 (店铺, 商品, 日期) 上已有相反粒度的行吗。"""
-    other = "<>" if str(sku_id) == DEFAULT_SKU_ID else "="
     return conn.execute(
         f"SELECT 1 FROM inventory WHERE shop_key=? AND offer_id=? AND date=? "
-        f"AND sku_id{other}? LIMIT 1",
+        f"AND sku_id{_other_form_predicate(sku_id)}? LIMIT 1",
         (shop_key, offer_id, date, DEFAULT_SKU_ID)).fetchone() is not None
 
 
 def _clear_opposite_granularity(conn: sqlite3.Connection, shop_key, offer_id, date,
                                 sku_id) -> int:
     """取胜方这一行是什么粒度，就清掉本机在同一 (店铺, 商品, 日期) 上的另一种粒度。"""
-    other = "<>" if str(sku_id) == DEFAULT_SKU_ID else "="
     return conn.execute(
-        f"DELETE FROM inventory WHERE shop_key=? AND offer_id=? AND date=? AND sku_id{other}?",
+        f"DELETE FROM inventory WHERE shop_key=? AND offer_id=? AND date=? "
+        f"AND sku_id{_other_form_predicate(sku_id)}?",
         (shop_key, offer_id, date, DEFAULT_SKU_ID)).rowcount
 
 
@@ -517,19 +524,18 @@ def _merge_versions(conn: sqlite3.Connection, rows: list[dict],
     table = _BY_NAME["product_information_versions"]
     for row in rows:
         group = groups[(row.get("shop_key"), row.get("observed_date"))]
-        # 同键的查找与替换都按 VERSION_DEDUPE_KEY 的表达式口径（COALESCE 两个可空列），
-        # 与去重索引一致；不依赖索引本身在不在（老库上它可能没建起来）。
-        match = ("shop_key=? AND offer_id=? AND observed_at=? "
-                 "AND COALESCE(content_hash,'')=? AND COALESCE(image_error,'')=?")
+        # 同键的查找与替换都按 VERSION_DEDUPE_KEY 的表达式口径（两个可空列 COALESCE），
+        # 与去重索引一致，且不依赖索引本身在不在（老库上它可能没建起来——那种库上
+        # INSERT OR IGNORE 挡不住重复，这里的先查后写才挡得住）。
         key_params = (row.get("shop_key"), row.get("offer_id"), row.get("observed_at"),
                       row.get("content_hash") or "", row.get("image_error") or "")
         exists = conn.execute(
-            f"SELECT 1 FROM product_information_versions WHERE {match}", key_params
+            f"SELECT 1 FROM product_information_versions WHERE {_VERSION_MATCH}", key_params
         ).fetchone() is not None
         if group.winner == "package" and exists:
             sets = ", ".join(f"{name}=?" for name in _VERSION_PAYLOAD)
             conn.execute(
-                f"UPDATE product_information_versions SET {sets} WHERE {match}",
+                f"UPDATE product_information_versions SET {sets} WHERE {_VERSION_MATCH}",
                 tuple(row.get(name) for name in _VERSION_PAYLOAD) + key_params)
             counts.replaced += 1
             group.local_replaced += 1
@@ -548,10 +554,11 @@ def _merge_versions(conn: sqlite3.Connection, rows: list[dict],
 def _merge_identity(conn: sqlite3.Connection, spec: _Identity, rows: list[dict],
                     pkg_machine: str, local_machine: str, counts: _Counts) -> None:
     """身份表交换律合成：时间列 MIN/MAX，描述列按最近一次观测取胜。"""
-    names = _BY_NAME[spec.table].names
-    pk_where = " AND ".join(f"{name}=?" for name in spec.pk)
+    table = _BY_NAME[spec.table]
+    names, pk = table.names, table.primary_key
+    pk_where = " AND ".join(f"{name}=?" for name in pk)
     for row in rows:
-        pk_values = tuple(row.get(name) for name in spec.pk)
+        pk_values = tuple(row.get(name) for name in pk)
         row_key = "\x1f".join(str(value) for value in pk_values)
         existing = conn.execute(
             f"SELECT * FROM {spec.table} WHERE {pk_where}", pk_values).fetchone()
@@ -567,20 +574,21 @@ def _merge_identity(conn: sqlite3.Connection, spec: _Identity, rows: list[dict],
 
         local_seen = (existing["last_seen_at"] or "", _seen_machine(
             conn, spec.table, row_key, existing["last_seen_at"] or "", local_machine))
-        winner = package_seen if package_seen > local_seen else local_seen
+        # 不逐列拼：描述列整份取最近一次观测那一侧的值（取胜方不是"后到者"，是判据）；
+        # 包缺的列按 None 落——与观测表各路径同一条投影口径（旧包少一列也能合）。
         merged = {
             "first_seen_at": _min_ts(existing["first_seen_at"], row.get("first_seen_at")),
             "last_seen_at": _max_ts(existing["last_seen_at"], row.get("last_seen_at")),
+            **{name: (row.get(name) if package_seen > local_seen else existing[name])
+               for name in spec.description},
         }
-        # 不逐列拼：描述列整份取最近一次观测那一侧的值（取胜方不是"后到者"，是判据）。
-        source = row if package_seen > local_seen else existing
-        merged.update({name: source[name] for name in spec.description})
         if any(existing[name] != merged[name] for name in merged):
             conn.execute(
                 f"UPDATE {spec.table} SET {', '.join(f'{name}=?' for name in merged)} "
                 f"WHERE {pk_where}", (*merged.values(), *pk_values))
             counts.replaced += 1
-        _write_seen(conn, spec.table, row_key, winner)
+        _write_seen(conn, spec.table, row_key,
+                    package_seen if package_seen > local_seen else local_seen)
 
 
 def _write_seen(conn: sqlite3.Connection, table_name: str, row_key: str,
