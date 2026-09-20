@@ -10,6 +10,7 @@ import secrets
 import sqlite3
 import threading
 from collections import defaultdict
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -189,6 +190,31 @@ def candidate_pairs(products, limit):
     return sorted(pairs)
 
 
+def update_candidates(products, groups, positive, excluded):
+    excluded = {frozenset(pair) for pair in excluded}
+    fingerprints = {identity(p): version(p) for p in products}
+    neighbors = defaultdict(set)
+    for pair in positive:
+        for fingerprint in pair:
+            neighbors[fingerprint].update(pair)
+    destinations = defaultdict(set)
+    by_id = {g['id']: g for g in groups}
+    for g in groups:
+        for m in g['members']:
+            destinations[fingerprints[identity(m)]].add(g['id'])
+    for p in products:
+        key = identity(p)
+        options = {gid for v in neighbors[version(p)] for gid in destinations[v]}
+        candidates = []
+        for gid in sorted(options):
+            members = by_id[gid]['members']
+            if (any(identity(m) != key and frozenset((version(p), fingerprints[identity(m)])) in positive for m in members)
+                    and not any(frozenset((key, identity(m))) in excluded for m in members)):
+                candidates.append(gid)
+        p['candidate_groups'] = candidates
+        p['match_label'] = '暂无匹配同款' if not candidates else '匹配唯一同款' if len(candidates) == 1 else '匹配多组同款'
+
+
 class MatchingService:
     def __init__(self, config):
         self.config = config
@@ -199,6 +225,16 @@ class MatchingService:
         """Single matching entry; confirmed groups and explicit exclusions take precedence."""
         with self._lock:
             return self._suggest(products, groups, excluded)
+
+    def refresh_candidates(self, products, groups, excluded=()):
+        """Re-evaluate current group destinations using cached evidence, without regrouping."""
+        with self._lock, closing(sqlite3.connect(self.config.cache.resolve().as_uri()+'?mode=ro', uri=True)) as conn:
+            positive = set()
+            for a, b, raw in conn.execute('SELECT evidence_a,evidence_b,result FROM judgments'):
+                result = json.loads(raw)
+                if result['same'] and result['confidence'] >= .8:
+                    positive.add(frozenset((a, b)))
+        update_candidates(products, groups, positive, excluded)
 
     def _suggest(self, products, groups, excluded):
         self.config.cache.parent.mkdir(parents=True, exist_ok=True)
@@ -329,20 +365,10 @@ class MatchingService:
                 original = original_ids.get(frozenset(identity(m) for m in g['members']))
                 if original:
                     g['id'] = original
-            group_versions = defaultdict(set)
-            group_by_id = {g['id']: g for g in output}
-            for g in output:
-                for m in g['members']:
-                    group_versions[fingerprints[identity(m)]].add(g['id'])
-            for p in products:
-                candidates = []
-                options = {gid for fingerprint in neighbors[version(p)] for gid in group_versions[fingerprint]}
-                for gid in sorted(options):
-                    g = group_by_id[gid]
-                    if any(matches(identity(p), identity(m)) for m in g['members']) and not any(frozenset((identity(p), identity(m))) in excluded for m in g['members']):
-                        candidates.append(gid)
-                p['candidate_groups'] = candidates
-                p['match_label'] = '暂无匹配同款' if not candidates else '匹配唯一同款' if len(candidates) == 1 else '匹配多组同款'
+            previous_order = {g['id']: i for i, g in enumerate(groups)}
+            member_order = {identity(m): i for i, g in enumerate(groups) for m in g['members']}
+            output.sort(key=lambda g: previous_order.get(g['id'], min(member_order.get(identity(m), len(groups)) for m in g['members'])))
+            update_candidates(products, output, known_positive, excluded)
             conn.execute('INSERT INTO recommendations(payload) VALUES (?)', (json.dumps({'groups': output, 'products': [{'identity': identity(p), 'version': version(p), 'candidates': p['candidate_groups'], 'status': p['matching_status']} for p in products]}, ensure_ascii=False),))
             for image_hash, description in self.judge.captions.items():
                 conn.execute('INSERT OR IGNORE INTO visual_evidence VALUES (?,?,?)',

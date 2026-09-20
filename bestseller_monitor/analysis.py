@@ -193,12 +193,24 @@ class AnalysisService:
             if group is None:
                 raise ValueError("同款组不存在")
             group["confirmed"] = True
+            snapshot['dirty'] = True
             return copy.deepcopy(snapshot)
 
     def source(self, offer_id):
         with self._read() as conn:
             row = conn.execute('SELECT product_url FROM products WHERE offer_id=?', (offer_id,)).fetchone()
             return {'url': row['product_url'] if row else None}
+
+    def edit_group(self, analysis_id, action, group_id, member, target_id=None):
+        """Commit an atomic edit only to the in-memory analysis draft."""
+        from .grouping import edit_group
+        with self._lock:
+            if analysis_id not in self._snapshots:
+                raise ValueError('分析已不存在')
+            snapshot = copy.deepcopy(self._snapshots[analysis_id])
+            edit_group(snapshot, action, group_id, member, target_id, self.matcher)
+            self._snapshots[analysis_id] = snapshot
+            return copy.deepcopy(snapshot)
 
 
 def _dates(start: str, end: str) -> list[str]:

@@ -75,7 +75,7 @@ class AnalysisBrowserTests(unittest.TestCase):
             self.page.get_by_label('开始日期', exact=True).fill('2026-08-31')
             self.page.get_by_label('结束日期', exact=True).fill('2026-09-07')
             self.page.get_by_role('button', name='下一步、进入同款确认').click()
-            expect(self.page.get_by_role('heading', name='G1 · 旧款杯子')).to_be_visible()
+            expect(self.page.get_by_role('heading', name='旧款杯子')).to_be_visible()
             self.page.get_by_role('button', name='放大商品图片').click()
             expect(self.page.get_by_role('dialog', name='商品图片')).to_be_visible()
             self.assertTrue(self.page.locator('#largeImage').evaluate('(img)=>img.complete && img.naturalWidth===1'))
@@ -94,7 +94,7 @@ class AnalysisBrowserTests(unittest.TestCase):
             self.page.get_by_role('button', name='重新选择日期').click()
             self.dates()
             self.page.get_by_role('button', name='下一步、进入同款确认').click()
-            expect(self.page.get_by_role('heading', name='G1 · 新款杯子')).to_be_visible()
+            expect(self.page.get_by_role('heading', name='新款杯子')).to_be_visible()
             self.assertEqual(self.page.get_by_role('img', name='新款杯子').get_attribute('src'), new['image_data'])
             failure = acquire(url)
         self.submit('2026-09-15', 80, name='失败版本', image_url=url, image_evidence=failure)
@@ -228,9 +228,9 @@ class AnalysisBrowserTests(unittest.TestCase):
                 collected_at="2026-09-14T04:00:00+00:00", attempt=1)
         self.dates()
         self.page.get_by_role("button", name="下一步、进入同款确认").click()
-        expect(self.page.get_by_role("article")).to_have_count(20)
+        expect(self.page.locator(".group-choice")).to_have_count(20)
         self.page.get_by_role("button", name="下一页").click()
-        expect(self.page.get_by_role("article")).to_have_count(3)
+        expect(self.page.locator(".group-choice")).to_have_count(3)
 
     def test_confirmation_unlocks_initial_ranking_and_sku_details(self):
         self.dates()
@@ -255,10 +255,11 @@ class AnalysisBrowserTests(unittest.TestCase):
                 collected_at=stamp+'T04:00:00+00:00', attempt=1)
         self.dates()
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
-        expect(self.page.get_by_role('button', name='确认当前分组', exact=True)).to_have_count(2)
-        for remaining in (1, 0):
-            self.page.get_by_role('button', name='确认当前分组', exact=True).first.click()
-            expect(self.page.get_by_role('button', name='确认当前分组', exact=True)).to_have_count(remaining)
+        expect(self.page.locator('.group-choice')).to_have_count(2)
+        for index in range(2):
+            self.page.locator('.group-choice').nth(index).click()
+            self.page.get_by_role('button', name='确认当前分组', exact=True).click()
+            expect(self.page.get_by_role('button', name='已确认', exact=True)).to_be_disabled()
         self.page.locator('#ranking > details > summary').first.click()
         expect(self.page.locator('#ranking > details').first).to_contain_text('切换商品')
         expect(self.page.locator('#ranking > details > summary').first).to_contain_text('30')
@@ -285,10 +286,11 @@ class AnalysisBrowserTests(unittest.TestCase):
         self.page.get_by_label('结束日期', exact=True).fill('2026-09-16')
         self.page.get_by_role('button', name='继续', exact=True).click()
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
-        expect(self.page.get_by_role('button', name='确认当前分组', exact=True)).to_have_count(2)
-        for remaining in (1, 0):
-            self.page.get_by_role('button', name='确认当前分组', exact=True).first.click()
-            expect(self.page.get_by_role('button', name='确认当前分组', exact=True)).to_have_count(remaining)
+        expect(self.page.locator('.group-choice')).to_have_count(2)
+        for index in range(2):
+            self.page.locator('.group-choice').nth(index).click()
+            self.page.get_by_role('button', name='确认当前分组', exact=True).click()
+            expect(self.page.get_by_role('button', name='已确认', exact=True)).to_be_disabled()
         self.page.locator('#ranking > details > summary').first.click()
         expect(self.page.locator('#ranking > details > summary').first).to_contain_text('50')
         final_chart = self.page.locator('#ranking > details').first.locator('details .inventory-chart').last

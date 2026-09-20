@@ -240,11 +240,11 @@ class MatchingBrowserTests(unittest.TestCase):
             transport.fail_comparisons = True
             self.dates()
             self.page.get_by_role('button', name='下一步、进入同款确认').click()
-            expect(self.page.get_by_role('article')).to_have_count(3)
+            expect(self.page.locator('.group-choice')).to_have_count(3)
             expect(self.page.get_by_text('模型请求失败或响应格式无效，请检查后台配置后重试').first).to_be_visible()
             transport.fail_comparisons = False
             self.page.get_by_role('button', name='重试模型匹配').click()
-            expect(self.page.get_by_role('article')).to_have_count(2)
+            expect(self.page.locator('.group-choice')).to_have_count(2)
             expect(self.page.get_by_role('article').first).to_contain_text('陶瓷饮具')
             expect(self.page.get_by_role('article').first).to_contain_text('月牙杯')
             expect(self.page.get_by_role('button', name='匹配唯一同款')).to_have_count(0)
@@ -253,9 +253,9 @@ class MatchingBrowserTests(unittest.TestCase):
             expect(self.page.get_by_text('缓存', exact=True).first).to_be_visible()
             self.assertEqual(len(transport.calls), calls)
             self.page.get_by_role('button', name='确认当前分组').first.click()
-            expect(self.page.get_by_role('button', name='已确认')).to_have_count(1)
+            expect(self.page.get_by_role('button', name='已确认', exact=True)).to_have_count(1)
             self.page.get_by_role('button', name='重试模型匹配').click()
-            expect(self.page.get_by_role('button', name='已确认')).to_have_count(1)
+            expect(self.page.get_by_role('button', name='已确认', exact=True)).to_have_count(1)
             rid = self.conn.execute("SELECT MAX(round_id) FROM snapshots WHERE shop_key='A01'").fetchone()[0]
             calls = len(transport.calls)
             # Only the URL changes: same bytes and name reuse judgments in a new analysis.
@@ -276,8 +276,8 @@ class MatchingBrowserTests(unittest.TestCase):
             self.page.get_by_role('button', name='重新选择日期').click()
             self.dates()
             self.page.get_by_role('button', name='下一步、进入同款确认').click()
-            expect(self.page.get_by_text('信息变更', exact=True)).to_be_visible()
-            expect(self.page.get_by_role('article')).to_have_count(3)
+            expect(self.page.locator('.matching-tags').get_by_text('信息变更', exact=True)).to_be_visible()
+            expect(self.page.locator('.group-choice')).to_have_count(3)
             self.assertEqual(len(transport.calls), calls+2)
             self.db.submit_inventory_snapshot(round_id=rid, shop_key='A01', shop_url='https://shop.example', shop_name='店铺1',
                 offer_id='11', product_url='https://detail.1688.com/offer/11.html', list_title='名称变更杯', detail_title='名称变更杯',
@@ -286,5 +286,5 @@ class MatchingBrowserTests(unittest.TestCase):
             self.page.get_by_role('button', name='重新选择日期').click()
             self.dates()
             self.page.get_by_role('button', name='下一步、进入同款确认').click()
-            expect(self.page.get_by_text('信息变更', exact=True)).to_be_visible()
+            expect(self.page.locator('.matching-tags').get_by_text('信息变更', exact=True)).to_be_visible()
             self.assertNotIn('secret-value', self.page.content())

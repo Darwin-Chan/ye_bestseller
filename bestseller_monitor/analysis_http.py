@@ -54,12 +54,20 @@ def create_server(service, port=0):
                     data = json.loads(self.rfile.read(length))
                     if data.get('action') == 'retry_matching':
                         return self.reply(service.retry_matching(data['id']))
+                    if data.get('action') in ('move', 'remove'):
+                        return self.reply(service.edit_group(data['id'], data['action'], data['group'],
+                                                             data['member'], data.get('target')))
+                    if data.get('action'):
+                        raise ValueError('不支持的分组操作')
                     if "group" in data:
                         return self.reply(service.confirm(data["id"], data["group"]))
                     return self.reply(service.start(data["start"], data["end"], data.get("acknowledged") is True))
                 self.reply({"error": "未找到该页面或操作"}, 404)
             except (ValueError, KeyError, TypeError) as exc:
                 self.reply({"error": str(exc)}, 400)
+            except ConnectionError:
+                # Closing a page can cancel its outstanding source-link requests.
+                return
             except (sqlite3.Error, OSError):
                 log.exception("分析读取失败")
                 self.reply({"error": "读取库存数据失败，请检查分析配置和数据库后重试"}, 503)
