@@ -442,8 +442,7 @@ def scan_exchange_gaps(exchange_root: str | pathlib.Path, local: sqlite3.Connect
     只看本机交换区里**已经有**的包（`raw-<机器>/data/<年>/W<周>-<机器>.db.gz`，不拉取），
     以及本周的整周日期范围；读不动的包记进 `notes` 跳过，不抛错——这个检查只告警。
     """
-    monday = weekly_plan.week_monday(week)
-    sunday = monday + dt.timedelta(days=6)
+    monday, sunday = weekly_plan.week_window(week)
     iso = monday.isocalendar()
     # 年取周编号里的那个 ISO 年：2026-W01 的周一落在 2025-12-29，目录仍是 data/2026/
     # （与票据 08 的导出口径一致）。

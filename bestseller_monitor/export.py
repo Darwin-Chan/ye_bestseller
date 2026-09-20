@@ -22,8 +22,9 @@
 采集，也看不见任何未提交的半截事务），再往包库里写。源库自始至终只读，export 不改本机库。
 
 **同周重跑不产生多余提交**：拿新包的**内容摘要**（`package_digest`，六表逐行的规范摘要，
-不含生成时刻这类每次都会变的东西）与 raw 库里已发布那份比；一样就不写文件、不提交——
-只把推送再试一次（上次推失败留下的那笔在这里补上，真的是空的推送是个空动作）。
+不含生成时刻这类每次都会变的东西）与 raw 库里已发布那份比——比的是 **HEAD 里那份**
+（远端的事实），工作区里躺着的残迹不算数；一样就不写文件、不提交，只把推送再试一次
+（上次推失败留下的那笔在这里补上，真的是空的推送是个空动作）。
 内容摘要可以跨重跑、跨机器复现（行序按列排序，与 SQLite 文件布局无关）。
 
 **发布**：包与图片清单（`<周>-<机器>.manifest.json.gz`，列出包引用的图片 key 集）同一次
@@ -50,58 +51,15 @@ from bestseller_monitor.db import CST, cst_date
 from bestseller_monitor.git_channel import ChannelError, GitChannel
 from bestseller_monitor.image_store import ImageStore, ImageStoreError, image_key
 from bestseller_monitor.weekly_plan import iso_week_label, week_monday
+from bestseller_monitor.weekly_plan import week_window as plan_week_window
 
 # 导出程序口径版本：包格式（表、列、筛选口径）变化时进一位——发布侧据此重发，
 # 汇总侧据此认出旧包。
 EXPORT_FORMAT_VERSION = "v1"
 
-# 包内的六张交换集表与它们的列（顺序即包里的列顺序；显式投影，不用 SELECT *）。
-EXCHANGE_TABLES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("shops", ("shop_key", "shop_name", "shop_url", "first_seen_at", "last_seen_at")),
-    ("products", ("offer_id", "product_url", "product_name", "main_image_url",
-                  "first_seen_at", "last_seen_at")),
-    ("skus", ("offer_id", "sku_name", "sku_id", "first_seen_at", "last_seen_at")),
-    ("inventory", ("shop_key", "offer_id", "sku_id", "date", "stock", "price",
-                   "shop_name", "product_name", "sku_name")),
-    ("product_information_versions",
-     ("shop_key", "offer_id", "observed_at", "observed_date", "product_name",
-      "image_url", "content_hash", "image_error")),
-    ("product_image_assets", ("content_hash", "mime")),
-)
-
 META_TABLE = "exchange_meta"
+PACKAGE_SUFFIX = ".db.gz"
 MANIFEST_SUFFIX = ".manifest.json.gz"
-
-_PACKAGE_SCHEMA = f"""
-CREATE TABLE shops (
-    shop_key TEXT PRIMARY KEY, shop_name TEXT, shop_url TEXT,
-    first_seen_at TEXT, last_seen_at TEXT
-);
-CREATE TABLE products (
-    offer_id TEXT PRIMARY KEY, product_url TEXT, product_name TEXT, main_image_url TEXT,
-    first_seen_at TEXT NOT NULL, last_seen_at TEXT
-);
-CREATE TABLE skus (
-    offer_id TEXT NOT NULL, sku_name TEXT, sku_id TEXT NOT NULL,
-    first_seen_at TEXT NOT NULL, last_seen_at TEXT,
-    PRIMARY KEY (offer_id, sku_id)
-);
-CREATE TABLE inventory (
-    shop_key TEXT NOT NULL, offer_id TEXT NOT NULL, sku_id TEXT NOT NULL,
-    date TEXT NOT NULL, stock INTEGER, price REAL,
-    shop_name TEXT, product_name TEXT, sku_name TEXT,
-    PRIMARY KEY (shop_key, offer_id, sku_id, date)
-);
-CREATE TABLE product_information_versions (
-    shop_key TEXT NOT NULL, offer_id TEXT NOT NULL, observed_at TEXT NOT NULL,
-    observed_date TEXT NOT NULL, product_name TEXT, image_url TEXT,
-    content_hash TEXT, image_error TEXT
-);
-CREATE TABLE product_image_assets (
-    content_hash TEXT PRIMARY KEY, mime TEXT NOT NULL
-);
-CREATE TABLE {META_TABLE} (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-"""
 
 # 身份表收「本周观测碰到的那些行」：offer/店铺出现在本周的库存行或版本行里。
 _WEEK_OFFERS = (
@@ -115,28 +73,98 @@ _WEEK_SHOPS = (
     "WHERE observed_date BETWEEN :start AND :end"
 )
 
-# 各表的取数 SQL：按周窗口筛，ORDER BY 全列（内容摘要不依赖库里的物理行序）。
-_SLICE_SQL: dict[str, str] = {
-    "shops": f"SELECT {{cols}} FROM shops WHERE shop_key IN ({_WEEK_SHOPS}) ORDER BY {{cols}}",
-    "products": f"SELECT {{cols}} FROM products WHERE offer_id IN ({_WEEK_OFFERS}) ORDER BY {{cols}}",
-    "skus": f"SELECT {{cols}} FROM skus WHERE offer_id IN ({_WEEK_OFFERS}) ORDER BY {{cols}}",
-    "inventory": "SELECT {cols} FROM inventory WHERE date BETWEEN :start AND :end "
-                 "ORDER BY {cols}",
-    "product_information_versions":
-        "SELECT {cols} FROM product_information_versions "
-        "WHERE observed_date BETWEEN :start AND :end ORDER BY {cols}",
-    "product_image_assets":
-        "SELECT {cols} FROM product_image_assets WHERE content_hash IN ("
-        "SELECT content_hash FROM product_information_versions "
-        "WHERE observed_date BETWEEN :start AND :end AND content_hash IS NOT NULL) "
-        "ORDER BY {cols}",
-}
+
+@dataclasses.dataclass(frozen=True)
+class _PackageTable:
+    """包内一张交换集表：列（列名, 声明）按包里的列序、主键、按周窗口取数的 SQL。
+
+    DDL、INSERT 的列序、内容摘要都从 `columns` 这一处生成——三份各写一遍就会悄悄错列。
+    """
+
+    name: str
+    columns: tuple[tuple[str, str], ...]
+    primary_key: tuple[str, ...] = ()
+    slice_sql: str = ""                   # 用 {cols} 占位列清单
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(name for name, _ in self.columns)
+
+    @property
+    def ddl(self) -> str:
+        parts = [f"{name} {decl}" for name, decl in self.columns]
+        if self.primary_key:
+            parts.append(f"PRIMARY KEY ({', '.join(self.primary_key)})")
+        return f"CREATE TABLE {self.name} ({', '.join(parts)});"
+
+
+EXCHANGE_TABLES: tuple[_PackageTable, ...] = (
+    _PackageTable(
+        "shops",
+        (("shop_key", "TEXT"), ("shop_name", "TEXT"), ("shop_url", "TEXT"),
+         ("first_seen_at", "TEXT"), ("last_seen_at", "TEXT")),
+        primary_key=("shop_key",),
+        slice_sql=f"SELECT {{cols}} FROM shops WHERE shop_key IN ({_WEEK_SHOPS}) "
+                  "ORDER BY {cols}",
+    ),
+    _PackageTable(
+        "products",
+        (("offer_id", "TEXT"), ("product_url", "TEXT"), ("product_name", "TEXT"),
+         ("main_image_url", "TEXT"), ("first_seen_at", "TEXT NOT NULL"),
+         ("last_seen_at", "TEXT")),
+        primary_key=("offer_id",),
+        slice_sql=f"SELECT {{cols}} FROM products WHERE offer_id IN ({_WEEK_OFFERS}) "
+                  "ORDER BY {cols}",
+    ),
+    _PackageTable(
+        "skus",
+        (("offer_id", "TEXT NOT NULL"), ("sku_name", "TEXT"), ("sku_id", "TEXT NOT NULL"),
+         ("first_seen_at", "TEXT NOT NULL"), ("last_seen_at", "TEXT")),
+        primary_key=("offer_id", "sku_id"),
+        slice_sql=f"SELECT {{cols}} FROM skus WHERE offer_id IN ({_WEEK_OFFERS}) "
+                  "ORDER BY {cols}",
+    ),
+    _PackageTable(
+        "inventory",
+        (("shop_key", "TEXT NOT NULL"), ("offer_id", "TEXT NOT NULL"),
+         ("sku_id", "TEXT NOT NULL"), ("date", "TEXT NOT NULL"),
+         ("stock", "INTEGER"), ("price", "REAL"), ("shop_name", "TEXT"),
+         ("product_name", "TEXT"), ("sku_name", "TEXT")),
+        primary_key=("shop_key", "offer_id", "sku_id", "date"),
+        slice_sql="SELECT {cols} FROM inventory WHERE date BETWEEN :start AND :end "
+                  "ORDER BY {cols}",
+    ),
+    _PackageTable(
+        "product_information_versions",
+        (("shop_key", "TEXT NOT NULL"), ("offer_id", "TEXT NOT NULL"),
+         ("observed_at", "TEXT NOT NULL"), ("observed_date", "TEXT NOT NULL"),
+         ("product_name", "TEXT"), ("image_url", "TEXT"),
+         ("content_hash", "TEXT"), ("image_error", "TEXT")),
+        slice_sql="SELECT {cols} FROM product_information_versions "
+                  "WHERE observed_date BETWEEN :start AND :end ORDER BY {cols}",
+    ),
+    _PackageTable(
+        "product_image_assets",
+        (("content_hash", "TEXT"), ("mime", "TEXT NOT NULL")),
+        primary_key=("content_hash",),
+        slice_sql="SELECT {cols} FROM product_image_assets WHERE content_hash IN ("
+                  "SELECT content_hash FROM product_information_versions "
+                  "WHERE observed_date BETWEEN :start AND :end AND content_hash IS NOT NULL) "
+                  "ORDER BY {cols}",
+    ),
+)
+
+_PACKAGE_SCHEMA = ("\n".join(table.ddl for table in EXCHANGE_TABLES)
+                   + f"\nCREATE TABLE {META_TABLE} (key TEXT PRIMARY KEY, value TEXT NOT NULL);\n")
 
 
 def week_window(week: str) -> tuple[str, str]:
-    """ISO 周编号（如 2026-W37）的北京日期窗口：周一与周日。"""
-    monday = week_monday(week)
-    return monday.isoformat(), (monday + dt.timedelta(days=6)).isoformat()
+    """ISO 周编号（如 2026-W37）的北京日期窗口：周一与周日。
+
+    口径在 `weekly_plan.week_window` 一处；这里只把日期折成取数 SQL 用的字符串。
+    """
+    monday, sunday = plan_week_window(week)
+    return monday.isoformat(), sunday.isoformat()
 
 
 def current_week() -> str:
@@ -151,7 +179,7 @@ def package_rel_path(week: str, machine_id: str) -> str:
     """
     week_monday(week)                     # 非法周编号在这里点名拒绝
     year, number = week.split("-W")
-    return f"data/{year}/W{number}-{machine_id}.db.gz"
+    return f"data/{year}/W{number}-{machine_id}{PACKAGE_SUFFIX}"
 
 
 def read_package_meta(conn: sqlite3.Connection) -> dict:
@@ -164,7 +192,7 @@ def read_package_meta(conn: sqlite3.Connection) -> dict:
         "generated_at": raw["generated_at"],
         "format_version": raw["format_version"],
         "crawl_in_progress": raw["crawl_in_progress"] == "1",
-        "rows": {table: int(raw[f"rows_{table}"]) for table, _ in EXCHANGE_TABLES},
+        "rows": {table.name: int(raw[f"rows_{table.name}"]) for table in EXCHANGE_TABLES},
     }
 
 
@@ -179,10 +207,9 @@ def _read_week_slice(source: pathlib.Path, week: str) -> dict[str, list[tuple]]:
         conn.execute("BEGIN")
         params = dict(zip(("start", "end"), week_window(week)))
         slice_: dict[str, list[tuple]] = {}
-        for table, columns in EXCHANGE_TABLES:
-            cols = ", ".join(columns)
-            sql = _SLICE_SQL[table].format(cols=cols)
-            slice_[table] = [tuple(row) for row in conn.execute(sql, params)]
+        for table in EXCHANGE_TABLES:
+            sql = table.slice_sql.format(cols=", ".join(table.names))
+            slice_[table.name] = [tuple(row) for row in conn.execute(sql, params)]
         conn.rollback()
         return slice_
     finally:
@@ -206,18 +233,19 @@ def build_package(source: pathlib.Path, package_path: pathlib.Path, *, week: str
     try:
         conn.execute("PRAGMA foreign_keys=OFF")     # 版本行可能引用本机缺字节的资产
         conn.executescript(_PACKAGE_SCHEMA)
-        for table, columns in EXCHANGE_TABLES:
-            rows = slice_[table]
+        for table in EXCHANGE_TABLES:
+            rows = slice_[table.name]
             if not rows:
                 continue
             conn.executemany(
-                f"INSERT INTO {table} VALUES ({', '.join('?' * len(columns))})", rows)
+                f"INSERT INTO {table.name} VALUES ({', '.join('?' * len(table.columns))})",
+                rows)
         conn.executemany(
             f"INSERT INTO {META_TABLE}(key, value) VALUES (?, ?)",
             [(key, value) for key, value in _meta_rows(
                 week=week, machine_id=machine_id, crawl_in_progress=crawl_in_progress,
                 generated_at=generated_at,
-                counts={table: len(slice_[table]) for table, _ in EXCHANGE_TABLES})])
+                counts={table.name: len(slice_[table.name]) for table in EXCHANGE_TABLES})])
         conn.commit()
     finally:
         conn.close()
@@ -232,7 +260,7 @@ def _meta_rows(*, week: str, machine_id: str, crawl_in_progress: bool,
         ("format_version", EXPORT_FORMAT_VERSION),
         ("crawl_in_progress", "1" if crawl_in_progress else "0"),
     ]
-    rows += [(f"rows_{table}", str(counts[table])) for table, _ in EXCHANGE_TABLES]
+    rows += [(f"rows_{table.name}", str(counts[table.name])) for table in EXCHANGE_TABLES]
     return rows
 
 
@@ -246,11 +274,11 @@ def package_digest(conn: sqlite3.Connection) -> str:
     digest.update(f"{EXPORT_FORMAT_VERSION}\n".encode("utf-8"))
     meta = read_package_meta(conn)
     digest.update(f"{meta['machine_id']}\n{meta['week']}\n".encode("utf-8"))
-    for table, columns in EXCHANGE_TABLES:
-        digest.update(f"== {table}\n".encode("utf-8"))
-        cols = ", ".join(columns)
+    for table in EXCHANGE_TABLES:
+        digest.update(f"== {table.name}\n".encode("utf-8"))
+        cols = ", ".join(table.names)
         count = 0
-        for row in conn.execute(f"SELECT {cols} FROM {table} ORDER BY {cols}"):
+        for row in conn.execute(f"SELECT {cols} FROM {table.name} ORDER BY {cols}"):
             count += 1
             digest.update(_row_bytes(row))
         digest.update(f"-- {count}\n".encode("utf-8"))
@@ -272,16 +300,25 @@ def _row_bytes(row: Iterable) -> bytes:
     return b"\x1f".join(parts) + b"\n"
 
 
-def package_image_keys(conn: sqlite3.Connection) -> list[tuple[str, str]]:
-    """包引用的图片：(key, 内容哈希) 列表，按 key 排序。
+@dataclasses.dataclass(frozen=True)
+class ImageRef:
+    """包引用的一个图片：内容寻址的 key 与它对应的内容哈希。"""
+
+    key: str
+    content_hash: str
+
+
+def package_image_keys(conn: sqlite3.Connection) -> tuple[ImageRef, ...]:
+    """包引用的图片，按 key 排序。
 
     引用 = 包内资产表的行。包里的资产表恰好收「本周版本行引用到的那些」（见取数 SQL），
     所以清单恰等于包引用的 key 集；mime 也在资产表里，key 的扩展名由它定。
     """
-    return sorted(
-        (image_key(content_hash, mime), content_hash)
-        for content_hash, mime in
-        conn.execute("SELECT content_hash, mime FROM product_image_assets"))
+    return tuple(sorted(
+        (ImageRef(image_key(content_hash, mime), content_hash)
+         for content_hash, mime in
+         conn.execute("SELECT content_hash, mime FROM product_image_assets")),
+        key=lambda ref: ref.key))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -309,7 +346,7 @@ class ExportResult:
     manifest_rel: str
     rows: dict[str, int]
     crawl_in_progress: bool
-    package_bytes: int
+    package_size: int                    # 包（.db.gz）的字节大小
     published: bool                      # 这次跑完包在远端上（同内容重跑的空推确认也算）
     unchanged: bool                      # 与已发布那份同内容：没有新提交
     commit: str | None = None            # 包在远端的提交（短哈希）；没发成时是 None
@@ -326,15 +363,15 @@ def _pack_gzip(data: bytes) -> bytes:
     return gzip.compress(data, mtime=0)
 
 
-def _manifest_bytes(package_name: str, key_pairs: list[tuple[str, str]]) -> bytes:
-    manifest = {"package": package_name, "keys": [key for key, _ in key_pairs]}
+def _manifest_bytes(package_name: str, images: tuple[ImageRef, ...]) -> bytes:
+    manifest = {"package": package_name, "keys": [ref.key for ref in images]}
     return _pack_gzip(json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
 
 
-def _published_digest(published: pathlib.Path) -> str | None:
-    """已发布那份包的内容摘要；读不动 / 不是我们的包时回 None（当「不一样」重发）。"""
+def _published_digest(published_gz: bytes) -> str | None:
+    """已发布那份包（.db.gz 的字节）的内容摘要；不是我们的包时回 None（当「不一样」重发）。"""
     try:
-        data = gzip.decompress(published.read_bytes())
+        data = gzip.decompress(published_gz)
     except (OSError, EOFError):
         return None
     with tempfile.TemporaryDirectory(prefix="bestseller-export-") as tmp:
@@ -371,10 +408,10 @@ def _restore_remote(channel: GitChannel) -> str | None:
     return None
 
 
-def upload_new_images(source: pathlib.Path, key_pairs: list[tuple[str, str]],
+def upload_new_images(source: pathlib.Path, images: tuple[ImageRef, ...],
                       store: ImageStore) -> ImageUploadResult:
     """清单里的图片：桶里已有的跳过，缺的传字节；本机取不到字节的如实记进 missing。"""
-    if not key_pairs:
+    if not images:
         return ImageUploadResult()
     try:
         existing = store.existing_keys()
@@ -385,19 +422,19 @@ def upload_new_images(source: pathlib.Path, key_pairs: list[tuple[str, str]],
     try:
         uploaded = uploaded_bytes = skipped = 0
         missing: list[str] = []
-        for key, content_hash in key_pairs:
-            if key in existing:
+        for ref in images:
+            if ref.key in existing:
                 skipped += 1
                 continue
             row = conn.execute(
                 "SELECT content FROM product_image_assets WHERE content_hash=?",
-                (content_hash,)).fetchone()
+                (ref.content_hash,)).fetchone()
             data = row[0] if row else None
             if not data:
-                missing.append(key)
+                missing.append(ref.key)
                 continue
             try:
-                store.upload(key, bytes(data))
+                store.upload(ref.key, bytes(data))
             except ImageStoreError as exc:
                 return ImageUploadResult(
                     uploaded=uploaded, uploaded_bytes=uploaded_bytes, skipped=skipped,
@@ -415,18 +452,18 @@ class _BuiltPackage:
     """打好在 outbox 里的一份包，连同它的清单与内容摘要。"""
 
     base: str                            # 如 W38-m1
-    package_bytes: bytes                 # .db.gz 的字节
-    manifest_bytes: bytes
+    package_gz: bytes                    # .db.gz 的字节
+    manifest_gz: bytes
     rows: dict[str, int]
     digest: str
-    key_pairs: list[tuple[str, str]]
+    images: tuple[ImageRef, ...]
 
 
 def _build(source: pathlib.Path, outbox: pathlib.Path, package_rel: str, *,
            week: str, machine_id: str, crawl_in_progress: bool) -> _BuiltPackage:
     """打包 → 摘要 → 清单 → 落 outbox（`.db` 与 `.db.gz` 都留着：失败时这就是「包留在本机」）。"""
     package_name = pathlib.Path(package_rel).name
-    base = package_name[: -len(".db.gz")]
+    base = package_name[: -len(PACKAGE_SUFFIX)]
     package_path = outbox / f"{base}.db"
     build_package(source, package_path, week=week, machine_id=machine_id,
                   crawl_in_progress=crawl_in_progress,
@@ -435,14 +472,14 @@ def _build(source: pathlib.Path, outbox: pathlib.Path, package_rel: str, *,
     try:
         rows = read_package_meta(conn)["rows"]
         digest = package_digest(conn)
-        key_pairs = package_image_keys(conn)
+        images = package_image_keys(conn)
     finally:
         conn.close()
-    package_bytes = _pack_gzip(package_path.read_bytes())
-    (outbox / f"{base}.db.gz").write_bytes(package_bytes)
-    return _BuiltPackage(base=base, package_bytes=package_bytes,
-                         manifest_bytes=_manifest_bytes(package_name, key_pairs),
-                         rows=rows, digest=digest, key_pairs=key_pairs)
+    package_gz = _pack_gzip(package_path.read_bytes())
+    (outbox / f"{base}.db.gz").write_bytes(package_gz)
+    return _BuiltPackage(base=base, package_gz=package_gz,
+                         manifest_gz=_manifest_bytes(package_name, images),
+                         rows=rows, digest=digest, images=images)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -455,9 +492,13 @@ class _PublishOutcome:
 
 def _publish(channel: GitChannel, raw_dir: pathlib.Path, package_rel: str,
              manifest_rel: str, built: _BuiltPackage) -> _PublishOutcome:
-    """与已发布那份比对后决定发不发；发就写文件 + 包与清单同一次提交推上去。"""
-    published_package = raw_dir / package_rel
-    if published_package.exists() and _published_digest(published_package) == built.digest:
+    """与已发布那份比对后决定发不发；发就写文件 + 包与清单同一次提交推上去。
+
+    比的是 **HEAD 里那份**（远端的事实），不是工作区文件——崩溃在「写完、提交前」
+    留下的残迹不能冒充已发布。
+    """
+    published_gz = channel.read_path(package_rel)
+    if published_gz is not None and _published_digest(published_gz) == built.digest:
         # 没有新内容：不写文件、不产生提交。推送仍试一次——上次推失败（比如第一次
         # 发布撞上断网）留下的那笔在这里补上；确实是空的推送是个空动作。
         try:
@@ -467,11 +508,12 @@ def _publish(channel: GitChannel, raw_dir: pathlib.Path, package_rel: str,
                 f"推送没成功（本次没有新内容要发布）：{exc}\n等通道恢复后重跑一次即可确认。"))
         return _PublishOutcome(published=True, unchanged=True, commit=channel.head())
 
+    published_package = raw_dir / package_rel
     published_manifest = raw_dir / manifest_rel
     try:
         published_package.parent.mkdir(parents=True, exist_ok=True)
-        published_package.write_bytes(built.package_bytes)
-        published_manifest.write_bytes(built.manifest_bytes)
+        published_package.write_bytes(built.package_gz)
+        published_manifest.write_bytes(built.manifest_gz)
         channel.commit(f"export {built.base}", [published_package, published_manifest])
         channel.push()
     except (ChannelError, OSError) as exc:
@@ -500,7 +542,7 @@ def export(cfg, *, week: str | None = None, store: ImageStore | None = None) -> 
     exchange_root = pathlib.Path(cfg.exchange_root)
     raw_dir = exchange_root / f"raw-{machine_id}"
     package_rel = package_rel_path(week, machine_id)
-    manifest_rel = package_rel[: -len(".db.gz")] + MANIFEST_SUFFIX
+    manifest_rel = package_rel[: -len(PACKAGE_SUFFIX)] + MANIFEST_SUFFIX
     outbox = exchange_root / "outbox"
 
     crawl_in_progress = crawler_identity.is_running()
@@ -509,7 +551,7 @@ def export(cfg, *, week: str | None = None, store: ImageStore | None = None) -> 
     result = dict(week=week, machine_id=machine_id, package_rel=package_rel,
                   manifest_rel=manifest_rel, rows=built.rows,
                   crawl_in_progress=crawl_in_progress,
-                  package_bytes=len(built.package_bytes))
+                  package_size=len(built.package_gz))
     if not (raw_dir / ".git").exists():
         return ExportResult(**result, published=False, unchanged=False, failure=(
             f"raw 库还没 clone 到 {raw_dir}：按上机清单第 9 步 clone 四个交换库，"
@@ -530,7 +572,7 @@ def export(cfg, *, week: str | None = None, store: ImageStore | None = None) -> 
 
     if store is None:
         store = _default_store(cfg)
-    images = (upload_new_images(source, built.key_pairs, store) if store is not None else
+    images = (upload_new_images(source, built.images, store) if store is not None else
               ImageUploadResult(failure=(
                   "配置缺 machine.cos_bucket：图片通道没有桶可用，包里的图这次没传。"
                   "照 config/config.example.toml 的 [machine] 一节补上桶名后重跑。")))

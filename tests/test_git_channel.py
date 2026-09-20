@@ -156,5 +156,35 @@ class LocalChangesTests(unittest.TestCase):
         self.assertFalse((self.mine / "plan" / "2026-W39.json").exists(), "未跟踪残迹被清掉")
 
 
+class HeadAndPathTests(unittest.TestCase):
+    """发布侧要的两件事：拿到发到哪笔提交；按 HEAD 读一个路径的字节（二进制不被改写）。"""
+
+    def setUp(self):
+        self.box = GitSandbox(self)
+        self.remote = self.box.new_remote()
+        self.box.seed(self.remote, {"note.txt": "seed\n"})
+        self.mine = self.box.clone(self.remote, "raw-m1")
+
+    def test_head_is_the_short_hash_of_the_current_commit(self):
+        channel = GitChannel(self.mine)
+
+        self.assertEqual(channel.head(),
+                         self.box.must("rev-parse", "--short", "HEAD",
+                                       cwd=self.mine).strip())
+
+    def test_read_path_returns_the_bytes_committed_at_head(self):
+        blob = bytes(range(256))                       # 全是二进制的字节：不许被解码改写
+        self.box.commit_push(self.mine, {"data/2026/W38-m1.db.gz": blob},
+                             message="export W38 m1")
+
+        self.assertEqual(GitChannel(self.mine).read_path("data/2026/W38-m1.db.gz"), blob)
+
+    def test_read_path_is_none_when_head_does_not_have_it(self):
+        """工作区里有（未跟踪的残迹）也不算——问的是 HEAD 那份。"""
+        self.box.write_files(self.mine, {"data/2026/W38-m1.db.gz": b"leftover"})
+
+        self.assertIsNone(GitChannel(self.mine).read_path("data/2026/W38-m1.db.gz"))
+
+
 if __name__ == "__main__":
     unittest.main()

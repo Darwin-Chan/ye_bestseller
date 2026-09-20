@@ -16,6 +16,9 @@ _MIME_EXT = {
     "image/webp": "webp",
 }
 
+# 桶内前缀：key 的推法与「列哪些 key」共用这一处，口径不会分家。
+IMAGE_PREFIX = "img/"
+
 
 class ImageStoreError(RuntimeError):
     """图片库操作失败（列表、上传）；消息带命令与输出摘要，供上游告警引用。"""
@@ -26,7 +29,7 @@ def image_key(content_hash: str, mime: str) -> str:
     ext = _MIME_EXT.get(mime)
     if not ext:
         raise ImageStoreError(f"不认识的图片 mime：{mime!r}（只存受支持的那四种）")
-    return f"img/{content_hash[:2]}/{content_hash}.{ext}"
+    return f"{IMAGE_PREFIX}{content_hash[:2]}/{content_hash}.{ext}"
 
 
 class ImageStore(Protocol):

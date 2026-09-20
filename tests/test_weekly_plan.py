@@ -38,6 +38,13 @@ class WeekLabelTests(unittest.TestCase):
         self.assertEqual(weekly_plan.week_span("2026-W01"), "12/29–1/4")
         self.assertEqual(weekly_plan.week_monday("2026-W01"), dt.date(2025, 12, 29))
 
+    def test_week_window_is_monday_to_sunday(self):
+        """周界的唯一算法（票据 08 的导出周窗口也取它）：周一与周日两个北京日期。"""
+        self.assertEqual(weekly_plan.week_window("2026-W39"),
+                         (dt.date(2026, 9, 21), dt.date(2026, 9, 27)))
+        self.assertEqual(weekly_plan.week_window("2026-W01"),
+                         (dt.date(2025, 12, 29), dt.date(2026, 1, 4)))
+
     def test_bad_week_label_is_rejected(self):
         for bad in ("2026W39", "2026-W3", "", "2026-W99"):
             with self.assertRaises(weekly_plan.PlanError, msg=bad):

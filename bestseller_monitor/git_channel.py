@@ -47,6 +47,11 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _run_bytes(*args: str) -> subprocess.CompletedProcess[bytes]:
+    """同一个 git 通道，但拿字节（`git show HEAD:<路径>` 读包这类二进制内容）。"""
+    return subprocess.run(["git", *args], capture_output=True, env=_git_env())
+
+
 def _failure(what: str, args: tuple[str, ...], done: subprocess.CompletedProcess[str]) -> ChannelError:
     detail = done.stderr.strip() or done.stdout.strip() or "（git 没有输出）"
     return ChannelError(f"{what}失败（git {' '.join(args)}）：\n{detail}")
@@ -127,6 +132,16 @@ class GitChannel:
         if done.returncode != 0:
             raise _failure("读取提交", args, done)
         return done.stdout.strip()
+
+    def read_path(self, path: str) -> bytes | None:
+        """HEAD 里这个仓库相对路径的字节；HEAD 里没有它（新库/新文件）时回 None。
+
+        问「远端那份是什么」用这一条（比如导出判「已发布的那份同不同内容」）——
+        工作区可能留着崩溃残迹，不能当事实。
+        """
+        args = ("-C", str(self.path), "show", f"HEAD:{pathlib.PurePosixPath(path)}")
+        done = _run_bytes(*args)
+        return done.stdout if done.returncode == 0 else None
 
     def reset_to_upstream(self, *, clean: bool = False) -> None:
         """把分支与工作区退回远端状态：未推送出去的提交与改动都会被撤掉。

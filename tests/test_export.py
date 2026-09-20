@@ -23,7 +23,7 @@ from bestseller_monitor import db as dbmod
 from bestseller_monitor import export
 from bestseller_monitor.db import CST, cst_date
 from bestseller_monitor.image_store import ImageStoreError
-from bestseller_monitor.weekly_plan import iso_week_label
+from bestseller_monitor.weekly_plan import PlanError, iso_week_label
 from tests.git_repos import GitSandbox
 from helpers import crawler_cfg, isolated_locks
 
@@ -409,6 +409,29 @@ class ExportRunTests(unittest.TestCase):
         self.assertEqual(result.images.uploaded, 1, "别人的 key 不顶替本包要传的")
         self.assertEqual(result.images.skipped, 0)
 
+    def test_a_leftover_package_from_a_crash_does_not_masquerade_as_published(self):
+        """崩溃在「写完包、还没提交」留下的未跟踪残迹，不能骗过发布判定——
+        判定比的是 HEAD 里那份（远端的事实），不是工作区里躺着什么。"""
+        self.box.commit_push(self.exchange / "raw-m1", {"README.md": "seed\n"},
+                             message="seed")
+        first = self.export("2026-W38")
+        clone = self.exchange / "raw-m1"
+        package = clone / "data" / "2026" / "W38-m1.db.gz"
+        built_bytes = package.read_bytes()
+        self.box.must("reset", "--hard", "HEAD~1", cwd=clone)
+        self.box.must("push", "--force", "origin", "main", cwd=clone)  # 远端退回种子那笔
+        package.parent.mkdir(parents=True, exist_ok=True)
+        package.write_bytes(built_bytes)          # 未跟踪的「残迹」，内容恰与新包一致
+
+        result = self.export("2026-W38")
+
+        self.assertTrue(result.published, result.failure)
+        self.assertFalse(result.unchanged, "工作区里的残迹不当作「已发布」")
+        self.assertNotEqual(result.commit, first.commit)
+        check = self.box.clone(self.remote, "after-crash")
+        self.assertTrue((check / "data" / "2026" / "W38-m1.db.gz").exists(),
+                        "包要真的进远端，而不是被当成已发布跳过")
+
     def test_a_failing_image_upload_is_reported_but_does_not_unpublish(self):
         class Exploding(FakeImageStore):
             def upload(self, key: str, data: bytes) -> None:
@@ -427,7 +450,8 @@ class ExportRunTests(unittest.TestCase):
         self.conn.commit()
         key2 = f"img/cd/{H2}.png"
 
-        result = export.upload_new_images(self.source, [(key2, H2)], self.store)
+        result = export.upload_new_images(self.source, (export.ImageRef(key2, H2),),
+                                          self.store)
 
         self.assertEqual(result.missing, (key2,))
         self.assertEqual(result.uploaded, 0)
@@ -493,6 +517,22 @@ class ExportRunTests(unittest.TestCase):
         result = export.export(self.cfg, store=self.store)
 
         self.assertEqual(result.week, iso_week_label(today))
+
+
+class WeekLabelTests(unittest.TestCase):
+    """周编号 → 窗口/包名：周界的算法在 weekly_plan 一处，布局在 spec §2 一处。"""
+
+    def test_package_path_carries_the_year_of_the_week_label(self):
+        # 2026-W01 的周一落在 2025 年，仍归 2026（与计划文件命名同一口径）
+        self.assertEqual(export.package_rel_path("2026-W01", "m1"),
+                         "data/2026/W01-m1.db.gz")
+        self.assertEqual(export.week_window("2026-W37"), ("2026-09-07", "2026-09-13"))
+
+    def test_an_illegal_week_is_rejected_loudly(self):
+        with self.assertRaises(PlanError) as ctx:
+            export.package_rel_path("2026-W99", "m1")
+
+        self.assertIn("2026-W99", str(ctx.exception))
 
 
 if __name__ == "__main__":

@@ -37,17 +37,17 @@ class ImageKeyTests(unittest.TestCase):
 
 class ParseListingTests(unittest.TestCase):
     def test_keys_come_out_of_coscli_output(self):
-        keys = parse_listing(LISTING, prefix="img/")
+        keys = parse_listing(LISTING)
 
         self.assertEqual(keys, {f"img/ab/{H1}.jpg", f"img/cd/{H2}.png"})
 
     def test_lines_without_a_cos_url_are_ignored(self):
-        self.assertEqual(parse_listing("Total 0 objects\n\n", prefix="img/"), set())
+        self.assertEqual(parse_listing("Total 0 objects\n\n"), set())
 
-    def test_keys_outside_the_prefix_are_not_ours(self):
+    def test_keys_outside_the_image_prefix_are_not_ours(self):
         text = f"cos://bucket/other/{H1}.jpg   1   2026-09-20 19:41:00 +0800 CST\n"
 
-        self.assertEqual(parse_listing(text, prefix="img/"), set())
+        self.assertEqual(parse_listing(text), set())
 
 
 class CosCliTests(unittest.TestCase):

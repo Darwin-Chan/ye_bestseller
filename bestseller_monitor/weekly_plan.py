@@ -65,10 +65,18 @@ def iso_week_label(day: dt.date) -> str:
     return f"{iso.year}-W{iso.week:02d}"
 
 
+def week_window(week: str) -> tuple[dt.date, dt.date]:
+    """ISO 周编号（如 2026-W39）对应的周一与周日（北京日期）。
+
+    周界的唯一算法：`.md` 抬头（`week_span`）与导出的周窗口（票据 08）都从这里取。
+    """
+    monday = week_monday(week)
+    return monday, monday + dt.timedelta(days=6)
+
+
 def week_span(week: str) -> str:
     """周编号的日期范围文本（如 9/21–9/27），供 .md 抬头用。"""
-    monday = week_monday(week)
-    sunday = monday + dt.timedelta(days=6)
+    monday, sunday = week_window(week)
     return f"{monday.month}/{monday.day}–{sunday.month}/{sunday.day}"
 
 

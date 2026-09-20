@@ -20,8 +20,9 @@ python -m playwright install chromium
   `config/analysis.example.toml` 为 `config/analysis.toml`（分析配置）：
   **真配置含机器专属值（路径、端口、机器编号），每台机器自建、不进代码仓**；
   仓库只追踪含全部键与占位说明的示例。采集配置的 `[machine]` 一节声明本机编号
-  `machine_id`、角色（`collector` 采集机 / `merge_only` 纯汇总机）、交换区根目录与
-  git / COS 的凭据档位（只记档位，密钥在仓库外）；缺 `machine_id` 或角色写错时启动报错点名。
+  `machine_id`、角色（`collector` 采集机 / `merge_only` 纯汇总机）、交换区根目录、
+  图片桶名 `cos_bucket` 与 git / COS 的凭据档位（只记桶名与档位，密钥在仓库外）；
+  缺 `machine_id` 或角色写错时启动报错点名。
 - 编辑 `config/config.toml` 调整页数上限、延迟、上限与路径（全部延迟走配置）。
 
 ## 运行

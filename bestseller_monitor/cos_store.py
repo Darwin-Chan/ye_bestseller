@@ -6,7 +6,8 @@
   本模块的命令行里只有桶名与 key，没有密钥。
 
 coscli 是外部二进制，它的输出格式是对外契约；解析只在这一处（`parse_listing`），
-认不出来的行当「不是 key」（宁可多传一张，不猜）。
+认不出来的行当「不是 key」（宁可多传一张，不猜）。前缀口径与 key 的推法共用
+`image_store.IMAGE_PREFIX`——分开写迟早分家。
 """
 from __future__ import annotations
 
@@ -14,17 +15,17 @@ import pathlib
 import subprocess
 import tempfile
 
-from bestseller_monitor.image_store import ImageStoreError
+from bestseller_monitor.image_store import IMAGE_PREFIX, ImageStoreError
 
-_LIST_TIMEOUT_SEC = 300
-_CP_TIMEOUT_SEC = 300
+COSCLI = "coscli"
+_TIMEOUT_SEC = 300
 
 
-def parse_listing(stdout: str, *, prefix: str) -> set[str]:
+def parse_listing(stdout: str) -> set[str]:
     """从 `coscli ls` 的输出里取 key 集：认带 `cos://` 的行，取桶名之后的那段。
 
     形如 `cos://<桶>/img/ab/….jpg   12345   2026-09-20 19:41:00 +0800 CST` 一行一条；
-    汇总行、报错行这类不含 `cos://` 的行直接跳过。
+    汇总行、报错行这类不含 `cos://` 的行直接跳过；前缀不是 `img/` 的（别的用途的对象）不算。
     """
     keys: set[str] = set()
     for line in stdout.splitlines():
@@ -33,7 +34,7 @@ def parse_listing(stdout: str, *, prefix: str) -> set[str]:
             continue
         url = line[marker:].split(maxsplit=1)[0]
         key = url[len("cos://"):].partition("/")[2]
-        if key.startswith(prefix):
+        if key.startswith(IMAGE_PREFIX):
             keys.add(key)
     return keys
 
@@ -41,30 +42,28 @@ def parse_listing(stdout: str, *, prefix: str) -> set[str]:
 class CosCliImageStore:
     """coscli 驱动的图片库（spec §3 的私有桶）。"""
 
-    def __init__(self, bucket: str, *, coscli: str = "coscli", prefix: str = "img/"):
+    def __init__(self, bucket: str):
         self.bucket = bucket
-        self.coscli = coscli
-        self.prefix = prefix
 
     def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
         try:
             done = subprocess.run(
-                [self.coscli, *args], capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=_LIST_TIMEOUT_SEC)
+                [COSCLI, *args], capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=_TIMEOUT_SEC)
         except FileNotFoundError as exc:
             raise ImageStoreError(
-                f"找不到 {self.coscli}：按上机清单第 10 步装好 coscli 并配好本机 AK"
-                f"（只限桶内 {self.prefix}* 前缀）。") from exc
+                f"找不到 {COSCLI}：按上机清单第 10 步装好 coscli 并配好本机 AK"
+                f"（只限桶内 {IMAGE_PREFIX}* 前缀）。") from exc
         except subprocess.TimeoutExpired as exc:
-            raise ImageStoreError(f"{self.coscli} {args[0]} 超时（{exc.timeout} 秒）") from exc
+            raise ImageStoreError(f"{COSCLI} {args[0]} 超时（{exc.timeout} 秒）") from exc
         if done.returncode != 0:
             detail = done.stderr.strip() or done.stdout.strip() or "（coscli 没有输出）"
-            raise ImageStoreError(f"{self.coscli} {args[0]} 失败：\n{detail}")
+            raise ImageStoreError(f"{COSCLI} {args[0]} 失败：\n{detail}")
         return done
 
     def existing_keys(self) -> set[str]:
-        done = self._run("ls", "-r", f"cos://{self.bucket}/{self.prefix}")
-        return parse_listing(done.stdout, prefix=self.prefix)
+        done = self._run("ls", "-r", f"cos://{self.bucket}/{IMAGE_PREFIX}")
+        return parse_listing(done.stdout)
 
     def upload(self, key: str, data: bytes) -> None:
         with tempfile.TemporaryDirectory(prefix="bestseller-image-") as tmp:
