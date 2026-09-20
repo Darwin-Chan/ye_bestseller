@@ -106,6 +106,14 @@ class AnalysisBrowserTests(unittest.TestCase):
         self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM product_image_assets').fetchone()[0], 2)
         self.submit('2026-09-17', 60, image_url=url, image_evidence={'content': b'\x89PNG\r\n\x1a\ninvalid'})
         self.assertIsNone(self.service.start('2026-09-07', '2026-09-17')['products'][0]['image_data'])
+        failed_id = self.conn.execute('SELECT MAX(id) FROM product_information_versions').fetchone()[0]
+        inventories = [tuple(r) for r in self.conn.execute('SELECT * FROM inventory')]
+        with patch('bestseller_monitor.product_images.urlopen', return_value=io.BytesIO(png(b'\0\xff\0'))), patch('bestseller_monitor.db.utcnow', return_value='2026-09-18T04:00:00+00:00'):
+            retried = self.db.retry_product_image(failed_id)
+        self.assertIsNone(retried['image_error'])
+        self.assertEqual(inventories, [tuple(r) for r in self.conn.execute('SELECT * FROM inventory')])
+        self.assertIsNone(self.service.start('2026-09-07', '2026-09-17')['products'][0]['image_data'])
+        self.assertEqual(self.service.start('2026-09-07', '2026-09-18')['products'][0]['image_hash'], new['image_hash'])
         with patch('bestseller_monitor.product_images.urlopen', side_effect=AssertionError('opening must not fetch')):
             for _ in range(2):
                 reopened = connect(self.path)
@@ -115,6 +123,7 @@ class AnalysisBrowserTests(unittest.TestCase):
     def test_legacy_inventory_never_borrows_current_image(self):
         self.conn.execute('DELETE FROM product_information_versions')
         self.conn.execute("UPDATE products SET main_image_url='https://images.example/current.png'")
+        self.conn.execute("UPDATE products SET product_url=''")
         self.conn.commit()
         product = self.service.start('2026-09-07', '2026-09-14')['products'][0]
         self.assertIsNone(product['image_data'])
@@ -123,6 +132,22 @@ class AnalysisBrowserTests(unittest.TestCase):
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
         expect(self.page.get_by_text('历史图片缺失', exact=True)).to_be_visible()
         expect(self.page.get_by_role('button', name='放大商品图片')).to_have_count(0)
+        expect(self.page.get_by_role('link', name='商品源地址')).to_have_count(0)
+        self.conn.execute("UPDATE products SET product_url='https://detail.1688.com/offer/11.html'")
+        self.conn.commit()
+        self.page.reload()
+        expect(self.page.get_by_role('link', name='商品源地址')).to_have_attribute('href', 'https://detail.1688.com/offer/11.html')
+
+    def test_truncated_jpeg_is_missing_evidence_not_failed_inventory(self):
+        import io
+        from PIL import Image
+        content = io.BytesIO()
+        Image.new('RGB', (12, 12), 'red').save(content, format='JPEG')
+        self.submit('2026-09-14', 42, image_evidence={'content': content.getvalue()[:-2]})
+        product = self.service.start('2026-09-07', '2026-09-14')['products'][0]
+        self.assertEqual(product['points'][-1]['stock'], 42)
+        self.assertIsNone(product['image_data'])
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM product_image_assets').fetchone()[0], 0)
 
     def dates(self):
         self.page.get_by_label("开始日期", exact=True).fill("2026-09-07")

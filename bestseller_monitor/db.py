@@ -1265,6 +1265,36 @@ class Database:
             (shop_key, offer_id, day, DEFAULT_SKU_ID),
         )
 
+    def retry_product_image(self, version_id: int) -> dict:
+        """Retry a failed latest observation without bypassing inventory deduplication.
+
+        Acquired content is new evidence dated now, never backdated over the failure.
+        """
+        from .product_images import acquire
+        version = self.conn.execute('SELECT * FROM product_information_versions WHERE id=?', (version_id,)).fetchone()
+        if version is None or not version['image_error']:
+            raise ValueError('只能重试失败的图片版本')
+        image = acquire(version['image_url'])
+        try:
+            self.conn.execute('BEGIN IMMEDIATE')
+            latest = self.conn.execute('SELECT id FROM product_information_versions WHERE shop_key=? AND offer_id=? ORDER BY observed_date DESC, observed_at DESC,id DESC LIMIT 1',
+                                       (version['shop_key'], version['offer_id'])).fetchone()
+            if latest['id'] != version_id:
+                raise ValueError('已有更新商品版本，请重试最新失败版本')
+            if 'content' in image:
+                self.conn.execute('INSERT OR IGNORE INTO product_image_assets VALUES (?,?,?)',
+                                  (image['hash'], image['mime'], image['content']))
+            now = utcnow()
+            cursor = self.conn.execute('INSERT INTO product_information_versions '
+                '(shop_key,offer_id,observed_at,observed_date,product_name,image_url,content_hash,image_error) VALUES (?,?,?,?,?,?,?,?)',
+                (version['shop_key'], version['offer_id'], now, cst_date(now), version['product_name'],
+                 version['image_url'], image.get('hash'), image.get('error')))
+            self.conn.commit()
+            return {'retried_version': version_id, 'new_version': cursor.lastrowid, 'image_error': image.get('error')}
+        except Exception:
+            self.conn.rollback()
+            raise
+
     def _upsert_skus(self, rows: list[dict]) -> None:
         now = utcnow()
         sku_rows = [

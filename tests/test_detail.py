@@ -88,15 +88,28 @@ class DetailTestCase(unittest.TestCase):
 
 
 class ImageEvidenceTests(DetailTestCase):
+    def test_broken_image_transport_does_not_block_inventory(self):
+        from http.client import IncompleteRead
+        observation = self.payload()
+        observation.payload['main_image_url'] = 'https://image.example/item.png'
+        with patch('bestseller_monitor.product_images.urlopen', side_effect=IncompleteRead(b'partial')):
+            result = self.capture(self.target(), self.observe(observation))
+        self.assertEqual(result.outcome, detail.Outcome.SUBMITTED)
+        version = self.rows('SELECT * FROM product_information_versions')[0]
+        self.assertIsNone(version['content_hash'])
+        self.assertIn('IncompleteRead', version['image_error'])
+        self.assertEqual(len(self.snapshots('成功')), 1)
+
     def test_shared_capture_retries_image_and_persists_asset(self):
         import io
+        from http.client import IncompleteRead
         from PIL import Image
         stream = io.BytesIO()
         Image.new('RGB', (1, 1), 'red').save(stream, format='PNG')
         observation = self.payload()
         observation.payload['main_image_url'] = 'https://image.example/item.png'
         with patch('bestseller_monitor.product_images.urlopen',
-                   side_effect=[OSError('temporary'), io.BytesIO(stream.getvalue())]) as fetch:
+                   side_effect=[IncompleteRead(b'partial'), io.BytesIO(stream.getvalue())]) as fetch:
             result = self.capture(self.target(), self.observe(observation))
         self.assertEqual(result.outcome, detail.Outcome.SUBMITTED)
         self.assertEqual(fetch.call_count, 2)

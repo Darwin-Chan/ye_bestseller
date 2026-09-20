@@ -99,7 +99,7 @@ function showProductImage(button) {
     $('imageViewer').showModal();
 }
 function sourceIcon(p) {
-    return /^https?:\/\//i.test(p.product_url||'')?`<a aria-label="商品源地址" title="商品源地址" href="${esc(p.product_url)}" target="_blank" rel="noopener noreferrer" onclick="openCurrentSource(event,'${esc(p.offer_id)}')">↗</a>`:'<span aria-disabled="true" title="暂无商品源地址" style="color:#aaa">↗</span>';
+    return /^https?:\/\//i.test(p.product_url||'')?`<a data-source-offer="${esc(p.offer_id)}" aria-label="商品源地址" title="商品源地址" href="${esc(p.product_url)}" target="_blank" rel="noopener noreferrer" data-offer="${esc(p.offer_id)}" onclick="openCurrentSource(event,this.dataset.offer)">↗</a>`:`<span data-source-offer="${esc(p.offer_id)}" aria-disabled="true" title="暂无商品源地址" style="color:#aaa">↗</span>`;
 }
 async function openCurrentSource(event, offer) {
     event.preventDefault(); event.stopPropagation();
@@ -111,6 +111,14 @@ async function openCurrentSource(event, offer) {
         if(tab)tab.location=data.url;
     } catch(e) {if(tab)tab.close();error(e);}
 }
+async function refreshSourceLinks() {
+    await Promise.allSettled([...document.querySelectorAll('[data-source-offer]')].map(async node=>{
+        const offer=node.dataset.sourceOffer;
+        const current=await api('/api/source?offer='+encodeURIComponent(offer));
+        if(node.isConnected)node.outerHTML=sourceIcon({offer_id:offer,product_url:current.url});
+    }));
+}
+window.addEventListener('focus', refreshSourceLinks);
 function renderProducts() {
     const snapshot=currentSnapshot, offset=productPage*20;
     $('products').innerHTML=snapshot.products.slice(offset,offset+20).map((p,i)=>{
@@ -127,6 +135,7 @@ function renderProducts() {
     $('next').disabled=productPage+1>=pages;
     $('results').hidden=!snapshot.groups.length || !snapshot.groups.every(group=>group.confirmed);
     if (!$('results').hidden) renderRanking();
+    refreshSourceLinks();
 }
 async function confirmGroup(group) {
     const snapshot=await api('/api/analysis',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:currentSnapshot.id,group})});
