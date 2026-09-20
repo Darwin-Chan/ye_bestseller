@@ -10,8 +10,8 @@
 - 通道不可达 / 推不动 → **不拦开轮**：用本机现值继续，把原因作为告警交出去
 
 「内容」按文本口径算：解码（UTF-8 BOM 优先、退 GBK，与 `load_shops` 同一读法，
-见 `config.decode_shops_bytes`）、行尾归一、去尾部空行——Excel 双击存一次带来的
-BOM/CRLF 差异不算真实修改。
+见 `config.decode_shops_bytes`）、行尾归一、去尾部空行（`canonical_text`）——Excel
+双击存一次带来的 BOM/CRLF 差异不算真实修改。
 
 两台机器在同一次推送窗口里改了同一行时，rebase 会撞车：当轮回 `PUSH_FAILED` 告警
 （本机现值不动），克隆清干净，下一轮就会以「两边都变」的形式把差异摆出来。
@@ -25,10 +25,10 @@ import dataclasses
 import datetime as dt
 import difflib
 import enum
-import hashlib
 import json
 import pathlib
 
+from bestseller_monitor.canonical_text import normalized_text, text_digest
 from bestseller_monitor.config import decode_shops_bytes
 from bestseller_monitor.db import CST
 from bestseller_monitor.git_channel import ChannelError, GitChannel
@@ -70,17 +70,9 @@ class SyncResult:
     diff: str | None = None
 
 
-def _normalized(text: str) -> str:
-    return text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
-
-
-def _digest(text: str) -> str:
-    return hashlib.sha256(_normalized(text).encode("utf-8")).hexdigest()
-
-
 def _canonical_bytes(text: str) -> bytes:
     """店铺清单的磁盘形态：UTF-8 带 BOM、LF 行尾、末尾一个换行。"""
-    return _BOM + (_normalized(text) + "\n").encode("utf-8")
+    return _BOM + (normalized_text(text) + "\n").encode("utf-8")
 
 
 def _read_text(path: pathlib.Path) -> str | None:
@@ -100,8 +92,8 @@ def _write_local_copy(local_csv: pathlib.Path, data: bytes) -> str | None:
 def _diff(local_csv: pathlib.Path, local_text: str,
           shared_csv: pathlib.Path, repo_text: str) -> str:
     lines = difflib.unified_diff(
-        _normalized(local_text).splitlines(),
-        _normalized(repo_text).splitlines(),
+        normalized_text(local_text).splitlines(),
+        normalized_text(repo_text).splitlines(),
         fromfile=f"本机 {local_csv}", tofile=f"计划库 {shared_csv}", lineterm="")
     return "\n".join(lines)
 
@@ -161,7 +153,7 @@ def _push(channel: GitChannel, shared_csv: pathlib.Path, local_csv: pathlib.Path
                           f"这次用本机现值开轮；通道修好后下次开程序会再试。{tail}",
                           warning=True)
     note = _write_local_copy(local_csv, _canonical_bytes(local_text))
-    _write_baseline(state_path, _digest(local_text), SyncAction.PUSHED)
+    _write_baseline(state_path, text_digest(local_text), SyncAction.PUSHED)
     tail = f"（本机副本没能写成同一形态：{note}）" if note else ""
     return SyncResult(SyncAction.PUSHED,
                       f"共享店铺清单已推送：本机改动写进计划库 {shared_csv}"
@@ -214,14 +206,14 @@ def sync_shared_shops(local_csv: str | pathlib.Path, plan_clone: str | pathlib.P
         note = _write_local_copy(local_csv, _canonical_bytes(repo_text))
         if note:
             return _pull_failed("计划库那份没能落到本机", note)
-        _write_baseline(state_path, _digest(repo_text), SyncAction.PULLED)
+        _write_baseline(state_path, text_digest(repo_text), SyncAction.PULLED)
         return SyncResult(SyncAction.PULLED,
                           f"本机还没有店铺清单：已从计划库拉到 {local_csv}。")
 
     if repo_text is None:                        # 第一台机器：本机清单成为共享清单
         return _push(channel, shared_csv, local_csv, local_text, state_path)
 
-    local_digest, repo_digest = _digest(local_text), _digest(repo_text)
+    local_digest, repo_digest = text_digest(local_text), text_digest(repo_text)
     if local_digest == repo_digest:
         _write_baseline(state_path, local_digest, SyncAction.IN_SYNC)
         return SyncResult(SyncAction.IN_SYNC,

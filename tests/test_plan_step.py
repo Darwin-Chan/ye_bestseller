@@ -22,9 +22,9 @@ import tempfile
 import unittest
 
 from bestseller_monitor import db as dbm
-from bestseller_monitor import plan_step
+from bestseller_monitor import plan_step, shops_sync
 from bestseller_monitor.config import ROLE_MERGE_ONLY
-from bestseller_monitor.db import Database
+from bestseller_monitor.db import Database, WeeklyPlanRow
 from tests.git_repos import GitSandbox
 from tests.helpers import crawler_cfg
 
@@ -183,7 +183,8 @@ class WeeklyPlanTableTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         self.database = Database(dbm.connect(self.dir / "crawler.db"))
         self.addCleanup(self.database.conn.close)
-        self.rows = [("A01", "店一", "m1", 23), ("A02", "店二", "m2", 8)]
+        self.rows = [WeeklyPlanRow("A01", "店一", "m1", 23),
+                     WeeklyPlanRow("A02", "店二", "m2", 8)]
 
     def store(self, rows=None, *, source: str = "generated", sha: str = "ab" * 32,
               stored_at: str = NOW) -> bool:
@@ -216,7 +217,7 @@ class WeeklyPlanTableTests(unittest.TestCase):
     def test_changed_plan_replaces_the_whole_week(self):
         self.store()
 
-        self.assertTrue(self.store(rows=[("A02", "店二", "m1", 30)],
+        self.assertTrue(self.store(rows=[WeeklyPlanRow("A02", "店二", "m1", 30)],
                                    source="pulled", sha="cd" * 32, stored_at=NEXT_RUN))
 
         self.assertEqual(self.read(), [
@@ -533,7 +534,7 @@ class RoleAndIdleTests(PrepWorldTestCase):
 
 
 class HealTests(PrepWorldTestCase):
-    def test_debris_from_a_crashed_publish_is_reset_and_cleaned(self):
+    def test_debris_from_a_crashed_publish_is_preserved_aside_then_reset(self):
         self.seed_repo()
         m1 = self.machine("m1")
         debris = m1.clone / "plan" / f"{WEEK}.json"
@@ -544,6 +545,10 @@ class HealTests(PrepWorldTestCase):
 
         self.assertEqual(result.status, plan_step.PrepStatus.READY)
         self.assertTrue(any("残迹" in w for w in result.warnings))
+        sidecars = sorted(m1.cfg.exchange_root.glob("plan-残迹-*"))
+        self.assertEqual(len(sidecars), 1, "收拾之前先旁路留存一整棵")
+        self.assertEqual((sidecars[0] / "plan" / f"{WEEK}.json").read_text(encoding="utf-8"),
+                         "{ 半截的 JSON", "残迹内容留得住")
         clone = self.fresh_clone()
         document = json.loads((clone / "plan" / f"{WEEK}.json").read_text(encoding="utf-8"))
         self.assertEqual(document["generated_by"], "m1", "发布的是新生成的计划，不是残迹")
@@ -575,22 +580,22 @@ class GapScanTests(unittest.TestCase):
         return plan_step.scan_exchange_gaps(self.exchange, self.conn, WEEK)
 
     def test_missing_pairs_are_reported_with_the_machines_that_have_them(self):
-        self.package("m2", "39-m2.db.gz", [("A01", MONDAY), ("A02", "2026-09-22")])
-        self.package("m3", "39-m3.db.gz", [("A02", "2026-09-22")])
+        self.package("m2", "W39-m2.db.gz", [("A01", MONDAY), ("A02", "2026-09-22")])
+        self.package("m3", "W39-m3.db.gz", [("A02", "2026-09-22")])
         self.local_rows([("A01", MONDAY)])
 
         scan = self.scan()
 
         self.assertEqual(scan.missing,
                          (plan_step.GapEntry("A02", "2026-09-22", ("m2", "m3")),))
-        self.assertEqual(scan.packages, ("raw-m2/data/2026/39-m2.db.gz",
-                                         "raw-m3/data/2026/39-m3.db.gz"))
+        self.assertEqual(scan.packages, ("raw-m2/data/2026/W39-m2.db.gz",
+                                         "raw-m3/data/2026/W39-m3.db.gz"))
         self.assertIn("A02 2026-09-22", scan.warning_message)
         self.assertIn("m2、m3", scan.warning_message)
         self.assertIn("只告警", scan.warning_message)
 
     def test_a_covered_pair_is_not_a_gap(self):
-        self.package("m2", "39-m2.db.gz", [("A01", MONDAY)])
+        self.package("m2", "W39-m2.db.gz", [("A01", MONDAY)])
         self.local_rows([("A01", MONDAY)])
 
         scan = self.scan()
@@ -598,37 +603,47 @@ class GapScanTests(unittest.TestCase):
         self.assertEqual(scan.missing, ())
         self.assertIsNone(scan.warning_message, "没有缺口就什么都不说")
 
-    def test_packages_of_other_weeks_are_not_read(self):
-        self.package("m2", "38-m2.db.gz", [("A01", "2026-09-14")])
-        self.package("m2", "2026-W39-m2.db.gz", [("A01", "2026-09-30")])
+    def test_other_weeks_are_not_read_and_out_of_range_dates_do_not_count(self):
+        self.package("m2", "W38-m2.db.gz", [("A01", "2026-09-14")])
+        self.package("m2", "39-m2.db.gz", [("A01", "2026-09-30")])
 
         scan = self.scan()
 
-        self.assertEqual(scan.packages, ("raw-m2/data/2026/2026-W39-m2.db.gz",),
-                         "上周的包不读；带年份写法的本周包照读")
+        self.assertEqual(scan.packages, ("raw-m2/data/2026/39-m2.db.gz",),
+                         "上周的包不读；spec 字面的裸周号写法也认")
         self.assertEqual(scan.missing, (), "周范围外的日期不算缺口")
 
     def test_an_unreadable_package_is_skipped_with_a_note(self):
-        path = self.package("m2", "39-m2.db.gz", [("A01", MONDAY)])
+        path = self.package("m2", "W39-m2.db.gz", [("A01", MONDAY)])
         path.write_bytes(b"not a gzip at all")
 
         scan = self.scan()
 
         self.assertEqual(scan.packages, ())
         self.assertEqual(scan.missing, ())
-        self.assertTrue(any("39-m2.db.gz" in note for note in scan.notes))
+        self.assertTrue(any("W39-m2.db.gz" in note for note in scan.notes))
 
     def test_no_packages_means_no_gaps_and_no_warning(self):
         scan = self.scan()
 
         self.assertEqual(scan, plan_step.GapScan(week=WEEK, packages=(), missing=(), notes=()))
 
+    def test_the_year_boundary_week_reads_the_iso_year_directory(self):
+        # 2026-W01 的周一落在 2025-12-29：目录按周编号里的 ISO 年（data/2026/），与导出口径一致
+        self.package("m2", "W01-m2.db.gz", [("A01", "2025-12-29")])
+
+        scan = plan_step.scan_exchange_gaps(self.exchange, self.conn, "2026-W01")
+
+        self.assertEqual(scan.packages, ("raw-m2/data/2026/W01-m2.db.gz",))
+        self.assertEqual(scan.missing,
+                         (plan_step.GapEntry("A01", "2025-12-29", ("m2",)),))
+
 
 class PrepareGapWarningTests(PrepWorldTestCase):
     def test_gaps_warn_but_do_not_block_starting(self):
         self.seed_repo()
         m1 = self.machine("m1")
-        write_package(m1.cfg.exchange_root / "raw-m2" / "data" / "2026" / "39-m2.db.gz",
+        write_package(m1.cfg.exchange_root / "raw-m2" / "data" / "2026" / "W39-m2.db.gz",
                       [("A01", MONDAY)])
 
         result = m1.prepare()
@@ -638,6 +653,40 @@ class PrepareGapWarningTests(PrepWorldTestCase):
         self.assertEqual(result.gaps.missing,
                          (plan_step.GapEntry("A01", MONDAY, ("m2",)),))
         self.assertTrue(any("缺口检查" in w for w in result.warnings))
+
+
+class ShopsSyncToleranceTests(PrepWorldTestCase):
+    """降级矩阵的「清单同步」一行：推不动 / 两边都变，都不拦计划确认与开轮。"""
+
+    def test_a_shops_push_failure_does_not_block_confirming_the_plan(self):
+        self.seed_repo()
+        m1 = self.machine("m1")
+        m1.prepare()                              # 第一次：确认（生成）发布并建立同步基线
+        m1.cfg.shop_csv.write_text(SHOPS_CSV + "A03,店三,https://a03.example/,5,1\n",
+                                   encoding="utf-8")     # 只本机变 → 方向是推
+        self.box.install_declining_hook(m1.clone, self.box.tmp / "hook-runs")
+
+        result = m1.prepare(now=NEXT_RUN)
+
+        self.assertEqual(result.shops_sync.action, shops_sync.SyncAction.PUSH_FAILED)
+        self.assertEqual(result.status, plan_step.PrepStatus.READY, "推不动不拦计划确认")
+        self.assertTrue(any("推送没成功" in w for w in result.warnings))
+        self.assertIn("A03", m1.cfg.shop_csv.read_text(encoding="utf-8"), "改动留着，下次再推")
+
+    def test_a_shops_conflict_stops_the_sync_but_not_the_plan(self):
+        self.seed_repo()
+        m1 = self.machine("m1")
+        m1.prepare()
+        m1.cfg.shop_csv.write_text(SHOPS_CSV.replace("23", "30"), encoding="utf-8")
+        self.edit_remote({"shops.csv": SHOPS_CSV.replace(",8,1", ",9,1").encode("utf-8")},
+                         message="另一台机器改共享清单")
+
+        result = m1.prepare(now=NEXT_RUN)
+
+        self.assertEqual(result.shops_sync.action, shops_sync.SyncAction.CONFLICT)
+        self.assertEqual(result.status, plan_step.PrepStatus.READY,
+                         "两边都变只停下清单同步，不拦计划确认")
+        self.assertTrue(any("两边都变" in w for w in result.warnings))
 
 
 if __name__ == "__main__":

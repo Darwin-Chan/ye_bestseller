@@ -763,6 +763,16 @@ class RoundTally:
         return ShopTally(shop_key=shop_key)
 
 
+@dataclass(frozen=True)
+class WeeklyPlanRow:
+    """本机计划表的一行：某店在某周归哪台机器、页数预算是多少（见 plan_step）。"""
+
+    shop_key: str
+    shop_name: str
+    machine_id: str
+    pages: int
+
+
 class Database:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
@@ -804,12 +814,11 @@ class Database:
                             stored_at: str) -> bool:
         """把本周计划的整周指派写进本机计划表（每店一行），返回这次是否真的落了库。
 
-        `rows` 是 `(shop_key, shop_name, machine_id, pages)`；整周替换——新一份计划里
-        没有的店不会留下旧行。内容、来源与哈希都和库里那份一致时不动（重跑幂等：
-        连 `stored_at` 也不刷新，它是这份计划落库的时刻，不是重跑的时刻）。
+        `rows` 是 `WeeklyPlanRow` 序列；整周替换——新一份计划里没有的店不会留下旧行。
+        内容、来源与哈希都和库里那份一致时不动（重跑幂等：连 `stored_at` 也不刷新，
+        它是这份计划落库的时刻，不是重跑的时刻）。
         """
-        new_rows = sorted((str(key), name, str(machine), int(pages))
-                          for key, name, machine, pages in rows)
+        new_rows = sorted((r.shop_key, r.shop_name, r.machine_id, r.pages) for r in rows)
         current = self.conn.execute(
             "SELECT shop_key, shop_name, machine_id, pages, source, plan_sha256 "
             "FROM weekly_plan WHERE week=? ORDER BY shop_key", (week,)).fetchall()

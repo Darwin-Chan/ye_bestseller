@@ -35,7 +35,6 @@ import dataclasses
 import datetime as dt
 import enum
 import gzip
-import hashlib
 import json
 import os
 import pathlib
@@ -47,18 +46,20 @@ from collections.abc import Mapping
 from typing import Any
 
 from bestseller_monitor import shops_sync, weekly_plan
+from bestseller_monitor.canonical_text import normalized_text, text_digest
 from bestseller_monitor.config import ROLE_MERGE_ONLY, load_shops
-from bestseller_monitor.db import CST, Database
+from bestseller_monitor.db import CST, Database, WeeklyPlanRow
 from bestseller_monitor.git_channel import ChannelError, GitChannel
 from bestseller_monitor.weekly_plan import PlanError
 
 PLAN_REPO_DIR = "plan"          # 计划库克隆在交换区根下的目录名
 PLAN_DIR = "plan"               # 计划文件在计划库里的目录（plan/<年>-W<周>.json）
 PUBLISHED_DIR = "published"     # 各机各写各的发布记录
-PACKAGE_SUFFIX = ".db.gz"       # raw 库里的周包：data/<年>/<周>-<机器>.db.gz
+PACKAGE_SUFFIX = ".db.gz"       # raw 库里的周包（票据 08 的导出写这种名字，见 _package_week）
 
-# 包文件名里的周号：`38-m1.db.gz` / `2026-W38-m1.db.gz` 都认（年份由 data/<年> 目录钉住）
-_PACKAGE_WEEK = re.compile(r"^(?:\d{4}-)?W?(\d{1,2})[-_].+$")
+# 包文件名里的周号：`W39-m2.db.gz` 为准，spec 字面的裸周号 `39-m2.db.gz` 也认
+# （年份由 data/<年> 目录钉住，机器标识是文件名末尾的后缀）。
+_PACKAGE_WEEK = re.compile(r"^W?(\d{1,2})-")
 # published/<本机>.md 的一行：本机自己写的表格，读回来只为「同周重发布时替换旧行」
 _PUBLISHED_ROW = re.compile(r"^\|\s*(\d{4}-W\d{2})\s*\|\s*(\S+)\s*\|\s*\S+\s*\|\s*(\S*)\s*\|$")
 
@@ -158,15 +159,6 @@ class _PlanOutcome:
     note: str | None = None     # 没拿到时的原因；拿到但过程不顺时的说明
 
 
-def _normalized(text: str) -> str:
-    """文本口径的内容：行尾归一、去尾空行——BOM/CRLF 差异不算另一份计划。"""
-    return text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
-
-
-def _digest(text: str) -> str:
-    return hashlib.sha256(_normalized(text).encode("utf-8")).hexdigest()
-
-
 def _plan_text(path: pathlib.Path) -> str:
     return path.read_bytes().decode("utf-8-sig")
 
@@ -215,11 +207,11 @@ def _read_plan_file(path: pathlib.Path, week: str) -> Mapping[str, Any] | None:
     return _checked_plan(document, week, path)
 
 
-def _plan_rows(document: Mapping[str, Any]) -> list[tuple[str, str, str, int]]:
-    """计划文件 → 本机计划表的整周行：(店铺编号, 名称, 归谁, 页数预算)。"""
+def _plan_rows(document: Mapping[str, Any]) -> list[WeeklyPlanRow]:
+    """计划文件 → 本机计划表的整周行（店铺编号、名称、归谁、页数预算）。"""
     snapshot = {str(s["key"]): s for s in document["shops"]}
-    return [(key, str(snapshot[key].get("name") or ""), str(machine),
-             int(snapshot[key]["pages"]))
+    return [WeeklyPlanRow(str(key), str(snapshot[key].get("name") or ""), str(machine),
+                          int(snapshot[key]["pages"]))
             for key, machine in document["assignments"].items()]
 
 
@@ -313,7 +305,7 @@ def _reread_after_failed_publish(channel: GitChannel, json_path: pathlib.Path,
                             f"发布没成功（{why}），远端也还没有本周计划——"
                             "先修通道（git 凭据/网络），再开程序。")
     # 本机那笔提交已经退回、没了；远端现在这份只可能是别人先发布的
-    return _PlanOutcome(existing, PlanSource.PULLED, _digest(_plan_text(json_path)),
+    return _PlanOutcome(existing, PlanSource.PULLED, text_digest(_plan_text(json_path)),
                         f"发布没成功（{why}）；已退回远端状态并重读已有计划，按它开工。")
 
 
@@ -325,7 +317,7 @@ def _publish(clone: pathlib.Path, machine_id: str, week: str, document: Mapping[
     published_path = clone / PUBLISHED_DIR / f"{machine_id}.md"
     text = weekly_plan.plan_json(document)
     entries = _read_published(published_path)
-    entries[week] = (now.isoformat(timespec="seconds"), _digest(text))
+    entries[week] = (now.isoformat(timespec="seconds"), text_digest(text))
     published_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         json_path.parent.mkdir(parents=True, exist_ok=True)
@@ -340,7 +332,7 @@ def _publish(clone: pathlib.Path, machine_id: str, week: str, document: Mapping[
         channel.push()
     except ChannelError as exc:
         return _reread_after_failed_publish(channel, json_path, week, str(exc))
-    return _PlanOutcome(document, PlanSource.GENERATED, _digest(text))
+    return _PlanOutcome(document, PlanSource.GENERATED, text_digest(text))
 
 
 def _confirm_plan(clone: pathlib.Path, machine_id: str, week: str,
@@ -353,7 +345,7 @@ def _confirm_plan(clone: pathlib.Path, machine_id: str, week: str,
         return _PlanOutcome(None, None, None, f"本周计划在计划库里但读不动，不猜也不覆盖：{exc}")
     if existing is not None:
         return _PlanOutcome(existing, _source_of(existing, machine_id),
-                            _digest(_plan_text(json_path)))
+                            text_digest(_plan_text(json_path)))
     try:
         document, md_text, _history = _generate_documents(clone, machine_id, week, now)
     except PlanError as exc:
@@ -361,31 +353,63 @@ def _confirm_plan(clone: pathlib.Path, machine_id: str, week: str,
     return _publish(clone, machine_id, week, document, md_text, now)
 
 
+def _preserve_debris(clone: pathlib.Path, sidecar: pathlib.Path) -> str | None:
+    """把克隆工作区（除 .git）整棵拷到旁路目录；拷不动就返回原因。
+
+    残迹里可能有人的东西（比如照上机清单在克隆里改了 machines.json 还没提交），
+    所以收拾前先留一份：全拷比逐个挑改动便宜，计划库本来就不大。
+    """
+    try:
+        sidecar.mkdir(parents=True)
+        for item in clone.iterdir():
+            if item.name == ".git":
+                continue
+            if item.is_dir():
+                shutil.copytree(item, sidecar / item.name)
+            else:
+                shutil.copy2(item, sidecar / item.name)
+    except OSError as exc:
+        return str(exc)
+    return None
+
+
 def _heal_dirty_clone(clone: pathlib.Path, warnings: list[str]) -> None:
-    """克隆里有没提交完的残迹时退回远端状态。
+    """克隆里有没提交完的残迹时退回远端状态（收拾前先整棵旁路留存）。
 
     准备串里的 pull 在有未提交改动时直接失败；上一次发布中途崩掉就会留下这种克隆，
     不收拾的话这台机器每次开程序都卡在「拉不动」。克隆只由本机程序写（写进去的都
-    立刻提交、失败就退回），未跟踪的残迹没有值得保留的（`clean=True` 一并清掉）。
+    立刻提交、失败就退回），未跟踪的也是崩在半途的残迹；但残迹里可能有人的东西，
+    所以先复制到旁路目录再退——留存里没有要留的，人自己把那个目录删掉即可。
     """
     if not (clone / ".git").exists():
         return
     channel = GitChannel(clone)
     try:
         changes = channel.local_changes()
-        if not changes:
-            return
-        channel.reset_to_upstream(clean=True)
     except ChannelError as exc:
-        warnings.append(f"计划库克隆里有没提交完的残迹，且没能退回远端状态：{exc}")
+        warnings.append(f"计划库克隆的残迹自检没做成：{exc}")
+        return
+    if not changes:
         return
     shown = "、".join(changes[:5]) + ("…" if len(changes) > 5 else "")
-    warnings.append(f"计划库克隆里有上次没提交完的残迹（可能是发布中途崩过），"
-                    f"已退回远端状态并清掉未跟踪文件：{shown}")
+    sidecar = clone.parent / f"plan-残迹-{dt.datetime.now(CST).strftime('%Y%m%d-%H%M%S')}"
+    note = _preserve_debris(clone, sidecar)
+    if note:
+        warnings.append(f"计划库克隆里有没提交完的残迹（{shown}），没能先整棵存到旁路"
+                        f"（{note}）——这次不动它，先自己看一眼再开程序。")
+        return
+    try:
+        channel.reset_to_upstream(clean=True)
+    except ChannelError as exc:
+        warnings.append(f"计划库克隆里有没提交完的残迹（{shown}），没能退回远端状态：{exc}\n"
+                        f"残迹已整棵存到 {sidecar}。")
+        return
+    warnings.append(f"计划库克隆里有上次没提交完的残迹（可能是发布中途崩过）：{shown}。\n"
+                    f"已整棵复制到 {sidecar} 后退回远端状态；留存里没有要留的就把它删掉。")
 
 
 def _package_week(name: str) -> int | None:
-    """包文件名里的周号（裸周号与 `2026-W38` 都认）；认不出返回 None。"""
+    """包文件名里的周号（`W39-m2.db.gz`，spec 字面的裸周号也认）；认不出返回 None。"""
     if not name.endswith(PACKAGE_SUFFIX):
         return None
     match = _PACKAGE_WEEK.match(name[:-len(PACKAGE_SUFFIX)])
@@ -415,13 +439,16 @@ def scan_exchange_gaps(exchange_root: str | pathlib.Path, local: sqlite3.Connect
                        week: str) -> GapScan:
     """只读交换区，比对本机缺哪些店哪些日：包里有、本机库里没有的，就是本机落后的部分。
 
-    只看本机交换区里**已经有**的包（`raw-<机器>/data/<年>/<周>-<机器>.db.gz`，不拉取），
+    只看本机交换区里**已经有**的包（`raw-<机器>/data/<年>/W<周>-<机器>.db.gz`，不拉取），
     以及本周的整周日期范围；读不动的包记进 `notes` 跳过，不抛错——这个检查只告警。
     """
     monday = weekly_plan.week_monday(week)
     sunday = monday + dt.timedelta(days=6)
-    year_dir = str(monday.year)
-    week_no = monday.isocalendar().week
+    iso = monday.isocalendar()
+    # 年取周编号里的那个 ISO 年：2026-W01 的周一落在 2025-12-29，目录仍是 data/2026/
+    # （与票据 08 的导出口径一致）。
+    year_dir = str(iso.year)
+    week_no = iso.week
 
     packages: list[str] = []
     covered: dict[tuple[str, str], set[str]] = {}
@@ -513,8 +540,8 @@ def prepare_week(cfg, db: Database, *, now: dt.datetime | None = None,
             status = PrepStatus.READY_FROM_CACHE
             source = PlanSource.LOCAL_CACHE
             db.replace_weekly_plan(week,
-                                   [(r["shop_key"], r["shop_name"], r["machine_id"], r["pages"])
-                                    for r in stored],
+                                   [WeeklyPlanRow(r["shop_key"], r["shop_name"],
+                                                  r["machine_id"], r["pages"]) for r in stored],
                                    source=source.value, plan_sha256=stored[0]["plan_sha256"],
                                    stored_at=now.isoformat(timespec="seconds"))
             warnings.append(f"用本地已落库的本周（{week}）计划继续——发布后本周不重算，"
