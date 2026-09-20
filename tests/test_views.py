@@ -5,17 +5,19 @@
 """
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
-from bestseller_monitor import rounds, views
+from bestseller_monitor import rounds, views, weekly_plan
 from bestseller_monitor.config import Shop
-from bestseller_monitor.db import Database, connect
+from bestseller_monitor.db import Database, WeeklyPlanRow, connect
 from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
 from helpers import crawler_cfg, new_round
 
 # 固定时刻：北京时间 2026-09-13 12:00。三个页面的「今天」都由它决定。
 NOW = "2026-09-13T04:00:00+00:00"
 TODAY = "2026-09-13"
+WEEK = weekly_plan.iso_week_label(date.fromisoformat(TODAY))
 
 
 class ViewsTestCase(unittest.TestCase):
@@ -28,6 +30,14 @@ class ViewsTestCase(unittest.TestCase):
         self.cfg = crawler_cfg(max_pages_per_shop=3)
         self.shops = [Shop("A01", "店铺A", "https://A01.example/")]
         self.state = views.UiState()
+
+    def store_plan(self, *assignments, pages=None):
+        """把本周计划落进本机计划表；assignments 是 (shop_key, machine_id)。"""
+        pages = pages or {}
+        self.db.replace_weekly_plan(
+            WEEK, [WeeklyPlanRow(key, f"店铺{key}", machine, pages.get(key, 3))
+                   for key, machine in assignments],
+            source="pulled", plan_sha256="ab" * 32, stored_at=NOW)
 
     def submit(self, round_id, offer_id, *skus, shop_key="A01"):
         """按库存快照提交的口径写一条成功观测（每项是 (sku_name, stock)）。"""
@@ -52,6 +62,7 @@ class StartViewTests(ViewsTestCase):
         round_id = new_round(self.db, "A01", run_date=TODAY)
         self.submit(round_id, "11", ("红", 5), ("蓝", 7))
         self.submit(round_id, "22", ("默认(单规格)", 3))
+        self.store_plan(("A01", "m-test"))
 
         view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
                                 state=self.state, crawler=None, now=NOW)
@@ -62,9 +73,59 @@ class StartViewTests(ViewsTestCase):
         self.assertEqual((shop["key"], shop["name"]), ("A01", "店铺A"))
         self.assertEqual((shop["products"], shop["skus"]), (2, 3))
         self.assertEqual(shop["pages"], 3, "翻页上限沿用配置里的全局默认")
-        self.assertTrue(shop["default_checked"], "今天没采满的店铺默认勾上")
+        self.assertTrue(shop["default_checked"], "计划里归本机的店默认勾上")
         self.assertTrue(view["summary"]["started"])
         self.assertEqual(view["summary"]["rounds"], 1)
+
+    def test_default_checks_match_the_stored_plan(self):
+        """票据 06：开始页默认勾选与计划表一致——勾的是归本机的店，别人那家不勾。"""
+        self.shops = [Shop("A01", "店铺A", "https://A01.example/"),
+                      Shop("A02", "店铺B", "https://A02.example/")]
+        self.store_plan(("A01", "m-test"), ("A02", "m2"))
+
+        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
+                                state=self.state, crawler=None, now=NOW)
+
+        checked = {shop["key"]: shop["default_checked"] for shop in view["shops"]}
+        self.assertEqual(checked, {"A01": True, "A02": False},
+                         "A02 本周计划归 m2：默认不勾，可显式勾上（越权处置见票据 07）")
+
+    def test_pages_default_comes_from_the_plan_snapshot(self):
+        """页数四层的界面侧：默认值吃计划快照（计划说 23 页就显示 23 页）。"""
+        self.shops = [Shop("A01", "店铺A", "https://A01.example/"),
+                      Shop("A02", "店铺B", "https://A02.example/")]
+        self.cfg = crawler_cfg(max_pages_per_shop=3)
+        self.store_plan(("A01", "m-test"), ("A02", "m2"), pages={"A01": 23, "A02": 8})
+
+        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
+                                state=self.state, crawler=None, now=NOW)
+
+        pages = {shop["key"]: shop["pages"] for shop in view["shops"]}
+        self.assertEqual(pages, {"A01": 23, "A02": 8},
+                         "整周快照：别机的店也按计划页数显示（界面里它可被越权勾选）")
+
+    def test_without_a_stored_plan_nothing_is_checked_and_nothing_is_claimed(self):
+        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
+                                state=self.state, crawler=None, now=NOW)
+
+        self.assertFalse(view["shops"][0]["default_checked"])
+        self.assertFalse(view["plan_idle"])
+        self.assertEqual(view["plan_note"], "", "没有落库计划：不说空手，也不冒充有计划")
+
+    def test_a_week_with_no_shops_for_this_machine_is_idle_not_an_error(self):
+        """本机本周没店：界面明说「空手」，照常渲出店铺表。"""
+        self.shops = [Shop("A01", "店铺A", "https://A01.example/"),
+                      Shop("A02", "店铺B", "https://A02.example/")]
+        self.store_plan(("A01", "m2"), ("A02", "m3"))
+
+        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
+                                state=self.state, crawler=None, now=NOW)
+
+        self.assertTrue(view["plan_idle"])
+        self.assertIn("空手", view["plan_note"])
+        self.assertIn(WEEK, view["plan_note"], "点明是哪一周的计划")
+        self.assertFalse(any(shop["default_checked"] for shop in view["shops"]))
+        self.assertEqual(view["total_shops"], 2)
 
 
 class RunViewTests(ViewsTestCase):

@@ -68,6 +68,7 @@ def crawler_cfg(**overrides):
         "attach_port": 9222,
         "base_url": "",
         "pages_per_shop_override": None,
+        "plan_pages": None,
         "alarm_on_intervention": False,
         "db_file": None,
         "shop_csv": None,

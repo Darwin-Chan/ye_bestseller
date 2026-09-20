@@ -2,6 +2,9 @@
 
 行为约定：
   - GUI 只做启动器/监控，抓取仍由本机 `python run.py --limit-shops=...` 子进程执行。
+  - 界面打开时在后台走一次「开轮前的一次准备」（spec §6，`plan_step.prepare_week`）：
+    拉计划库 → 同步清单 → 确认/生成/发布本周计划 → 落库。开始页的默认勾选与页数
+    都读落库计划（与命令行同一份）；准备没通过则默认拒绝开轮（逃生口入口见票据 07）。
   - GUI 读 data/bestseller.db 展示“今日/各店”数据；过程页上一次刷新回来之后才排下一次
     （节拍约 2 秒），慢查询不会把请求堆起来，暂停/中止也不必排在它们后面（IS-38）。
   - “暂停”＝写下停止请求，轮次保留为“进行中”（可续跑）。
@@ -15,6 +18,7 @@
 from __future__ import annotations
 
 import ctypes
+import datetime as dt
 import logging
 import logging.handlers
 import os
@@ -27,14 +31,14 @@ from pathlib import Path
 import webview
 
 from bestseller_monitor.config import Config, load_shops
-from bestseller_monitor.db import Database, connect, cst_date, utcnow
+from bestseller_monitor.db import CST, Database, connect, cst_date, utcnow
 from bestseller_monitor.rounds import (
     RoundRequest,
     ScopeMismatch,
     ShopScope,
     TerminalReason,
 )
-from bestseller_monitor import rounds
+from bestseller_monitor import plan_step, rounds, weekly_plan
 from bestseller_monitor import crawler_identity
 from bestseller_monitor import single_instance
 from bestseller_monitor import stop_request
@@ -115,8 +119,12 @@ class Api:
         self._now = now
         self._open_conn = open_conn if open_conn is not None else (
             lambda: connect(self.cfg.db_file))
+        self._shops_injected = shops is not None
         self.shops = (list(shops) if shops is not None else
                       [s for s in load_shops(self.cfg.shop_csv) if s.active])
+        # 开轮前准备（spec §6）的结局：`prepare()` 落在这里，`start_run` 拿它做
+        # 「默认拒绝开轮」的判定；没跑过就是 None（子进程开轮前还会再准备一次）。
+        self._prep: plan_step.PrepResult | None = None
         self._lock = threading.RLock()
         self.proc: subprocess.Popen | None = None
         self.round_id: int | None = None
@@ -164,11 +172,68 @@ class Api:
         )
 
     # ---------- 开始页 ----------
+    def _current_week(self) -> str:
+        """今天（北京时间）所在的周编号；计划表与准备步骤都按它对齐。"""
+        return weekly_plan.iso_week_label(dt.date.fromisoformat(self._today()))
+
+    def prepare(self) -> plan_step.PrepResult | None:
+        """界面打开时的一次（开轮前）准备（spec §6）：与命令行开跑前同一步。
+
+        `main()` 在后台线程里跑它——拉计划库与确认计划通常要几秒，不该挡着窗口打开；
+        落库后开始页的下一次轮询就按本周计划给默认勾选与页数。失败只记日志：界面
+        照常可用，「默认拒绝开轮」的判定在 `_plan_block_reason`，逃生口入口见票据
+        07。返回结局供测试与日志用；意外异常返回 None。
+        """
+        try:
+            conn = self._open_conn()
+            try:
+                # prepare_week 按北京日期算周：注入的时刻先折算到 CST，免得跨夜差一周
+                moment = dt.datetime.fromisoformat(self._now()).astimezone(CST)
+                result = plan_step.prepare_week(self.cfg, Database(conn), now=moment)
+            finally:
+                conn.close()
+        except Exception as exc:                       # noqa: BLE001
+            log.warning("开轮前准备没做成（界面照常可用，子进程开轮前还会再准备一次）：%s", exc)
+            return None
+        self._prep = result
+        log.info("开轮前准备：%s（本周 %s，本机 %s 家店）",
+                 result.status.value, result.week, len(result.my_shops))
+        for warning in result.warnings:
+            log.warning("开轮前准备：%s", warning)
+        return result
+
+    def _plan_block_reason(self) -> str | None:
+        """准备没通过就默认拒绝开轮（spec §6 降级表；逃生口入口见票据 07）。
+
+        只认本界面刚做过、且是本周的那次准备：没跑过或跨了周就不拦——子进程 run.py
+        开跑前自己会做准备，那里有同样的判定与同一条退出码。
+        """
+        prep = self._prep
+        if prep is None or prep.week != self._current_week():
+            return None
+        if prep.status is plan_step.PrepStatus.SKIPPED_MERGE_ONLY:
+            return "本机是纯汇总机（machine.role = merge_only）：不做采集。"
+        if prep.status is plan_step.PrepStatus.REFUSED:
+            return "开轮前准备没通过，本次不开轮：\n" + (prep.reason or "拉不到计划库，且本地没有本周计划。")
+        return None
+
+    def _refresh_shops(self, conn) -> None:
+        """店铺全量的最新读法：本机启用的店 + 本周计划说到的店。
+
+        计划落库后，开始页的清单会跟着变（停用但仍在计划里的店要能勾上）；
+        测试与基准注入了 shops= 就完全按注入的那份来。
+        """
+        if self._shops_injected or self.cfg.shop_csv is None:
+            return
+        plan = plan_step.stored_plan(Database(conn), self._current_week())
+        self.shops = plan_step.visible_shops(self.cfg, plan)
+
     def get_start(self) -> dict:
         with self._lock:
             conn = self._open_conn()
             try:
                 self._stop_watch.tick(conn)
+                self._refresh_shops(conn)
                 return views.start_view(
                     conn, cfg=self.cfg, shops=self.shops, state=self._ui_state(),
                     crawler=self.current_crawler(conn), now=self._now())
@@ -229,6 +294,9 @@ class Api:
 
     def start_run(self, keys: list[str]) -> dict:
         with self._lock:
+            reason = self._plan_block_reason()
+            if reason is not None:
+                return {"ok": False, "error": reason}
             by_key = {shop.key: shop for shop in self.shops}
             missing = [key for key in keys if key not in by_key]
             if missing:
@@ -534,6 +602,9 @@ def main() -> int:
     try:
         api = Api()
         _configure_gui_logging(api.cfg)
+        # 界面打开时的一次（开轮前）准备（spec §6）：后台跑，落库后开始页的下一次轮询
+        # 就按本周计划给默认勾选与页数；失败只记日志，开轮时子进程还会再准备一次。
+        threading.Thread(target=api.prepare, name="plan-prepare", daemon=True).start()
         html = (PROJECT_ROOT / "docs" / "ui_live.html").read_text(encoding="utf-8")
         window = webview.create_window(
             WINDOW_TITLE,

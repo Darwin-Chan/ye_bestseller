@@ -1,6 +1,7 @@
 """轮次调度：榜单 → 详情。"""
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import os
 import random
@@ -10,8 +11,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from . import (browser_proc, browser_pw, click_listing, dedupe, detail, detail_visit, rounds,
-               single_instance, stop_request)
+from . import (browser_proc, browser_pw, click_listing, dedupe, detail, detail_visit, plan_step,
+               rounds, single_instance, stop_request, weekly_plan)
 from .guard import DenyTracker, RoundDenyExceeded, ShopDenyExceeded
 from .config import Config, Shop, load_shops
 from .db import (
@@ -148,26 +149,38 @@ def round_shops(db: Database, round_id: int, cfg: Config) -> list[Shop]:
     return shops
 
 
-def requested_round_shops(cfg: Config, limit_keys: set[str] | None = None) -> list[Shop]:
+def requested_round_shops(cfg: Config, limit_keys: set[str] | None = None, *,
+                          week: str | None = None) -> list[Shop]:
     """本次调用要用的店铺范围。
 
     limit_keys 给出时是明确的范围请求（命令行 `--limit-shops` 或界面勾选）：
     与今天进行中的轮次不一致就由 open() 拒绝。
     为 None 表示「开始或续跑」：今天已有进行中的轮次就按轮次自身的范围续跑，
-    否则用配置里的有效店铺。
+    否则取**本周落库计划**里归本机的店（不再从 active 全取，spec §6）；本周还没有
+    落库计划（开轮前的准备没做成）就没有可采的店，返回空——默认拒绝开轮由入口定
+    （逃生口入口见票据 07）。`week` 由调用方给（开轮前的准备刚算出的那个）：不给
+    才按今天的北京日期现算，免得跨夜时两处各算一周。
+
+    两个读法都经 `plan_step.stored_plan` / `visible_shops`：界面陈列与这里读的是
+    同一份落库计划，谁都不解析计划文件。
     """
-    all_shops = [shop for shop in load_shops(cfg.shop_csv) if shop.active]
-    if limit_keys is not None:
-        return [shop for shop in all_shops if shop.key in limit_keys]
     conn = connect(cfg.db_file)
     try:
         db = Database(conn)
+        plan = plan_step.stored_plan(
+            db, week or weekly_plan.iso_week_label(dt.date.fromisoformat(cst_date())))
+        if limit_keys is not None:
+            return [shop for shop in plan_step.visible_shops(cfg, plan)
+                    if shop.key in limit_keys]
         active = rounds.active_round(db, cst_date())
         if active is not None:
             return round_shops(db, active.id, cfg)
+        if plan is None:
+            return []
+        mine = set(plan.machine_keys(cfg.machine_id))
+        return [shop for shop in plan_step.visible_shops(cfg, plan) if shop.key in mine]
     finally:
         conn.close()
-    return all_shops
 
 
 def _pending_detail_offers(db: Database, round_id: int, cfg: Config,

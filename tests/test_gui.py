@@ -3,15 +3,16 @@ import sqlite3
 import tempfile
 import time
 import unittest
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import gui
-from bestseller_monitor import browser_proc, db, rounds, single_instance, stop_request
+from bestseller_monitor import browser_proc, db, plan_step, rounds, single_instance, \
+    stop_request, weekly_plan
 from bestseller_monitor.config import Shop
-from bestseller_monitor.db import (CST, DETAIL_BUDGET_NOTE, Database, connect,
+from bestseller_monitor.db import (CST, DETAIL_BUDGET_NOTE, Database, WeeklyPlanRow, connect,
                                    cst_date, utcnow)
 from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
 from gui import Api
@@ -45,6 +46,113 @@ def gui_api(*, shops=(), now=None, db_path=None, open_conn=None, stop_clock=None
                now=now or utcnow,
                open_conn=open_conn,
                stop_clock=stop_clock)
+
+
+class GuiPlanWiringTests(unittest.TestCase):
+    """票据 06：界面打开时做一次开轮前准备；默认勾选、页数、拒开都读落库计划。"""
+
+    NOW = "2026-09-21T04:00:00+00:00"       # 北京时间 2026-09-21（周一）12:00，2026-W39
+    SHOPS_CSV = ("shop_key,shop_name,shop_url,pages,active\n"
+                 "A01,店一,https://a01.example/,3,1\n"
+                 "A02,店二,https://a02.example/,30,1\n")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.shop_csv = self.dir / "shops.csv"
+        self.shop_csv.write_text(self.SHOPS_CSV, encoding="utf-8")
+        self.db_path = self.dir / "gui.db"
+
+    def api(self, **cfg) -> Api:
+        """不带 shops= 注入的界面对象：店铺全量走真实的清单+计划读法。"""
+        return Api(cfg=crawler_cfg(shop_csv=self.shop_csv, db_file=self.db_path,
+                                   exchange_root=self.dir / "exchange",
+                                   max_pages_per_shop=2, **cfg),
+                   now=lambda: self.NOW, open_conn=lambda: connect(self.db_path))
+
+    def store_plan(self, *assignments):
+        """把本周计划落进本机计划表；assignments 是 (shop_key, machine_id, pages)。"""
+        conn = connect(self.db_path)
+        try:
+            week = weekly_plan.iso_week_label(date(2026, 9, 21))
+            Database(conn).replace_weekly_plan(
+                week, [WeeklyPlanRow(key, f"店{key}", machine, pages)
+                       for key, machine, pages in assignments],
+                source="pulled", plan_sha256="ab" * 32, stored_at="2026-09-21T08:00:00+08:00")
+        finally:
+            conn.close()
+
+    def test_start_page_defaults_and_pages_come_from_the_stored_plan(self):
+        self.store_plan(("A01", "m-test", 23), ("A02", "m2", 8))
+
+        start = self.api().get_start()
+
+        shops = {shop["key"]: shop for shop in start["shops"]}
+        self.assertEqual(set(shops), {"A01", "A02"})
+        self.assertTrue(shops["A01"]["default_checked"], "计划里归本机的店默认勾上")
+        self.assertFalse(shops["A02"]["default_checked"], "归 m2 的默认不勾")
+        self.assertEqual(shops["A01"]["pages"], 23, "界面默认值吃计划快照")
+        self.assertEqual(shops["A02"]["pages"], 8, "越权补采时也按本周预算")
+
+    def test_a_planned_shop_deactivated_midweek_stays_on_the_start_page(self):
+        """计划已发布：周中把店标停用，本周它仍要出现在页面上、默认勾上。"""
+        self.shop_csv.write_text(
+            "shop_key,shop_name,shop_url,pages,active\n"
+            "A01,店一,https://a01.example/,3,1\n"
+            "A02,店二,https://a02.example/,30,0\n", encoding="utf-8")
+        self.store_plan(("A02", "m-test", 8))
+
+        start = self.api().get_start()
+
+        shops = {shop["key"]: shop for shop in start["shops"]}
+        self.assertEqual(set(shops), {"A01", "A02"}, "A02 停用了但本周计划说到了它")
+        self.assertTrue(shops["A02"]["default_checked"])
+
+    def test_prepare_runs_the_pre_start_step_and_then_start_run_is_allowed(self):
+        api = self.api()
+
+        refused = api.prepare()
+
+        self.assertEqual(refused.status, plan_step.PrepStatus.REFUSED)
+        self.store_plan(("A01", "m-test", 23))          # 本地已有本周计划：降级到它
+        cached = api.prepare()
+
+        self.assertEqual(cached.status, plan_step.PrepStatus.READY_FROM_CACHE)
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            self.assertTrue(api.start_run(["A01"])["ok"])
+            spawn.assert_called_once_with(["A01"])
+
+    def test_start_run_is_refused_when_the_preparation_did_not_pass(self):
+        api = self.api()
+        self.assertEqual(api.prepare().status, plan_step.PrepStatus.REFUSED)
+
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            result = api.start_run(["A01"])
+
+        self.assertFalse(result["ok"])
+        self.assertIn("准备", result["error"])
+        spawn.assert_not_called()
+
+    def test_start_run_without_a_preparation_lets_the_child_decide(self):
+        """准备还没跑完（或没跑）时不拦：子进程 run.py 自己会做准备。"""
+        api = self.api()
+
+        with patch.object(Api, "_spawn_crawler"):
+            self.assertTrue(api.start_run(["A01"])["ok"])
+
+    def test_the_interface_never_sends_a_page_budget_override(self):
+        """界面不提供改预算的入口：只有命令行能发 --pages-per-shop（spec §6）。"""
+        api = self.api()
+        self.store_plan(("A01", "m-test", 23))
+        self.assertIsNone(api.cfg.pages_per_shop_override)
+
+        with patch.object(gui.subprocess, "Popen") as popen:
+            api._spawn_crawler(["A01"])
+
+        cmd = popen.call_args.args[0]
+        self.assertNotIn("--pages-per-shop", cmd)
+        self.assertIn("--limit-shops", cmd)
 
 
 class GuiWindowHeightTests(unittest.TestCase):

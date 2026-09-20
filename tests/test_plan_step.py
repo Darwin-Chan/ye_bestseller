@@ -225,6 +225,78 @@ class WeeklyPlanTableTests(unittest.TestCase):
         ], "换了一份计划：整周替换，A01 不再留下")
 
 
+class StoredPlanReadTests(unittest.TestCase):
+    """落库计划的读口（spec §6）：界面与命令行读同一份，都不解析计划文件。"""
+
+    def setUp(self):
+        self.dir = pathlib.Path(tempfile.mkdtemp(prefix="bestseller-plan-read-"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.database = Database(dbm.connect(self.dir / "crawler.db"))
+        self.addCleanup(self.database.conn.close)
+
+    def store(self, *rows: WeeklyPlanRow) -> None:
+        self.database.replace_weekly_plan(WEEK, rows, source="pulled",
+                                          plan_sha256="ab" * 32, stored_at=NOW)
+
+    def test_a_week_without_rows_reads_as_none(self):
+        self.assertIsNone(plan_step.stored_plan(self.database, WEEK), "没落过库：没有这份计划")
+        self.assertIsNone(plan_step.stored_plan(self.database, "2026-W38"))
+
+    def test_reads_the_whole_week_with_machine_keys_and_page_snapshot(self):
+        self.store(WeeklyPlanRow("A02", "店二", "m2", 8),
+                   WeeklyPlanRow("A01", "店一", "m1", 23),
+                   WeeklyPlanRow("A03", "店三", "m1", 5))
+
+        plan = plan_step.stored_plan(self.database, WEEK)
+
+        self.assertEqual(plan.week, WEEK)
+        self.assertEqual([row.shop_key for row in plan.rows], ["A01", "A02", "A03"],
+                         "整周的行都在（不只本机那几行），按店铺编号排序")
+        self.assertEqual(plan.machine_keys("m1"), ("A01", "A03"))
+        self.assertEqual(plan.machine_keys("m3"), (), "本机本周没店 = 空手，不是错误")
+        self.assertEqual(plan.pages(), {"A01": 23, "A02": 8, "A03": 5})
+
+
+class VisibleShopsTests(unittest.TestCase):
+    """开始页陈列与命令行共用的店铺全量：本机启用的店，加上本周计划说到的店。"""
+
+    LOCAL_CSV = ("shop_key,shop_name,shop_url,pages,active\n"
+                 "A01,店一,https://a01.example/,23,1\n"
+                 "A02,店二,https://a02.example/,8,1\n"
+                 "A03,店三,https://a03.example/,5,0\n")   # 周中停用，但本周计划仍说到了它
+
+    def setUp(self):
+        self.dir = pathlib.Path(tempfile.mkdtemp(prefix="bestseller-visible-"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.shop_csv = self.dir / "shops.csv"
+        self.shop_csv.write_text(self.LOCAL_CSV, encoding="utf-8")
+        self.cfg = crawler_cfg(machine_id="m1", shop_csv=self.shop_csv)
+
+    def plan(self, *rows: WeeklyPlanRow) -> plan_step.StoredPlan:
+        return plan_step.StoredPlan(week=WEEK, rows=rows)
+
+    def test_without_a_plan_the_active_shops_are_the_universe(self):
+        shops = plan_step.visible_shops(self.cfg, None)
+
+        self.assertEqual([shop.key for shop in shops], ["A01", "A02"])
+
+    def test_a_planned_shop_stays_visible_even_after_it_is_deactivated(self):
+        shops = plan_step.visible_shops(
+            self.cfg, self.plan(WeeklyPlanRow("A03", "店三", "m1", 5)))
+
+        self.assertEqual([shop.key for shop in shops], ["A01", "A02", "A03"],
+                         "计划已发布：本周按计划走，周中停用不把它从本周摘掉")
+        self.assertEqual(shops[2].url, "https://a03.example/page/offerlist.htm",
+                         "地址与名称仍从本机清单取")
+
+    def test_a_planned_key_missing_from_the_local_list_is_skipped(self):
+        shops = plan_step.visible_shops(
+            self.cfg, self.plan(WeeklyPlanRow("A09", "已删店", "m1", 5)))
+
+        self.assertEqual([shop.key for shop in shops], ["A01", "A02"],
+                         "本机清单里没有的行（被删了）：没有地址，采不了")
+
+
 class FirstPublishTests(PrepWorldTestCase):
     """pull 成功 + 本周计划不在：生成、发布（JSON 与 .md 同一次提交）、整周落库。"""
 

@@ -31,6 +31,7 @@ window.pywebview = { platform: "edgechromium", api: {
       ov: {products: 180, skus: 1038},
       summary: {started: true, rounds: 1, text: "00:29 开始 · 跑约 20 分"},
       shops: SHOPS, total_shops: 2, start_hint: window.__crawler ? "采集进程正在跑" : "",
+      plan_note: window.__planNote || "",
       crawler: window.__crawler || null,
     };
   },
@@ -118,7 +119,8 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
             cls._pw.stop()
 
     def open_page(self, fail_on: str | None = None, message: str | None = None,
-                  start_error: str | None = None, crawler: dict | None = None):
+                  start_error: str | None = None, crawler: dict | None = None,
+                  plan_note: str | None = None):
         """加载真实页面，注入一个会按需抛错、按需拒绝启动的 pywebview 桥。"""
         page = self.browser.new_page(viewport={"width": 1100, "height": 1000})
         if fail_on:
@@ -129,6 +131,8 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
             page.add_init_script(f"window.__startError = {start_error!r};")
         if crawler is not None:
             page.add_init_script(f"window.__crawler = {crawler!r};")
+        if plan_note is not None:
+            page.add_init_script(f"window.__planNote = {plan_note!r};")
         page.add_init_script(MOCK_API)
         page.goto(HTML_URI)
         return page
@@ -240,6 +244,27 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
 
             self.assertIn("已有采集进程在运行", page.inner_text(ERROR_BOX))
             self.assertEqual(self.active_tab(page), "开始", "被拒绝时不该停在结果页")
+        finally:
+            page.close()
+
+    def test_the_idle_plan_note_is_shown_on_the_start_page(self):
+        """本机本周没店（空手）：页面上明说一句，不是静默也不是报错（票据 06）。"""
+        page = self.open_page(
+            plan_note="本周计划（2026-W39）里没有归本机的店（空手）——合法状态，不用开轮。")
+        try:
+            page.wait_for_selector("#planBanner", state="visible", timeout=5000)
+
+            self.assertIn("空手", page.inner_text("#planBanner"))
+            self.assertFalse(page.is_visible(ERROR_BOX), "空手是合法状态，不是错误")
+        finally:
+            page.close()
+
+    def test_the_plan_banner_stays_hidden_when_there_is_nothing_to_say(self):
+        page = self.open_page()
+        try:
+            page.wait_for_selector("#rows input", timeout=5000)
+
+            self.assertFalse(page.is_visible("#planBanner"))
         finally:
             page.close()
 

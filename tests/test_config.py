@@ -298,6 +298,33 @@ cos_access = "read_only"
             effective_pages_limit(configured, SimpleNamespace(max_pages_per_shop=3)), 9,
         )
 
+    def test_effective_pages_limit_plan_snapshot_layer(self):
+        """页数四层优先（spec §6）：命令行覆盖 > 计划快照 > 店铺 pages > 全局默认。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Config.from_file(self._write_config(tmp), root=Path(tmp))  # 全局 3 页
+        configured = Shop("A01", "店一", "https://a.1688.com/", pages=9)
+        unconfigured = Shop("A02", "店二", "https://b.1688.com/")
+
+        planned = cfg.replace(plan_pages={"A01": 23, "A02": 2})
+        self.assertEqual(effective_pages_limit(configured, planned), 23, "计划快照压过店铺 pages")
+        self.assertEqual(effective_pages_limit(unconfigured, planned), 2, "计划快照压过全局默认")
+
+        # 刚从落库计划读到它的调用方可以显式传入；显式传入压过挂在配置上的那份
+        self.assertEqual(
+            effective_pages_limit(configured, planned, plan_pages={"A01": 5}), 5)
+
+        overridden = planned.replace(pages_per_shop_override=1)
+        self.assertEqual(effective_pages_limit(configured, overridden), 1, "命令行压过计划快照")
+
+        # 计划快照里没有的店（计划外／周中新增）回落到下面两层
+        partial = cfg.replace(plan_pages={"A02": 2})
+        self.assertEqual(effective_pages_limit(configured, partial), 9)
+
+        # 快照里的 0 与店铺 pages 的 0 同一语义——「没配预算」，回落到下一层
+        zeros = cfg.replace(plan_pages={"A01": 0, "A02": 0})
+        self.assertEqual(effective_pages_limit(configured, zeros), 9)
+        self.assertEqual(effective_pages_limit(unconfigured, zeros), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

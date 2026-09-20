@@ -85,6 +85,7 @@
       </div>
       <p class="muted" style="margin:12px 0 0;white-space:pre-line" id="todaySummary">—</p>
       <div class="banner warn" id="activeRoundBanner" style="display:none"></div>
+      <div class="banner" id="planBanner" style="display:none"></div>
       <div style="text-align:right;margin-top:12px;display:none" id="crawlerActions">
         <button class="btn danger" id="abortForeignBtn">中止正在跑的这一轮（放弃）</button>
       </div>
@@ -298,6 +299,9 @@
       : "今天尚未开始，可勾选店铺后点「开始抓取」";
     $("activeRoundBanner").textContent = d.start_hint || "";
     $("activeRoundBanner").style.display = d.start_hint ? "block" : "none";
+    // 本周计划的一句话（空手是合法状态等）；没有要说的就收起
+    $("planBanner").textContent = d.plan_note || "";
+    $("planBanner").style.display = d.plan_note ? "block" : "none";
     // 有采集在跑（本界面或别处起的）就给中止入口：那一轮不从这里停，就只能等它跑完。
     const crawler = d.crawler || null;
     $("abortForeignBtn").textContent = crawler && crawler.round_id

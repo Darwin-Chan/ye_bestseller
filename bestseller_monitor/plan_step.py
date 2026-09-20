@@ -10,6 +10,8 @@
   文件）——这是三台各自算出同一份计划的前提。
 - **落库**：整周指派写进本机计划表（`db.weekly_plan`，不入交换集），带来源与计划文件
   哈希（按归一化文本算——BOM/CRLF 差异不算另一份计划）；同周重跑幂等。
+- **读法**（`stored_plan` / `visible_shops`）：界面与命令行读**同一份落库计划**，不各自
+  解析计划文件——开始页默认勾选、轮次店铺范围、页数四层里的「计划快照」层都从这里取。
 - **降级**（spec §6 表逐行，判定都在这里，界面/命令行入口见票据 07）：拉不到计划库 +
   本地已落库 → 用本地那份（`READY_FROM_CACHE`，即「未能确认最新」）；拉不到 + 本地没有
   → 默认拒绝开轮（`REFUSED`）并留显式逃生口；生成失败（pages 空缺点名、名册读不到）落到
@@ -47,7 +49,7 @@ from typing import Any
 
 from bestseller_monitor import shops_sync, weekly_plan
 from bestseller_monitor.canonical_text import normalized_text, text_digest
-from bestseller_monitor.config import ROLE_MERGE_ONLY, load_shops
+from bestseller_monitor.config import ROLE_MERGE_ONLY, Shop, load_shops
 from bestseller_monitor.db import CST, Database, WeeklyPlanRow
 from bestseller_monitor.git_channel import ChannelError, GitChannel
 from bestseller_monitor.weekly_plan import PlanError
@@ -56,6 +58,10 @@ PLAN_REPO_DIR = "plan"          # 计划库克隆在交换区根下的目录名
 PLAN_DIR = "plan"               # 计划文件在计划库里的目录（plan/<年>-W<周>.json）
 PUBLISHED_DIR = "published"     # 各机各写各的发布记录
 PACKAGE_SUFFIX = ".db.gz"       # raw 库里的周包（票据 08 的导出写这种名字，见 _package_week）
+
+# 拉不到计划库、本地也没有本周计划时「默认拒绝开轮」的退出码：命令行入口用它，
+# 与别的退出码各表示一件事（2 配置/范围没匹配、3 轮次范围不一致、4 采集进程已占用）。
+PLAN_REFUSED_EXIT_CODE = 5
 
 # 包文件名里的周号：`W39-m2.db.gz` 为准，spec 字面的裸周号 `39-m2.db.gz` 也认
 # （年份由 data/<年> 目录钉住，机器标识是文件名末尾的后缀）。
@@ -147,6 +153,51 @@ class PrepResult:
     @property
     def escape_hatch_available(self) -> bool:
         return self.status is PrepStatus.REFUSED
+
+
+@dataclasses.dataclass(frozen=True)
+class StoredPlan:
+    """本机计划表里某一周的整周计划——界面与命令行读的同一份（读口 `stored_plan`）。
+
+    同一份落库计划有两个读法：归某台机器的店（`machine_keys`，轮次范围与开始页默认
+    勾选用它），整周的页数快照（`pages`，页数四层优先里的「计划快照」用它）。都不解析
+    计划文件。
+    """
+
+    week: str
+    rows: tuple[WeeklyPlanRow, ...]     # 整周（含别机的行），按 shop_key 排序
+
+    def pages(self) -> dict[str, int]:
+        """整周的页数快照：shop_key → 本周预算（计划说了多少就多少）。"""
+        return {row.shop_key: row.pages for row in self.rows}
+
+    def machine_keys(self, machine_id: str) -> tuple[str, ...]:
+        """这一周归这台机器的店；空元组 = 空手（合法正常态，不是错误）。"""
+        return tuple(row.shop_key for row in self.rows if row.machine_id == machine_id)
+
+
+def stored_plan(db: Database, week: str) -> StoredPlan | None:
+    """读本机计划表里这一周落的计划；没落过库返回 None。
+
+    这就是「界面与命令行读同一份落库计划」的那一份：两边都经这里读，谁都不解析
+    计划库里的文件。落库由 `prepare_week` 做（发布物确认过才落，见模块 docstring）。
+    """
+    rows = tuple(WeeklyPlanRow(row["shop_key"], row["shop_name"], row["machine_id"],
+                               row["pages"])
+                 for row in db.weekly_plan(week))
+    return StoredPlan(week=week, rows=rows) if rows else None
+
+
+def visible_shops(cfg, plan: StoredPlan | None) -> list[Shop]:
+    """开始页陈列与命令行共用的店铺全量：本机清单里启用的店，加上本周计划说到的店。
+
+    计划说到的店即使在清单里标了停用（active=0）也留着——计划已发布，本周按计划走
+    （周中改清单不改本周的预算与范围；下一份计划起才生效）。计划里有、本机清单里
+    没有那个编号的（行被删了）：地址无从谈起，跳过。
+    """
+    planned_keys = set(plan.pages()) if plan is not None else set()
+    return [shop for shop in load_shops(cfg.shop_csv)
+            if shop.active or shop.key in planned_keys]
 
 
 @dataclasses.dataclass(frozen=True)

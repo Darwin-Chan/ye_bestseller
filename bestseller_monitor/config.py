@@ -6,6 +6,7 @@ import dataclasses
 import io
 import pathlib
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
 
@@ -122,6 +123,9 @@ class Config:
     cos_access: str
     # 命令行显式指定的翻页上限（None = 没有显式覆盖）；优先级见 effective_pages_limit()
     pages_per_shop_override: int | None = None
+    # 本周计划的页数快照（shop_key → 预算）：开轮前的准备从落库的计划表读出来后挂在这里，
+    # 采集路径深处（click_listing）靠它吃到计划层的预算；优先级见 effective_pages_limit()
+    plan_pages: Mapping[str, int] | None = None
 
     @classmethod
     def from_file(cls, path: pathlib.Path, root: pathlib.Path | None = None) -> "Config":
@@ -226,20 +230,30 @@ class Shop:
     active: bool = True
 
 
-def effective_pages_limit(shop: Shop | None, cfg: Config) -> int:
-    """该店本轮实际翻页上限，三个来源按优先级取第一个有值的。
+def effective_pages_limit(shop: Shop | None, cfg: Config, *,
+                          plan_pages: Mapping[str, int] | None = None) -> int:
+    """该店本轮实际翻页上限，四个来源按优先级取第一个有值的。
 
-    命令行显式覆盖（`--pages-per-shop`）> 店铺配置（shops.csv 的 `pages`）>
-    全局默认（config.toml 的 `max_pages_per_shop`）。
+    命令行显式覆盖（`--pages-per-shop`）> 本周计划快照 > 店铺配置（shops.csv 的
+    `pages`）> 全局默认（config.toml 的 `max_pages_per_shop`）。
 
     显式覆盖必须单独保留：只改 `max_pages_per_shop` 的话，店铺自己配了 pages
     的店仍会按店铺值翻页，命令行的冒烟参数就失效（IS-35）。
+
+    计划快照来自落库的计划表（`plan_step.stored_plan`）：开轮进程把它挂在
+    `cfg.plan_pages` 上（采集路径深处拿不到计划对象），刚从库里读到它的调用方
+    （界面取数）也可以显式传入。快照里的 0 与店铺 `pages` 的 0 同一语义——
+    「没配预算」，回落到下一层。
     """
     override = getattr(cfg, "pages_per_shop_override", None)
     if override is not None:
         return int(override)
-    if shop is not None and shop.pages:
-        return int(shop.pages)
+    if shop is not None:
+        budget = plan_pages if plan_pages is not None else getattr(cfg, "plan_pages", None)
+        if budget and budget.get(shop.key):
+            return int(budget[shop.key])
+        if shop.pages:
+            return int(shop.pages)
     return int(cfg.max_pages_per_shop)
 
 

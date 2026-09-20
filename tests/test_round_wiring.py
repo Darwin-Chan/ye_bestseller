@@ -1,12 +1,12 @@
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_pw, guard, pipeline, rounds
+from bestseller_monitor import browser_pw, guard, pipeline, rounds, weekly_plan
 from bestseller_monitor.config import Shop
-from bestseller_monitor.db import CST, Database, connect, cst_date
+from bestseller_monitor.db import CST, Database, WeeklyPlanRow, connect, cst_date
 from bestseller_monitor.rounds import RoundRequest, ScopeMismatch, ShopScope
 from helpers import crawler_cfg, isolated_locks, new_round
 
@@ -30,6 +30,24 @@ class RoundScopeWiringTests(unittest.TestCase):
         for key in keys:
             rows.append(f"{key},店铺{key},https://{key}.example/,3,1,")
         self.shop_csv.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    def _write_shops_inactive(self, key):
+        """该店在本机清单里标了停用（active=0）：行与地址都还在。"""
+        self.shop_csv.write_text(
+            f"{SHOP_CSV_HEADER}\n{key},店铺{key},https://{key}.example/,3,0,\n",
+            encoding="utf-8")
+
+    def _store_plan(self, *assignments):
+        """把本周计划落进本机计划表；assignments 是 (shop_key, machine_id)."""
+        conn = connect(self.db_path)
+        try:
+            week = weekly_plan.iso_week_label(date.fromisoformat(cst_date()))
+            Database(conn).replace_weekly_plan(
+                week, [WeeklyPlanRow(key, f"店铺{key}", machine, 3)
+                       for key, machine in assignments],
+                source="pulled", plan_sha256="ab" * 32, stored_at="2026-09-21T08:00:00+08:00")
+        finally:
+            conn.close()
 
     def _cfg(self, **overrides):
         """这一层要的那几件（采集配置的默认值见 helpers.crawler_cfg）。"""
@@ -132,21 +150,50 @@ class RoundScopeWiringTests(unittest.TestCase):
     def test_bare_run_keeps_the_round_scope_when_config_shrinks(self):
         self._open_round(cst_date(), "A01", "A02")
         self._write_shops("A01")
+        self._store_plan(("A01", "m-test"))    # 本周计划是另一份事实：续跑仍以轮次为准
 
         shops = pipeline.requested_round_shops(self._cfg(), None)
 
         self.assertEqual([shop.key for shop in shops], ["A01", "A02"])
         self.assertEqual(shops[1].url, "https://A02.example/")
 
-    def test_bare_run_without_active_round_uses_config_shops(self):
+    def test_bare_run_without_active_round_uses_the_stored_plan(self):
+        """票据 06：范围从落库计划取——归本机的店才采，不再从 active 全取。"""
+        self._store_plan(("A01", "m-test"), ("A02", "m3"))
+
         shops = pipeline.requested_round_shops(self._cfg(), None)
 
-        self.assertEqual([shop.key for shop in shops], ["A01", "A02"])
+        self.assertEqual([shop.key for shop in shops], ["A01"],
+                         "A02 本周归 m3：不进本机的轮次范围（越权要显式勾选）")
+
+    def test_bare_run_without_a_stored_plan_has_nothing_to_crawl(self):
+        shops = pipeline.requested_round_shops(self._cfg(), None)
+
+        self.assertEqual(shops, [], "没有落库计划就没有可采的店（开轮前的准备先于这一步）")
+
+    def test_a_planned_shop_deactivated_midweek_still_counts(self):
+        """周中把店标停用不改变本周：计划已发布，本周仍按计划采它。"""
+        self._write_shops_inactive("A01")
+        self._store_plan(("A01", "m-test"))
+
+        shops = pipeline.requested_round_shops(self._cfg(), None)
+
+        self.assertEqual([shop.key for shop in shops], ["A01"])
+        self.assertEqual(shops[0].url, "https://A01.example/page/offerlist.htm")
 
     def test_limit_keys_is_an_explicit_scope_request(self):
         shops = pipeline.requested_round_shops(self._cfg(), {"A02"})
 
         self.assertEqual([shop.key for shop in shops], ["A02"])
+
+    def test_limit_keys_can_name_a_planned_shop_deactivated_locally(self):
+        """界面勾选送的是这里的 limit_keys：与界面陈列的全量取同一份（含停用的计划店）。"""
+        self._write_shops_inactive("A01")
+        self._store_plan(("A01", "m-test"))
+
+        shops = pipeline.requested_round_shops(self._cfg(), {"A01"})
+
+        self.assertEqual([shop.key for shop in shops], ["A01"])
 
 
 class PwCdpRoundAssemblyTests(unittest.TestCase):

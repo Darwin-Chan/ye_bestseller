@@ -1,7 +1,7 @@
 """命令行覆盖的接线：`--pages-per-shop` 必须留下「显式覆盖」标记（IS-35）。
 
-只测 `run.apply_overrides()` 这一个 seam：参数怎么解析、怎么落到配置，都是外部
-行为（命令行页数优先于 shops.csv 的 pages）；不碰浏览器与数据库。
+`run.apply_overrides()` 这一个 seam 单独测：参数怎么解析、怎么落到配置（命令行页数
+优先于 shops.csv 的 pages）；`main()` 那一层另测开轮前准备与落库计划的读法（票据 06）。
 """
 from __future__ import annotations
 
@@ -10,12 +10,14 @@ import io
 import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
 import run
-from bestseller_monitor import single_instance
+from bestseller_monitor import plan_step, single_instance, weekly_plan
 from bestseller_monitor.config import Config, Shop, effective_pages_limit
+from bestseller_monitor.db import Database, WeeklyPlanRow, connect, cst_date
 
 
 MINIMAL_CONFIG = """
@@ -97,6 +99,19 @@ class RunCliTests(unittest.TestCase):
         self.assertIsNone(cfg.pages_per_shop_override, "别的参数不该动页数覆盖")
 
 
+def store_weekly_plan(tmp_path: Path, *assignments) -> None:
+    """把本周计划落进本机计划表；assignments 是 (shop_key, machine_id, pages)。"""
+    conn = connect(tmp_path / "bestseller.db")
+    try:
+        week = weekly_plan.iso_week_label(date.fromisoformat(cst_date()))
+        Database(conn).replace_weekly_plan(
+            week, [WeeklyPlanRow(key, f"店{key}", machine, pages)
+                   for key, machine, pages in assignments],
+            source="pulled", plan_sha256="ab" * 32, stored_at="2026-09-21T08:00:00+08:00")
+    finally:
+        conn.close()
+
+
 class RunCliBusyTests(unittest.TestCase):
     """抢不到采集锁：命令行给可读原因 + 专用退出码，界面靠这个码提示原因（工单 02）。"""
 
@@ -110,6 +125,7 @@ class RunCliBusyTests(unittest.TestCase):
                 "A01,店一,https://a.1688.com/,3,1,\n",
                 encoding="utf-8",
             )
+            store_weekly_plan(tmp_path, ("A01", "m1", 3))   # 先备好本周计划，才走到抢锁
             out = io.StringIO()
             busy = run.CrawlerAlreadyRunning("已有采集进程在运行：同一时刻只能跑一轮")
 
@@ -123,6 +139,110 @@ class RunCliBusyTests(unittest.TestCase):
 
         self.assertEqual(code, single_instance.CRAWLER_BUSY_EXIT_CODE)
         self.assertIn("已有采集进程在运行", out.getvalue(), "命令行要给出可读原因")
+
+
+class RunCliPlanTests(unittest.TestCase):
+    """开轮前准备与落库计划的接线（票据 06）：范围与页数都从本机计划表读。"""
+
+    SHOPS_CSV = ("shop_key,shop_name,shop_url,pages,active,offer_list_url\n"
+                 "A01,店一,https://a.1688.com/,3,1,\n"
+                 "A02,店二,https://b.1688.com/,5,1,\n")
+
+    def _env(self, tmp: str, *, shops: str | None = None, plan=()) -> Path:
+        """建好配置、本机清单与（可选的）本周落库计划，返回配置文件路径。
+
+        交换区根缺省指向 `<tmp>/exchange`，里面没有计划库克隆：拉不到计划库的降级
+        在这里就是「本地已落库 → 用本地那份」，正好驱动票据 06 的读法。
+        """
+        tmp_path = Path(tmp)
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(MINIMAL_CONFIG, encoding="utf-8")
+        (tmp_path / "shops.csv").write_text(shops or self.SHOPS_CSV, encoding="utf-8")
+        if plan:
+            store_weekly_plan(tmp_path, *plan)
+        return cfg_path
+
+    def _main(self, cfg_path: Path, *argv: str, round_error: Exception | None = None):
+        out = io.StringIO()
+        with patch.object(run, "ROOT", cfg_path.parent), \
+                patch.object(sys, "argv", ["run.py", "--config", str(cfg_path), *argv]), \
+                patch.object(run.logging, "basicConfig"), \
+                patch.object(run.logging.handlers, "RotatingFileHandler"), \
+                patch.object(run, "run_round", side_effect=round_error) as round_call:
+            with contextlib.redirect_stdout(out):
+                code = run.main()
+        return code, out.getvalue(), round_call
+
+    def test_cli_scopes_the_round_to_the_plan_and_feeds_it_the_page_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = self._env(tmp, plan=(("A01", "m1", 23), ("A02", "m2", 5)))
+
+            code, out, round_call = self._main(cfg_path)
+
+        self.assertEqual(code, 0)
+        cfg, shops = round_call.call_args.args
+        self.assertEqual([shop.key for shop in shops], ["A01"],
+                         "A02 本周计划归 m2：裸跑的范围取计划里归本机的店")
+        self.assertEqual(effective_pages_limit(shops[0], cfg), 23,
+                         "计划快照（23）压过 shops.csv 的 pages（3）")
+        self.assertEqual(cfg.plan_pages, {"A01": 23, "A02": 5}, "整周快照都挂上：越权补采也看本周预算")
+        self.assertIsNone(cfg.pages_per_shop_override, "命令行没发 --pages-per-shop 就不留标记")
+        self.assertIn("未能确认最新", out, "用本地那份继续的告警要在命令行看得见")
+
+    def test_cli_still_takes_an_explicit_limit_shops_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = self._env(tmp, plan=(("A01", "m1", 23), ("A02", "m2", 5)))
+
+            code, out, round_call = self._main(cfg_path, "--limit-shops", "A02")
+
+        self.assertEqual(code, 0)
+        cfg, shops = round_call.call_args.args
+        self.assertEqual([shop.key for shop in shops], ["A02"],
+                         "显式点名别机的店 = 越权补采：放行（处置与留痕见票据 07）")
+        self.assertEqual(effective_pages_limit(shops[0], cfg), 5)
+
+    def test_pages_per_shop_flag_still_beats_the_plan_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = self._env(tmp, plan=(("A01", "m1", 23),))
+
+            code, out, round_call = self._main(cfg_path, "--pages-per-shop", "1")
+
+        self.assertEqual(code, 0)
+        cfg, shops = round_call.call_args.args
+        self.assertEqual(effective_pages_limit(shops[0], cfg), 1)
+
+    def test_cli_refuses_to_start_without_a_usable_plan(self):
+        """拉不到计划库、本地也没有本周计划：默认拒绝开轮，给专用退出码（逃生口见票据 07）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = self._env(tmp)
+
+            code, out, round_call = self._main(cfg_path)
+
+        self.assertEqual(code, plan_step.PLAN_REFUSED_EXIT_CODE)
+        round_call.assert_not_called()
+        self.assertIn("拒绝开轮", out)
+        self.assertIn("clone", out, "要说清是计划库没建起来还是别的")
+
+    def test_cli_reports_idle_as_a_legal_state(self):
+        """本机本周没店（空手）：说清楚，不当错误，不开轮。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = self._env(tmp, plan=(("A01", "m2", 23), ("A02", "m3", 5)))
+
+            code, out, round_call = self._main(cfg_path)
+
+        self.assertEqual(code, 0)
+        round_call.assert_not_called()
+        self.assertIn("空手", out)
+
+    def test_cli_refuses_when_the_lock_is_taken_even_with_a_plan(self):
+        """准备过了也不越权：抢不到锁仍走「已有采集在跑」那条路（保持工单 02 的口径）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = self._env(tmp, plan=(("A01", "m1", 23),))
+
+            code, out, _ = self._main(
+                cfg_path, round_error=run.CrawlerAlreadyRunning("占用中"))
+
+        self.assertEqual(code, single_instance.CRAWLER_BUSY_EXIT_CODE)
 
 
 if __name__ == "__main__":
