@@ -6,11 +6,14 @@
 """
 import io
 import json
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shells"))  # noqa: E402
 
 import analysis_launcher
 import launcher_core

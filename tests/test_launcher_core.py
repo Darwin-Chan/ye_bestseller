@@ -13,6 +13,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shells"))  # noqa: E402
+
 from analysis_launcher import SPEC as ANALYSIS_SPEC
 from exchange_launcher import SPEC as EXCHANGE_SPEC
 from gui_launcher import SPEC as GUI_SPEC
@@ -62,6 +64,29 @@ class ResolveProjectRootTests(unittest.TestCase):
 
             self.assertEqual(
                 resolve_project_root(launcher, env={}, frozen=False, spec=GUI_SPEC), root)
+
+    def test_derives_root_when_the_shell_runs_from_shells(self):
+        """源码布局（2026-09-21 起）：壳在 <项目根>\\shells\\，上一级才是项目根。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _usable_root(tmp)
+            shells = root / "shells"
+            shells.mkdir()
+            launcher = shells / "gui_launcher.py"
+            launcher.write_text("# shell\n", encoding="utf-8")
+
+            self.assertEqual(
+                resolve_project_root(launcher, env={}, frozen=False, spec=GUI_SPEC), root)
+
+    def test_refuses_unknown_location_even_with_two_levels(self):
+        """两级都不像项目根时照旧拒绝：向上多认一级不等于放宽标记。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            shells = Path(tmp) / "somewhere" / "shells"
+            shells.mkdir(parents=True)
+            launcher = shells / "gui_launcher.py"
+            launcher.write_text("# shell\n", encoding="utf-8")
+
+            with self.assertRaises(LauncherError):
+                resolve_project_root(launcher, env={}, frozen=False, spec=GUI_SPEC)
 
     def test_env_override_wins_over_exe_location(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -288,7 +313,7 @@ class ImportPurityTests(unittest.TestCase):
                        "launcher_core"):
             done = subprocess.run(
                 [sys.executable, "-c", probe.format(module=module)],
-                cwd=Path(__file__).resolve().parent.parent,
+                cwd=Path(__file__).resolve().parent.parent / "shells",
                 capture_output=True, text=True,
             )
 

@@ -8,8 +8,9 @@ exe 里不放项目代码：壳只做三件事——推导项目根、找到本�
 拉 `analyze.py`（缺省即开窗，不带参数）。
 
 行为约定（对三只壳一致）：
-  - 项目根：`BESTSELLER_PROJECT` > exe 所在目录的上一级（exe 待在 `<项目根>\\dist\\`），
-    两者都要求目录里有目标的项目根标记（见 `LauncherSpec.markers`）。
+  - 项目根：`BESTSELLER_PROJECT` > 壳所在目录的上一级（exe 待在 `<项目根>\\dist\\`，
+    源码运行时壳在 `<项目根>\\shells\\`），两者都要求目录里有目标的项目根标记
+    （见 `LauncherSpec.markers`）。
   - 解释器：`BESTSELLER_PYTHON` > PATH 上的 `pythonw` > PATH 上的 `python`。
   - 壳守着子进程：stderr 收管道写进 `<项目根>\\logs\\<目标日志名>`；子进程退出时按目标的
     弹窗政策决定要不要弹中文 MessageBox（`should_notify`）。
@@ -88,7 +89,8 @@ def resolve_project_root(launcher_path: Path, env: Mapping[str, str], *, frozen:
                          spec: LauncherSpec) -> Path:
     """项目根：`BESTSELLER_PROJECT` > 壳自己的位置。
 
-    打包成 exe 时壳待在 `<项目根>\\dist\\`（上一级才是项目根）；直接跑源码时壳就躺在项目根里。
+    打包成 exe 时壳待在 `<项目根>\\dist\\`（上一级才是项目根）；直接跑源码时壳在
+    `<项目根>\\shells\\`，上一级是项目根（壳直接摆回项目根里也认）。
     """
     override = (env.get("BESTSELLER_PROJECT") or "").strip()
     if override:
@@ -100,14 +102,16 @@ def resolve_project_root(launcher_path: Path, env: Mapping[str, str], *, frozen:
         return root
 
     path = Path(launcher_path).resolve()
-    root = path.parent.parent if frozen else path.parent
-    if not _looks_like_project_root(root, spec):
-        where = " exe 的位置" if frozen else " 启动壳的位置"
-        raise LauncherError(
-            f"从{where}推不出项目根：{root} 下缺少 {_markers_text(spec)}。\n"
-            "exe 需要待在 <项目根>\\dist\\，或用环境变量 BESTSELLER_PROJECT 指定项目根。"
-        )
-    return root
+    # 两级都试、标记说话：exe 在 dist/（上两级），源码壳在 shells/（上一级）。
+    roots = (path.parent.parent, path.parent) if frozen else (path.parent, path.parent.parent)
+    for root in roots:
+        if _looks_like_project_root(root, spec):
+            return root
+    where = " exe 的位置" if frozen else " 启动壳的位置"
+    raise LauncherError(
+        f"从{where}推不出项目根：{roots[0]} 下缺少 {_markers_text(spec)}。\n"
+        "exe 需要待在 <项目根>\\dist\\，或用环境变量 BESTSELLER_PROJECT 指定项目根。"
+    )
 
 
 def resolve_python(env: Mapping[str, str], which: Callable[[str], str | None] = shutil.which) -> str:

@@ -37,13 +37,13 @@ class Target:
 
 
 TARGETS = {
-    "gui": Target(spec=ROOT / "bestseller_gui.spec",
+    "gui": Target(spec=ROOT / "shells" / "bestseller_gui.spec",
                   exe=ROOT / "dist" / "bestseller_gui.exe",
                   toc=ROOT / "build" / "bestseller_gui" / "Analysis-00.toc"),
-    "exchange": Target(spec=ROOT / "bestseller_exchange.spec",
+    "exchange": Target(spec=ROOT / "shells" / "bestseller_exchange.spec",
                        exe=ROOT / "dist" / "bestseller_exchange.exe",
                        toc=ROOT / "build" / "bestseller_exchange" / "Analysis-00.toc"),
-    "analysis": Target(spec=ROOT / "bestseller_analysis.spec",
+    "analysis": Target(spec=ROOT / "shells" / "bestseller_analysis.spec",
                        exe=ROOT / "dist" / "bestseller_analysis.exe",
                        toc=ROOT / "build" / "bestseller_analysis" / "Analysis-00.toc"),
 }
