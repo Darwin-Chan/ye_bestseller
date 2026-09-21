@@ -124,7 +124,7 @@ function openBulk(all){
     $('bulkMultiple').textContent=multiple?`其中包含${multiple}个匹配到多组的商品，这些商品按照系统推荐分组推进。`:'其中不含匹配到多组的商品';
     $('bulkDialog').showModal();
 }
-async function confirmBulk(){if(await changeConfirmation({action:'confirm_groups',groups:bulkTargets}))$('bulkDialog').close();}
+async function confirmBulk(){if(await updateDraft({action:'confirm_groups',groups:bulkTargets}))$('bulkDialog').close();}
 function show(snapshot) {
     currentSnapshot=snapshot;
     productPage=0; selectedGroup=null;reviewTab='all';checkedGroups.clear();
@@ -198,7 +198,7 @@ function renderProducts() {
     if(!visible.some(g=>g.id===selectedGroup))selectedGroup=visible[0]?.id;
     $('products').innerHTML=visible.map(g=>`<div class="group-row"><input type="checkbox" aria-label="勾选 ${esc(g.id)}" data-group="${esc(g.id)}" ${checkedGroups.has(g.id)?'checked':''} ${g.confirmed?'disabled':''} onchange="checkGroup(this.dataset.group,this.checked)"><button class="group-choice" aria-pressed="${g.id===selectedGroup}" data-group="${esc(g.id)}" onclick="selectGroup(this.dataset.group)"><b>${esc(g.id)} · ${g.members.length} 个商品</b><small>${esc(groupProducts(g)[0].product_name)} · 销量 ${g.sales}</small><small>状态：${g.confirmed?'已确认':'待确认'}</small></button></div>`).join('');
     const group=snapshot.groups.find(g=>g.id===selectedGroup);
-    $('groupDetail').innerHTML=group?`<div class="bar"><h3>${esc(group.id)} · ${group.members.length} 个商品</h3><div class="group-actions"><button data-mutation ${group.confirmed&&reviewTab!=='confirmed'?'disabled':''} onclick="${group.confirmed?"changeConfirmation({action:'withdraw',group:selectedGroup})":'confirmGroup(selectedGroup)'}">${group.confirmed?(reviewTab==='confirmed'?'撤回当前分组':'已确认'):'确认当前分组'}</button><button onclick="openAdd()">组内新增商品</button></div></div><p>同款组销量 <b>${group.sales}</b> · <span class="group-status">${group.confirmed?'已确认':'待确认'}</span></p>${groupProducts(group).map(p=>memberCard(p,true)).join('')}`:'暂无符合条件的分组';
+    $('groupDetail').innerHTML=group?`<div class="bar"><h3>${esc(group.id)} · ${group.members.length} 个商品</h3><div class="group-actions"><button data-mutation ${group.confirmed&&reviewTab!=='confirmed'?'disabled':''} onclick="${group.confirmed?"updateDraft({action:'withdraw',group:selectedGroup})":'confirmGroup(selectedGroup)'}">${group.confirmed?(reviewTab==='confirmed'?'撤回当前分组':'已确认'):'确认当前分组'}</button><button onclick="openAdd()">组内新增商品</button></div></div><p>同款组销量 <b>${group.sales}</b> · <span class="group-status">${group.confirmed?'已确认':'待确认'}</span></p>${groupProducts(group).map(p=>memberCard(p,true)).join('')}`:'暂无符合条件的分组';
     $('dirtyStatus').textContent=snapshot.dirty?'未保存':'';
     document.querySelectorAll('[data-tab]').forEach(button=>button.setAttribute('aria-selected',button.dataset.tab===reviewTab));
     updateBatchControls();
@@ -230,13 +230,17 @@ function requestRemoval(index) {
     if(memberGroup(currentSnapshot.products[index]).members.length>1)$('removeDialog').showModal();
 }
 async function mutate(action,index,target=null) {
+    const p=currentSnapshot.products[index], source=memberGroup(p);
+    return updateDraft({action,group:source.id,member:{shop_key:p.shop_key,offer_id:p.offer_id},target});
+}
+async function updateDraft(operation, resetPage=false) {
     if(editBusy)return false;
     editBusy=true; clearError();
-    const p=currentSnapshot.products[index], source=memberGroup(p);
-    const controls=[...document.querySelectorAll('[data-mutation]')].map(node=>[node,node.disabled]);
+    const controls=[...document.querySelectorAll('[data-mutation], #retryMatching')].map(node=>[node,node.disabled]);
     controls.forEach(([node])=>node.disabled=true);
     try {
-        currentSnapshot=await api('/api/analysis',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:currentSnapshot.id,action,group:source.id,member:{shop_key:p.shop_key,offer_id:p.offer_id},target})});
+        currentSnapshot=await api('/api/analysis',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:currentSnapshot.id,...operation})});
+        if(resetPage)productPage=0;
         renderProducts();return true;
     } catch(e) {error(e);return false;}
     finally {editBusy=false;controls.forEach(([node,disabled])=>node.disabled=disabled);}
@@ -258,22 +262,10 @@ function renderAddResults() {
 }
 async function addMember(index) {if(await mutate('move',index,selectedGroup))$('addDialog').close();}
 async function retryMatching() {
-    if(editBusy)return;
-    editBusy=true;
-    $('retryMatching').disabled=true;
-    try {
-        currentSnapshot=await api('/api/analysis',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:currentSnapshot.id,action:'retry_matching'})});
-        productPage=0; renderProducts();
-    } catch(e) {error(e);} finally {editBusy=false;$('retryMatching').disabled=false;}
+    await updateDraft({action:'retry_matching'},true);
 }
 async function confirmGroup(group) {
-    await changeConfirmation({group});
-}
-async function changeConfirmation(operation){
-    if(editBusy)return false;
-    editBusy=true;clearError();$('bulkOK').disabled=true;
-    try{currentSnapshot=await api('/api/analysis',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:currentSnapshot.id,...operation})});renderProducts();return true;}
-    catch(e){error(e);return false;}finally{editBusy=false;$('bulkOK').disabled=false;}
+    await updateDraft({group});
 }
 function inventoryChart(points, sku=false) {
     const width=680, height=160, stocks=points.filter(p=>p.stock!==null).map(p=>p.stock);
