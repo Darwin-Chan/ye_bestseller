@@ -157,15 +157,14 @@ class RankingBrowserTests(unittest.TestCase):
         expect(rows).to_have_count(2)
         expect(rows.nth(1).locator('summary')).to_contain_text('杯子4')
         expect(rows.nth(1).locator('summary .number')).to_have_text('0 销量')
-        # A40：换区间后最高贡献者变化，代表名称跟着换。
+        # A40：换区间后最高贡献者变化，代表名称跟着换；保存过的人工关系按版本复用。
         self.page.get_by_role('button', name='重新选择日期').click()
         self.page.get_by_label('结束日期', exact=True).fill('2026-09-08')
         self.page.get_by_role('button', name='继续', exact=True).click()  # 周二不是全量抓取日
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
         expect(self.page.get_by_role('heading', name='确认同款')).to_be_visible()
-        sid = self.page.url.split('analysis=')[1]
-        self.join_group(sid, '222', '11')
-        self.join_group(sid, '333', '11')
+        expect(self.page.locator('#groupDetail h3')).to_have_text('G1 · 3 个商品')
+        expect(self.page.locator('#groupDetail .group-status')).to_have_text('已确认')
         self.save_and_show_results()
         row = self.page.locator('#ranking > details').first
         expect(row.locator('summary .product-title b')).to_have_text('杯子')

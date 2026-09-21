@@ -326,9 +326,9 @@ class AnalysisBrowserTests(unittest.TestCase):
         self.page.get_by_role('button', name='继续', exact=True).click()
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
         expect(self.page.locator('.group-choice')).to_have_count(2)
+        # 上一段区间保存过的确认按版本复用：到这儿两个组已经已确认，不需要再点一遍。
         for index in range(2):
             self.page.locator('.group-choice').nth(index).click()
-            self.page.get_by_role('button', name='确认当前分组', exact=True).click()
             expect(self.page.get_by_role('button', name='已确认', exact=True)).to_be_disabled()
         self.page.get_by_role('button', name='保存分组并查看畅销品').click()
         self.page.locator('#ranking > details > summary').first.click()
@@ -497,6 +497,92 @@ class AnalysisBrowserTests(unittest.TestCase):
         conn = sqlite3.connect(self.service.config.store)
         self.assertEqual(conn.execute('SELECT COUNT(*) FROM analysis_drafts').fetchone()[0], 1)
         conn.close()
+
+    def test_new_range_reuses_saved_decisions_across_restart_and_image_change(self):
+        # 票 09 演示路径：保存 ABC 同款关系 → 新区间只观察到 AB → 保存 → 扩大区间找回 C
+        # → 关系仍在 → 更新 C 的图片后看到变更需要处理。
+        self.add_product('22', '云朵杯', 60, 50, color='red')
+        self.add_product('33', '树叶杯', 30, 20, color='red')
+        for offer, name, points in [('11', '杯子', [(16, 70), (21, 50)]),
+                                    ('22', '云朵杯', [(16, 40), (21, 30)])]:
+            for day, stock in points:
+                self.submit_product(offer, f'2026-09-{day}', stock, name=name,
+                                    color='red' if offer == '22' else None)
+        self.dates()
+        self.page.get_by_role('button', name='下一步、进入同款确认').click()
+        expect(self.page.locator('.group-choice')).to_have_count(3)
+        # 人工把云朵杯、树叶杯并进杯子所在组并确认，保存进结果页。
+        self.page.get_by_role('button', name='组内新增商品').click()
+        self.page.get_by_role('textbox', name='搜索商品', exact=True).fill('云朵杯')
+        self.page.locator('#addResults').get_by_role('button', name='添加到当前组').click()
+        self.page.get_by_role('button', name='组内新增商品').click()
+        self.page.get_by_role('textbox', name='搜索商品', exact=True).fill('树叶杯')
+        self.page.locator('#addResults').get_by_role('button', name='添加到当前组').click()
+        expect(self.page.locator('#groupDetail h3')).to_have_text('G1 · 3 个商品')
+        self.page.get_by_role('button', name='确认当前分组', exact=True).click()
+        expect(self.page.locator('#groupDetail .group-status')).to_have_text('已确认')
+        self.page.get_by_role('button', name='保存分组并查看畅销品').click()
+        expect(self.page.locator('#ranking > details > summary .number').first).to_have_text('40 销量')
+
+        # 新区间 15—21：只有杯子、云朵杯有观测；保存过的确认直接生效，不要求重新确认。
+        self.page.get_by_role('button', name='重新选择日期').click()
+        self.page.get_by_label('开始日期', exact=True).fill('2026-09-15')
+        self.page.get_by_role('button', name='继续', exact=True).click()  # 周二不是全量抓取日
+        self.page.get_by_label('结束日期', exact=True).fill('2026-09-21')
+        self.page.get_by_role('button', name='下一步、进入同款确认').click()
+        expect(self.page.locator('.group-choice')).to_have_count(1)
+        expect(self.page.locator('#groupDetail h3')).to_have_text('G1 · 2 个商品')
+        expect(self.page.locator('#groupDetail .group-status')).to_have_text('已确认')
+        expect(self.page.get_by_role('button', name='确认当前分组', exact=True)).to_have_count(0)
+        self.page.get_by_role('button', name='保存分组并查看畅销品').click()
+        expect(self.page.locator('#ranking > details > summary .number').first).to_have_text('50 销量')
+        # 重启后继续这个区间：复用来的确认随草稿一起恢复。
+        self.restart_service()
+        self.page.get_by_role('button', name='继续上次分析').click()
+        expect(self.page.locator('#snapshotInfo')).to_contain_text('其中0待确认')
+        expect(self.page.locator('#groupDetail .group-status')).to_have_text('已确认')
+
+        # 未保存的撤回不能混进新分析：离开时提示，放弃后回到最近保存版本。
+        self.page.get_by_role('tab', name='已确认', exact=True).click()
+        self.page.locator('.group-choice').first.click()
+        self.page.get_by_role('button', name='撤回当前分组').click()
+        expect(self.page.locator('#dirtyStatus')).to_have_text('未保存')
+        self.page.get_by_role('button', name='重新选择日期').click()
+        expect(self.page.get_by_role('dialog')).to_contain_text('未保存')
+        self.page.get_by_role('button', name='放弃修改').click()
+        expect(self.page.get_by_role('heading', name='选择销量计算区间')).to_be_visible()
+        # 返回日期页时会按上个快照的日期（15 日）弹出非全量提醒，先关掉。
+        self.page.get_by_role('button', name='继续', exact=True).click()
+
+        # 扩大区间 7—21：树叶杯回来，三成员关系仍在，销量按新区间重算。
+        self.dates()
+        self.page.get_by_label('结束日期', exact=True).fill('2026-09-21')
+        self.page.get_by_role('button', name='下一步、进入同款确认').click()
+        expect(self.page.locator('.group-choice')).to_have_count(1)
+        expect(self.page.locator('#groupDetail h3')).to_have_text('G1 · 3 个商品')
+        expect(self.page.locator('#groupDetail .group-status')).to_have_text('已确认')
+        expect(self.page.locator('#groupDetail')).to_contain_text('同款组销量 90')
+        self.page.get_by_role('button', name='暂时保存').click()
+        expect(self.page.locator('#saveStatus')).to_have_text(re.compile(r'^已保存 · \d{2}-\d{2} \d{2}:\d{2}$'))
+        self.restart_service()
+        self.page.get_by_role('button', name='继续上次分析').click()
+        expect(self.page.locator('#groupDetail h3')).to_have_text('G1 · 3 个商品')
+        expect(self.page.locator('#groupDetail .group-status')).to_have_text('已确认')
+
+        # 更新树叶杯的图片：旧确认不套给新版本，另两名成员保持已确认，变更可见。
+        self.submit_product('33', '2026-09-14', 20, name='树叶杯', color='green')
+        self.page.get_by_role('button', name='重新选择日期').click()
+        self.dates()
+        self.page.get_by_label('结束日期', exact=True).fill('2026-09-21')
+        self.page.get_by_role('button', name='下一步、进入同款确认').click()
+        expect(self.page.locator('.group-choice')).to_have_count(2)
+        expect(self.page.locator('#groupDetail h3')).to_have_text('G1 · 2 个商品')
+        expect(self.page.locator('#groupDetail .group-status')).to_have_text('已确认')
+        self.page.locator('.group-choice').filter(has_text='树叶杯 ·').click()
+        expect(self.page.locator('#groupDetail .group-status')).to_have_text('待确认')
+        expect(self.page.locator('#groupDetail aside.change')).to_contain_text('商品名称或图片已有变更，请核对当前信息。')
+        Path('work').mkdir(exist_ok=True)
+        self.page.screenshot(path='work/ticket09-reuse.png')
 
 
 class InventoryCalculationTests(unittest.TestCase):

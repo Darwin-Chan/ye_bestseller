@@ -15,7 +15,7 @@ from uuid import uuid4
 from . import crawler_identity
 from .analysis_store import DraftStore
 from .db import utcnow
-from .matching import MatchingConfig, MatchingService, ModelConfig, identity, summarize_group
+from .matching import MatchingConfig, MatchingService, ModelConfig, identity, summarize_group, version
 
 DEFAULT_DRAFT_FILE = "analysis-drafts.sqlite"
 
@@ -79,6 +79,8 @@ class AnalysisService:
         self.config = config
         self.running = running or crawler_identity.is_running
         self._snapshots = {}
+        # 本次分析开始时账本记录过的商品版本，供信息变更标注在模型重试后仍然成立。
+        self._recorded_versions = {}
         self._lock = threading.Lock()
         self.matcher = MatchingService(config.matching) if config.matching and config.matching.mode != 'disabled' else None
 
@@ -178,15 +180,16 @@ class AnalysisService:
             product.update(result)
         snapshot = {"id": uuid4().hex, "start": start, "end": end,
                     "frozen_at": utcnow(), "inventory": rows, "products": products,
-                    "shops": shops, "dirty": False, "saved_at": None, "groups": [
-                        {"id": f"G{i+1}", "confirmed": False,
-                         "members": [{"shop_key": p["shop_key"], "offer_id": p["offer_id"]}],
-                         "sales": p["sales"]}
-                        for i, p in enumerate(products)]}
+                    "shops": shops, "dirty": False, "saved_at": None, "groups": []}
+        # 「继续上次分析」读原快照；新日期区间走这里：重算销量后，把已保存的
+        # 人工确认按商品版本套回来（票 09），不适用的留在待确认由人工处理。
+        recorded = reuse_decisions(snapshot, self.store.ledger())
         with self._lock:
             self._match(snapshot)
+            mark_information_changes(snapshot, recorded)
             rank_groups(snapshot)
             self._snapshots[snapshot["id"]] = snapshot
+            self._recorded_versions[snapshot["id"]] = recorded
         return copy.deepcopy(snapshot)
 
     def _match(self, snapshot):
@@ -202,6 +205,7 @@ class AnalysisService:
                 raise ValueError('分析已不存在')
             snapshot = copy.deepcopy(self._snapshots[analysis_id])
             self._match(snapshot)
+            mark_information_changes(snapshot, self._recorded_versions.get(analysis_id, {}))
             rank_groups(snapshot)
             self._snapshots[analysis_id] = snapshot
             return copy.deepcopy(snapshot)
@@ -248,8 +252,10 @@ class AnalysisService:
                 raise ValueError('还有待确认的同款组，请先完成确认')
             saved_at = utcnow()
             # 先落盘再改内存：写失败时本次修改仍留在页面，并保持未保存标记。
+            # 草稿版本与决策账本同一次事务提交，页面此刻的确认/排除即全局最新。
             self.store.write(analysis_id, snapshot['start'], snapshot['end'], saved_at,
-                             self._draft_payload(snapshot, saved_at))
+                             self._draft_payload(snapshot, saved_at),
+                             merge_decisions(snapshot, self.store.ledger()))
             snapshot['dirty'] = False
             snapshot['saved_at'] = saved_at
             return copy.deepcopy(snapshot)
@@ -465,3 +471,103 @@ def _aggregate_points(series: list[list[dict]]) -> list[dict]:
             'segment_start': any(member[index].get('segment_start') for member in series),
         })
     return aggregated
+
+
+def reuse_decisions(snapshot: dict, decisions: dict) -> dict:
+    """把账本里已保存的人工确认套到新分析的成员上，返回账本记录过的商品版本。
+
+    关系按成员逐一核对证据版本：版本未变的成员沿用确认，版本变了的不套旧确认；
+    版本未变的其余成员照旧成组（票 09）。不适用与未参与的商品留在待确认。
+    排除关系按商品身份生效，不受版本影响；只有两端都在本次分析里才加载。
+    """
+    products = snapshot['products']
+    current = {identity(p): version(p) for p in products}
+    recorded = {}
+    parent = {}
+
+    def find(member):
+        while parent.setdefault(member, member) != member:
+            member = parent[member]
+        return member
+
+    confirmed = set()
+    for relation in decisions['relations']:
+        for member, member_version in relation:
+            recorded.setdefault(member, set()).add(member_version)
+        intact = [member for member, member_version in relation if current.get(member) == member_version]
+        for member in intact[1:]:
+            parent[find(intact[0])] = find(member)
+        confirmed.update(intact)
+    for member, member_version in decisions['standalone']:
+        recorded.setdefault(member, set()).add(member_version)
+        if current.get(member) == member_version:
+            confirmed.add(member)
+    groups = []
+    clusters = {}
+    for p in products:
+        member = identity(p)
+        if member in confirmed:
+            root = find(member)
+            if root not in clusters:
+                clusters[root] = {'id': f'G{len(groups)+1}', 'confirmed': True, 'members': []}
+                groups.append(clusters[root])
+            clusters[root]['members'].append({'shop_key': p['shop_key'], 'offer_id': p['offer_id']})
+        else:
+            groups.append({'id': f'G{len(groups)+1}', 'confirmed': False,
+                           'members': [{'shop_key': p['shop_key'], 'offer_id': p['offer_id']}]})
+    snapshot['groups'] = groups
+    snapshot['excluded'] = [list(pair) for pair in decisions['excluded']
+                            if pair[0] in current and pair[1] in current]
+    return recorded
+
+
+def mark_information_changes(snapshot: dict, recorded: dict) -> None:
+    """账本里记录过的版本与当前版本不一致的商品标为信息变更：旧确认不适用于新证据。"""
+    for product in snapshot['products']:
+        versions = recorded.get(identity(product))
+        if versions and version(product) not in versions:
+            product['origin'] = '信息变更'
+
+
+def merge_decisions(snapshot: dict, decisions: dict) -> dict:
+    """保存这次人工整理后的完整账本。
+
+    确认的多商品组按在场成员写回关系；成员这次没参与（新区间不显示）时关系
+    保留旧版本，只把在场成员更新为当前版本——保存局部区间不能抹掉全局历史
+    关系与排除（票 09）。在场却已被人工挪出该组的成员按最新决定移出关系。
+    """
+    present = {identity(p): version(p) for p in snapshot['products']}
+    group_of = {identity(m): g for g in snapshot['groups'] for m in g['members']}
+    clusters = {}
+    for group in snapshot['groups']:
+        if group['confirmed'] and len(group['members']) > 1:
+            clusters[group['id']] = {identity(m): present[identity(m)] for m in group['members']}
+    relations = []
+    for relation in decisions['relations']:
+        in_view = [member for member, _ in relation if member in present]
+        if not in_view:
+            relations.append([list(member) for member in relation])
+            continue
+        targets = {group_of[member]['id'] for member in in_view}
+        if len(targets) == 1:
+            (gid,) = targets
+            if gid in clusters:
+                for member, member_version in relation:
+                    if member not in present:
+                        clusters[gid].setdefault(member, member_version)
+                continue
+        remaining = [(member, member_version) for member, member_version in relation if member not in present]
+        if len(remaining) > 1:
+            relations.append([list(member) for member in remaining])
+    for members in clusters.values():
+        relations.append([[member, member_version] for member, member_version in sorted(members.items())])
+    standalone = []
+    for p in snapshot['products']:
+        group = group_of[identity(p)]
+        if group['confirmed'] and len(group['members']) == 1:
+            standalone.append([identity(p), present[identity(p)]])
+    excluded = [list(pair) for pair in decisions['excluded']
+                if not (pair[0] in present and pair[1] in present)]
+    excluded += [list(pair) for pair in snapshot.get('excluded', [])]
+    return {'relations': sorted(relations), 'standalone': sorted(standalone),
+            'excluded': sorted({tuple(pair) for pair in excluded})}
