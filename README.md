@@ -54,6 +54,62 @@ python run.py --pages-per-shop 2 --max-detail 20 --limit-shops A01
 - 中断后可再次运行续跑；已放弃或中断轮写入的数据照常参与。
 - 结果写入 `F:/AI/bestseller_runtime/data/bestseller.db`；解析失败的原始页面存 `F:/AI/bestseller_runtime/data/raw_pages/round_<轮次>/`；不再自动生成 CSV/Excel。运行数据已移出工作区（路径见 `config/config.toml`）。
 
+## 畅销品分析（独立程序）
+
+分析独立于采集：它只**只读**现有库存库，把一次分析固定成快照，再把人工整理进度单独存进
+自己的草稿库。不要求抓取结束才出报表，也不把分析塞进采集流程。
+
+### 启动
+
+```bash
+python analyze.py
+```
+
+- 打开桌面窗口（pywebview）并起一个只监听 `127.0.0.1` 随机端口的本地服务，页面是
+  `docs/bestseller-analysis.html`。
+- 只想起服务、不开窗口（调试或远程查看端口）：
+
+```bash
+python analyze.py --serve
+```
+
+- 换配置：`python analyze.py --config <路径>`，缺省 `config/analysis.toml`。
+- 正式入口就是上面这条命令；**不需要开开发控制台调用页面里的隐藏函数**。
+
+### 配置
+
+复制 `config/analysis.example.toml` 为 `config/analysis.toml`（真配置含机器专属值，不进代码仓）。
+相对路径以配置文件所在目录为基准。
+
+| 键 | 作用 | 缺省 |
+| --- | --- | --- |
+| `analysis.database` | 要读的库存数据库 | 必填 |
+| `analysis.store` | **分析草稿库**（暂存与「继续上次分析」） | 配置目录下的 `analysis-drafts.sqlite` |
+| `analysis.output` | **离线报告落盘目录** | 项目的 `output/` |
+| `analysis.full_capture_weekday` | 非全量抓取提醒日（ISO：1=周一） | `1` |
+| `matching.mode` | `disabled` 不调模型 / `direct` 主模型直收图片 / `caption` 先由视觉模型提证据 | `disabled` |
+| `matching.cache` | 同款判断缓存库 | 配置目录下的 `matching.sqlite` |
+| `matching.model` / `matching.vision` | 服务地址、模型名、**密钥读环境变量**（`key_env`） | 见示例 |
+
+模型密钥只从环境变量读，不写进页面也不进配置文件。
+
+### 数据落在哪
+
+- **草稿**（日期、固定库存、分组与人工确认/排除/撤回）：`analysis.store` 指向的 SQLite 文件。
+  「暂时保存」与「保存分组并查看畅销品」各是一次完整版本提交；重开程序用
+  「继续上次分析」恢复最近一次成功保存的版本。
+- **离线报告**：导出写进 `analysis.output`（缺省 `output/`），文件名含日期区间与本次导出的
+  时间标识，重名加序号不覆盖；页面会显示生成的文件位置。报告可离线打开，不含密钥，
+  也提供不了人工分组编辑或采集控制。
+
+### 走一遍
+
+选开始/结束日期 → 核对两侧「当日真实抓取」数量 → 进入同款确认 → 处理模型建议（对比、
+移除、组内新增）→ 筛选与批量确认 / 撤回 → 暂时保存 → 查看畅销品 → 导出 HTML 报告。
+
+验收记录（环境、样本、A01—A46 逐条核对、未执行项）见
+[docs/畅销品分析验收记录.md](docs/畅销品分析验收记录.md)。
+
 ## 打包与运行形态
 
 双击的 `dist\bestseller_gui.exe` 是一个**启动壳**，不是自带代码的程序（决定见 [ADR-0007](docs/adr/0007-gui-exe-is-a-shell.md)）：
