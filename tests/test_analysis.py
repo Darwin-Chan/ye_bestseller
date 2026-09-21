@@ -238,8 +238,17 @@ class AnalysisBrowserTests(unittest.TestCase):
         expect(self.page.get_by_role("heading", name="初步畅销品")).not_to_be_visible()
         self.page.get_by_role("button", name="确认当前分组").click()
         expect(self.page.get_by_role("heading", name="初步畅销品")).to_be_visible()
-        self.page.get_by_text("01 杯子 · 20 销量", exact=True).click()
-        expect(self.page.get_by_text("红色 · 销量 20", exact=True)).to_be_visible()
+        rank = self.page.locator('#ranking > details').first
+        expect(rank.locator(':scope > summary')).to_contain_text('01')
+        expect(rank.locator(':scope > summary')).to_contain_text('杯子')
+        expect(rank.locator(':scope > summary .number')).to_have_text('20 销量')
+        expect(self.page.get_by_text('点击展开')).to_have_count(0)
+        rank.locator(':scope > summary').click()
+        expect(rank.locator('.chart-block[data-sku="false"] .inventory-chart')).to_be_visible()
+        sku = rank.locator('.sku-row').filter(has_text='红色')
+        expect(sku.locator('summary')).to_contain_text('销量 20')
+        sku.locator('summary').click()
+        expect(sku.locator('.inventory-chart')).to_be_visible()
 
     def test_switching_inventory_through_database_and_browser(self):
         for day, values in [(7, [('default', 100)]), (8, [('default', 90)]),
@@ -265,7 +274,9 @@ class AnalysisBrowserTests(unittest.TestCase):
         expect(self.page.locator('#ranking > details > summary').first).to_contain_text('30')
         expect(self.page.locator('#ranking .inventory-chart').first).to_be_visible()
         rank = self.page.locator('#ranking > details').first
-        expect(rank.locator('.inventory-chart').first.locator('line')).to_have_count(12)
+        chart = rank.locator('.inventory-chart').first
+        expect(chart.locator('.stock-line')).to_have_count(6)  # 切换日不连线
+        expect(chart.locator('.sales-line')).to_have_count(7)
         default_chart = rank.locator('details .inventory-chart').first
         expect(default_chart.locator('circle[data-stock]')).to_have_count(3)
         expect(default_chart.locator('circle[data-date="2026-09-10"]')).to_have_count(0)

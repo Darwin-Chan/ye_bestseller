@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from . import crawler_identity
 from .db import utcnow
-from .matching import MatchingConfig, MatchingService, ModelConfig
+from .matching import MatchingConfig, MatchingService, ModelConfig, identity, summarize_group
 
 
 @dataclass(frozen=True)
@@ -165,6 +165,7 @@ class AnalysisService:
                         for i, p in enumerate(products)]}
         with self._lock:
             self._match(snapshot)
+            rank_groups(snapshot)
             self._snapshots[snapshot["id"]] = snapshot
         return copy.deepcopy(snapshot)
 
@@ -181,6 +182,7 @@ class AnalysisService:
                 raise ValueError('分析已不存在')
             snapshot = copy.deepcopy(self._snapshots[analysis_id])
             self._match(snapshot)
+            rank_groups(snapshot)
             self._snapshots[analysis_id] = snapshot
             return copy.deepcopy(snapshot)
 
@@ -232,6 +234,7 @@ class AnalysisService:
                 raise ValueError('分析已不存在')
             snapshot = copy.deepcopy(self._snapshots[analysis_id])
             edit_group(snapshot, action, group_id, member, target_id, self.matcher)
+            rank_groups(snapshot)
             self._snapshots[analysis_id] = snapshot
             return copy.deepcopy(snapshot)
 
@@ -333,3 +336,33 @@ def _calculate_segment(rows: list[dict], start: str, end: str) -> dict:
             "color": "red" if any(sku["points"][i]["color"] == "red" for sku in bucket["skus"]) else "green",
         } for i, day in enumerate(dates)]
     return products
+
+
+def rank_groups(snapshot):
+    """组级排名视图：成员次序、组总销量与组图逐日点只从这里产出（规格 §4、§6、§14）。
+
+    先按同款分组把成员收成稳定次序（销量降序，并列按身份），再把成员的逐日点聚到
+    组层。冻结后快照入库前调用一次，之后的读取与导出都消费同一份结果，页面不再自己
+    重算销量。只依赖快照数据，可以安全地对同一份快照反复调用。
+    """
+    products = {identity(p): p for p in snapshot['products']}
+    for group in snapshot['groups']:
+        summarize_group(group, products)
+        group['points'] = _aggregate_points([products[identity(m)]['points'] for m in group['members']])
+
+
+def _aggregate_points(series):
+    """把多个成员的逐日点聚合成上一层：库存只累加当日有效观测（全缺即未知），销量求和，补货向上汇总。"""
+    if not series:
+        return []
+    aggregated = []
+    for index, first in enumerate(series[0]):
+        active = [points[index] for points in series if points[index]['stock'] is not None]
+        aggregated.append({
+            'date': first['date'],
+            'stock': sum(point['stock'] for point in active) if active else None,
+            'sales': sum(points[index]['sales'] for points in series),
+            'color': 'red' if any(points[index]['color'] == 'red' for points in series) else 'green',
+            'segment_start': any(points[index].get('segment_start') for points in series),
+        })
+    return aggregated
