@@ -11,14 +11,27 @@
 `logs/exchange.log`；周报在 `<交换区根>/报告/<年>-W<周>.md`。窗口标题与快捷方式名用
 中文「数据交换台」；窗口不挂进现有采集界面（独立进程、独立锁）。
 
-窗口里两个次要按钮（只导出 / 只汇总）与命令行 `--only` 是同一入口；纯汇总机上
-「导出」入口保留并写明跳过（不藏掉），点了就照「本机是纯汇总机，跳过」如实记。
+**运行互斥**（票 14）：同一台机器同一时刻至多一次交换台运行——窗口与命令行同规，
+锁在这里取（不放启动壳里，改脚本不用重打包）：窗口开着时锁在窗口进程手里，第二个
+实例（双击第二次壳、或命令行）拿不到锁——窗口模式弹 MessageBox 后退出 0（照 ADR-0008
+的约定让启动壳保持安静），命令行打一行说明后退出 2。锁在每次运行结束时释放。
+
+**壳与参数**：`dist/bestseller_exchange.exe` 只负责开窗（等价 `--window`），不转发参数；
+`--week`（补历史）、`--only`、`--config` 走本脚本。窗口不接周入口：`--window` 与
+`--week` 同传明确拒绝。
+
+窗口里两个次要按钮（只导出 / 只汇总）与命令行 `--only` 是同一入口；一次运行结束显示
+**结局行**（与命令行收尾同一句：报告路径 + 退出码口径）。纯汇总机上「仅导出」入口保留
+并写明跳过（不藏掉），按钮置灰；点了就照「本机是纯汇总机，跳过」如实记。
+运行中关窗不拦、只记录（重跑能修：导出幂等、导入有幂等账、报告同周重写）。
 """
 from __future__ import annotations
 
 import argparse
+import ctypes
 import logging
 import logging.handlers
+import os
 import sys
 import threading
 from pathlib import Path
@@ -30,10 +43,15 @@ sys.path.insert(0, str(ROOT))
 import webview  # noqa: E402
 
 from bestseller_monitor import exchange as console  # noqa: E402
+from bestseller_monitor import single_instance  # noqa: E402
 from bestseller_monitor.config import ROLE_GLOSS, ROLE_MERGE_ONLY, Config  # noqa: E402
 from bestseller_monitor.weekly_plan import PlanError  # noqa: E402
 
 WINDOW_TITLE = "数据交换台"
+
+_MB_ICONINFORMATION = 0x40
+_MB_SETFOREGROUND = 0x10000
+_MB_TOPMOST = 0x40000
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -113,6 +131,14 @@ class Api:
             return {"running": self._running, "lines": list(self._lines),
                     "exit_code": self.exit_code}
 
+    def close_note(self) -> str | None:
+        """关窗时的一句话：运行还没结束就如实记一笔（只记录、不拦）。"""
+        with self._lock:
+            if not self._running:
+                return None
+        return ("运行还没结束就关窗了：这一趟可能半途而废；重跑能修"
+                "（导出是幂等的、导入有幂等账、报告同周重写）。")
+
     def _append(self, line: str) -> None:
         with self._lock:
             self._lines.append(line)
@@ -121,45 +147,99 @@ class Api:
         try:
             outcome = self._run(self.cfg, only=only, emit=self._append)
             code = outcome.exit_code
+            report = outcome.report_path
         except Exception as exc:              # 窗口不能因为一次运行出错就死掉
             logging.getLogger(__name__).exception("一次运行出错了")
             self._append(f"运行出错了：{exc}")
-            code = console.EXIT_NOTHING_DONE
+            code, report = console.EXIT_NOTHING_DONE, None
+        # 结局行：与命令行收尾同一句话（报告路径 + 退出码口径），窗口里也要看得到
+        if report is not None:
+            self._append(f"报告：{report}")
+        self._append(f"退出码 {code}：{console.VERDICT[code]}")
         with self._lock:
             self.exit_code = code
             self._running = False
+
+
+def _notify(text: str, title: str = WINDOW_TITLE) -> None:
+    """一句给人看的提示；弹不出来也只落日志，不算错。
+
+    与 gui.py 那份同规：`BESTSELLER_NO_DIALOG=1` 只落日志不弹窗（自动化验证用）。
+    窗口模式的第二个实例没人看控制台，靠它说话。
+    """
+    logging.getLogger(__name__).info(text)
+    if os.name != "nt" or (os.environ.get("BESTSELLER_NO_DIALOG") or "").strip() == "1":
+        return
+    _message_box(text, title)
+
+
+def _message_box(text: str, title: str = WINDOW_TITLE) -> None:
+    try:
+        ctypes.windll.user32.MessageBoxW(
+            None, text, title, _MB_ICONINFORMATION | _MB_SETFOREGROUND | _MB_TOPMOST)
+    except OSError as exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning("弹窗失败（%s）：%s", exc, text)
 
 
 def open_window(cfg) -> int:
     """开小窗口；关窗后返回最后一次运行的退出码（没跑过是 0）。"""
     api = Api(cfg)
     html = (ROOT / "docs" / "ui_exchange.html").read_text(encoding="utf-8")
-    webview.create_window(WINDOW_TITLE, html=html, js_api=api, width=640, height=540,
-                          min_size=(540, 420))
+    window = webview.create_window(WINDOW_TITLE, html=html, js_api=api, width=640,
+                                   height=540, min_size=(540, 420))
+    window.events.closing += lambda: _note_closing(api)
     webview.start(debug=False)
     return api.exit_code if api.exit_code is not None else console.EXIT_CLEAN
 
 
+def _note_closing(api) -> None:
+    """关窗：运行还在跑只记一笔（不拦、不弹）——重跑能修。"""
+    note = api.close_note()
+    if note:
+        logging.getLogger(__name__).warning(note)
+
+
+def _refuse_when_running(window: bool) -> int:
+    """同一台机器同一时刻至多一次交换台运行：窗口与命令行同规（票 14）。"""
+    text = "数据交换台已经在运行（窗口开着，或另一次运行还没结束）：等它结束再跑。"
+    if window:
+        _notify(text + "\n\n这次不再开第二个窗口。", title="数据交换台 · 已经在运行")
+        return console.EXIT_CLEAN          # 退出 0：照 ADR-0008 的约定让启动壳保持安静
+    print(text)
+    return console.EXIT_NOTHING_DONE
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.window and args.week:
+        print("\n>>> --window 与 --week 不能同时用：窗口不接周入口（补历史走脚本）。"
+              "\n>>> 要指定周窗口请直接运行：python exchange.py --week 2026-W37\n")
+        return console.EXIT_NOTHING_DONE
     try:
         cfg = Config.from_file(args.config)
     except (FileNotFoundError, ValueError) as exc:
-        print(f"\n>>> {exc}\n")
+        # 窗口模式没人看控制台：写 stderr——启动壳收着这条管道，弹窗里会带出来
+        print(f"\n>>> {exc}\n", file=sys.stderr if args.window else sys.stdout)
         return console.EXIT_NOTHING_DONE
-    cfg.ensure_dirs()
-    _configure_logging(cfg)
-    if args.window:
-        return open_window(cfg)
+    lock = single_instance.acquire(single_instance.EXCHANGE_LOCK)
+    if lock is None:
+        return _refuse_when_running(args.window)
     try:
-        outcome = console.run_once(cfg, only=args.only, week=args.week, emit=print)
-    except PlanError as exc:                  # --week 写错这类：点名说清楚，不吐栈
-        print(f"\n>>> {exc}\n")
-        return console.EXIT_NOTHING_DONE
-    if outcome.report_path is not None:       # 检查没过（交换区根不在）时没有报告可指
-        print(f"\n报告：{outcome.report_path}")
-    print(f"退出码 {outcome.exit_code}：{console.VERDICT[outcome.exit_code]}")
-    return outcome.exit_code
+        cfg.ensure_dirs()
+        _configure_logging(cfg)
+        if args.window:
+            return open_window(cfg)
+        try:
+            outcome = console.run_once(cfg, only=args.only, week=args.week, emit=print)
+        except PlanError as exc:              # --week 写错这类：点名说清楚，不吐栈
+            print(f"\n>>> {exc}\n")
+            return console.EXIT_NOTHING_DONE
+        if outcome.report_path is not None:   # 检查没过（交换区根不在）时没有报告可指
+            print(f"\n报告：{outcome.report_path}")
+        print(f"退出码 {outcome.exit_code}：{console.VERDICT[outcome.exit_code]}")
+        return outcome.exit_code
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":

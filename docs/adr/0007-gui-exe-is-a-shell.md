@@ -38,3 +38,12 @@
 - **取消 exe**（`pythonw` + 快捷方式）：零打包、零漂移，代价是丢掉「双击一个文件就能起来」的手感，而壳能用同样的手感拿到同样的好处。
 
 相关工单为 IS-52；实现见 `gui_launcher.py`、`bestseller_gui.spec`、`tools/build_gui_exe.py`。运行形态的操作口径见 README 的「打包与运行形态」一节。
+
+**落地实证（2026-09-21，票 14）**：壳正文抽芯为 `launcher_core.py`，两只薄入口
+（`gui_launcher.py` / `exchange_launcher.py`）各自填目标差异：拉起的脚本、项目根标记、日志名、
+弹窗政策（采集壳「非零都弹」；交换台壳「0/1 静默、2 与启动失败才弹」——退出码 1 是正常结局）。
+重建入口泛化为 `python tools/build_exe.py --target gui|exchange`（`tools/build_gui_exe.py`
+随之退役、不再存在），新增第二只壳：交换台壳（`bestseller_exchange.spec` →
+`dist/bestseller_exchange.exe`，拉 `<项目根>\exchange.py --window`，不转发参数）。本 ADR 的
+壳形态（项目代码一律从源码目录加载、项目根按 exe 位置推导、exe 待在 `<项目根>\dist\`）
+对两只壳一视同仁；演练取证在 `.scratch/multi-machine-collection-impl/ticket14/`。

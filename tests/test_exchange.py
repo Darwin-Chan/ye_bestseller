@@ -21,8 +21,10 @@ import io
 import shutil
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -30,7 +32,7 @@ from unittest.mock import patch
 import exchange
 from bestseller_monitor import db as dbmod
 from bestseller_monitor import exchange as exchange_mod
-from bestseller_monitor import export, merge
+from bestseller_monitor import export, merge, single_instance
 from bestseller_monitor.config import ROLE_COLLECTOR, ROLE_MERGE_ONLY
 from bestseller_monitor.db import CST
 from bestseller_monitor.image_store import ImageStoreError
@@ -848,6 +850,31 @@ class EntryPointTests(unittest.TestCase):
         self.assertNotIn("报告：", out.getvalue())
 
 
+class _ClosingEvent:
+    """pywebview 的 `window.events.closing`：支持 `+=` 挂处理器。"""
+
+    def __init__(self):
+        self.handlers: list = []
+
+    def __iadd__(self, handler):
+        self.handlers.append(handler)
+        return self
+
+
+class WindowStub:
+    """窗口替身：只带 open_window 用到的 events.closing。"""
+
+    def __init__(self, title: str, kwargs: dict):
+        self.title = title
+        self.kwargs = kwargs
+        self.events = SimpleNamespace(closing=_ClosingEvent())
+
+
+def unique_lock_name() -> str:
+    """每个用例一把自己的锁名：不跟本机真实运行的交换台抢同一把（与 single_instance 用例同规）。"""
+    return rf"Local\bestseller_test_exchange_{uuid.uuid4().hex}"
+
+
 class WindowTests(unittest.TestCase):
     """小窗口（独立小工具）：标题、状态与两个次要按钮走同一个 Api。"""
 
@@ -855,7 +882,9 @@ class WindowTests(unittest.TestCase):
         created = {}
 
         def fake_create(title, **kwargs):
-            created.update(title=title, **kwargs)
+            window = WindowStub(title, kwargs)
+            created.update(kwargs, title=title, window=window)
+            return window
 
         with patch.object(exchange.webview, "create_window", side_effect=fake_create), \
                 patch.object(exchange.webview, "start"):
@@ -865,6 +894,8 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(created["title"], "数据交换台")
         self.assertIsInstance(created["js_api"], exchange.Api)
         self.assertIn("数据交换台", created["html"])
+        # 关窗事件有接线（运行中关窗只记录，票 14 Q10）
+        self.assertEqual(len(created["window"].events.closing.handlers), 1)
 
     def test_state_names_the_role_and_keeps_the_export_entry_with_a_note(self):
         merge_only = exchange.Api(crawler_cfg(machine_id="m4", role=ROLE_MERGE_ONLY)).state()
@@ -885,7 +916,7 @@ class WindowTests(unittest.TestCase):
             seen["only"] = only
             emit("检查：本机 m1（采集机）")
             emit("导出已发布")
-            return SimpleNamespace(exit_code=1)
+            return SimpleNamespace(exit_code=1, report_path=None)
 
         api = exchange.Api(crawler_cfg(machine_id="m1"), run=fake_run)
         self.assertEqual(api.start("merge"), {"ok": True})
@@ -899,8 +930,235 @@ class WindowTests(unittest.TestCase):
         self.assertFalse(polled["running"])
         self.assertEqual(polled["exit_code"], 1)
         self.assertEqual(seen["only"], "merge")
-        self.assertEqual(polled["lines"], ["检查：本机 m1（采集机）", "导出已发布"])
+        self.assertEqual(polled["lines"], ["检查：本机 m1（采集机）", "导出已发布",
+                                           "退出码 1：有需要人看一眼的地方"])
         self.assertEqual(api.state()["exit_code"], 1)
+
+    def test_a_finished_run_ends_with_the_cli_closing_lines(self):
+        """结局行（票 14）：CLI 的收尾句（报告路径 + 退出码口径）窗口里也要看得到。"""
+        report = Path("F:/AI/bestseller_runtime/exchange/报告") / f"{WEEK}.md"
+
+        def fake_run(cfg, *, only=None, emit=None, **kwargs):
+            emit("报告已写到 " + str(report))
+            return SimpleNamespace(exit_code=2, report_path=report)
+
+        api = exchange.Api(crawler_cfg(machine_id="m1"), run=fake_run)
+        api.start(None)
+        polled = api.poll()
+        for _ in range(500):
+            if not polled["running"]:
+                break
+            time.sleep(0.01)
+            polled = api.poll()
+
+        self.assertEqual(polled["lines"][-2:], [f"报告：{report}",
+                                                "退出码 2：本机没做成事"])
+
+    def test_a_run_that_died_before_the_report_still_ends_with_the_verdict(self):
+        def fake_run(cfg, *, only=None, emit=None, **kwargs):
+            raise RuntimeError("替身炸了")
+
+        api = exchange.Api(crawler_cfg(machine_id="m1"), run=fake_run)
+        api.start(None)
+        polled = api.poll()
+        for _ in range(500):
+            if not polled["running"]:
+                break
+            time.sleep(0.01)
+            polled = api.poll()
+
+        self.assertEqual(polled["lines"][-1], "退出码 2：本机没做成事")
+        self.assertNotIn("报告：", polled["lines"][-2])
+
+    def test_close_note_is_quiet_when_nothing_is_running(self):
+        api = exchange.Api(crawler_cfg(machine_id="m1"),
+                           run=lambda *a, **k: SimpleNamespace(exit_code=0, report_path=None))
+
+        self.assertIsNone(api.close_note())
+
+    def test_close_note_records_a_window_closed_mid_run(self):
+        """运行中关窗只记录、不拦（票 14 Q10）：重跑能修（导出幂等、导入有幂等账）。"""
+        gate = threading.Event()
+
+        def slow_run(cfg, *, only=None, emit=None, **kwargs):
+            gate.wait(5)
+            return SimpleNamespace(exit_code=0, report_path=None)
+
+        api = exchange.Api(crawler_cfg(machine_id="m1"), run=slow_run)
+        api.start(None)
+        try:
+            for _ in range(500):
+                if api.poll()["running"]:
+                    break
+                time.sleep(0.01)
+            note = api.close_note()
+        finally:
+            gate.set()
+
+        self.assertIn("重跑能修", note)
+
+
+class WindowPageTests(unittest.TestCase):
+    """窗口页文案与纯汇总机的置灰（票 14：按钮照用户用词、导出入口保留但不给点）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.html = (Path(__file__).resolve().parent.parent
+                    / "docs" / "ui_exchange.html").read_text(encoding="utf-8")
+
+    def test_the_first_button_is_named_like_the_user_says_it(self):
+        self.assertIn("导出&amp;汇总", self.html)
+        self.assertNotIn("完整运行", self.html)
+
+    def test_the_export_button_greys_out_on_a_merge_only_machine(self):
+        # 入口保留着、不藏（spec §7），但纯汇总机上没有可做的事：「仅导出」置灰。
+        self.assertIn("merge_only", self.html)
+        self.assertIn("exportBtn.disabled", self.html)
+
+
+class WeekWithWindowTests(unittest.TestCase):
+    """`--window` 与 `--week` 同传明确拒绝（票 14 Q10；现状是静默忽略）。"""
+
+    def test_window_with_a_week_is_refused_with_a_pointer_to_the_script(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = exchange.main(["--window", "--week", WEEK])
+
+        self.assertEqual(code, 2)
+        self.assertIn("--week", out.getvalue())
+        self.assertIn("python exchange.py --week", out.getvalue())
+
+    def test_the_refusal_comes_before_the_config_is_read(self):
+        """参数冲突是用错入口，不是配置问题：没配置也要先报这一条。"""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = exchange.main(["--window", "--week", WEEK,
+                                  "--config", "Z:/nope/config.toml"])
+
+        self.assertEqual(code, 2)
+        self.assertNotIn("找不到配置", out.getvalue())
+
+
+class MutexTests(unittest.TestCase):
+    """运行互斥（票 14 Q7）：同一台机器同一时刻至多一次交换台运行，窗口与命令行同规。"""
+
+    def test_a_run_takes_the_exchange_lock_under_its_module_name(self):
+        world = ConsoleWorld(self)
+        config = write_config(world)
+        asked: list[str] = []
+        name = unique_lock_name()
+        real_acquire = single_instance.acquire
+
+        def recording_acquire(lock_name):
+            asked.append(lock_name)
+            return real_acquire(name)
+
+        with patch.object(single_instance, "acquire", side_effect=recording_acquire), \
+                patch.object(exchange_mod, "run_once",
+                             return_value=SimpleNamespace(exit_code=0, report_path=None)):
+            code = exchange.main(["--config", str(config)])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(asked, [single_instance.EXCHANGE_LOCK])
+
+    def test_a_second_console_run_gets_one_line_and_exit_two(self):
+        world = ConsoleWorld(self)
+        config = write_config(world)
+        name = unique_lock_name()
+        with patch.object(single_instance, "EXCHANGE_LOCK", name):
+            holder = single_instance.acquire(name)
+            self.assertIsNotNone(holder)
+            try:
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = exchange.main(["--config", str(config)])
+            finally:
+                holder.release()
+
+        self.assertEqual(code, 2)
+        self.assertIn("已经在运行", out.getvalue())
+
+    def test_a_second_window_pops_and_exits_zero(self):
+        """第二个实例沿用界面那条约定（ADR-0008）：自己弹窗说明、退出 0 让启动壳保持安静。"""
+        world = ConsoleWorld(self)
+        config = write_config(world)
+        name = unique_lock_name()
+        told: list[str] = []
+        with patch.object(single_instance, "EXCHANGE_LOCK", name):
+            holder = single_instance.acquire(name)
+            self.assertIsNotNone(holder)
+            try:
+                with patch.object(exchange, "_message_box",
+                                  side_effect=lambda text, title=None: told.append(text)):
+                    code = exchange.main(["--window", "--config", str(config)])
+            finally:
+                holder.release()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(told), 1)
+        self.assertIn("已经在运行", told[0])
+
+    def test_the_second_instance_popup_honours_no_dialog(self):
+        world = ConsoleWorld(self)
+        config = write_config(world)
+        name = unique_lock_name()
+        with patch.object(single_instance, "EXCHANGE_LOCK", name), \
+                patch.dict("os.environ", {"BESTSELLER_NO_DIALOG": "1"}):
+            holder = single_instance.acquire(name)
+            self.assertIsNotNone(holder)
+            try:
+                with patch.object(exchange, "_message_box") as box:
+                    code = exchange.main(["--window", "--config", str(config)])
+            finally:
+                holder.release()
+
+        self.assertEqual(code, 0)
+        box.assert_not_called()
+
+    def test_consecutive_runs_in_one_process_are_not_concurrency(self):
+        """锁在每次运行结束时释放：同进程里连续调用 main() 不算并发（票 14 Q7）。"""
+        world = ConsoleWorld(self)
+        config = write_config(world)
+        name = unique_lock_name()
+        with patch.object(single_instance, "EXCHANGE_LOCK", name), \
+                patch.object(exchange_mod, "run_once",
+                             return_value=SimpleNamespace(exit_code=0, report_path=None)):
+            first = exchange.main(["--config", str(config)])
+            second = exchange.main(["--config", str(config)])
+
+        self.assertEqual((first, second), (0, 0))
+        self.assertFalse(single_instance.is_held(name), "main() 返回后锁该已释放")
+
+    def test_the_window_holds_the_lock_for_as_long_as_it_is_open(self):
+        world = ConsoleWorld(self)
+        config = write_config(world)
+        name = unique_lock_name()
+        held_during_window: list[bool] = []
+
+        def fake_create(title, **kwargs):
+            return WindowStub(title, kwargs)
+
+        with patch.object(single_instance, "EXCHANGE_LOCK", name), \
+                patch.object(exchange.webview, "create_window", side_effect=fake_create), \
+                patch.object(exchange.webview, "start",
+                             side_effect=lambda **kw: held_during_window.append(
+                                 single_instance.is_held(name))):
+            code = exchange.main(["--window", "--config", str(config)])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(held_during_window, [True], "窗口开着时锁要在手里")
+        self.assertFalse(single_instance.is_held(name), "关窗后锁该释放")
+
+
+class WindowConfigFailureTests(unittest.TestCase):
+    def test_window_mode_reports_a_broken_config_on_stderr(self):
+        """窗口模式没人看控制台：写 stderr（启动壳收着这条管道，弹窗里会带出来）。"""
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = exchange.main(["--window", "--config", "Z:/nope/config.toml"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("找不到配置", err.getvalue())
 
 
 if __name__ == "__main__":

@@ -112,20 +112,26 @@ python analyze.py --serve
 
 ## 打包与运行形态
 
-双击的 `dist\bestseller_gui.exe` 是一个**启动壳**，不是自带代码的程序（决定见 [ADR-0007](docs/adr/0007-gui-exe-is-a-shell.md)）：
+两个入口程序各配一只**启动壳**（打包 exe；决定见 [ADR-0007](docs/adr/0007-gui-exe-is-a-shell.md)）：采集界面
+`dist\bestseller_gui.exe`（采集壳）、数据交换台 `dist\bestseller_exchange.exe`（交换台壳）。壳不是自带代码的程序：
 
-- exe 里不含项目代码，它只推导项目根、找到本机 python、拉起 `<项目根>\gui.py`；
-- 界面 `gui.py`、页面 `docs/ui_live.html`、采集包 `bestseller_monitor`、`run.py` 全部来自源码目录，改这些文件**不需要重新打包**；
+- exe 里不含项目代码，它只推导项目根、找到本机 python、拉起源码目录里那一个脚本（`<项目根>\gui.py` / `<项目根>\exchange.py --window`）；
+- 界面 `gui.py`、交换台 `exchange.py`、页面 `docs/ui_live.html` / `docs/ui_exchange.html`、采集包 `bestseller_monitor`、`run.py` 全部来自源码目录，改这些文件**不需要重新打包**；
+- 壳不向子进程转发参数：`--week`（补历史）、`--only`（只跑一半）这类是脚本的参数，双击壳没有参数可传——交换台壳收到会明确拒绝并提示走脚本；
 - 项目根按 exe 位置推导（`dist` 的上一级），所以 exe 必须待在 `<项目根>\dist\`；可用环境变量 `BESTSELLER_PROJECT` 显式指定；
-- 找不到 python、缺 pywebview、界面启动即崩这类失败会弹窗说明，并在 `<项目根>\logs\gui_launcher.log` 留底（自动化验证时设 `BESTSELLER_NO_DIALOG=1`，只落日志不弹窗；`--check --check-report <路径>` 可只做推导与校验并写出 JSON 报告）。
+- 失败会弹窗说明并留底日志（`<项目根>\logs\gui_launcher.log` / `exchange_launcher.log`）：采集壳「非零退出都弹」；交换台壳「退出码 0/1 静默（1 是正常结局——有需要人看一眼的），2 与启动失败才弹」。自动化验证时设 `BESTSELLER_NO_DIALOG=1` 只落日志不弹窗；`--check --check-report <路径>` 可只做推导与校验并写出 JSON 报告。
 
-重新打包：
+重新打包（建哪只就传哪个目标）：
 
 ```bash
-python tools/build_gui_exe.py
+python tools/build_exe.py --target gui
 ```
 
-脚本会顺带断言产物里没有项目代码（`bestseller_monitor` / `gui`）。
+```bash
+python tools/build_exe.py --target exchange
+```
+
+脚本会顺带断言产物里没有项目代码（`bestseller_monitor` / `gui` / `exchange`）。
 
 ## 多机分片采集（机制按实现票落地中）
 
@@ -135,11 +141,13 @@ python tools/build_gui_exe.py
 - **周计划**：打开程序时（命令行则开跑前）采集程序自动 pull `plan` 库 → 同步店铺清单 →
   确认（不存在就生成并发布）本周计划——各店归哪台机器、各给多少页；开始页默认勾选本机份额，
   人核对用 `plan` 库里的 `plan/<年>-W<周>.md`。生成算法与发布步骤在实现票落地中。
-- **数据交换台**（脚本 `exchange.py`，窗口标题用中文名）：手工触发一次运行——检查 → 导出本机
+- **数据交换台**（脚本 `exchange.py`，窗口标题用中文名；双击入口 `dist\bestseller_exchange.exe`，
+  见「打包与运行形态」）：手工触发一次运行——检查 → 导出本机
   周包 → 拉取别人的包 → 汇总进本机库 → 写本机视角周报（`<交换区根>/报告/<年>-W<周>.md`，
   一周一份、同周重跑重写）；`--only export|merge` 只跑一半，`--week 2026-W37` 补历史，
   退出码 `0` 干净 / `1` 有需要人看一眼的 / `2` 本机没做成事；`--window` 开小窗口
-  （完整运行 + 只导出 / 只汇总两个次要按钮）。
+  （导出&汇总 + 仅导出 / 仅汇总三个按钮；壳只开窗、不转发参数，补历史走脚本）。
+  同一台机器同一时刻至多一次交换台运行（窗口与命令行同规：窗口开着时命令行会被拒绝）。
 - **凭据**：每台机器自己的 SSH key 与 COS AK；纯汇总机只持只读档（push / 上传被拒即预期）。
   密钥都放仓库外，`config.toml` 只记档位。
 - 上机步骤（m1 增量、m2/m3 接入、纯汇总机、三机验收）见

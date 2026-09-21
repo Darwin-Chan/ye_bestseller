@@ -35,9 +35,9 @@
 
   <div class="card">
     <div class="row">
-      <button class="btn" id="runBtn">完整运行</button>
-      <button class="btn ghost" id="exportBtn">只导出</button>
-      <button class="btn ghost" id="mergeBtn">只汇总</button>
+      <button class="btn" id="runBtn">导出&amp;汇总</button>
+      <button class="btn ghost" id="exportBtn">仅导出</button>
+      <button class="btn ghost" id="mergeBtn">仅汇总</button>
       <span id="note"></span>
     </div>
     <div class="row" style="margin-top:10px">
@@ -45,7 +45,7 @@
     </div>
   </div>
 
-  <div class="card"><pre id="log">（还没跑过。点「完整运行」：检查 → 导出 → 拉取 → 汇总 → 报告。）</pre></div>
+  <div class="card"><pre id="log">（还没跑过。点「导出&amp;汇总」：检查 → 导出 → 拉取 → 汇总 → 报告。）</pre></div>
 
   <div class="row"><span id="status" class="pill n">待命</span></div>
 </div>
@@ -54,12 +54,19 @@
 const logEl = document.getElementById('log');
 const statusEl = document.getElementById('status');
 const noteEl = document.getElementById('note');
+const exportBtn = document.getElementById('exportBtn');
 const buttons = ['runBtn', 'exportBtn', 'mergeBtn'].map(id => document.getElementById(id));
-let busy = false;
+let mergeOnly = false;
 
 function setStatus(text, cls) {
   statusEl.textContent = text;
   statusEl.className = 'pill ' + cls;
+}
+
+function applyBusy(running) {
+  buttons.forEach(b => b.disabled = running);
+  // 纯汇总机上「仅导出」没有可做的事：入口保留着（不藏），按钮置灰
+  exportBtn.disabled = running || mergeOnly;
 }
 
 async function refresh() {
@@ -67,9 +74,9 @@ async function refresh() {
   document.getElementById('who').textContent = `本机 ${s.machine_id}（${s.role_gloss}）`;
   document.getElementById('reportDir').textContent = s.report_dir;
   noteEl.textContent = s.export_note || '';
-  busy = s.running;
-  buttons.forEach(b => b.disabled = busy);
-  if (!busy && s.exit_code !== null && s.exit_code !== undefined) {
+  mergeOnly = !!s.merge_only;
+  applyBusy(s.running);
+  if (!s.running && s.exit_code !== null && s.exit_code !== undefined) {
     setStatus(`上次运行结束：退出码 ${s.exit_code}`, s.exit_code === 0 ? 'g' : (s.exit_code === 1 ? 'a' : 'r'));
   }
 }
@@ -79,7 +86,7 @@ async function poll() {
   logEl.textContent = p.lines.length ? p.lines.join('\n') : logEl.textContent;
   logEl.scrollTop = logEl.scrollHeight;
   if (p.running) { setStatus('运行中…', 'a'); }
-  buttons.forEach(b => b.disabled = p.running);
+  applyBusy(p.running);
   if (!p.running && p.exit_code !== null && p.exit_code !== undefined) {
     setStatus(`结束：退出码 ${p.exit_code}`, p.exit_code === 0 ? 'g' : (p.exit_code === 1 ? 'a' : 'r'));
   }
@@ -90,7 +97,7 @@ async function start(only) {
   const r = await window.pywebview.api.start(only);
   if (!r.ok) { setStatus(r.reason, 'a'); return; }
   setStatus('运行中…', 'a');
-  buttons.forEach(b => b.disabled = true);
+  applyBusy(true);
 }
 
 document.getElementById('runBtn').onclick = () => start(null);

@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
-# 采集壳的打包配置（IS-52 / ADR-0007）：exe 里不放项目代码。
-# 入口是薄入口 gui_launcher.py（正文在 launcher_core.py，票 14 抽芯）；它只负责推导项目根、
-# 找本机 python、拉起 <项目根>\gui.py。界面与采集都来自源码目录，
+# 交换台壳的打包配置（票 14 / ADR-0007）：exe 里不放项目代码。
+# 入口是薄入口 exchange_launcher.py（正文在 launcher_core.py）；它只负责推导项目根、
+# 找本机 python、拉起 <项目根>\exchange.py --window。交换台与采集都来自源码目录，
 # 所以这里既不带 webview / pythonnet，也不带 docs 与 bestseller_monitor。
 datas = []
 binaries = []
@@ -9,7 +9,7 @@ hiddenimports = []
 
 
 a = Analysis(
-    ['gui_launcher.py'],
+    ['exchange_launcher.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
@@ -29,7 +29,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='bestseller_gui',
+    name='bestseller_exchange',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
