@@ -9,6 +9,8 @@
 database = "../data/bestseller.db"
 # 分析草稿库：暂存与「继续上次分析」的独立文件；缺省 analysis-drafts.sqlite（配置目录下）。
 # store = "../data/analysis-drafts.sqlite"
+# 离线报告（导出 HTML）的落盘目录；缺省 ../output（项目的 output 文件夹）。
+# output = "../output"
 # ISO 星期：1=周一，7=周日。只是提醒，不调度采集。
 full_capture_weekday = 1
 

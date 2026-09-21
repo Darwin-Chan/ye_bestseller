@@ -17,8 +17,10 @@ from .analysis_store import DraftStore
 from .db import utcnow
 from .matching import (MatchingConfig, MatchingService, ModelConfig, ORIGIN_CHANGED,
                        identity, summarize_group, version)
+from .report import report_name, write_report
 
 DEFAULT_DRAFT_FILE = "analysis-drafts.sqlite"
+DEFAULT_OUTPUT_DIR = "output"
 
 
 @dataclass(frozen=True)
@@ -28,10 +30,14 @@ class AnalysisConfig:
     matching: MatchingConfig | None = None
     # 分析草稿库。直接构造时缺省与库存库同目录；配置文件里缺省在配置目录（见 from_file）。
     store: Path | None = None
+    # 离线报告的导出目录：缺省项目的 output 文件夹；配置文件里同样有缺省（见 from_file）。
+    output: Path | None = None
 
     def __post_init__(self):
         if self.store is None:
             object.__setattr__(self, 'store', self.database.with_name(DEFAULT_DRAFT_FILE))
+        if self.output is None:
+            object.__setattr__(self, 'output', Path(__file__).resolve().parent.parent / DEFAULT_OUTPUT_DIR)
         if self.matching and self.matching.cache.resolve() == self.database.resolve():
             raise ValueError('同款缓存不能使用库存数据库')
         reserved = {self.database.resolve()}
@@ -61,6 +67,10 @@ class AnalysisConfig:
         store = Path(cfg.get("store", DEFAULT_DRAFT_FILE))
         if not store.is_absolute():
             store = path.resolve().parent / store
+        # 缺省相对配置目录回到项目根：仓库里真配置放 config/，导出的报告进项目的 output。
+        output = Path(cfg.get('output', Path('..') / DEFAULT_OUTPUT_DIR))
+        if not output.is_absolute():
+            output = path.resolve().parent / output
         matching = None
         if 'matching' in document:
             options = document['matching']
@@ -72,7 +82,7 @@ class AnalysisConfig:
             matching = MatchingConfig(cache.resolve(), ModelConfig(**options.get('model', {})),
                 ModelConfig(**options['vision']) if 'vision' in options else None,
                 options.get('mode', 'disabled'), options.get('concurrency', 2), options.get('candidates', 6))
-        return cls(database.resolve(), weekday, matching, store.resolve())
+        return cls(database.resolve(), weekday, matching, store.resolve(), output.resolve())
 
 
 class AnalysisService:
@@ -338,6 +348,43 @@ class AnalysisService:
         with self._read() as conn:
             row = conn.execute('SELECT product_url FROM products WHERE offer_id=?', (offer_id,)).fetchone()
             return {'url': row['product_url'] if row else None}
+
+    def export_sources(self, analysis_id):
+        """报告要用的来源地址：只取本次分析的商品在导出时仍有效的详情地址（规格 §8）。"""
+        with self._lock:
+            snapshot = self._snapshots.get(analysis_id)
+            if snapshot is None:
+                stored = self.store.read(analysis_id)
+                if stored is None:
+                    raise ValueError("分析已不存在，请重新选择日期")
+                snapshot = stored.payload
+            offers = sorted({product['offer_id'] for product in snapshot['products']})
+        urls = {}
+        with self._read() as conn:
+            for offset in range(0, len(offers), 400):
+                chunk = offers[offset:offset+400]
+                placeholders = ','.join('?' * len(chunk))
+                for row in conn.execute("SELECT offer_id, product_url FROM products"
+                                        f" WHERE offer_id IN ({placeholders}) AND product_url != ''", chunk):
+                    urls[row['offer_id']] = row['product_url']
+        return {'urls': urls}
+
+    def export(self, analysis_id, html):
+        """把页面生成的完整报告写进 output：用已保存快照，不重查库存、不重跑模型。"""
+        if not isinstance(html, str) or not html.startswith('<!doctype html'):
+            raise ValueError('导出内容无效，未写入任何文件')
+        with self._lock:
+            snapshot = self._snapshots.get(analysis_id)
+            if snapshot is None:
+                raise ValueError("分析已不存在，请重新选择日期")
+            if snapshot.get('dirty'):
+                raise ValueError('当前分析有未保存的修改，请先保存再导出')
+            if any(not group['confirmed'] for group in snapshot['groups']):
+                raise ValueError('还有待确认的同款组，请先完成确认')
+            start, end = snapshot['start'], snapshot['end']
+        # 写盘放在锁外：导出只读快照，重名冲突由写入端的序号兜底。
+        path = write_report(self.config.output, report_name(start, end, utcnow()), html)
+        return {'path': str(path)}
 
     def edit_group(self, analysis_id, action, group_id, member, target_id=None):
         """Commit an atomic edit only to the in-memory analysis draft."""

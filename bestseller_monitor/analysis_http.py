@@ -9,6 +9,9 @@ from urllib.parse import parse_qs, urlsplit
 
 PAGE = Path(__file__).resolve().parent.parent / "docs" / "bestseller-analysis.html"
 SAVE_ACTIONS = ('save', 'save_and_view', 'discard')
+MAX_REQUEST = 1024 * 1024  # 分组与保存操作的正文上限
+# 导出报告内嵌图片资产，正文可达数百 MB；页面在 POST 之前先做体积预检。
+MAX_REPORT = 256 * 1024 * 1024
 log = logging.getLogger(__name__)
 
 
@@ -41,6 +44,8 @@ def create_server(service, port=0):
                         return self.reply(service.settings())
                     if route.path == "/api/source":
                         return self.reply(service.source(query['offer'][0]))
+                    if route.path == "/api/sources":
+                        return self.reply(service.export_sources(query['analysis'][0]))
                     if route.path == "/api/coverage":
                         return self.reply(service.coverage(query["date"][0]))
                     if route.path == "/api/draft":
@@ -51,14 +56,17 @@ def create_server(service, port=0):
                             return self.reply({"error": "读取分析草稿失败，请检查分析配置和数据库后重试"}, 503)
                     if route.path == "/api/analysis":
                         return self.reply(service.get(query["id"][0]))
-                elif self.command == "POST" and route.path == "/api/analysis":
+                elif self.command == "POST" and route.path in ("/api/analysis", "/api/report"):
                     expected = f"http://127.0.0.1:{self.server.server_port}"
                     if self.headers.get("Origin") != expected:
                         return self.reply({"error": "请求来源无效"}, 403)
+                    limit = MAX_REPORT if route.path == "/api/report" else MAX_REQUEST
                     length = int(self.headers.get("Content-Length", "0"))
-                    if not 0 < length <= 1024 * 1024:
+                    if not 0 < length <= limit:
                         raise ValueError("请求大小无效")
                     data = json.loads(self.rfile.read(length))
+                    if route.path == "/api/report":
+                        return self._export(service, data)
                     if data.get('action') in SAVE_ACTIONS:
                         return self._save_action(service, data)
                     if data.get('action') == 'confirm_groups':
@@ -97,6 +105,14 @@ def create_server(service, port=0):
                 log.exception("分析草稿操作失败")
                 message = "恢复最近保存版本失败，请重试" if data['action'] == 'discard' else "保存分析草稿失败，请重试"
                 return self.reply({"error": message}, 503)
+
+        def _export(self, service, data):
+            # 写盘失败要有专属文案：页面据此显示真实错误并允许重试。
+            try:
+                return self.reply(service.export(data['id'], data.get('html')))
+            except OSError as exc:
+                log.exception("导出报告失败")
+                return self.reply({"error": f"导出报告失败（{exc}），请检查 output 目录后重试"}, 503)
 
         do_GET = dispatch
         do_POST = dispatch
