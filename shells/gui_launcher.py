@@ -1,4 +1,4 @@
-"""采集壳（IS-52 / ADR-0007）：`dist/bestseller_gui.exe` 就是本文件打出来的。
+"""采集壳（IS-52 / ADR-0007）：`dist/inventory_fetch.exe` 就是本文件打出来的。
 
 壳的正文在 `launcher_core.py`（三只壳共用）；本文件只填采集目标的差异：拉
 `<项目根>\\gui.py`、项目根标记是 `gui.py` + `bestseller_monitor`、弹窗政策是
@@ -17,7 +17,7 @@ SPEC = LauncherSpec(
     markers=("gui.py", "bestseller_monitor"),
     script="gui.py",
     log_name="gui_launcher.log",
-    dialog_title="1688 畅销品监控 · 无法启动",
+    dialog_title="1688 畅销品监控 · 库存数据抓取（无法启动）",
     project_modules=("bestseller_monitor", "gui"),
 )
 

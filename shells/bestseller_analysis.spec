@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# 分析壳的打包配置（票 14 / ADR-0007）：exe 里不放项目代码。
+# 分析壳的打包配置（票 14 / ADR-0007）：产物 `dist\bestseller_analysis.exe`，exe 里不放项目代码。
 # 入口是薄入口 analysis_launcher.py（正文在 launcher_core.py）；它只负责推导项目根、
 # 找本机 python、拉起 <项目根>\analyze.py（缺省即开窗，不传参数）。分析程序与其它项目代码
 # 都来自源码目录，所以这里既不带 webview / pythonnet，也不带 docs 与 bestseller_monitor。

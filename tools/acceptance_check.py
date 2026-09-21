@@ -222,7 +222,7 @@ def check_packages(exchange_root: pathlib.Path, week: str,
 
     计划名册里的每台采集机本周都该有自己的包；缺席的必须在本机周报里被点名
     （「还没收到的包」那一节）——「为空或已有说明」两种都算过，但本机这周的周报
-    必须在（三台各自至少跑一次数据交换台是这条的前提）。包名与包内容（元数据里的
+    必须在（三台各自至少跑一次交换台是这条的前提）。包名与包内容（元数据里的
     机器、周）对不上的当场不过：那种文件比缺席更危险。
     """
     title = "周包与「还没来的包」"
@@ -261,7 +261,7 @@ def check_packages(exchange_root: pathlib.Path, week: str,
     report_path = root / exchange.REPORT_DIR / f"{week}.md"
     if not report_path.exists():
         return Criterion(title, FAIL, (*lines, *problems,
-            f"本机这周还没有周报（{report_path}）：三台各自至少跑一次数据交换台"
+            f"本机这周还没有周报（{report_path}）：三台各自至少跑一次交换台"
             "是这条的前提，跑完再来验收。"))
     text = report_path.read_text(encoding="utf-8", errors="replace")
     # 「已点名」只认「还没收到的包」那一行（周报里唯一的出处；整个报告做子串匹配会把
@@ -274,7 +274,7 @@ def check_packages(exchange_root: pathlib.Path, week: str,
                          "按「已有说明」过。")
         else:
             problems.append(f"raw-{machine} 的包缺席，周报里也没点名："
-                            "重跑一次本机数据交换台（汇总）再看这周的周报。")
+                            "重跑一次本机交换台（汇总）再看这周的周报。")
     if problems:
         return Criterion(title, FAIL, (*lines, *problems))
     return Criterion(title, PASS, tuple(lines))
@@ -459,7 +459,7 @@ def check_cold_start(db_path: pathlib.Path, exchange_root: pathlib.Path) -> Crit
                  f"{len(packages) - len(missing_packages)}/{len(packages)}")
     for ref in missing_packages[:10]:
         problems.append(f"没收进来的包：{ref.rel}"
-                        "（重跑一次本机的数据交换台（汇总）即可补齐）")
+                        "（重跑一次本机的交换台（汇总）即可补齐）")
     if len(missing_packages) > 10:
         problems.append(f"…还有 {len(missing_packages) - 10} 个包没收进来。")
 

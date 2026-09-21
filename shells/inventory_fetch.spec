@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# 采集壳的打包配置（IS-52 / ADR-0007）：exe 里不放项目代码。
+# 采集壳的打包配置（IS-52 / ADR-0007）：产物 `dist\inventory_fetch.exe`，exe 里不放项目代码。
 # 入口是薄入口 gui_launcher.py（正文在 launcher_core.py，票 14 抽芯）；它只负责推导项目根、
 # 找本机 python、拉起 <项目根>\gui.py。界面与采集都来自源码目录，
 # 所以这里既不带 webview / pythonnet，也不带 docs 与 bestseller_monitor。
@@ -29,7 +29,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='bestseller_gui',
+    name='inventory_fetch',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

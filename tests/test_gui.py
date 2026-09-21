@@ -806,6 +806,14 @@ class GuiSingleInstanceTests(unittest.TestCase):
         focus.assert_called_once_with(gui.WINDOW_TITLE)
         self.assertIn("已经打开", notify.call_args.args[0])
 
+    def test_the_window_and_its_page_carry_the_product_display_name(self):
+        """显示名与另两个程序同族（ADR-0007 的 2026-09-22 改名）：窗口标题就是页面标题。"""
+        self.assertEqual(gui.WINDOW_TITLE, "1688 畅销品监控 · 库存数据抓取")
+        page = (Path(gui.__file__).resolve().parent / "bestseller_monitor" / "pages"
+                / "ui_live.html").read_text(encoding="utf-8")
+        self.assertIn(f"<title>{gui.WINDOW_TITLE}</title>", page)
+        self.assertIn(f"<h1>{gui.WINDOW_TITLE}</h1>", page)
+
     def test_closing_warns_that_the_crawler_keeps_running(self):
         api = SimpleNamespace(any_crawler_running=lambda: True)
         with patch.object(gui, "_notify") as notify:

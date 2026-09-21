@@ -26,7 +26,7 @@ SPEC = LauncherSpec(
     markers=("analyze.py", "bestseller_monitor"),
     script="analyze.py",
     log_name="analysis_launcher.log",
-    dialog_title="畅销品分析 · 无法启动",
+    dialog_title="1688 畅销品监控 · 销量分析（无法启动）",
     quiet_exit_codes=frozenset(),
     project_modules=("bestseller_monitor", "analyze"),
 )

@@ -1,4 +1,4 @@
-"""数据交换台的一次运行与周报（spec §7/§8）。
+"""交换台的一次运行与周报（spec §7/§8）。
 
 **一次运行**（`run_once`，手工触发）：检查 → 导出 → 拉取 → 汇总 → 报告；
 `--only export|merge` 只跑一半（导出这半 = 检查 + 导出，汇总这半 = 检查 + 拉取 + 汇总；
@@ -203,7 +203,7 @@ def check_environment(cfg, *, db: Database, week: str, now: dt.datetime,
         return CheckResult(fatal=(
             f"交换区根目录不存在：{root}\n"
             "照上机清单第 4/9 步建好运行根与四个交换库的克隆（raw-m1、raw-m2、raw-m3、plan），"
-            "再跑数据交换台。"), notes=(), crawled=())
+            "再跑交换台。"), notes=(), crawled=())
 
     notes: list[str] = []
     repos = {path.name for path in root.glob("raw-*") if path.is_dir()}
@@ -683,7 +683,7 @@ def _render(outcome: RunOutcome) -> str:
     monday, sunday = weekly_plan.week_window(outcome.week)
     span = f"{monday.month}月{monday.day}日 – {sunday.month}月{sunday.day}日"
     lines = [
-        f"# 数据交换台周报 · {outcome.week}",
+        f"# 库存数据交换周报 · {outcome.week}",
         "",
         f"本机 **{outcome.machine_id}**（{ROLE_GLOSS[outcome.role]}）· "
         f"{outcome.ran_at:%Y-%m-%d %H:%M} 运行 · 覆盖 {span}",

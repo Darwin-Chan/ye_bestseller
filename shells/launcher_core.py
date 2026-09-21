@@ -2,8 +2,8 @@
 （入口级的参数拒绝在各薄入口自己那一段，见文末）。
 
 exe 里不放项目代码：壳只做三件事——推导项目根、找到本机 python、拉起源码目录里的
-目标脚本并守着它。采集壳（`dist/bestseller_gui.exe`，入口 `gui_launcher.py`）拉
-`gui.py`；交换台壳（`dist/bestseller_exchange.exe`，入口 `exchange_launcher.py`）拉
+目标脚本并守着它。采集壳（`dist/inventory_fetch.exe`，入口 `gui_launcher.py`）拉
+`gui.py`；交换台壳（`dist/inventory_exchange.exe`，入口 `exchange_launcher.py`）拉
 `exchange.py --window`；分析壳（`dist/bestseller_analysis.exe`，入口 `analysis_launcher.py`）
 拉 `analyze.py`（缺省即开窗，不带参数）。
 
@@ -68,7 +68,7 @@ class LauncherSpec:
     script: str                                  # 子进程入口：<项目根>\<script>
     script_args: tuple[str, ...] = ()            # 子进程的固定参数（用户的参数不转发）
     log_name: str = "launcher.log"               # <项目根>\logs\ 下的日志名
-    dialog_title: str = "1688 畅销品监控 · 无法启动"
+    dialog_title: str = "1688 畅销品监控 · 无法启动"   # 品牌级兜底；三只壳都各自填「<程序全名>（无法启动）」
     quiet_exit_codes: frozenset[int] = frozenset()
     project_modules: tuple[str, ...] = ()
 

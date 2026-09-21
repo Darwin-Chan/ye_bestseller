@@ -175,12 +175,12 @@ class RunCliMergeOnlyTests(unittest.TestCase):
         self.assertEqual(code, 2)
         round_call.assert_not_called()
         self.assertIn("纯汇总机", out)
-        self.assertIn("数据交换台", out, "要说清这台机器该跑什么，而不只是拒绝")
+        self.assertIn("交换台", out, "要说清这台机器该跑什么，而不只是拒绝")
         self.assertNotIn("shops.csv", out, "拒绝发生在读采集清单之前：别报成清单缺失")
         self.assertFalse((Path(tmp) / "bestseller.db").exists(), "拒绝时库根本不该被建出来")
 
     def test_an_existing_library_is_left_untouched(self):
-        """库已经有了（数据交换台建的）：轮次 / 快照 / 采集身份 / 店铺行都不许写。"""
+        """库已经有了（交换台建的）：轮次 / 快照 / 采集身份 / 店铺行都不许写。"""
         with tempfile.TemporaryDirectory() as tmp:
             cfg_path = self._env(tmp, shops=True, db=True)
 

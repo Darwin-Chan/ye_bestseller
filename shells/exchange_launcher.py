@@ -1,4 +1,4 @@
-"""交换台壳（票 14 / ADR-0007）：`dist/bestseller_exchange.exe` 就是本文件打出来的。
+"""交换台壳（票 14 / ADR-0007）：`dist/inventory_exchange.exe` 就是本文件打出来的。
 
 壳的正文在 `launcher_core.py`；本文件填交换台目标的差异：拉
 `<项目根>\\exchange.py --window`、项目根标记是 `exchange.py` + `bestseller_monitor`、
@@ -23,7 +23,7 @@ SPEC = LauncherSpec(
     script="exchange.py",
     script_args=("--window",),
     log_name="exchange_launcher.log",
-    dialog_title="数据交换台 · 无法启动",
+    dialog_title="1688 畅销品监控 · 库存数据交换（无法启动）",
     quiet_exit_codes=frozenset({0, 1}),
     project_modules=("bestseller_monitor", "exchange"),
 )

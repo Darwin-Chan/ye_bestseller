@@ -40,7 +40,7 @@ def _usable_root(tmp: str, *markers: str) -> Path:
     return root
 
 
-def _exe_in_dist(root: Path, name: str = "bestseller_gui.exe") -> Path:
+def _exe_in_dist(root: Path, name: str = "inventory_fetch.exe") -> Path:
     exe = root / "dist" / name
     exe.parent.mkdir(exist_ok=True)
     exe.write_bytes(b"")
@@ -91,7 +91,7 @@ class ResolveProjectRootTests(unittest.TestCase):
     def test_env_override_wins_over_exe_location(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _usable_root(str(Path(tmp) / "elsewhere"))
-            exe = Path(tmp) / "downloads" / "bestseller_gui.exe"
+            exe = Path(tmp) / "downloads" / "inventory_fetch.exe"
             exe.parent.mkdir()
             exe.write_bytes(b"")
 
@@ -102,7 +102,7 @@ class ResolveProjectRootTests(unittest.TestCase):
 
     def test_misplaced_exe_says_where_it_belongs(self):
         with tempfile.TemporaryDirectory() as tmp:
-            exe = Path(tmp) / "downloads" / "bestseller_gui.exe"
+            exe = Path(tmp) / "downloads" / "inventory_fetch.exe"
             exe.parent.mkdir()
             exe.write_bytes(b"")
 
@@ -129,7 +129,7 @@ class ResolveProjectRootTests(unittest.TestCase):
         分析壳认的是 analyze.py（键叫 analysis、标记叫 analyze，写错会当场失败）。"""
         with tempfile.TemporaryDirectory() as tmp:
             root = _usable_root(tmp, "exchange.py")
-            exe = _exe_in_dist(root, "bestseller_exchange.exe")
+            exe = _exe_in_dist(root, "inventory_exchange.exe")
 
             self.assertEqual(
                 resolve_project_root(exe, env={}, frozen=True, spec=EXCHANGE_SPEC), root)

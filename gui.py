@@ -65,7 +65,7 @@ def _crawler_python(exe: str | None = None) -> str:
     return exe
 
 
-WINDOW_TITLE = "1688 畅销品监控 · 每日库存抓取"
+WINDOW_TITLE = "1688 畅销品监控 · 库存数据抓取"
 
 log = logging.getLogger(__name__)
 
@@ -589,7 +589,7 @@ def _default_window_height() -> int:
     return max(_MIN_HEIGHT, min(_PREFERRED_HEIGHT, avail - _SCREEN_MARGIN))
 
 
-def _notify(text: str, title: str = "1688 畅销品监控") -> None:
+def _notify(text: str, title: str = WINDOW_TITLE) -> None:
     """一句给人看的提示；弹不出来也只落日志，不算错。
 
     与 gui_launcher 里那份刻意分开写：启动壳不能 import 项目代码（它要能独立打包）。
@@ -633,7 +633,7 @@ def _announce_already_open() -> None:
     log.info("界面已经打开，本次启动不建立第二个窗口。")
     if not _focus_existing_window(WINDOW_TITLE):
         log.info("没能把已有窗口前置，只做提示。")
-    _notify("界面已经打开，请看已打开的那个窗口。")
+    _notify("界面已经打开，请看已打开的那个窗口。", title=f"{WINDOW_TITLE}（已经在运行）")
 
 
 def _warn_crawler_keeps_running(api) -> bool:
@@ -643,7 +643,7 @@ def _warn_crawler_keeps_running(api) -> bool:
         return True
     log.info("关闭界面：采集仍在后台继续，重新打开界面可以看到进度并中止它。")
     _notify("采集仍在后台继续。\n\n重新打开界面可以看到进度并中止它。",
-            title="1688 畅销品监控 · 采集继续运行")
+            title=f"{WINDOW_TITLE}（采集继续运行）")
     return True
 
 

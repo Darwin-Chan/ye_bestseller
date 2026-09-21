@@ -17,7 +17,7 @@
 并上报**，记进轮次备注与本机计划外账（`plan_step.record_deviations`）。
 
 纯汇总机（`machine.role = merge_only`）不做采集：在碰采集清单与库之前就明确拒绝
-（退出码 2，文案 `plan_step.MERGE_ONLY_REFUSAL`）——这台机器上跑数据交换台。
+（退出码 2，文案 `plan_step.MERGE_ONLY_REFUSAL`）——这台机器上跑交换台。
 
 `--shops` 是人工冒烟的清单覆盖：开轮前的准备把它当作「本机清单副本」与计划库比对
 （两边都变会停下不猜，单边变化可能被推送）——拿临时清单冒烟时留意这一点。
@@ -44,7 +44,7 @@ from bestseller_monitor.pipeline import (  # noqa: E402
 from bestseller_monitor.rounds import ScopeMismatch  # noqa: E402
 from bestseller_monitor import plan_step, rounds, single_instance, sound  # noqa: E402
 
-# 本机没做成事：范围/清单没匹配、纯汇总机不做采集（与数据交换台的退出码 2 同值同义）。
+# 本机没做成事：范围/清单没匹配、纯汇总机不做采集（与交换台的退出码 2 同值同义）。
 # 各表示一件事的专用码在各自模块里（plan_step.PLAN_REFUSED_EXIT_CODE、
 # single_instance.CRAWLER_BUSY_EXIT_CODE）。
 EXIT_NOT_DONE = 2
@@ -90,7 +90,7 @@ def main() -> int:
     cfg = Config.from_file(args.config, root=ROOT)
     cfg = apply_overrides(cfg, args)
     # 纯汇总机不做采集（spec §6 降级表末行、§11）：在碰采集清单与库之前就拒绝——这台
-    # 机器上没有采集清单是常态（不采 1688），库该由数据交换台开；这里一样都不动。
+    # 机器上没有采集清单是常态（不采 1688），库该由交换台开；这里一样都不动。
     if is_merge_only(cfg):
         print(f"\n>>> {plan_step.MERGE_ONLY_REFUSAL}\n")
         return EXIT_NOT_DONE

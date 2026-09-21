@@ -198,7 +198,7 @@ class EndToEndAcceptanceTests(unittest.TestCase):
 
         self.stop_server()
         self.page.goto(report.as_uri())
-        expect(self.page.get_by_role('heading', name='畅销品分析报告')).to_be_visible()
+        expect(self.page.get_by_role('heading', name='销量分析报告')).to_be_visible()
         expect(self.page.locator('#ranking .rank')).to_have_count(len(final['groups']))
         # 折叠的排名行在离线报告里仍能展开，图与图例随报告内嵌。
         first = self.page.locator('#ranking .rank').first

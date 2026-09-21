@@ -95,7 +95,7 @@ class PrepStatus(str, enum.Enum):
 # 点「开始抓取」的拒绝共用这一句（判定共用 `config.is_merge_only`）——三处各写一份
 # 就会改一处漏两处。
 MERGE_ONLY_REFUSAL = ("本机是纯汇总机（machine.role = merge_only）：不做采集——"
-                      "汇总与报告请跑数据交换台（exchange.py）。")
+                      "汇总与报告请跑交换台（exchange.py）。")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -128,7 +128,7 @@ class GapScan:
                   for e in shown]
         if len(self.missing) > len(shown):
             lines.append(f"…还有 {len(self.missing) - len(shown)} 个。")
-        lines.append("跑一次数据交换台（汇总）可以补齐；本检查只告警，不拦开轮、不自动合并。")
+        lines.append("跑一次交换台（汇总）可以补齐；本检查只告警，不拦开轮、不自动合并。")
         return "\n".join(lines)
 
 

@@ -29,7 +29,11 @@ _QUOTED_NAME_RE = re.compile(r"'([A-Za-z_][A-Za-z0-9_.]*)'")
 
 @dataclasses.dataclass(frozen=True)
 class Target:
-    """一只壳的构建坐标：打包入口 spec、产物 exe、构建后要读的 TOC。"""
+    """一只壳的构建坐标：打包入口 spec、产物 exe、构建后要读的 TOC。
+
+    spec 文件名 = 产物 exe 名 = `build/` 子目录名（PyInstaller 按 spec 文件名建工作目录），
+    改名时三处一起走。
+    """
 
     spec: Path
     exe: Path
@@ -37,12 +41,12 @@ class Target:
 
 
 TARGETS = {
-    "gui": Target(spec=ROOT / "shells" / "bestseller_gui.spec",
-                  exe=ROOT / "dist" / "bestseller_gui.exe",
-                  toc=ROOT / "build" / "bestseller_gui" / "Analysis-00.toc"),
-    "exchange": Target(spec=ROOT / "shells" / "bestseller_exchange.spec",
-                       exe=ROOT / "dist" / "bestseller_exchange.exe",
-                       toc=ROOT / "build" / "bestseller_exchange" / "Analysis-00.toc"),
+    "gui": Target(spec=ROOT / "shells" / "inventory_fetch.spec",
+                  exe=ROOT / "dist" / "inventory_fetch.exe",
+                  toc=ROOT / "build" / "inventory_fetch" / "Analysis-00.toc"),
+    "exchange": Target(spec=ROOT / "shells" / "inventory_exchange.spec",
+                       exe=ROOT / "dist" / "inventory_exchange.exe",
+                       toc=ROOT / "build" / "inventory_exchange" / "Analysis-00.toc"),
     "analysis": Target(spec=ROOT / "shells" / "bestseller_analysis.spec",
                        exe=ROOT / "dist" / "bestseller_analysis.exe",
                        toc=ROOT / "build" / "bestseller_analysis" / "Analysis-00.toc"),
@@ -85,8 +89,15 @@ def build(target: Target) -> None:
     )
 
 
-def verify_exe(target: Target) -> dict:
-    """让产物自己报一遍：它认得项目根、跑在冻结态、身上没有项目代码。"""
+def verify_exe(key: str, target: Target) -> dict:
+    """让产物自己报一遍：它认得项目根、跑在冻结态、身上没有项目代码，且确实是点名要建的那只壳。
+
+    自检报告的 `target` 是壳自己在 `--check` 里报的目标键：和请求的键对不上，就说明这个目标的
+    spec 配错了薄入口（产物 exe 的名字由 spec 的 `name=` 决定，未必跟着错）。
+    """
+    if not target.exe.is_file():
+        raise BuildCheckError(
+            f"产物不在：{target.exe}——TARGETS 里的 exe 路径与 spec 的 name= 对不上？")
     with tempfile.TemporaryDirectory() as tmp:
         report_path = Path(tmp) / "check.json"
         done = subprocess.run(
@@ -101,6 +112,10 @@ def verify_exe(target: Target) -> dict:
 
     if done.returncode != 0 or not report.get("ok"):
         raise BuildCheckError(f"产物的 --check 没过：{report.get('error') or done.returncode}")
+    if report.get("target") != key:
+        raise BuildCheckError(
+            f"产物自检报的目标是 {report.get('target')!r}，不该是 {key!r}——"
+            "TARGETS 里这个目标的 spec 配错了薄入口。")
     if not report.get("frozen"):
         raise BuildCheckError("自检跑的不是打包产物（frozen=false），这次检查不算数。")
     if report.get("bundle_has_project_code"):
@@ -112,14 +127,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="重建 dist 下的启动壳，并自检产物里没有项目代码（IS-52 / ADR-0007）。")
     parser.add_argument("--target", choices=sorted(TARGETS), required=True,
-                        help="建哪只壳：gui = 采集壳（dist/bestseller_gui.exe）、"
-                             "exchange = 交换台壳（dist/bestseller_exchange.exe）、"
+                        help="建哪只壳：gui = 采集壳（dist/inventory_fetch.exe）、"
+                             "exchange = 交换台壳（dist/inventory_exchange.exe）、"
                              "analysis = 分析壳（dist/bestseller_analysis.exe）")
     args = parser.parse_args(argv)
     target = TARGETS[args.target]
     build(target)
     assert_no_project_code(target.toc)
-    report = verify_exe(target)
+    report = verify_exe(args.target, target)
     size_kb = target.exe.stat().st_size // 1024
     print(f"OK：{target.exe}（{size_kb} KB），项目根 {report['project_root']}")
     return 0

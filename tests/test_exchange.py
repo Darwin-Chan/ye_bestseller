@@ -1,4 +1,4 @@
-"""票据 10：数据交换台一次运行与周报的验收测试。
+"""票据 10：交换台一次运行与周报的验收测试。
 
 接缝（spec「测试边界」）：
 
@@ -134,7 +134,7 @@ def seed_coverage(conn: sqlite3.Connection, coverage, *, observed_at="10:00:00",
 
 
 class ConsoleWorld:
-    """一台机器跑数据交换台的小世界：三个 raw 库的裸远端 + 本机克隆 + 本机库 + 计划表。
+    """一台机器跑交换台的小世界：三个 raw 库的裸远端 + 本机克隆 + 本机库 + 计划表。
 
     `publish()` 模拟别的机器发周包：经**另一个**克隆推送（交换区里那份要等交换台
     自己 pull 才到——与真实三机一致）。
@@ -262,7 +262,7 @@ class CleanRunTests(unittest.TestCase):
 
         self.assertEqual(outcome.exit_code, 0)
         report = self.world.report()
-        self.assertTrue(report.startswith("# 数据交换台周报 · 2026-W38\n"))
+        self.assertTrue(report.startswith("# 库存数据交换周报 · 2026-W38\n"))
         self.assertIn("本机 **m1**（采集机）· 2026-09-20 19:41 运行 · 覆盖 9月14日 – 9月20日",
                       report)
         self.assertIn("**结果**：干净（退出码 0）· 缺口 0 · 冲突 0 · 还没来的包 0", report)
@@ -891,9 +891,9 @@ class WindowTests(unittest.TestCase):
             code = exchange.open_window(crawler_cfg(machine_id="m1"))
 
         self.assertEqual(code, 0)
-        self.assertEqual(created["title"], "数据交换台")
+        self.assertEqual(created["title"], "1688 畅销品监控 · 库存数据交换")
         self.assertIsInstance(created["js_api"], exchange.Api)
-        self.assertIn("数据交换台", created["html"])
+        self.assertIn("1688 畅销品监控 · 库存数据交换", created["html"])
         # 关窗事件有接线（运行中关窗只记录，票 14 Q10）
         self.assertEqual(len(created["window"].events.closing.handlers), 1)
 

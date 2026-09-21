@@ -130,7 +130,7 @@ class EntryPathTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         title, url = webview.create_window.call_args.args
-        self.assertEqual(title, "畅销品分析")
+        self.assertEqual(title, "1688 畅销品监控 · 销量分析")
         self.assertEqual(url, "http://127.0.0.1:43210")
         self.assertTrue(server.shut and server.closed, "关窗后服务要关干净")
 

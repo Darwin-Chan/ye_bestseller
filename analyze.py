@@ -2,8 +2,8 @@
 
 **运行互斥**（票 14）：同一台机器同一时刻至多一次分析运行——窗口与 `--serve` 同规，
 锁在这里取（不放启动壳里，改脚本不用重新打包）。抢不到锁的第二个实例落日志、把已有的
-「畅销品分析」窗口叫到前面、弹中文提示，然后**退出 0**（照 ADR-0008 的约定让分析壳
-保持安静）。分析没有恒真的 `--window`：缺省即开窗，`--serve` 只起本地服务。
+「1688 畅销品监控 · 销量分析」窗口叫到前面、弹中文提示，然后**退出 0**（照 ADR-0008
+的约定让分析壳保持安静）。分析没有恒真的 `--window`：缺省即开窗，`--serve` 只起本地服务。
 
 **提示路径**：本文件自带一份 `_notify`（落日志 → 非 `BESTSELLER_NO_DIALOG=1` 时弹
 MessageBoxW），与 `gui.py` 里那份刻意分开写：入口各自独立，不抽公共件。日志走 stderr
@@ -24,7 +24,7 @@ from bestseller_monitor.analysis import AnalysisConfig, AnalysisService
 from bestseller_monitor.analysis_http import create_server
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-WINDOW_TITLE = "畅销品分析"
+WINDOW_TITLE = "1688 畅销品监控 · 销量分析"
 
 log = logging.getLogger(__name__)
 
@@ -104,11 +104,11 @@ def _announce_already_open() -> None:
     log.info("分析已经打开，本次启动不建立第二个窗口。")
     if not _focus_existing_window(WINDOW_TITLE):
         log.info("没能把已有窗口前置，只做提示。")
-    _notify("分析已经打开，请看已打开的那个窗口。", title="畅销品分析 · 已经在运行")
+    _notify("分析已经打开，请看已打开的那个窗口。", title=f"{WINDOW_TITLE}（已经在运行）")
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="独立畅销品分析")
+    parser = argparse.ArgumentParser(description="独立销量分析")
     parser.add_argument("--config", type=Path,
                         default=PROJECT_ROOT / "config" / "analysis.toml")
     parser.add_argument("--serve", action="store_true",

@@ -195,7 +195,7 @@ class OfflineReportBrowserTests(unittest.TestCase):
         offline_requests = []
         self.page.on('request', lambda request: offline_requests.append(request.url))
         self.page.goto(path.as_uri())
-        expect(self.page.get_by_role('heading', name='畅销品分析报告')).to_be_visible()
+        expect(self.page.get_by_role('heading', name='销量分析报告')).to_be_visible()
         main = self.page.locator('main')
         expect(main).to_contain_text('2026-09-07 — 2026-09-14')
         expect(main).to_contain_text(snapshot['frozen_at'])

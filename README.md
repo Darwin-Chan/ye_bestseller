@@ -66,7 +66,7 @@ python run.py --pages-per-shop 2 --max-detail 20 --limit-shops A01
 - 中断后可再次运行续跑；已放弃或中断轮写入的数据照常参与。
 - 结果写入 `F:/AI/bestseller_runtime/data/bestseller.db`；解析失败的原始页面存 `F:/AI/bestseller_runtime/data/raw_pages/round_<轮次>/`；不再自动生成 CSV/Excel。运行数据已移出工作区（路径见 `config/config.toml`）。
 
-## 畅销品分析（独立程序）
+## 销量分析（独立程序）
 
 分析独立于采集：它只**只读**现有库存库，把一次分析固定成快照，再把人工整理进度单独存进
 自己的草稿库。不要求抓取结束才出报表，也不把分析塞进采集流程。
@@ -127,8 +127,8 @@ python analyze.py --serve
 
 ## 打包与运行形态
 
-三个入口程序各配一只**启动壳**（打包 exe；决定见 [ADR-0007](docs/adr/0007-gui-exe-is-a-shell.md)）：采集界面
-`dist\bestseller_gui.exe`（采集壳）、数据交换台 `dist\bestseller_exchange.exe`（交换台壳）、畅销品分析
+三个入口程序各配一只**启动壳**（打包 exe；决定见 [ADR-0007](docs/adr/0007-gui-exe-is-a-shell.md)）：库存数据抓取
+`dist\inventory_fetch.exe`（采集壳）、库存数据交换 `dist\inventory_exchange.exe`（交换台壳）、销量分析
 `dist\bestseller_analysis.exe`（分析壳）。壳不是自带代码的程序：
 
 - exe 里不含项目代码，它只推导项目根、找到本机 python、拉起源码目录里那一个脚本（`<项目根>\gui.py` / `<项目根>\exchange.py --window` / `<项目根>\analyze.py` 不带参数）；
@@ -165,7 +165,7 @@ python tools/build_exe.py --target analysis
 - **周计划**：打开程序时（命令行则开跑前）采集程序自动 pull `plan` 库 → 同步店铺清单 →
   确认（不存在就生成并发布）本周计划——各店归哪台机器、各给多少页；开始页默认勾选本机份额，
   人核对用 `plan` 库里的 `plan/<年>-W<周>.md`。生成算法与发布步骤在实现票落地中。
-- **数据交换台**（脚本 `exchange.py`，窗口标题用中文名；双击入口 `dist\bestseller_exchange.exe`，
+- **库存数据交换**（脚本 `exchange.py`，窗口标题用中文全名；双击入口 `dist\inventory_exchange.exe`，
   见「打包与运行形态」）：手工触发一次运行——检查 → 导出本机
   周包 → 拉取别人的包 → 汇总进本机库 → 写本机视角周报（`<交换区根>/报告/<年>-W<周>.md`，
   一周一份、同周重跑重写）；`--only export|merge` 只跑一半，`--week 2026-W37` 补历史，
@@ -192,7 +192,7 @@ python tools/build_exe.py --target analysis
 本项目属未获 1688 许可的自动化采集实验，仅供个人研究；使用真实账号存在被平台风控的风险，
 请自行评估并仅将数据用于个人分析。
 
-## 独立畅销品分析（第一阶段）
+## 独立销量分析（第一阶段）
 
 ```bash
 python analyze.py

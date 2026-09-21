@@ -37,7 +37,7 @@ def _driver(v: object) -> str:
 # 机器角色档位（spec §10）：采集机 = 采集 + 导出 + 汇总；纯汇总机 = 只汇总与展示。
 ROLE_COLLECTOR = "collector"
 ROLE_MERGE_ONLY = "merge_only"
-# 档位的中文名一处写死：配置校验的报错、数据交换台的报告与窗口都用它。
+# 档位的中文名一处写死：配置校验的报错、交换台的报告与窗口都用它。
 ROLE_GLOSS = {ROLE_COLLECTOR: "采集机", ROLE_MERGE_ONLY: "纯汇总机"}
 
 

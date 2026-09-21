@@ -1,4 +1,4 @@
-"""数据交换台（spec §7）：独立小工具——命令行一次运行 + 小窗口并存。
+"""库存数据交换（spec §7）：独立小工具——命令行一次运行 + 小窗口并存。
 
 用法：
     python exchange.py                     # 一次完整运行：检查 → 导出 → 拉取 → 汇总 → 报告
@@ -9,14 +9,14 @@
 
 退出码（spec §7）：`0` 干净 / `1` 有需要人看一眼的 / `2` 本机没做成事。逐次流水在
 `logs/exchange.log`；周报在 `<交换区根>/报告/<年>-W<周>.md`。窗口标题与快捷方式名用
-中文「数据交换台」；窗口不挂进现有采集界面（独立进程、独立锁）。
+中文全名「1688 畅销品监控 · 库存数据交换」；窗口不挂进现有采集界面（独立进程、独立锁）。
 
 **运行互斥**（票 14）：同一台机器同一时刻至多一次交换台运行——窗口与命令行同规，
 锁在这里取（不放启动壳里，改脚本不用重打包）：窗口开着时锁在窗口进程手里，第二个
 实例（双击第二次壳、或命令行）拿不到锁——窗口模式弹 MessageBox 后退出 0（照 ADR-0008
 的约定让启动壳保持安静），命令行打一行说明后退出 2。锁在每次运行结束时释放。
 
-**壳与参数**：`dist/bestseller_exchange.exe` 只负责开窗（等价 `--window`），不转发参数；
+**壳与参数**：`dist/inventory_exchange.exe` 只负责开窗（等价 `--window`），不转发参数；
 `--week`（补历史）、`--only`、`--config` 走本脚本。窗口不接周入口：`--window` 与
 `--week` 同传明确拒绝。
 
@@ -55,7 +55,7 @@ from bestseller_monitor import single_instance  # noqa: E402
 from bestseller_monitor.config import ROLE_GLOSS, ROLE_MERGE_ONLY, Config  # noqa: E402
 from bestseller_monitor.weekly_plan import PlanError  # noqa: E402
 
-WINDOW_TITLE = "数据交换台"
+WINDOW_TITLE = "1688 畅销品监控 · 库存数据交换"
 
 _MB_ICONINFORMATION = 0x40
 _MB_SETFOREGROUND = 0x10000
@@ -209,9 +209,9 @@ def _note_closing(api) -> None:
 
 def _refuse_when_running(window: bool) -> int:
     """同一台机器同一时刻至多一次交换台运行：窗口与命令行同规（票 14）。"""
-    text = "数据交换台已经在运行（窗口开着，或另一次运行还没结束）：等它结束再跑。"
+    text = "交换台已经在运行（窗口开着，或另一次运行还没结束）：等它结束再跑。"
     if window:
-        _notify(text + "\n\n这次不再开第二个窗口。", title="数据交换台 · 已经在运行")
+        _notify(text + "\n\n这次不再开第二个窗口。", title=f"{WINDOW_TITLE}（已经在运行）")
         return console.EXIT_CLEAN          # 退出 0：照 ADR-0008 的约定让启动壳保持安静
     logging.getLogger(__name__).info(text)
     print(text)
