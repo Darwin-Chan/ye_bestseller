@@ -71,7 +71,13 @@ def _notify(text: str, title: str = WINDOW_TITLE) -> None:
 
 
 def _focus_existing_window(title: str) -> bool:
-    """按标题把已有窗口叫到前面；做不到就返回 False（调用方只提示，不报错）。"""
+    """按标题把已有窗口叫到前面；做不到就返回 False（调用方只提示，不报错）。
+
+    与 gui.py 里那份刻意分开写（同一份实现在入口各留一份，不抽公共件）：
+    改这里时那边也看一眼，别只修一边。已知的坑：只按标题找可能先命中资源管理器的
+    `TabProxyWindow`（同名窗口的任务栏代理，演练查窗口时亲眼见过）——前置不一定命中
+    对的那扇窗；先例（gui.py）同源，没真见过错置前就不收紧。
+    """
     if os.name != "nt":
         return False
     try:
