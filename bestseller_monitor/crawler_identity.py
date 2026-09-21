@@ -41,7 +41,7 @@ class CrawlerProcess:
     browser_os_started: str | None = None
 
     def to_payload(self) -> dict:
-        """界面 payload 要的形状：`docs/ui_live.html` 读 `d.crawler.round_id`，
+        """界面 payload 要的形状：`bestseller_monitor/pages/ui_live.html` 读 `d.crawler.round_id`，
         跨 pywebview 那一步走 JSON，所以这里给回普通 dict。"""
         return {"pid": self.pid, "round_id": self.round_id,
                 "started_at": self.started_at, "note": self.note}

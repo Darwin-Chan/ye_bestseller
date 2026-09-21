@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-PAGE = Path(__file__).resolve().parent.parent / "docs" / "bestseller-analysis.html"
+PAGE = Path(__file__).resolve().parent / "pages" / "bestseller-analysis.html"
 SAVE_ACTIONS = ('save', 'save_and_view', 'discard')
 MAX_REQUEST = 1024 * 1024  # 分组与保存操作的正文上限
 # 导出报告内嵌图片资产，正文可达数百 MB；页面在 POST 之前先做体积预检。

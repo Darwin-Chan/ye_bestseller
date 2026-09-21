@@ -2,7 +2,7 @@
 
 界面每约 2 秒刷新一次，取数入口只有这一个 module；`gui.Api` 持有界面会话事实
 （`UiState`）与连接生命周期，取数本身在这里。返回的是页面直接要的原始 dict——
-键就是 `docs/ui_live.html` 读的那些，也是测试断言的那些。
+键就是 `bestseller_monitor/pages/ui_live.html` 读的那些，也是测试断言的那些。
 
 两条输入约定：
 

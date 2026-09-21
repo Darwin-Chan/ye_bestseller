@@ -1004,7 +1004,7 @@ class WindowPageTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.html = (Path(__file__).resolve().parent.parent
-                    / "docs" / "ui_exchange.html").read_text(encoding="utf-8")
+                    / "bestseller_monitor" / "pages" / "ui_exchange.html").read_text(encoding="utf-8")
 
     def test_the_first_button_is_named_like_the_user_says_it(self):
         self.assertIn("导出&amp;汇总", self.html)

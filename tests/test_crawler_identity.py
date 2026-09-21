@@ -101,7 +101,7 @@ class CrawlerIdentityTests(unittest.TestCase):
 
     # ---------- 界面的 payload ----------
     def test_the_payload_keeps_the_json_shape_the_page_reads(self):
-        """`docs/ui_live.html` 读 `d.crawler.round_id`，所以跨 pywebview 那一步还是 dict。"""
+        """`bestseller_monitor/pages/ui_live.html` 读 `d.crawler.round_id`，所以跨 pywebview 那一步还是 dict。"""
         who = CrawlerProcess(pid=1, round_id=2, started_at="t")
 
         self.assertEqual(who.to_payload(),

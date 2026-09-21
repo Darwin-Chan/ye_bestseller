@@ -1,11 +1,11 @@
-"""给 docs/ui_live.html 注入 mock pywebview API，渲染三屏截图（前端 QA 用）。"""
+"""给 bestseller_monitor/pages/ui_live.html 注入 mock pywebview API，渲染三屏截图（前端 QA 用）。"""
 import pathlib
 import textwrap
 from playwright.sync_api import sync_playwright
 
 here = pathlib.Path(__file__).resolve().parent
-html = (here.parent / "docs" / "ui_live.html").resolve().as_uri()
-out = here.parent / "output"
+html = (here.parent / "bestseller_monitor" / "pages" / "ui_live.html").resolve().as_uri()
+out = here.parent / ".scratch" / "tool-output"
 out.mkdir(parents=True, exist_ok=True)
 
 MOCK = r"""

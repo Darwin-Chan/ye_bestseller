@@ -1,8 +1,8 @@
 import pathlib
 from playwright.sync_api import sync_playwright
 
-html = (pathlib.Path("docs/ui_mockup.html")).resolve().as_uri()
-out = pathlib.Path("output")
+html = (pathlib.Path("docs/design/ui_mockup.html")).resolve().as_uri()
+out = pathlib.Path(".scratch/tool-output")
 out.mkdir(parents=True, exist_ok=True)
 with sync_playwright() as p:
     b = p.chromium.launch(channel="msedge", headless=True)

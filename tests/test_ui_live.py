@@ -4,7 +4,7 @@ pywebview 把 Python 异常变成 rejected promise，界面原先对 `await api.
 异常就此消失在页面里——按钮看起来像"点了没反应"（2026-09-12 运行库实例：
 exe 的入口脚本调用已删除的 Database.start_or_resume，点击后界面毫无动静）。
 
-这里用 mock 的 pywebview 桥驱动真实的 docs/ui_live.html，锁住三件事：
+这里用 mock 的 pywebview 桥驱动真实的 bestseller_monitor/pages/ui_live.html，锁住三件事：
 失败要显示、失败后可重试、成功路径不受影响。
 """
 import unittest
@@ -12,7 +12,7 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-HTML_URI = (Path(__file__).resolve().parent.parent / "docs" / "ui_live.html").as_uri()
+HTML_URI = (Path(__file__).resolve().parent.parent / "bestseller_monitor" / "pages" / "ui_live.html").as_uri()
 
 MOCK_API = r"""
 window.__calls = [];

@@ -664,7 +664,7 @@ def main() -> int:
         # 界面打开时的一次（开轮前）准备（spec §6）：后台跑，落库后开始页的下一次轮询
         # 就按本周计划给默认勾选与页数；失败只记日志，开轮时子进程还会再准备一次。
         threading.Thread(target=api.prepare, name="plan-prepare", daemon=True).start()
-        html = (PROJECT_ROOT / "docs" / "ui_live.html").read_text(encoding="utf-8")
+        html = (PROJECT_ROOT / "bestseller_monitor" / "pages" / "ui_live.html").read_text(encoding="utf-8")
         window = webview.create_window(
             WINDOW_TITLE,
             html=html,

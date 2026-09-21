@@ -192,7 +192,7 @@ def _message_box(text: str, title: str = WINDOW_TITLE) -> None:
 def open_window(cfg) -> int:
     """开小窗口；关窗后返回最后一次运行的退出码（没跑过是 0）。"""
     api = Api(cfg)
-    html = (ROOT / "docs" / "ui_exchange.html").read_text(encoding="utf-8")
+    html = (ROOT / "bestseller_monitor" / "pages" / "ui_exchange.html").read_text(encoding="utf-8")
     window = webview.create_window(WINDOW_TITLE, html=html, js_api=api, width=640,
                                    height=540, min_size=(540, 420))
     window.events.closing += lambda: _note_closing(api)
