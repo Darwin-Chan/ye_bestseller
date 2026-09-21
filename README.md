@@ -86,8 +86,9 @@ python tools/build_gui_exe.py
   （完整运行 + 只导出 / 只汇总两个次要按钮）。
 - **凭据**：每台机器自己的 SSH key 与 COS AK；纯汇总机只持只读档（push / 上传被拒即预期）。
   密钥都放仓库外，`config.toml` 只记档位。
-- 上机步骤（m1 增量与 m2/m3 接入）见 [docs/三机上机清单.md](docs/三机上机清单.md)——m1 一节已
-  可执行（含 2026-09-21 的演练取证与判据）；机器本地全文在
+- 上机步骤（m1 增量、m2/m3 接入、纯汇总机、三机验收）见
+  [docs/三机上机清单.md](docs/三机上机清单.md)——四段都可执行（含演练取证与判据；验收
+  核对用 `python tools/acceptance_check.py`）；机器本地全文在
   `.scratch/multi-machine-collection/spec.md` §12。
 
 ## 校准说明

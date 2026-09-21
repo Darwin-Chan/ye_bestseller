@@ -11,8 +11,10 @@
   明示（保留入口不藏）；导出失败不拦汇总这半，如实记进报告与退出码。
 - **拉取**：对另外的每个交换库 pull（别的 `raw-*` 库 + `plan` 库——纯汇总机不跑采集
   准备串，plan 克隆靠这一趟保鲜）。拉不动记一笔（需要人看一眼），不拦汇总。
-- **汇总**：交换区里本周别人发的包逐个 `merge.import_package`（票据 09 的确定性合并、
-  同哈希幂等跳过）；本机自己的包不收。
+- **汇总**：交换区里别人发的包逐个 `merge.import_package`（票据 09 的确定性合并、
+  同哈希幂等跳过）；本机自己的包不收。**不只本周**：账里还没有的历史包也一起收——
+  冷启动一次重放全部（spec §11），别的机器迟到补发的历史包下次运行自动补上
+  （各台最终收敛到同一份全量库）；账里已有的历史包安静跳过，不重进报告表。
 - **报告**：`<交换区根>/报告/<年>-W<周>.md`——**一周一份、同周重跑重写同一份**，
   内容是**状态累积**（从计划表、本机库、交换区、幂等账与冲突账现读）而不是两次运行
   日志相加；开头「本次运行」行说明这一次具体做了什么。逐次流水在 `logs/exchange.log`。
@@ -178,10 +180,13 @@ def _mb(size: int) -> str:
     return f"{size / 1_000_000:.1f} MB"
 
 
-def _week_days(week: str, now: dt.datetime) -> tuple[dt.date, ...]:
-    """这一周「该采到」的天：整周里已经过去（含今天）的那些；未来周一个都没有。"""
+def week_days(week: str, as_of: dt.date) -> tuple[dt.date, ...]:
+    """这一周「该采到」的天：整周里已经过去（含 as_of 当天）的那些；未来周一个都没有。
+
+    周报的缺口口径与三机验收核对（`tools/acceptance_check.py`）共用这一处推导。
+    """
     monday, sunday = weekly_plan.week_window(week)
-    last = min(sunday, now.date())
+    last = min(sunday, as_of)
     return tuple(day for day in (monday + dt.timedelta(days=i) for i in range(7))
                  if day <= last)
 
@@ -228,7 +233,7 @@ def _self_crawled_days(db: Database, week: str, machine_id: str,
     plan = plan_step.stored_plan(db, week)
     if plan is None:
         return ()
-    days = _week_days(week, now)
+    days = week_days(week, now.date())
     if not days:
         return ()
     span = (days[0].isoformat(), days[-1].isoformat())
@@ -268,14 +273,31 @@ def _pull_others(cfg, machine_id: str, say) -> tuple[PullNote, ...]:
     return tuple(notes)
 
 
-def _merge_week(cfg, db: Database, *, week: str, machine_id: str, store,
-                say) -> dict[pathlib.Path, merge.ImportResult]:
-    """把交换区里本周别人发的包逐个收进本机库（同哈希自动跳过）。本机自己的包不收。"""
+def _merge_packages(cfg, db: Database, *, week: str, machine_id: str, store,
+                    say) -> dict[pathlib.Path, merge.ImportResult]:
+    """把交换区里别人发的包逐个收进本机库；本机自己的包不收。
+
+    不只收本周：账里还没有的历史包也一起收——冷启动一次重放全部（spec §11），
+    别的机器迟到补发的历史包下次运行自动补上（各台最终收敛到同一份全量库）。
+    账里已有的历史包安静跳过：不占这次运行的账、不重进报告表（状态累积以本周为焦点）。
+    同哈希的重复导入本来就安全（幂等账），这里只是让「本周的」照旧走一次好让报告
+    把它标成「已导入过 → 跳过」。
+    """
     root = pathlib.Path(cfg.exchange_root)
+    known = {str(row["package_sha256"])
+             for row in db.conn.execute("SELECT package_sha256 FROM import_packages")}
     imported: dict[pathlib.Path, merge.ImportResult] = {}
-    for ref in export.week_packages(root, week):
+    for ref in export.all_packages(root):
         if ref.machine == machine_id:
             continue
+        if ref.week != week:
+            try:
+                sha = merge.package_sha256(ref.path)
+            except OSError:
+                sha = None                       # 读不动：交给导入那一步如实报
+            if sha is not None and sha in known:
+                say(f"跳过 {ref.path.name}：{ref.week or '历史'} 的包账里已有")
+                continue
         result = merge.import_package(db.conn, ref.path, machine_id=machine_id, store=store)
         imported[ref.path] = result
         if result.failed:
@@ -287,7 +309,7 @@ def _merge_week(cfg, db: Database, *, week: str, machine_id: str, store,
                 f"覆盖 {result.rows_replaced:,} 行、冲突 {result.conflicts} 处、"
                 f"拉图 {result.images_pulled} 张")
     if not imported:
-        say("交换区里没有别的机器发的本周包可收。")
+        say("交换区里没有别的机器发的包可收。")
     return imported
 
 
@@ -351,8 +373,8 @@ def run_once(cfg, *, only: str | None = None, week: str | None = None,
         merge_ran = only != ONLY_EXPORT
         if merge_ran:
             pulls = _pull_others(cfg, machine_id, say)
-            imported = _merge_week(cfg, db, week=week, machine_id=machine_id,
-                                   store=store, say=say)
+            imported = _merge_packages(cfg, db, week=week, machine_id=machine_id,
+                                       store=store, say=say)
 
         outcome = _assemble(cfg, db, week=week, now=now, machine_id=machine_id, role=role,
                             check=check, export_result=export_result, export_note=export_note,
@@ -383,20 +405,25 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
     """把这次运行与库里的现成事实折成报告模型（状态累积，不是运行日志相加）。"""
     root = pathlib.Path(cfg.exchange_root)
     plan = plan_step.stored_plan(db, week)
-    days = _week_days(week, now)
-    packages = export.week_packages(root, week)
+    days = week_days(week, now.date())
+    week_refs = export.week_packages(root, week)
     plan_of_shop = ({row.shop_key: row.machine_id for row in plan.rows}
                     if plan is not None else {})
 
-    packages_rows = tuple(
-        _package_row(db, ref, imported.get(ref.path))
-        for ref in packages if ref.machine != machine_id)
+    # 「收进来的包」= 这次真收的（含冷启动的历史包）+ 本周的全部别机包（含还没碰过的）。
+    # 账里已有的历史包不占行：状态累积以本周为焦点，历史是「已经收进来了」这一条。
+    others = {ref.path: ref for ref in export.all_packages(root) if ref.machine != machine_id}
+    weekly_paths = {ref.path for ref in week_refs}
+    shown = sorted((ref for path, ref in others.items()
+                    if path in imported or path in weekly_paths),
+                   key=lambda ref: (ref.week or "", ref.machine, ref.path.name))
+    packages_rows = tuple(_package_row(db, ref, imported.get(ref.path)) for ref in shown)
 
     planned = set(plan_of_shop.values())
-    arrived = {ref.machine for ref in packages}
+    arrived = {ref.machine for ref in week_refs}
     missing = tuple(sorted(m for m in planned if m != machine_id and m not in arrived))
 
-    gaps = _gaps(db, plan, week=week, days=days, machine_id=machine_id, packages=packages,
+    gaps = _gaps(db, plan, week=week, days=days, machine_id=machine_id, packages=week_refs,
                  missing=missing)
     conflicts = _conflicts(db, week=week, machine_id=machine_id, plan=plan)
     image_missing_total = sum(result.images_missing for result in imported.values())
@@ -481,7 +508,7 @@ def _gaps(db: Database, plan, *, week: str, days: tuple[dt.date, ...], machine_i
                 continue
             if row.machine_id == machine_id:
                 gaps.append(GapLine(machine=machine_id, shop_key=row.shop_key,
-                                    date=pair[1], reason=_self_gap_reason(db, pair[1])))
+                                    date=pair[1], reason=gap_reason(db, pair[1])))
             elif row.machine_id in missing:
                 continue                        # 「还没来的包」那一行说它，不记成缺口
             else:
@@ -491,8 +518,12 @@ def _gaps(db: Database, plan, *, week: str, days: tuple[dt.date, ...], machine_i
     return tuple(gaps)
 
 
-def _self_gap_reason(db: Database, day: str) -> str:
-    """本机缺这一天，为什么：当天的轮次终态（进行中 = 半截的一天）。"""
+def gap_reason(db: Database, day: str) -> str:
+    """本机缺这一天，为什么：当天的轮次终态（进行中 = 半截的一天）。
+
+    周报的缺口理由与三机验收核对（`tools/acceptance_check.py`）共用这一处推导——
+    「缺口逐条有说明」两边说的必须是同一句人话。
+    """
     if rounds.active_round(db, day) is not None:
         return "当天采集还在跑（半截的一天）"
     on_day = rounds.on_date(db, day)

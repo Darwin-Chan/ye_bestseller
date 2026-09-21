@@ -256,6 +256,27 @@ class PackageRef:
     path: pathlib.Path
     rel: str
 
+    @property
+    def week(self) -> str | None:
+        """包名与年目录折出的周编号（`2026-W38`）；认不出时 None。"""
+        number = package_week(self.path.name)
+        year = self.path.parent.name
+        return f"{year}-W{number:02d}" if number is not None and year.isdigit() else None
+
+
+def _package_ref(repo: pathlib.Path, path: pathlib.Path,
+                 exchange_root: pathlib.Path) -> PackageRef | None:
+    """把一个文件认成包：名字里认得出周号、机器后缀与所在 `raw-*` 目录对得上。
+
+    认不出的不是包（周号乱写、放错目录的都算）——两个找包的读口共用这一处判定。
+    """
+    machine = repo.name[len("raw-"):]
+    if not machine or package_week(path.name) is None or \
+            not path.name[: -len(PACKAGE_SUFFIX)].endswith(f"-{machine}"):
+        return None
+    return PackageRef(machine=machine, path=path,
+                      rel=path.relative_to(exchange_root).as_posix())
+
 
 def week_packages(exchange_root: str | pathlib.Path, week: str) -> tuple[PackageRef, ...]:
     """交换区里某一周的包，按机器与文件名排序。
@@ -264,20 +285,38 @@ def week_packages(exchange_root: str | pathlib.Path, week: str) -> tuple[Package
     （`merge.package_shop_days` / `merge.import_package`）。年目录取周编号里的 ISO 年：
     2026-W01 的周一落在 2025-12-29，目录仍是 data/2026/（与 `package_rel_path` 同一口径）。
     """
+    root = pathlib.Path(exchange_root)
     iso = week_monday(week).isocalendar()
     year_dir, week_no = str(iso.year), iso.week
     found: list[PackageRef] = []
-    for repo in sorted(pathlib.Path(exchange_root).glob("raw-*")):
-        machine = repo.name[len("raw-"):]
-        if not repo.is_dir() or not machine:
+    for repo in sorted(root.glob("raw-*")):
+        if not repo.is_dir():
             continue
         for path in sorted((repo / "data" / year_dir).glob(f"*{PACKAGE_SUFFIX}")):
-            if package_week(path.name) != week_no or \
-                    not path.name[: -len(PACKAGE_SUFFIX)].endswith(f"-{machine}"):
+            if package_week(path.name) != week_no:
                 continue
-            found.append(PackageRef(machine=machine, path=path,
-                                    rel=f"{repo.name}/data/{year_dir}/{path.name}"))
+            ref = _package_ref(repo, path, root)
+            if ref is not None:
+                found.append(ref)
     return tuple(found)
+
+
+def all_packages(exchange_root: str | pathlib.Path) -> tuple[PackageRef, ...]:
+    """交换区里全部周的包，按周、机器、文件名排序——冷启动重放读它（spec §11）。
+
+    同 `week_packages` 的口径：只读本机**已经有**的克隆、一个包都不解压；认不出周号
+    或机器对不上文件名的文件不算包。
+    """
+    root = pathlib.Path(exchange_root)
+    found: list[PackageRef] = []
+    for repo in sorted(root.glob("raw-*")):
+        if not repo.is_dir():
+            continue
+        for path in sorted(repo.glob(f"data/*/*{PACKAGE_SUFFIX}")):
+            ref = _package_ref(repo, path, root)
+            if ref is not None:
+                found.append(ref)
+    return tuple(sorted(found, key=lambda ref: (ref.week or "", ref.machine, ref.path.name)))
 
 
 def read_package_meta(conn: sqlite3.Connection) -> dict:

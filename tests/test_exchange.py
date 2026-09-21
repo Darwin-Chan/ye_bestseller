@@ -523,6 +523,67 @@ class WeekWindowTests(unittest.TestCase):
             "SELECT week FROM import_packages").fetchone()[0], "2026-W37")
 
 
+class ColdStartReplayTests(unittest.TestCase):
+    """冷启动重放（spec §11；纯汇总机清单第 6 步）：一轮把账里没见过的包全收进来。
+
+    「新机器从交换区重放全部包」是一次冷启动的事：只收本周的话，全新纯汇总机得人按周
+    逐周跑一遍才收敛，报告里的「收进来的包」也永远只有本周那一行。历史里已经收过的
+    包不重进报告表（状态累积以本周为焦点），别的机器迟到补发的历史包下次运行自动补上。
+    """
+
+    def test_one_cold_start_run_replays_every_package_in_the_area(self):
+        world = ConsoleWorld(self, machine_id="m4", role=ROLE_MERGE_ONLY)
+        world.publish("m1", [("A01", "2026-09-05")], week="2026-W36")
+        world.publish("m1", [("A01", "2026-09-09")], week="2026-W37")
+        world.publish("m2", [("A02", day) for day in DAYS])
+        world.sync("m1", "m2", "m3")
+
+        outcome = world.run()
+
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(len(outcome.imports), 3)
+        report = world.report()
+        # 清单第 6 步的判据形态：收进来的包 = 交换区全部（含历史周）
+        self.assertIn("| raw-m1 | W36 |", report)
+        self.assertIn("| raw-m1 | W37 |", report)
+        self.assertIn("| raw-m2 | W38 |", report)
+        self.assertIn("**本次运行**：导出：本机是纯汇总机，跳过 · 新收 3 个包", report)
+        ledger = world.conn.execute(
+            "SELECT week FROM import_packages ORDER BY week").fetchall()
+        self.assertEqual([row[0] for row in ledger], ["2026-W36", "2026-W37", "2026-W38"])
+
+    def test_a_second_run_does_not_relist_history_already_collected(self):
+        world = ConsoleWorld(self, machine_id="m4", role=ROLE_MERGE_ONLY)
+        world.publish("m1", [("A01", "2026-09-05")], week="2026-W36")
+        world.publish("m2", [("A02", day) for day in DAYS])
+        world.sync("m1", "m2", "m3")
+        world.run()
+        self.assertIn("| raw-m1 | W36 |", world.report())
+
+        second = world.run()
+
+        report = world.report()
+        self.assertEqual(len(second.imports), 1, "历史那份安静跳过，不占这次运行的账")
+        self.assertNotIn("W36", report)
+        self.assertIn("| raw-m2 | W38 | 17 | — | — | — | — | 已导入过 → 跳过 |", report)
+
+    def test_a_late_backfilled_package_is_caught_up_by_the_next_run(self):
+        world = ConsoleWorld(self)                    # 采集机 m1
+        world.plan(("A01", "m1", 3), ("A03", "m3", 3))
+        world.crawls([("A01", day) for day in DAYS])
+        world.publish("m2", [("A02", "2026-09-09")], week="2026-W37")   # 迟到的历史包
+        world.publish("m3", [("A03", day) for day in DAYS])
+        world.sync("m2", "m3")
+
+        outcome = world.run()
+
+        self.assertEqual(outcome.exit_code, 0)
+        ledger = world.conn.execute(
+            "SELECT week FROM import_packages ORDER BY week").fetchall()
+        self.assertEqual([row[0] for row in ledger], ["2026-W37", "2026-W38"])
+        self.assertIn("| raw-m2 | W37 |", world.report())
+
+
 class PullAndImageTroubleTests(unittest.TestCase):
     """拉不动与缺图：都如实记、都要人看一眼（退出码 1），不拦汇总。"""
 
