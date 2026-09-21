@@ -53,7 +53,7 @@ from typing import Any
 
 from bestseller_monitor import rounds, shops_sync, weekly_plan
 from bestseller_monitor.canonical_text import normalized_text, text_digest
-from bestseller_monitor.config import ROLE_MERGE_ONLY, Shop, load_shops
+from bestseller_monitor.config import Shop, is_merge_only, load_shops
 from bestseller_monitor.db import CST, Database, PlanDeviationRow, WeeklyPlanRow
 from bestseller_monitor.git_channel import ChannelError, GitChannel
 from bestseller_monitor.weekly_plan import PlanError
@@ -92,9 +92,10 @@ class PrepStatus(str, enum.Enum):
 
 
 # 纯汇总机试图开采集时的拒绝文案（spec §6 降级表末行、§11）：命令行、界面开始页与
-# 点「开始抓取」的拒绝共用这一句——三处各写一份就会改一处漏两处。
+# 点「开始抓取」的拒绝共用这一句（判定共用 `config.is_merge_only`）——三处各写一份
+# 就会改一处漏两处。
 MERGE_ONLY_REFUSAL = ("本机是纯汇总机（machine.role = merge_only）：不做采集——"
-                      "导出与汇总请跑数据交换台（exchange.py）。")
+                      "汇总与报告请跑数据交换台（exchange.py）。")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -650,7 +651,7 @@ def prepare_week(cfg, db: Database, *, now: dt.datetime | None = None,
     now = now or dt.datetime.now(CST)
     week = weekly_plan.iso_week_label(now.date())
     machine = str(cfg.machine_id)
-    if cfg.role == ROLE_MERGE_ONLY:
+    if is_merge_only(cfg):
         return PrepResult(status=PrepStatus.SKIPPED_MERGE_ONLY, week=week, machine=machine)
 
     clone = pathlib.Path(cfg.exchange_root) / PLAN_REPO_DIR

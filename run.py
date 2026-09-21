@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parent
 
 sys.path.insert(0, str(ROOT))
 
-from bestseller_monitor.config import ROLE_MERGE_ONLY, Config, load_shops  # noqa: E402
+from bestseller_monitor.config import Config, is_merge_only, load_shops  # noqa: E402
 from bestseller_monitor.db import Database, connect, cst_date  # noqa: E402
 from bestseller_monitor.pipeline import (  # noqa: E402
     CrawlerAlreadyRunning,
@@ -43,6 +43,11 @@ from bestseller_monitor.pipeline import (  # noqa: E402
 )
 from bestseller_monitor.rounds import ScopeMismatch  # noqa: E402
 from bestseller_monitor import plan_step, rounds, single_instance, sound  # noqa: E402
+
+# 本机没做成事：范围/清单没匹配、纯汇总机不做采集（与数据交换台的退出码 2 同值同义）。
+# 各表示一件事的专用码在各自模块里（plan_step.PLAN_REFUSED_EXIT_CODE、
+# single_instance.CRAWLER_BUSY_EXIT_CODE）。
+EXIT_NOT_DONE = 2
 
 
 def parse_args() -> argparse.Namespace:
@@ -86,9 +91,9 @@ def main() -> int:
     cfg = apply_overrides(cfg, args)
     # 纯汇总机不做采集（spec §6 降级表末行、§11）：在碰采集清单与库之前就拒绝——这台
     # 机器上没有采集清单是常态（不采 1688），库该由数据交换台开；这里一样都不动。
-    if cfg.role == ROLE_MERGE_ONLY:
+    if is_merge_only(cfg):
         print(f"\n>>> {plan_step.MERGE_ONLY_REFUSAL}\n")
-        return 2
+        return EXIT_NOT_DONE
     limit_keys = None
     if args.limit_shops:
         limit_keys = {s.strip() for s in args.limit_shops.split(",") if s.strip()}
@@ -138,7 +143,7 @@ def main() -> int:
     if not shops:
         if limit_keys is not None:
             print("limit-shops 与清单没有任何匹配。")
-            return 2
+            return EXIT_NOT_DONE
         if prep.idle:
             print(f"本周计划（{prep.week}）里没有归本机的店（空手）：没有要采的店。")
             return 0
@@ -146,9 +151,9 @@ def main() -> int:
             print("本周计划里归本机的店在本机清单里找不到："
                   f"{'、'.join(prep.my_shops)}——先把它们补回 {cfg.shop_csv}（照上机清单"
                   "第 11 步的清单同步），或等下一份计划；这一轮没有可采的店。")
-            return 2
+            return EXIT_NOT_DONE
         print("本机清单里没有有效店铺（active=1）。")
-        return 2
+        return EXIT_NOT_DONE
 
     cfg.ensure_dirs()
     sound.configure(cfg.alarm_on_intervention)

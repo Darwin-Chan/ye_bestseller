@@ -122,30 +122,22 @@ class RunCliBusyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             seed_plan(tmp_path, ("A01", "m1", 3))   # 先备好本周计划，才走到抢锁
-            out = io.StringIO()
             busy = run.CrawlerAlreadyRunning("已有采集进程在运行：同一时刻只能跑一轮")
 
-            with patch.object(run, "ROOT", tmp_path), \
-                    patch.object(sys, "argv", ["run.py", "--config", str(cfg_path)]), \
-                    patch.object(run.logging, "basicConfig"), \
-                    patch.object(run.logging.handlers, "RotatingFileHandler"), \
-                    patch.object(run, "run_round", side_effect=busy):
-                with contextlib.redirect_stdout(out):
-                    code = run.main()
+            code, out, _ = run_main(cfg_path, round_error=busy)
 
         self.assertEqual(code, single_instance.CRAWLER_BUSY_EXIT_CODE)
-        self.assertIn("已有采集进程在运行", out.getvalue(), "命令行要给出可读原因")
+        self.assertIn("已有采集进程在运行", out, "命令行要给出可读原因")
 
 
-def run_main(cfg_path: Path, *argv: str, round_error: Exception | None = None,
-             root: Path | None = None):
+def run_main(cfg_path: Path, *argv: str, round_error: Exception | None = None):
     """跑一次 `run.main()`：固定 argv、静音日志、`run_round` 换替身，收 stdout。
 
-    返回 (退出码, stdout, run_round 的替身)。`root` 默认取配置文件所在目录（`run.ROOT`
-    在真实入口里是项目根；用例的世界就是那个临时目录）。
+    返回 (退出码, stdout, run_round 的替身)。`run.ROOT` 取配置文件所在目录——用例的
+    世界就是那个临时目录，与真实入口的项目根同形。
     """
     out = io.StringIO()
-    with patch.object(run, "ROOT", root or cfg_path.parent), \
+    with patch.object(run, "ROOT", cfg_path.parent), \
             patch.object(sys, "argv", ["run.py", "--config", str(cfg_path), *argv]), \
             patch.object(run.logging, "basicConfig"), \
             patch.object(run.logging.handlers, "RotatingFileHandler"), \

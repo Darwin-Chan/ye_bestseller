@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from . import click_events, plan_step, rounds, weekly_plan
-from .config import ROLE_MERGE_ONLY, effective_pages_limit
+from .config import effective_pages_limit, is_merge_only
 from .crawler_identity import CrawlerProcess
 from .db import CST, Database, RoundTally, cst_date
 
@@ -215,7 +215,7 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
     mine = frozenset(plan.machine_keys(str(cfg.machine_id))) if plan is not None else frozenset()
     idle = plan is not None and not mine
     notes = []
-    if cfg.role == ROLE_MERGE_ONLY:
+    if is_merge_only(cfg):
         # 采集入口在这台机器上是被拒的（判定与命令行同源，见 plan_step.MERGE_ONLY_REFUSAL）：
         # 把话说在点「开始抓取」之前，而不是等人点了才知道。
         notes.append(plan_step.MERGE_ONLY_REFUSAL)
@@ -227,7 +227,11 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
     ov_products, ov_skus = _inventory_counts(conn, today)
     current = rounds.active_round(db, today)
     stale = None if current is not None else rounds.active_round(db)
-    if crawler is not None:
+    if is_merge_only(cfg):
+        # 本机不做采集：页首那句已经说清，这里不再给「点开始抓取会…」这类承诺
+        # （hint 只谈采集；库里留着进行中的轮次也不改这条）。
+        hint = ""
+    elif crawler is not None:
         hint = _crawler_hint(crawler)
     elif current is not None:
         hint = (f"轮次 #{current.id} 正在进行（{current.run_date}），"

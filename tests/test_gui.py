@@ -67,9 +67,10 @@ class GuiPlanWiringTests(unittest.TestCase):
 
     def api(self, **cfg) -> Api:
         """不带 shops= 注入的界面对象：店铺全量走真实的清单+计划读法。"""
-        return Api(cfg=crawler_cfg(shop_csv=self.shop_csv, db_file=self.db_path,
-                                   exchange_root=self.dir / "exchange",
-                                   max_pages_per_shop=2, **cfg),
+        values = dict(shop_csv=self.shop_csv, db_file=self.db_path,
+                      exchange_root=self.dir / "exchange", max_pages_per_shop=2)
+        values.update(cfg)
+        return Api(cfg=crawler_cfg(**values),
                    now=lambda: self.NOW, open_conn=lambda: connect(self.db_path))
 
     def store_plan(self, *assignments):
@@ -197,9 +198,7 @@ class GuiPlanWiringTests(unittest.TestCase):
 
     def test_a_merge_only_machine_opens_without_a_shop_list_and_says_so(self):
         """纯汇总机上没有采集清单是常态（不采 1688）：界面照常打开，并在开始页说明白。"""
-        api = Api(cfg=crawler_cfg(shop_csv=self.dir / "没有这份清单.csv", db_file=self.db_path,
-                                  exchange_root=self.dir / "exchange", role=ROLE_MERGE_ONLY),
-                  now=lambda: self.NOW, open_conn=lambda: connect(self.db_path))
+        api = self.api(role=ROLE_MERGE_ONLY, shop_csv=self.dir / "没有这份清单.csv")
 
         start = api.get_start()
 
@@ -211,6 +210,20 @@ class GuiPlanWiringTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("纯汇总机", result["error"])
         spawn.assert_not_called()
+
+    def test_the_start_page_does_not_promise_a_resume_it_would_refuse(self):
+        """库里留着进行中的轮次（换角色 / 拷库留下的）时，页面不许再说「点开始抓取会续跑」。"""
+        api = self.api(role=ROLE_MERGE_ONLY)
+        conn = connect(self.db_path)
+        try:
+            new_round(Database(conn), "A01", run_date="2026-09-21")
+        finally:
+            conn.close()
+
+        start = api.get_start()
+
+        self.assertIn("纯汇总机", start["plan_note"])
+        self.assertEqual(start["start_hint"], "")
 
     def test_a_degraded_preparation_marks_the_start_page_as_unconfirmed(self):
         """拉不到计划库、本地有那份：界面标注「未能确认最新」（spec §6 降级表）。"""

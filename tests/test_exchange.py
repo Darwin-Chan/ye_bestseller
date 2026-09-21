@@ -218,16 +218,16 @@ class ConsoleWorld:
         for machine in machines or ("m2", "m3"):
             GitChannel(self.root / f"raw-{machine}").pull()
 
-    def make_read_only(self, *repos: str) -> dict[str, Path]:
+    def make_read_only(self, *remotes: str) -> dict[str, Path]:
         """把这些裸库换成只读（服务端拒绝一切推送），返回各库的推送计数文件。
 
         只读部署公钥那一侧的形态（spec §11）：clone / pull 照常，写入被服务端拒。
-        `raw-<机器>` 用库名给，计划库用 `plan`（它的裸远端叫 `plan.git`）。
+        `remotes` 用裸库名（`raw-m1.git` / `plan.git`，与 `new_remote` 同一个叫法）。
         """
         counters: dict[str, Path] = {}
-        for name in repos:
+        for name in remotes:
             counter = self.box.tmp / f"{name}-push-attempts"
-            self.box.install_read_only_remote(self.box.tmp / f"{name}.git", counter)
+            self.box.install_read_only_remote(self.box.tmp / name, counter)
             counters[name] = counter
         return counters
 
@@ -491,7 +491,7 @@ class ReadOnlyCredentialRunTests(unittest.TestCase):
         self.world.box.clone(plan_remote, "exchange/plan")   # 纯汇总机不跑准备串：plan 靠拉取保鲜
 
     def test_the_whole_run_never_writes_to_the_exchange(self):
-        counters = self.world.make_read_only("raw-m1", "raw-m2", "raw-m3", "plan")
+        counters = self.world.make_read_only("raw-m1.git", "raw-m2.git", "raw-m3.git", "plan.git")
 
         outcome = self.world.run()
 

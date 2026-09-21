@@ -40,7 +40,7 @@ import sqlite3
 from collections.abc import Callable
 
 from bestseller_monitor import export, merge, plan_step, rounds, weekly_plan
-from bestseller_monitor.config import ROLE_GLOSS, ROLE_MERGE_ONLY
+from bestseller_monitor.config import ROLE_GLOSS, ROLE_MERGE_ONLY, is_merge_only
 from bestseller_monitor.db import CST, Database, connect
 from bestseller_monitor.git_channel import ChannelError, GitChannel
 from bestseller_monitor.image_store import ImageStoreError
@@ -202,7 +202,7 @@ def check_environment(cfg, *, db: Database, week: str, now: dt.datetime,
 
     notes: list[str] = []
     repos = {path.name for path in root.glob("raw-*") if path.is_dir()}
-    if cfg.role != ROLE_MERGE_ONLY and f"raw-{machine_id}" not in repos:
+    if not is_merge_only(cfg) and f"raw-{machine_id}" not in repos:
         notes.append(f"本机的 raw 库还没 clone 到 {root / f'raw-{machine_id}'}："
                      "导出这半会按「没做成事」报（上机清单第 9 步）。")
     if not [repo for repo in repos if repo != f"raw-{machine_id}"]:
@@ -337,7 +337,7 @@ def run_once(cfg, *, only: str | None = None, week: str | None = None,
         export_note: str | None = None
         if only == ONLY_MERGE:
             export_note = "本次只跑了汇总（--only merge），没做导出"
-        elif role == ROLE_MERGE_ONLY:
+        elif is_merge_only(cfg):
             export_note = "本机是纯汇总机，跳过"
             say(f"导出：{export_note}（入口保留着，不藏）。")
         else:

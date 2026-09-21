@@ -40,6 +40,16 @@ ROLE_MERGE_ONLY = "merge_only"
 # 档位的中文名一处写死：配置校验的报错、数据交换台的报告与窗口都用它。
 ROLE_GLOSS = {ROLE_COLLECTOR: "采集机", ROLE_MERGE_ONLY: "纯汇总机"}
 
+
+def is_merge_only(cfg) -> bool:
+    """这台机器是不是纯汇总机（spec §10 的角色档位）：角色判定只此一处。
+
+    取 `cfg` 而不是做成 `Config` 的方法：测试与基准用的是 SimpleNamespace 替身，
+    同一条判据要两边都能用（`role` 字段两边都有）。
+    """
+    return cfg.role == ROLE_MERGE_ONLY
+
+
 # 凭据档位（spec §11）：只记档位、不记密钥；密钥在仓库外（~/.ssh、secrets/ 或 coscli 配置）。
 # readwrite = 采集机档（git 可写、COS 限 img/* 读写）；read_only = 纯汇总机档（push/上传被拒即档位正确）。
 ACCESS_READWRITE = "readwrite"

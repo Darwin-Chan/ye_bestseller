@@ -137,10 +137,11 @@ exit 0
 
     def install_declining_hook(self, clone: pathlib.Path, counter: pathlib.Path) -> None:
         """pre-push 钩子：每次推送记一笔并拒绝——凭据被拒、网络断那类不可重试的失败。"""
-        self.install_pre_push(clone, f'''
-echo ran >> "{self.sh_path(counter)}"
-exit 1
-''')
+        self.install_pre_push(clone, self._declining_body(counter))
+
+    def _declining_body(self, counter: pathlib.Path) -> str:
+        """「记一笔再拒绝」的钩子正文（不含 shebang）：三个拒绝类钩子共用这一份。"""
+        return f'echo ran >> "{self.sh_path(counter)}"\nexit 1\n'
 
     def install_read_only_remote(self, remote: pathlib.Path, counter: pathlib.Path) -> None:
         """给裸库装 pre-receive 钩子：每次推送记一笔并拒绝——只读部署公钥那一侧的形态。
@@ -151,8 +152,8 @@ exit 1
         """
         hooks = remote / "hooks"
         hooks.mkdir(parents=True, exist_ok=True)
-        script = f'#!/bin/sh\necho ran >> "{self.sh_path(counter)}"\nexit 1\n'
-        (hooks / "pre-receive").write_bytes(script.encode("utf-8"))
+        (hooks / "pre-receive").write_bytes(
+            ("#!/bin/sh\n" + self._declining_body(counter)).encode("utf-8"))
 
     def publish_into_bare(self, remote: pathlib.Path, clone: pathlib.Path) -> None:
         """让另一个克隆的提交落到裸库上，不经过 push（也就不经过 pre-receive 钩子）。

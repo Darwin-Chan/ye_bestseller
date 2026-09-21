@@ -128,6 +128,21 @@ class PushTests(unittest.TestCase):
         self.assertEqual(runs.read_text(encoding="utf-8").split(), ["ran"],
                          "非 non-fast-forward 的失败不许重试")
 
+    def test_push_onto_an_unreachable_channel_fails_without_retrying(self):
+        """通道不可达（远端没了）：push 的第一步 pull 就失败——不重试、不无限打转。"""
+        self.box.must("remote", "set-url", "origin", str(self.box.tmp / "gone.git"),
+                      cwd=self.mine)
+        self.box.write_files(self.mine, {"mine.txt": "mine\n"})
+        channel = GitChannel(self.mine)
+        self.assertTrue(channel.commit("add mine.txt", [self.mine / "mine.txt"]))
+
+        with self.assertRaises(ChannelError) as ctx:
+            channel.push()
+
+        self.assertIn("拉取失败", str(ctx.exception),
+                      "报的是第一步的拉取：没有落到重试循环里")
+        self.assertIn("does not appear to be a git repository", str(ctx.exception))
+
 
 class ReadOnlyCredentialTests(unittest.TestCase):
     """只读凭据（spec §11）：clone / pull 照常，push 被远端拒绝、不重试、原样报出。

@@ -32,7 +32,7 @@ from pathlib import Path
 
 import webview
 
-from bestseller_monitor.config import ROLE_MERGE_ONLY, Config, Shop, load_shops
+from bestseller_monitor.config import Config, Shop, is_merge_only, load_shops
 from bestseller_monitor.db import CST, Database, connect, cst_date, utcnow
 from bestseller_monitor.rounds import (
     RoundRequest,
@@ -88,7 +88,7 @@ def _local_shops(cfg) -> list[Shop]:
     try:
         return [shop for shop in load_shops(cfg.shop_csv) if shop.active]
     except FileNotFoundError:
-        if cfg.role != ROLE_MERGE_ONLY:
+        if not is_merge_only(cfg):
             raise
         log.info("纯汇总机：本机没有采集清单（%s），开始页照常打开。", cfg.shop_csv)
         return []
@@ -235,7 +235,7 @@ class Api:
         今天已有进行中的轮次同样不拦：那是续跑，范围以轮次自身为准（与 run.py 同一条
         规则，逃生口开出来的那一轮也才续得下去）。
         """
-        if self.cfg.role == ROLE_MERGE_ONLY:
+        if is_merge_only(self.cfg):
             return plan_step.MERGE_ONLY_REFUSAL
         prep = self._prep_this_week()
         if prep is None or prep.can_start:
@@ -268,7 +268,7 @@ class Api:
         """
         if self._shops_injected or self.cfg.shop_csv is None:
             return
-        if self.cfg.role == ROLE_MERGE_ONLY:
+        if is_merge_only(self.cfg):
             return
         plan = plan_step.stored_plan(Database(conn), self._current_week())
         self.shops = plan_step.visible_shops(self.cfg, plan)
@@ -395,7 +395,7 @@ class Api:
     def resume_run(self) -> dict:
         """在“过程”页暂停后点击“继续”：重新拉起抓取，续跑本轮未完成店铺，并停留在过程页。"""
         with self._lock:
-            if self.cfg.role == ROLE_MERGE_ONLY:
+            if is_merge_only(self.cfg):
                 # 续跑也是开采集（库里可能留着换角色 / 拷库带来的进行中轮次）：与开始页同一条拒绝。
                 return {"ok": False, "error": plan_step.MERGE_ONLY_REFUSAL}
             if self.any_crawler_running():
