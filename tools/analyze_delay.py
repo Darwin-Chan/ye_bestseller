@@ -275,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--db", type=Path, default=None, help="数据库路径，默认 data/bestseller.db")
     ap.add_argument("--round", type=int, default=None, help="只分析指定 round_id")
-    ap.add_argument("--out", type=Path, default=None, help="输出目录，默认 output")
+    ap.add_argument("--out", type=Path, default=None, help="输出目录，默认 .scratch/tool-output")
     ap.add_argument("--chart", action="store_true", help="生成柱状图（需 matplotlib）")
     args = ap.parse_args(argv)
 

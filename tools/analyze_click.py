@@ -1,6 +1,6 @@
 """只读：按店统计「点击→弹窗」可靠性（基于 event_log 的 click_* 事件）。
 
-用法：python tools/analyze_click.py [--round N] [--db data/bestseller.db] [--out output]
+用法：python tools/analyze_click.py [--round N] [--db data/bestseller.db] [--out .scratch/tool-output]
 """
 from __future__ import annotations
 
@@ -104,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args(argv)
     db_path = args.db or (Path(__file__).resolve().parents[1] / "data" / "bestseller.db")
-    out_dir = args.out or (Path(__file__).resolve().parents[1] / "output")
+    out_dir = args.out or (Path(__file__).resolve().parents[1] / ".scratch" / "tool-output")
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:

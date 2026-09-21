@@ -1,6 +1,6 @@
 # Bestseller（1688 SKU 库存快照 MVP）
 
-按 [docs/PRD-1688库存快照MVP.md](docs/PRD-1688库存快照MVP.md) 实现的路线 A MVP：
+按 [docs/product/PRD-1688库存快照MVP.md](docs/product/PRD-1688库存快照MVP.md) 实现的路线 A MVP：
 每天在若干 1688 店铺内按销量排序抓取前若干页商品，进入详情页采集 SKU 名称/价格/库存，
 存入 SQLite，跨轮比较库存变化用于估算销量。（同步导出 CSV/Excel 已停用，数据呈现后置为异步。）
 
@@ -12,6 +12,18 @@ python -m playwright install chromium
 ```
 
 - 界面依赖 `pywebview`（在 `requirements.txt` 里），Windows 上走 Edge WebView2 后端，需要本机有 WebView2 运行时（Win10/11 随 Edge 自带）。
+
+## 目录布局（运行时 / 设计时）
+
+第一层文件夹要么运行时、要么设计时，两者不共用（见 [ADR-0033](docs/adr/0033-repo-layout-runtime-vs-design.md)）：
+
+- **运行时侧**：`bestseller_monitor/`（含 `pages/` 三个程序页面）、`config/`、`dist/`（三只壳）、
+  `logs/`（**只放运行时日志**）、`output/`（**只放分析程序生成的报告**），以及入口脚本
+  `gui.py` / `run.py` / `analyze.py` / `exchange.py` / `login_chrome.py` 与 `start.bat`。
+- **设计时侧**：`docs/`（**文档唯一去处**：`adr/` `reviews/` `agents/` `research/` `product/`
+  `ops/` `history/` `design/` `out-of-scope/`）、`shells/`（壳源码与打包 spec）、`tests/`、
+  `tools/`、`.scratch/`（工单与过程材料；开发/测试/票证据日志在 `.scratch/logs/`）。
+- 根目录只留三份定论说明：README、CONTEXT、AGENTS。
 
 ## 配置
 
@@ -66,7 +78,7 @@ python analyze.py
 ```
 
 - 打开桌面窗口（pywebview）并起一个只监听 `127.0.0.1` 随机端口的本地服务，页面是
-  `docs/bestseller-analysis.html`。
+  `bestseller_monitor/pages/bestseller-analysis.html`。
 - 双击入口：`dist\bestseller_analysis.exe`（分析壳，见「打包与运行形态」）等价于本命令
   （缺省即开窗）；同一台机器同一时刻至多一次分析——第二次起壳会提示「分析已经打开」、
   尽量把那边的窗口叫到前面，然后安静退出（退出码 0，壳不弹错误框）。
@@ -111,7 +123,7 @@ python analyze.py --serve
 移除、组内新增）→ 筛选与批量确认 / 撤回 → 暂时保存 → 查看畅销品 → 导出 HTML 报告。
 
 验收记录（环境、样本、A01—A46 逐条核对、未执行项）见
-[docs/畅销品分析验收记录.md](docs/畅销品分析验收记录.md)。
+[docs/ops/畅销品分析验收记录.md](docs/ops/畅销品分析验收记录.md)。
 
 ## 打包与运行形态
 
@@ -120,7 +132,7 @@ python analyze.py --serve
 `dist\bestseller_analysis.exe`（分析壳）。壳不是自带代码的程序：
 
 - exe 里不含项目代码，它只推导项目根、找到本机 python、拉起源码目录里那一个脚本（`<项目根>\gui.py` / `<项目根>\exchange.py --window` / `<项目根>\analyze.py` 不带参数）；
-- 界面 `gui.py`、交换台 `exchange.py`、分析 `analyze.py`、页面 `docs/ui_live.html` / `docs/ui_exchange.html` / `docs/bestseller-analysis.html`、采集包 `bestseller_monitor`、`run.py` 全部来自源码目录，改这些文件**不需要重新打包**；
+- 界面 `gui.py`、交换台 `exchange.py`、分析 `analyze.py`、页面 `bestseller_monitor/pages/ui_live.html` / `bestseller_monitor/pages/ui_exchange.html` / `bestseller_monitor/pages/bestseller-analysis.html`、采集包 `bestseller_monitor`、`run.py` 全部来自源码目录，改这些文件**不需要重新打包**；
 - 壳不向子进程转发参数：`--week`（补历史）、`--only`（只跑一半）、`--config` / `--serve`（换分析配置 / 只起服务）这类是脚本的参数，双击壳没有参数可传——交换台壳与分析壳收到会明确拒绝并提示走脚本；
 - 项目根按 exe 位置推导（`dist` 的上一级），所以 exe 必须待在 `<项目根>\dist\`；可用环境变量 `BESTSELLER_PROJECT` 显式指定；
 - 失败会弹窗说明并留底日志（`<项目根>\logs\gui_launcher.log` / `exchange_launcher.log` / `analysis_launcher.log`）：采集壳与分析壳「非零退出都弹」；交换台壳「退出码 0/1 静默（1 是正常结局——有需要人看一眼的），2 与启动失败才弹」。自动化验证时设 `BESTSELLER_NO_DIALOG=1` 只落日志不弹窗；`--check --check-report <路径>` 可只做推导与校验并写出 JSON 报告。
@@ -141,10 +153,14 @@ python tools/build_exe.py --target analysis
 
 脚本会顺带断言产物里没有项目代码（`bestseller_monitor` / `gui` / `exchange` / `analyze`）。
 
+壳的源码（4 个 launcher 与三份 `.spec`）都在 `shells/`；`build/` 只是打包的中间产物，可随时清空。
+壳与本机无关：可直接把 `dist\` 下三个 exe 拷到别的机器用（壳自己找本机 python 与源码目录）；
+重建壳才需要 `pyinstaller`（已在 `requirements.txt` 里）。
+
 ## 多机分片采集（机制按实现票落地中）
 
 三台采集机各自采集，通过**交换区**（git 私有库 + 对象存储图片）互递数据、各自汇总；
-通道选型与容量测算见 [docs/三机汇总通道调研.md](docs/三机汇总通道调研.md)。
+通道选型与容量测算见 [docs/research/三机汇总通道调研.md](docs/research/三机汇总通道调研.md)。
 
 - **周计划**：打开程序时（命令行则开跑前）采集程序自动 pull `plan` 库 → 同步店铺清单 →
   确认（不存在就生成并发布）本周计划——各店归哪台机器、各给多少页；开始页默认勾选本机份额，
@@ -159,7 +175,7 @@ python tools/build_exe.py --target analysis
 - **凭据**：每台机器自己的 SSH key 与 COS AK；纯汇总机只持只读档（push / 上传被拒即预期）。
   密钥都放仓库外，`config.toml` 只记档位。
 - 上机步骤（m1 增量、m2/m3 接入、纯汇总机、三机验收）见
-  [docs/三机上机清单.md](docs/三机上机清单.md)——四段都可执行（含演练取证与判据；验收
+  [docs/ops/三机上机清单.md](docs/ops/三机上机清单.md)——四段都可执行（含演练取证与判据；验收
   核对用 `python tools/acceptance_check.py`）；机器本地全文在
   `.scratch/multi-machine-collection/spec.md` §12。
 

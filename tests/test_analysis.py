@@ -410,8 +410,8 @@ class AnalysisBrowserTests(unittest.TestCase):
         self.assertEqual(restored['excluded'], before['excluded'])
         self.assertEqual([g['id'] for g in restored['groups'] if g['confirmed']], ['G1'])
         expect(self.page.locator('#groupDetail .group-status')).to_have_text('已确认')
-        Path('work').mkdir(exist_ok=True)
-        self.page.screenshot(path='work/ticket08-resume.png')
+        Path('.scratch/work').mkdir(parents=True, exist_ok=True)
+        self.page.screenshot(path='.scratch/work/ticket08-resume.png')
         # 恢复的是原快照：旧名称、旧图片、旧库存都在，不受源库更新影响。
         self.choose_group('云朵杯')
         expect(self.page.locator('#groupDetail')).to_contain_text('云朵杯')
@@ -453,8 +453,8 @@ class AnalysisBrowserTests(unittest.TestCase):
         expect(self.page.locator('#error')).to_contain_text('保存分析草稿失败')
         expect(self.page.locator('#dirtyStatus')).to_have_text('未保存')
         expect(self.page.locator('#saveStatus')).to_have_text('')
-        Path('work').mkdir(exist_ok=True)
-        self.page.screenshot(path='work/ticket08-save-failure.png')
+        Path('.scratch/work').mkdir(parents=True, exist_ok=True)
+        self.page.screenshot(path='.scratch/work/ticket08-save-failure.png')
         # 保存并查看失败同样不呈现结果。
         expect(save_and_view).to_be_enabled()
         save_and_view.click()
@@ -600,8 +600,8 @@ class AnalysisBrowserTests(unittest.TestCase):
         self.page.locator('.group-choice').filter(has_text='树叶杯 ·').click()
         expect(self.page.locator('#groupDetail .group-status')).to_have_text('待确认')
         expect(self.page.locator('#groupDetail aside.change')).to_contain_text('商品名称或图片已有变更，请核对当前信息。')
-        Path('work').mkdir(exist_ok=True)
-        self.page.screenshot(path='work/ticket09-reuse.png')
+        Path('.scratch/work').mkdir(parents=True, exist_ok=True)
+        self.page.screenshot(path='.scratch/work/ticket09-reuse.png')
         # 处理变更：把树叶杯并回已确认组并保存，重启后再验证人工判断未丢失。
         self.page.locator('.group-choice').filter(has_text='杯子 ·').click()
         self.page.get_by_role('button', name='组内新增商品').click()

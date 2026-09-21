@@ -10,6 +10,23 @@
 
 原因：`implement` 这类 skill 的正文里有「Commit your work to the current branch.」这样的无条件指令，被 fork 出来的子代理会把它当成自己的任务，2026-09-11 因此出现过审查子代理自行改代码并提交。
 
+## 仓库布局（运行时 / 设计时，2026-09-21 起）
+
+第一层文件夹要么运行时、要么设计时，不许兼有（决定见 `docs/adr/0033-repo-layout-runtime-vs-design.md`）：
+
+- **运行时侧**：`bestseller_monitor/`（程序包，含 `pages/` 三个程序页面）、`config/`、
+  `dist/`（三只壳唯一的运行位置）、`logs/`（**只放运行时日志**）、`output/`（**只放
+  分析程序生成/导出的报告**）、入口脚本（`gui.py` / `run.py` / `analyze.py` /
+  `exchange.py` / `login_chrome.py`）。
+- **设计时侧**：`docs/`（**文档唯一去处**：`adr/` `reviews/` `agents/` `research/`
+  `product/` `ops/` `history/` `design/` `out-of-scope/`）、`shells/`（壳源码与 spec）、
+  `tests/`、`tools/`、`.scratch/`（工单与过程材料）。
+- 根目录只留三份定论说明：README、CONTEXT、AGENTS。
+- **新产物落点**：新文档进 `docs/` 的相应子目录；证据日志写
+  `.scratch/logs/tickets/<slug>/<票号>/`（开发日志写 `.scratch/logs/dev/`）；
+  诊断/截图类工具的默认输出写 `.scratch/tool-output/`；别往根目录或运行时文件夹
+  （`logs/`、`output/`、`dist/`）放设计时产物。
+
 ## Agent skills
 
 ### Issue tracker

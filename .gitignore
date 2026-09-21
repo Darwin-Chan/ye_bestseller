@@ -6,44 +6,49 @@ desktop.ini
 # 编辑器
 .vscode/
 .idea/
+.vs/
 *.swp
 
-# 日志
+# 日志（运行时日志只在根 logs/；开发/测试/票证据日志在 .scratch/logs/，见 AGENTS.md）
 *.log
-logs/
+/logs/
 
-# 依赖
+# 依赖与构建产物
 node_modules/
-dist/
-build/
+/dist/
+/build/
 
 # Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
 
 # 环境变量
 .env
 .env.local
 
-# 1688 监控运行数据（不上传）
-data/
-output/
-profiles/
+# 1688 监控运行数据（不上传；真库 / 真 profile 在仓库外，路径见 config）
+/data/
+/output/
+/profiles/
 *.db
+*.sqlite
 *.xlsx
-config/shops.csv
+/config/shops.csv
 
 # 每台机器自建的真配置（含机器专属值；示例见 config/*.example.toml，不进代码仓）
-config/config.toml
-config/analysis.toml
+/config/config.toml
+/config/analysis.toml
 
 # 交换区（4 个交换库 raw-m1/raw-m2/raw-m3/plan 的 clone 位置）
-exchange/
+/exchange/
 
 # 本地 Agent 配置、工单草稿与子代理交接目录（不上传）
 .claude/
 .codex/
 .scratch/
-work/

@@ -4,3 +4,5 @@ Pillow>=10.0
 # 仅测试用：test_card_selector 用真实 CSS 引擎验证商品卡选择器（原先由 DrissionPage 顺带带入）
 lxml>=5.0
 cssselect>=1.2
+# 仅打包壳用（python tools/build_exe.py --target gui|exchange|analysis）
+pyinstaller>=6.0
