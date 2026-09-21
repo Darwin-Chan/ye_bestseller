@@ -1,10 +1,10 @@
-"""重建 `dist\\` 下的启动壳（采集壳 / 交换台壳），并自检产物里没有项目代码（IS-52 / ADR-0007）。
+"""重建 `dist\\` 下的启动壳（采集壳 / 交换台壳 / 分析壳），并自检产物里没有项目代码（IS-52 / ADR-0007）。
 
-壳只带自己的代码与第三方库。`gui`、`exchange`、`bestseller_monitor` 一旦出现在产物里，就
-说明打包退回了「入口脚本冻结、抓取包走源码目录」的半套形态——自检在这里直接失败，别把它
-交给用户。
+壳只带自己的代码与第三方库。`gui`、`exchange`、`analyze`、`bestseller_monitor` 一旦出现在
+产物里，就说明打包退回了「入口脚本冻结、抓取包走源码目录」的半套形态——自检在这里直接失败，
+别把它交给用户。
 
-用法：`python tools/build_exe.py --target gui|exchange`
+用法：`python tools/build_exe.py --target gui|exchange|analysis`
 """
 from __future__ import annotations
 
@@ -20,8 +20,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# exe 里出现这些名字，就是夹带了项目代码。
-PROJECT_MODULES = ("gui", "exchange", "bestseller_monitor")
+# exe 里出现这些名字，就是夹带了项目代码。分析壳的脚本名是 analyze.py（目标键叫 analysis）。
+PROJECT_MODULES = ("gui", "exchange", "analyze", "bestseller_monitor")
 
 # PyInstaller 的 TOC 是 repr 出来的结构：模块名是单引号里的点分标识符。
 _QUOTED_NAME_RE = re.compile(r"'([A-Za-z_][A-Za-z0-9_.]*)'")
@@ -43,6 +43,9 @@ TARGETS = {
     "exchange": Target(spec=ROOT / "bestseller_exchange.spec",
                        exe=ROOT / "dist" / "bestseller_exchange.exe",
                        toc=ROOT / "build" / "bestseller_exchange" / "Analysis-00.toc"),
+    "analysis": Target(spec=ROOT / "bestseller_analysis.spec",
+                       exe=ROOT / "dist" / "bestseller_analysis.exe",
+                       toc=ROOT / "build" / "bestseller_analysis" / "Analysis-00.toc"),
 }
 
 
@@ -110,7 +113,8 @@ def main(argv: list[str] | None = None) -> int:
         description="重建 dist 下的启动壳，并自检产物里没有项目代码（IS-52 / ADR-0007）。")
     parser.add_argument("--target", choices=sorted(TARGETS), required=True,
                         help="建哪只壳：gui = 采集壳（dist/bestseller_gui.exe）、"
-                             "exchange = 交换台壳（dist/bestseller_exchange.exe）")
+                             "exchange = 交换台壳（dist/bestseller_exchange.exe）、"
+                             "analysis = 分析壳（dist/bestseller_analysis.exe）")
     args = parser.parse_args(argv)
     target = TARGETS[args.target]
     build(target)

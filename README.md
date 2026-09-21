@@ -67,6 +67,9 @@ python analyze.py
 
 - 打开桌面窗口（pywebview）并起一个只监听 `127.0.0.1` 随机端口的本地服务，页面是
   `docs/bestseller-analysis.html`。
+- 双击入口：`dist\bestseller_analysis.exe`（分析壳，见「打包与运行形态」）等价于本命令
+  （缺省即开窗）；同一台机器同一时刻至多一次分析——第二次起壳会提示「分析已经打开」并
+  把那边的窗口叫到前面，然后安静退出（退出码 0，壳不弹错误框）。
 - 只想起服务、不开窗口（调试或远程查看端口）：
 
 ```bash
@@ -112,14 +115,15 @@ python analyze.py --serve
 
 ## 打包与运行形态
 
-两个入口程序各配一只**启动壳**（打包 exe；决定见 [ADR-0007](docs/adr/0007-gui-exe-is-a-shell.md)）：采集界面
-`dist\bestseller_gui.exe`（采集壳）、数据交换台 `dist\bestseller_exchange.exe`（交换台壳）。壳不是自带代码的程序：
+三个入口程序各配一只**启动壳**（打包 exe；决定见 [ADR-0007](docs/adr/0007-gui-exe-is-a-shell.md)）：采集界面
+`dist\bestseller_gui.exe`（采集壳）、数据交换台 `dist\bestseller_exchange.exe`（交换台壳）、畅销品分析
+`dist\bestseller_analysis.exe`（分析壳）。壳不是自带代码的程序：
 
-- exe 里不含项目代码，它只推导项目根、找到本机 python、拉起源码目录里那一个脚本（`<项目根>\gui.py` / `<项目根>\exchange.py --window`）；
-- 界面 `gui.py`、交换台 `exchange.py`、页面 `docs/ui_live.html` / `docs/ui_exchange.html`、采集包 `bestseller_monitor`、`run.py` 全部来自源码目录，改这些文件**不需要重新打包**；
-- 壳不向子进程转发参数：`--week`（补历史）、`--only`（只跑一半）这类是脚本的参数，双击壳没有参数可传——交换台壳收到会明确拒绝并提示走脚本；
+- exe 里不含项目代码，它只推导项目根、找到本机 python、拉起源码目录里那一个脚本（`<项目根>\gui.py` / `<项目根>\exchange.py --window` / `<项目根>\analyze.py` 不带参数）；
+- 界面 `gui.py`、交换台 `exchange.py`、分析 `analyze.py`、页面 `docs/ui_live.html` / `docs/ui_exchange.html` / `docs/bestseller-analysis.html`、采集包 `bestseller_monitor`、`run.py` 全部来自源码目录，改这些文件**不需要重新打包**；
+- 壳不向子进程转发参数：`--week`（补历史）、`--only`（只跑一半）、`--config` / `--serve`（换分析配置 / 只起服务）这类是脚本的参数，双击壳没有参数可传——交换台壳与分析壳收到会明确拒绝并提示走脚本；
 - 项目根按 exe 位置推导（`dist` 的上一级），所以 exe 必须待在 `<项目根>\dist\`；可用环境变量 `BESTSELLER_PROJECT` 显式指定；
-- 失败会弹窗说明并留底日志（`<项目根>\logs\gui_launcher.log` / `exchange_launcher.log`）：采集壳「非零退出都弹」；交换台壳「退出码 0/1 静默（1 是正常结局——有需要人看一眼的），2 与启动失败才弹」。自动化验证时设 `BESTSELLER_NO_DIALOG=1` 只落日志不弹窗；`--check --check-report <路径>` 可只做推导与校验并写出 JSON 报告。
+- 失败会弹窗说明并留底日志（`<项目根>\logs\gui_launcher.log` / `exchange_launcher.log` / `analysis_launcher.log`）：采集壳与分析壳「非零退出都弹」；交换台壳「退出码 0/1 静默（1 是正常结局——有需要人看一眼的），2 与启动失败才弹」。自动化验证时设 `BESTSELLER_NO_DIALOG=1` 只落日志不弹窗；`--check --check-report <路径>` 可只做推导与校验并写出 JSON 报告。
 
 重新打包（建哪只就传哪个目标）：
 
@@ -131,7 +135,11 @@ python tools/build_exe.py --target gui
 python tools/build_exe.py --target exchange
 ```
 
-脚本会顺带断言产物里没有项目代码（`bestseller_monitor` / `gui` / `exchange`）。
+```bash
+python tools/build_exe.py --target analysis
+```
+
+脚本会顺带断言产物里没有项目代码（`bestseller_monitor` / `gui` / `exchange` / `analyze`）。
 
 ## 多机分片采集（机制按实现票落地中）
 

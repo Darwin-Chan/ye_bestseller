@@ -1,11 +1,12 @@
-"""启动壳的正文（IS-52 / ADR-0007）：两只壳共用这一份，差异全在 `LauncherSpec` 里。
+"""启动壳的正文（IS-52 / ADR-0007）：三只壳共用这一份，差异全在 `LauncherSpec` 里。
 
 exe 里不放项目代码：壳只做三件事——推导项目根、找到本机 python、拉起源码目录里的
 目标脚本并守着它。采集壳（`dist/bestseller_gui.exe`，入口 `gui_launcher.py`）拉
 `gui.py`；交换台壳（`dist/bestseller_exchange.exe`，入口 `exchange_launcher.py`）拉
-`exchange.py --window`。
+`exchange.py --window`；分析壳（`dist/bestseller_analysis.exe`，入口 `analysis_launcher.py`）
+拉 `analyze.py`（缺省即开窗，不带参数）。
 
-行为约定（对两只壳一致）：
+行为约定（对三只壳一致）：
   - 项目根：`BESTSELLER_PROJECT` > exe 所在目录的上一级（exe 待在 `<项目根>\\dist\\`），
     两者都要求目录里有目标的项目根标记（见 `LauncherSpec.markers`）。
   - 解释器：`BESTSELLER_PYTHON` > PATH 上的 `pythonw` > PATH 上的 `python`。
@@ -14,8 +15,9 @@ exe 里不放项目代码：壳只做三件事——推导项目根、找到本�
   - `BESTSELLER_NO_DIALOG=1` 时只落日志、不弹窗，供自动化验证用。
   - `--check [--check-report <路径>]`：只做推导与校验，把结果写成 JSON 后退出，不开子进程。
 
-**壳不向子进程转发参数**：目标脚本自己的命令行参数（`--week`、`--only`、`--config`）一律
-走源码目录的脚本。交换台壳对这类参数明确拒绝（见 `exchange_launcher.shell_refusal`）。
+**壳不向子进程转发参数**：目标脚本自己的命令行参数（`--week`、`--only`、`--config`、
+`--serve`）一律走源码目录的脚本。交换台壳与分析壳对这类参数明确拒绝
+（见 `exchange_launcher.shell_refusal` / `analysis_launcher.shell_refusal`）。
 """
 from __future__ import annotations
 
@@ -58,8 +60,8 @@ class LauncherSpec:
     （非零都弹）；交换台壳是 `{0, 1}`（1 = 有需要人看一眼的地方，是正常结局）。
     """
 
-    target: str                                  # "gui" / "exchange"：--check 报告里自我说明
-    noun: str                                    # 文案主语：「界面」/「交换台」
+    target: str                                  # "gui" / "exchange" / "analysis"：--check 报告里自我说明
+    noun: str                                    # 文案主语：「界面」/「交换台」/「分析」
     markers: tuple[str, ...]                     # 项目根标记：缺一就不是项目根
     script: str                                  # 子进程入口：<项目根>\<script>
     script_args: tuple[str, ...] = ()            # 子进程的固定参数（用户的参数不转发）

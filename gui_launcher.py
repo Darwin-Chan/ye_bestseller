@@ -1,6 +1,6 @@
 """采集壳（IS-52 / ADR-0007）：`dist/bestseller_gui.exe` 就是本文件打出来的。
 
-壳的正文在 `launcher_core.py`（两只壳共用）；本文件只填采集目标的差异：拉
+壳的正文在 `launcher_core.py`（三只壳共用）；本文件只填采集目标的差异：拉
 `<项目根>\\gui.py`、项目根标记是 `gui.py` + `bestseller_monitor`、弹窗政策是
 「非零退出都弹」（行为与抽芯前一致）。采集中途的参数一个都不转发。
 """

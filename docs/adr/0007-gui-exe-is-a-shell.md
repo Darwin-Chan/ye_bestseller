@@ -47,3 +47,11 @@
 `dist/bestseller_exchange.exe`，拉 `<项目根>\exchange.py --window`，不转发参数）。本 ADR 的
 壳形态（项目代码一律从源码目录加载、项目根按 exe 位置推导、exe 待在 `<项目根>\dist\`）
 对两只壳一视同仁；演练取证在 `.scratch/multi-machine-collection-impl/ticket14/`。
+
+**落地实证（2026-09-21，分析线票 14）**：加入第三只壳——分析壳，与上述两只同形：
+`analysis_launcher.py` + `bestseller_analysis.spec` → `dist/bestseller_analysis.exe`，拉
+`<项目根>\analyze.py`（不带参数，缺省即开窗）、项目根标记 `analyze.py` + `bestseller_monitor`、
+弹窗政策同采集壳「非零都弹」；重建入口随之泛化为
+`python tools/build_exe.py --target gui|exchange|analysis`。名实分裂是有意的：目标键、spec、
+薄入口、日志与 `--target` 都叫 `analysis`，被拉的脚本仍叫 `analyze.py`（写错会当场失败）。
+演练取证在 `.scratch/bestseller-analysis/ticket14/`。
