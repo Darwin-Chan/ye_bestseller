@@ -32,7 +32,7 @@ from pathlib import Path
 
 import webview
 
-from bestseller_monitor.config import Config, load_shops
+from bestseller_monitor.config import ROLE_MERGE_ONLY, Config, Shop, load_shops
 from bestseller_monitor.db import CST, Database, connect, cst_date, utcnow
 from bestseller_monitor.rounds import (
     RoundRequest,
@@ -79,6 +79,21 @@ _SW_RESTORE = 9
 _BUSY_ERROR = "已有抓取任务在运行，请先暂停或中止。"
 
 
+def _local_shops(cfg) -> list[Shop]:
+    """本机采集清单里启用的店。
+
+    纯汇总机上没有这份清单是常态（不采 1688，上机清单也不建它）：界面照常打开、
+    开始页说明白，而不是拿「找不到店铺清单」把人挡在门外。
+    """
+    try:
+        return [shop for shop in load_shops(cfg.shop_csv) if shop.active]
+    except FileNotFoundError:
+        if cfg.role != ROLE_MERGE_ONLY:
+            raise
+        log.info("纯汇总机：本机没有采集清单（%s），开始页照常打开。", cfg.shop_csv)
+        return []
+
+
 def _configure_gui_logging(cfg=None) -> logging.Handler:
     """GUI 自己的动作也留日志——暂停/中止后的浏览器收尾否则事后无据可查（IS-43）。
 
@@ -122,8 +137,7 @@ class Api:
         self._open_conn = open_conn if open_conn is not None else (
             lambda: connect(self.cfg.db_file))
         self._shops_injected = shops is not None
-        self.shops = (list(shops) if shops is not None else
-                      [s for s in load_shops(self.cfg.shop_csv) if s.active])
+        self.shops = (list(shops) if shops is not None else _local_shops(self.cfg))
         # 开轮前准备（spec §6）的结局：`prepare()` 落在这里，`start_run` 拿它做
         # 「默认拒绝开轮」的判定；没跑过就是 None（子进程开轮前还会再准备一次）。
         self._prep: plan_step.PrepResult | None = None
@@ -214,16 +228,18 @@ class Api:
     def _plan_block_reason(self, db: Database | None = None) -> str | None:
         """准备没通过就默认拒绝开轮（spec §6 降级表；逃生口入口见票据 07）。
 
-        只认本界面刚做过、且是本周的那次准备：没跑过或跨了周就不拦——子进程 run.py
-        开跑前自己会做准备，那里有同样的判定与同一条退出码（它的拒绝在这里也有文案，
-        见 `_refused_start_message`）。今天已有进行中的轮次同样不拦：那是续跑，范围
-        以轮次自身为准（与 run.py 同一条规则，逃生口开出来的那一轮也才续得下去）。
+        **纯汇总机先判、且不指望准备**：角色是配置事实，这台机器不做采集——准备还没
+        跑完（或意外没落定）也不许把子进程放出去。其余判据只认本界面刚做过、且是本周的
+        那次准备：没跑过或跨了周就不拦——子进程 run.py 开跑前自己会做准备，那里有同样
+        的判定与同一条退出码（它的拒绝在这里也有文案，见 `_refused_start_message`）。
+        今天已有进行中的轮次同样不拦：那是续跑，范围以轮次自身为准（与 run.py 同一条
+        规则，逃生口开出来的那一轮也才续得下去）。
         """
+        if self.cfg.role == ROLE_MERGE_ONLY:
+            return plan_step.MERGE_ONLY_REFUSAL
         prep = self._prep_this_week()
         if prep is None or prep.can_start:
             return None
-        if prep.status is plan_step.PrepStatus.SKIPPED_MERGE_ONLY:
-            return "本机是纯汇总机（machine.role = merge_only）：不做采集。"
         if db is not None and rounds.active_round(db, self._today()) is not None:
             return None
         return "开轮前准备没通过，本次不开轮：\n" + (prep.reason or "拉不到计划库，且本地没有本周计划。")
@@ -247,9 +263,12 @@ class Api:
         """店铺全量的最新读法：本机启用的店 + 本周计划说到的店。
 
         计划落库后，开始页的清单会跟着变（停用但仍在计划里的店要能勾上）；
-        测试与基准注入了 shops= 就完全按注入的那份来。
+        测试与基准注入了 shops= 就完全按注入的那份来。纯汇总机不采集：清单不是它的
+        取数来源（没有那份文件也是正常态），构造时读到什么就留什么。
         """
         if self._shops_injected or self.cfg.shop_csv is None:
+            return
+        if self.cfg.role == ROLE_MERGE_ONLY:
             return
         plan = plan_step.stored_plan(Database(conn), self._current_week())
         self.shops = plan_step.visible_shops(self.cfg, plan)
@@ -376,6 +395,9 @@ class Api:
     def resume_run(self) -> dict:
         """在“过程”页暂停后点击“继续”：重新拉起抓取，续跑本轮未完成店铺，并停留在过程页。"""
         with self._lock:
+            if self.cfg.role == ROLE_MERGE_ONLY:
+                # 续跑也是开采集（库里可能留着换角色 / 拷库带来的进行中轮次）：与开始页同一条拒绝。
+                return {"ok": False, "error": plan_step.MERGE_ONLY_REFUSAL}
             if self.any_crawler_running():
                 return {"ok": False, "error": _BUSY_ERROR}
             conn = self._open_conn()

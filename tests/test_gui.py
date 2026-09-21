@@ -167,6 +167,51 @@ class GuiPlanWiringTests(unittest.TestCase):
         self.assertFalse(result["escape_hatch"])
         spawn.assert_not_called()
 
+    def test_the_merge_only_refusal_does_not_wait_for_the_preparation(self):
+        """角色是配置事实：准备还没落定（或这一周还没准备过）也不许把采集子进程放出去。"""
+        api = self.api(role=ROLE_MERGE_ONLY)
+
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            result = api.start_run(["A01"], ignore_plan=True)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("纯汇总机", result["error"])
+        self.assertFalse(result["escape_hatch"])
+        spawn.assert_not_called()
+
+    def test_a_merge_only_machine_cannot_resume_an_active_round(self):
+        """续跑也是开采集：库里留着进行中的轮次（换角色 / 拷贝库留下的）也不许拉起来。"""
+        api = self.api(role=ROLE_MERGE_ONLY)
+        conn = connect(self.db_path)
+        try:
+            new_round(Database(conn), "A01", run_date="2026-09-21")
+        finally:
+            conn.close()
+
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            result = api.resume_run()
+
+        self.assertFalse(result["ok"])
+        self.assertIn("纯汇总机", result["error"])
+        spawn.assert_not_called()
+
+    def test_a_merge_only_machine_opens_without_a_shop_list_and_says_so(self):
+        """纯汇总机上没有采集清单是常态（不采 1688）：界面照常打开，并在开始页说明白。"""
+        api = Api(cfg=crawler_cfg(shop_csv=self.dir / "没有这份清单.csv", db_file=self.db_path,
+                                  exchange_root=self.dir / "exchange", role=ROLE_MERGE_ONLY),
+                  now=lambda: self.NOW, open_conn=lambda: connect(self.db_path))
+
+        start = api.get_start()
+
+        self.assertEqual(start["total_shops"], 0)
+        self.assertIn("纯汇总机", start["plan_note"])
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            result = api.start_run(["A01"])
+
+        self.assertFalse(result["ok"])
+        self.assertIn("纯汇总机", result["error"])
+        spawn.assert_not_called()
+
     def test_a_degraded_preparation_marks_the_start_page_as_unconfirmed(self):
         """拉不到计划库、本地有那份：界面标注「未能确认最新」（spec §6 降级表）。"""
         self.store_plan(("A01", "m-test", 23))

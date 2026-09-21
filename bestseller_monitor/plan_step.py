@@ -91,6 +91,12 @@ class PrepStatus(str, enum.Enum):
     SKIPPED_MERGE_ONLY = "skipped_merge_only"  # 纯汇总机：不检查、不生成、不发布
 
 
+# 纯汇总机试图开采集时的拒绝文案（spec §6 降级表末行、§11）：命令行、界面开始页与
+# 点「开始抓取」的拒绝共用这一句——三处各写一份就会改一处漏两处。
+MERGE_ONLY_REFUSAL = ("本机是纯汇总机（machine.role = merge_only）：不做采集——"
+                      "导出与汇总请跑数据交换台（exchange.py）。")
+
+
 @dataclasses.dataclass(frozen=True)
 class GapEntry:
     """本机缺的一个（店铺 × 日期）：交换区里已经有，本机库里没有。"""

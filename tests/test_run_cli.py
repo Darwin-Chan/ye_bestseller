@@ -137,6 +137,74 @@ class RunCliBusyTests(unittest.TestCase):
         self.assertIn("已有采集进程在运行", out.getvalue(), "命令行要给出可读原因")
 
 
+def run_main(cfg_path: Path, *argv: str, round_error: Exception | None = None,
+             root: Path | None = None):
+    """跑一次 `run.main()`：固定 argv、静音日志、`run_round` 换替身，收 stdout。
+
+    返回 (退出码, stdout, run_round 的替身)。`root` 默认取配置文件所在目录（`run.ROOT`
+    在真实入口里是项目根；用例的世界就是那个临时目录）。
+    """
+    out = io.StringIO()
+    with patch.object(run, "ROOT", root or cfg_path.parent), \
+            patch.object(sys, "argv", ["run.py", "--config", str(cfg_path), *argv]), \
+            patch.object(run.logging, "basicConfig"), \
+            patch.object(run.logging.handlers, "RotatingFileHandler"), \
+            patch.object(run, "run_round", side_effect=round_error) as round_call:
+        with contextlib.redirect_stdout(out):
+            code = run.main()
+    return code, out.getvalue(), round_call
+
+
+class RunCliMergeOnlyTests(unittest.TestCase):
+    """票据 11：纯汇总机的采集入口被明确拒绝，且本机库不被碰（spec §6 降级表末行、§11）。"""
+
+    def _env(self, tmp: str, *, shops: bool, db: bool = False) -> Path:
+        """一台纯汇总机的世界：配置标 merge_only；（可选的）采集清单与（可选的）已有库。
+
+        纯汇总机的上机清单不建采集清单（不采 1688），所以「没有 shops.csv」才是常态。
+        """
+        tmp_path = Path(tmp)
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(MINIMAL_CONFIG + 'role = "merge_only"\n', encoding="utf-8")
+        if shops:
+            (tmp_path / "shops.csv").write_text(
+                "shop_key,shop_name,shop_url,pages,active,offer_list_url\n"
+                "A01,店一,https://a.1688.com/,3,1,\n", encoding="utf-8")
+        if db:
+            connect(tmp_path / "bestseller.db").close()
+        return cfg_path
+
+    def test_a_machine_without_a_shop_list_is_refused_with_a_readable_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = self._env(tmp, shops=False)
+
+            code, out, round_call = run_main(cfg_path)
+
+        self.assertEqual(code, 2)
+        round_call.assert_not_called()
+        self.assertIn("纯汇总机", out)
+        self.assertIn("数据交换台", out, "要说清这台机器该跑什么，而不只是拒绝")
+        self.assertNotIn("shops.csv", out, "拒绝发生在读采集清单之前：别报成清单缺失")
+        self.assertFalse((Path(tmp) / "bestseller.db").exists(), "拒绝时库根本不该被建出来")
+
+    def test_an_existing_library_is_left_untouched(self):
+        """库已经有了（数据交换台建的）：轮次 / 快照 / 采集身份 / 店铺行都不许写。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = self._env(tmp, shops=True, db=True)
+
+            code, out, round_call = run_main(cfg_path)
+
+            self.assertEqual(code, 2)
+            round_call.assert_not_called()
+            conn = connect(Path(tmp) / "bestseller.db")
+            try:
+                for table in ("rounds", "snapshots", "crawler_process", "shops"):
+                    count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    self.assertEqual(count, 0, f"{table} 不该有行")
+            finally:
+                conn.close()
+
+
 class RunCliPlanTests(unittest.TestCase):
     """开轮前准备与落库计划的接线（票据 06）：范围与页数都从本机计划表读。"""
 
@@ -159,15 +227,7 @@ class RunCliPlanTests(unittest.TestCase):
         return cfg_path
 
     def _main(self, cfg_path: Path, *argv: str, round_error: Exception | None = None):
-        out = io.StringIO()
-        with patch.object(run, "ROOT", cfg_path.parent), \
-                patch.object(sys, "argv", ["run.py", "--config", str(cfg_path), *argv]), \
-                patch.object(run.logging, "basicConfig"), \
-                patch.object(run.logging.handlers, "RotatingFileHandler"), \
-                patch.object(run, "run_round", side_effect=round_error) as round_call:
-            with contextlib.redirect_stdout(out):
-                code = run.main()
-        return code, out.getvalue(), round_call
+        return run_main(cfg_path, *argv, round_error=round_error)
 
     def test_cli_scopes_the_round_to_the_plan_and_feeds_it_the_page_budget(self):
         with tempfile.TemporaryDirectory() as tmp:

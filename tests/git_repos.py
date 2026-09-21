@@ -142,6 +142,25 @@ echo ran >> "{self.sh_path(counter)}"
 exit 1
 ''')
 
+    def install_read_only_remote(self, remote: pathlib.Path, counter: pathlib.Path) -> None:
+        """给裸库装 pre-receive 钩子：每次推送记一笔并拒绝——只读部署公钥那一侧的形态。
+
+        与 pre-push 钩子不同，拒绝发生在**服务端**：客户端拿到的是 `[remote rejected]`
+        （git 自己的说法是 hook declined），正是「这台机器的 key 没有写权限」时客户端
+        看到的东西。规格的判据：push 被拒 = 只读档位配置正确（spec §11）。
+        """
+        hooks = remote / "hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
+        script = f'#!/bin/sh\necho ran >> "{self.sh_path(counter)}"\nexit 1\n'
+        (hooks / "pre-receive").write_bytes(script.encode("utf-8"))
+
+    def publish_into_bare(self, remote: pathlib.Path, clone: pathlib.Path) -> None:
+        """让另一个克隆的提交落到裸库上，不经过 push（也就不经过 pre-receive 钩子）。
+
+        给「远端只收有写权限的机器」那类用例用：只读那台照常 pull 得到它，自己推不上去。
+        """
+        self.must("--git-dir", str(remote), "fetch", str(clone), "main:refs/heads/main")
+
     def install_declining_commit_hook(self, clone: pathlib.Path, counter: pathlib.Path) -> None:
         """pre-commit 钩子：每次提交记一笔并拒绝——模拟「提交这一步本身失败」。
 

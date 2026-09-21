@@ -129,6 +129,50 @@ class PushTests(unittest.TestCase):
                          "非 non-fast-forward 的失败不许重试")
 
 
+class ReadOnlyCredentialTests(unittest.TestCase):
+    """只读凭据（spec §11）：clone / pull 照常，push 被远端拒绝、不重试、原样报出。
+
+    远端装 pre-receive 钩子拒绝一切写入——只读部署公钥那一侧的形态：写权限在服务端
+    被拿掉，客户端拿到的是 `[remote rejected]`。「push 被拒 = 只读档位配置正确」。
+    """
+
+    def setUp(self):
+        self.box = GitSandbox(self)
+        self.remote = self.box.new_remote()
+        self.box.seed(self.remote, {"shops.csv": "v1\n"})
+        self.attempts = self.box.tmp / "push-attempts"
+        self.box.install_read_only_remote(self.remote, self.attempts)
+        self.mine = self.box.clone(self.remote, "plan")   # 只读凭据下 clone 照常
+
+    def test_pull_still_brings_what_another_machine_published(self):
+        """别的机器（有写权限）发布的提交，只读这台 pull 得到。"""
+        other = self.box.clone(self.remote, "other")
+        self.box.write_files(other, {"shops.csv": "v2\n"})
+        self.box.must("add", "--", "shops.csv", cwd=other)
+        self.box.must("commit", "-m", "v2", "--", "shops.csv", cwd=other)
+        self.box.publish_into_bare(self.remote, other)
+
+        GitChannel(self.mine).pull()
+
+        self.assertEqual((self.mine / "shops.csv").read_text(encoding="utf-8"), "v2\n")
+
+    def test_push_is_remote_rejected_and_never_retried(self):
+        self.box.write_files(self.mine, {"mine.txt": "mine\n"})
+        channel = GitChannel(self.mine)
+        self.assertTrue(channel.commit("add mine.txt", [self.mine / "mine.txt"]))
+
+        with self.assertRaises(ChannelError) as ctx:
+            channel.push()
+
+        self.assertEqual(self.attempts.read_text(encoding="utf-8").split(), ["ran"],
+                         "远端拒绝不是 non-fast-forward：只试一次，不无限重试")
+        self.assertIn("remote rejected", str(ctx.exception), "把远端的拒绝原样带回来")
+        # 远端一个字节都没变；本机那笔提交还留着（谁也没撤它）
+        landed = self.box.clone(self.remote, "check")
+        self.assertEqual((landed / "shops.csv").read_text(encoding="utf-8"), "v1\n")
+        self.assertFalse((landed / "mine.txt").exists())
+
+
 class LocalChangesTests(unittest.TestCase):
     """准备串开跑前的残迹自检：未提交改动与未跟踪文件都要看得见、清得掉。"""
 

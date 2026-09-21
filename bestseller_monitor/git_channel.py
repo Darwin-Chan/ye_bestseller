@@ -53,8 +53,11 @@ def _run_bytes(*args: str) -> subprocess.CompletedProcess[bytes]:
 
 
 def _failure(what: str, args: tuple[str, ...], done: subprocess.CompletedProcess[str]) -> ChannelError:
-    detail = done.stderr.strip() or done.stdout.strip() or "（git 没有输出）"
-    return ChannelError(f"{what}失败（git {' '.join(args)}）：\n{detail}")
+    """把 git 两个流里有的话都带上：`push --porcelain` 的拒绝理由在 **stdout**（stderr
+    只有一句「failed to push some refs」）——只挑一个流会把最要紧的那句丢掉。
+    """
+    detail = "\n".join(part.strip() for part in (done.stderr, done.stdout) if part.strip())
+    return ChannelError(f"{what}失败（git {' '.join(args)}）：\n{detail or '（git 没有输出）'}")
 
 
 class GitChannel:

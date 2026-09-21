@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from . import click_events, plan_step, rounds, weekly_plan
-from .config import effective_pages_limit
+from .config import ROLE_MERGE_ONLY, effective_pages_limit
 from .crawler_identity import CrawlerProcess
 from .db import CST, Database, RoundTally, cst_date
 
@@ -207,6 +207,7 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
     不解析计划文件）。越权店（计划归别机）默认不勾，并按 `plan_label` 点名它归谁
     （票据 07）。本机本周没店（空手）是合法正常态：照常给出店铺表，另附一句说明，
     不报错。`state.plan_stale`（这次准备是降级来的）再加一句「未能确认最新」。
+    纯汇总机照常给这一页，但第一句就说清它不做采集（票据 11）。
     """
     today = cst_date(now)
     db = Database(conn)
@@ -214,6 +215,10 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
     mine = frozenset(plan.machine_keys(str(cfg.machine_id))) if plan is not None else frozenset()
     idle = plan is not None and not mine
     notes = []
+    if cfg.role == ROLE_MERGE_ONLY:
+        # 采集入口在这台机器上是被拒的（判定与命令行同源，见 plan_step.MERGE_ONLY_REFUSAL）：
+        # 把话说在点「开始抓取」之前，而不是等人点了才知道。
+        notes.append(plan_step.MERGE_ONLY_REFUSAL)
     if idle:
         notes.append(f"本周计划（{plan.week}）里没有归本机的店（空手）——合法状态，不用开轮。")
     if state.plan_stale:

@@ -218,6 +218,19 @@ class ConsoleWorld:
         for machine in machines or ("m2", "m3"):
             GitChannel(self.root / f"raw-{machine}").pull()
 
+    def make_read_only(self, *repos: str) -> dict[str, Path]:
+        """把这些裸库换成只读（服务端拒绝一切推送），返回各库的推送计数文件。
+
+        只读部署公钥那一侧的形态（spec §11）：clone / pull 照常，写入被服务端拒。
+        `raw-<机器>` 用库名给，计划库用 `plan`（它的裸远端叫 `plan.git`）。
+        """
+        counters: dict[str, Path] = {}
+        for name in repos:
+            counter = self.box.tmp / f"{name}-push-attempts"
+            self.box.install_read_only_remote(self.box.tmp / f"{name}.git", counter)
+            counters[name] = counter
+        return counters
+
     def run(self, **kwargs):
         kwargs.setdefault("week", WEEK)
         kwargs.setdefault("now", RUN_AT)
@@ -459,6 +472,40 @@ class MergeOnlyMachineTests(unittest.TestCase):
         self.assertEqual(len(outcome.imports), 2)
         # 没有落库计划（纯汇总机不跑准备串）：缺口与「还没来的包」如实说没法对照
         self.assertIn("- 本机没有本周（2026-W38）的落库计划", report)
+
+
+class ReadOnlyCredentialRunTests(unittest.TestCase):
+    """只读凭据下的一轮完整运行（票据 11，spec §11）：clone / pull / 汇总照常，一个 push 都不试。
+
+    「push 被拒 = 只读档位配置正确」：把几个裸库都换成只读（服务端 pre-receive 拒绝
+    一切写入，push 通道在 test_git_channel 里单独有实证），这一轮跑完它们一次都没被
+    碰过——纯汇总机的正常一轮里根本没有写交换区的动作。
+    """
+
+    def setUp(self):
+        self.world = ConsoleWorld(self, machine_id="m4", role=ROLE_MERGE_ONLY)
+        self.world.publish("m2", [("A02", day) for day in DAYS])
+        self.world.publish("m3", [("A03", day) for day in DAYS])
+        plan_remote = self.world.box.new_remote("plan.git")
+        self.world.box.seed(plan_remote, {"machines.json": '["m1", "m2", "m3"]\n'})
+        self.world.box.clone(plan_remote, "exchange/plan")   # 纯汇总机不跑准备串：plan 靠拉取保鲜
+
+    def test_the_whole_run_never_writes_to_the_exchange(self):
+        counters = self.world.make_read_only("raw-m1", "raw-m2", "raw-m3", "plan")
+
+        outcome = self.world.run()
+
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(len(outcome.imports), 2)
+        self.assertEqual(self.world.conn.execute(
+            "SELECT COUNT(DISTINCT shop_key || date) FROM inventory").fetchone()[0], 14,
+            "两个包的店 × 天（2 × 7）都汇总进来了")
+        report = self.world.report()
+        self.assertIn("- 导出：本机是纯汇总机，跳过", report)
+        self.assertIn("| raw-m2 | W38 | 17 | 17 | 0 | 0 | 0（0.0 MB） | 已导入 |", report)
+        for name, counter in counters.items():
+            self.assertFalse(counter.exists(), f"{name} 被推过：只读档位下不该有写交换区的动作")
+        self.assertFalse((self.world.root / "outbox").exists(), "导出跳过：连包都不该打")
 
 
 class WeekWindowTests(unittest.TestCase):

@@ -16,6 +16,9 @@
 记账为计划外」运行。显式点名了归别台机器的店（`--limit-shops`）= 越权补采：**放行
 并上报**，记进轮次备注与本机计划外账（`plan_step.record_deviations`）。
 
+纯汇总机（`machine.role = merge_only`）不做采集：在碰采集清单与库之前就明确拒绝
+（退出码 2，文案 `plan_step.MERGE_ONLY_REFUSAL`）——这台机器上跑数据交换台。
+
 `--shops` 是人工冒烟的清单覆盖：开轮前的准备把它当作「本机清单副本」与计划库比对
 （两边都变会停下不猜，单边变化可能被推送）——拿临时清单冒烟时留意这一点。
 """
@@ -31,7 +34,7 @@ ROOT = Path(__file__).resolve().parent
 
 sys.path.insert(0, str(ROOT))
 
-from bestseller_monitor.config import Config, load_shops  # noqa: E402
+from bestseller_monitor.config import ROLE_MERGE_ONLY, Config, load_shops  # noqa: E402
 from bestseller_monitor.db import Database, connect, cst_date  # noqa: E402
 from bestseller_monitor.pipeline import (  # noqa: E402
     CrawlerAlreadyRunning,
@@ -81,6 +84,11 @@ def main() -> int:
     args = parse_args()
     cfg = Config.from_file(args.config, root=ROOT)
     cfg = apply_overrides(cfg, args)
+    # 纯汇总机不做采集（spec §6 降级表末行、§11）：在碰采集清单与库之前就拒绝——这台
+    # 机器上没有采集清单是常态（不采 1688），库该由数据交换台开；这里一样都不动。
+    if cfg.role == ROLE_MERGE_ONLY:
+        print(f"\n>>> {plan_step.MERGE_ONLY_REFUSAL}\n")
+        return 2
     limit_keys = None
     if args.limit_shops:
         limit_keys = {s.strip() for s in args.limit_shops.split(",") if s.strip()}
@@ -98,10 +106,6 @@ def main() -> int:
         free = False
         # 正向判据（can_start）：以后 PrepStatus 多了新结局也不会在这里被静默放行
         if not prep.can_start:
-            if prep.status is plan_step.PrepStatus.SKIPPED_MERGE_ONLY:
-                print("本机是纯汇总机（machine.role = merge_only）：不做采集；"
-                      "导出与汇总请跑数据交换台（exchange.py）。")
-                return 2
             # 「默认拒绝开轮」拦的是新开轮：今天已有进行中的轮次就按轮次自身续跑
             # （逃生口开出来的那一轮也才续得下去）；真没路可走时给显式逃生口。
             if rounds.active_round(db, cst_date()) is not None:
