@@ -7,6 +7,8 @@
 [analysis]
 # 现有库存数据库；「按机器改」（采集机上是本机采集库，再按需换数据源）。
 database = "../data/bestseller.db"
+# 分析草稿库：暂存与「继续上次分析」的独立文件；缺省 analysis-drafts.sqlite（配置目录下）。
+# store = "../data/analysis-drafts.sqlite"
 # ISO 星期：1=周一，7=周日。只是提醒，不调度采集。
 full_capture_weekday = 1
 

@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 PAGE = Path(__file__).resolve().parent.parent / "docs" / "bestseller-analysis.html"
+SAVE_ACTIONS = ('save', 'save_and_view', 'discard')
 log = logging.getLogger(__name__)
 
 
@@ -42,6 +43,12 @@ def create_server(service, port=0):
                         return self.reply(service.source(query['offer'][0]))
                     if route.path == "/api/coverage":
                         return self.reply(service.coverage(query["date"][0]))
+                    if route.path == "/api/draft":
+                        try:
+                            return self.reply(service.draft())
+                        except (sqlite3.Error, OSError):
+                            log.exception("读取分析草稿失败")
+                            return self.reply({"error": "读取分析草稿失败，请检查分析配置和数据库后重试"}, 503)
                     if route.path == "/api/analysis":
                         return self.reply(service.get(query["id"][0]))
                 elif self.command == "POST" and route.path == "/api/analysis":
@@ -52,6 +59,8 @@ def create_server(service, port=0):
                     if not 0 < length <= 1024 * 1024:
                         raise ValueError("请求大小无效")
                     data = json.loads(self.rfile.read(length))
+                    if data.get('action') in SAVE_ACTIONS:
+                        return self._save_action(service, data)
                     if data.get('action') == 'confirm_groups':
                         return self.reply(service.confirm_groups(data['id'], data['groups']))
                     if data.get('action') == 'withdraw':
@@ -75,6 +84,19 @@ def create_server(service, port=0):
             except (sqlite3.Error, OSError):
                 log.exception("分析读取失败")
                 self.reply({"error": "读取库存数据失败，请检查分析配置和数据库后重试"}, 503)
+
+        def _save_action(self, service, data):
+            # 保存失败要有专属文案：页面据此保持「未保存」并允许重试。
+            try:
+                if data['action'] == 'save':
+                    return self.reply(service.save_draft(data['id']))
+                if data['action'] == 'save_and_view':
+                    return self.reply(service.save_and_view(data['id']))
+                return self.reply(service.discard(data['id']))
+            except (sqlite3.Error, OSError):
+                log.exception("分析草稿操作失败")
+                message = "恢复最近保存版本失败，请重试" if data['action'] == 'discard' else "保存分析草稿失败，请重试"
+                return self.reply({"error": message}, 503)
 
         do_GET = dispatch
         do_POST = dispatch

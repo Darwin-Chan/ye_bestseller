@@ -15,15 +15,12 @@ from playwright.sync_api import expect
 import test_analysis as browser_fixture
 from bestseller_monitor.matching import (MatchingConfig, MatchingService, ModelConfig,
                                          candidate_pairs, identity, request_json, ModelFailure)
-from bestseller_monitor.product_images import evidence
 from bestseller_monitor.analysis import AnalysisConfig
-from helpers import new_round
+from helpers import new_round, product_picture
 
 
 def picture(color):
-    stream = io.BytesIO()
-    Image.new('RGB', (8, 8), color).save(stream, format='PNG')
-    return evidence(stream.getvalue())
+    return product_picture(color)
 
 
 def product(number, color='red', name='杯子'):
@@ -279,6 +276,7 @@ class MatchingBrowserTests(unittest.TestCase):
                 main_image_url='https://img.example/new-url', sku_rows=[dict(sku_id='red', sku_name='红色', sku_stock=80)],
                 collected_at='2026-09-14T04:00:00+00:00', attempt=1, image_evidence=picture('red'))
             self.page.get_by_role('button', name='重新选择日期').click()
+            self.page.get_by_role('button', name='放弃修改').click()
             self.dates()
             self.page.get_by_role('button', name='下一步、进入同款确认').click()
             expect(self.page.get_by_text('缓存', exact=True).first).to_be_visible()

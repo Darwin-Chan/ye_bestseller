@@ -12,6 +12,7 @@ from bestseller_monitor.click_events import CardRef
 from bestseller_monitor.config import ACCESS_READWRITE, ROLE_COLLECTOR
 from bestseller_monitor.db import WeeklyPlanRow, cst_date
 from bestseller_monitor.listing import ListingLoadFailed
+from bestseller_monitor.product_images import evidence
 from bestseller_monitor.rounds import RoundRequest, ShopScope
 
 # 采集配置替身存档原始页的地方（失败路径真会写文件；用例要断言就覆盖成本地 tmp）。
@@ -116,6 +117,34 @@ def new_round(db, *shops, run_date: str | None = None) -> int:
             scopes.append(ShopScope(key, url, name))
     opened = rounds.open(db, RoundRequest(run_date or cst_date(), tuple(scopes)))
     return opened.round.id
+
+
+def product_picture(color):
+    """一张单色 PNG 的图片证据（8×8 的 RGB）。"""
+    import io
+    from PIL import Image
+    stream = io.BytesIO()
+    Image.new('RGB', (8, 8), color).save(stream, format='PNG')
+    return evidence(stream.getvalue())
+
+
+def submit_offer(db, offer, day, stock, *, name, shop_key="A01", shop_name="店铺1", color=None,
+                 image_url="", image_evidence=None):
+    """提交一次商品库存快照。
+
+    color 给一张单色图证据（配一个 img.example 地址）；显式 image_url / image_evidence 优先。
+    """
+    if color and not image_url:
+        image_url = f"https://img.example/{offer}"
+    if color and image_evidence is None:
+        image_evidence = product_picture(color)
+    rid = new_round(db, shop_key, run_date=day)
+    db.submit_inventory_snapshot(
+        round_id=rid, shop_key=shop_key, shop_url="https://shop.example", shop_name=shop_name,
+        offer_id=offer, product_url=f"https://detail.1688.com/offer/{offer}.html",
+        list_title=name, detail_title=name, main_image_url=image_url, image_evidence=image_evidence,
+        sku_rows=[{"sku_id": "red", "sku_name": "红色", "sku_stock": stock}],
+        collected_at=day + "T04:00:00+00:00", attempt=1)
 
 
 def store_weekly_plan(db, week: str, *assignments) -> None:

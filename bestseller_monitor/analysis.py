@@ -13,8 +13,11 @@ from pathlib import Path
 from uuid import uuid4
 
 from . import crawler_identity
+from .analysis_store import DraftStore
 from .db import utcnow
 from .matching import MatchingConfig, MatchingService, ModelConfig, identity, summarize_group
+
+DEFAULT_DRAFT_FILE = "analysis-drafts.sqlite"
 
 
 @dataclass(frozen=True)
@@ -22,10 +25,19 @@ class AnalysisConfig:
     database: Path
     full_capture_weekday: int = 1  # ISO: Monday=1
     matching: MatchingConfig | None = None
+    # 分析草稿库。直接构造时缺省与库存库同目录；配置文件里缺省在配置目录（见 from_file）。
+    store: Path | None = None
 
     def __post_init__(self):
+        if self.store is None:
+            object.__setattr__(self, 'store', self.database.with_name(DEFAULT_DRAFT_FILE))
         if self.matching and self.matching.cache.resolve() == self.database.resolve():
             raise ValueError('同款缓存不能使用库存数据库')
+        reserved = {self.database.resolve()}
+        if self.matching:
+            reserved.add(self.matching.cache.resolve())
+        if self.store.resolve() in reserved:
+            raise ValueError('分析草稿库不能与库存数据库或同款缓存共用文件')
 
     @classmethod
     def from_file(cls, path: Path) -> AnalysisConfig:
@@ -45,6 +57,9 @@ class AnalysisConfig:
         database = Path(cfg["database"])
         if not database.is_absolute():
             database = path.resolve().parent / database
+        store = Path(cfg.get("store", DEFAULT_DRAFT_FILE))
+        if not store.is_absolute():
+            store = path.resolve().parent / store
         matching = None
         if 'matching' in document:
             options = document['matching']
@@ -56,7 +71,7 @@ class AnalysisConfig:
             matching = MatchingConfig(cache.resolve(), ModelConfig(**options.get('model', {})),
                 ModelConfig(**options['vision']) if 'vision' in options else None,
                 options.get('mode', 'disabled'), options.get('concurrency', 2), options.get('candidates', 6))
-        return cls(database.resolve(), weekday, matching)
+        return cls(database.resolve(), weekday, matching, store.resolve())
 
 
 class AnalysisService:
@@ -66,6 +81,11 @@ class AnalysisService:
         self._snapshots = {}
         self._lock = threading.Lock()
         self.matcher = MatchingService(config.matching) if config.matching and config.matching.mode != 'disabled' else None
+
+    @property
+    def store(self):
+        """草稿库跟着当前配置走：配置换了库或换了存储位置立即生效。"""
+        return DraftStore(self.config.store)
 
     @contextmanager
     def _read(self):
@@ -146,7 +166,7 @@ class AnalysisService:
                     if not version['product_name']:
                         product['information_note'] = '仅图片证据：名称待重新观测，尚未形成完整商品信息版本'
                     if version['content']:
-                        product['image_data'] = 'data:'+version['mime']+';base64,'+base64.b64encode(version['content']).decode('ascii')
+                        product['image_data'] = _data_url(version['mime'], version['content'])
                 else:
                     historical = [r for r in rows if r['shop_key']==product['shop_key'] and r['offer_id']==product['offer_id'] and r['date']<=end]
                     product['product_name'] = max(historical, key=lambda r:r['date'])['product_name'] if historical else None
@@ -158,7 +178,7 @@ class AnalysisService:
             product.update(result)
         snapshot = {"id": uuid4().hex, "start": start, "end": end,
                     "frozen_at": utcnow(), "inventory": rows, "products": products,
-                    "shops": shops, "groups": [
+                    "shops": shops, "dirty": False, "saved_at": None, "groups": [
                         {"id": f"G{i+1}", "confirmed": False,
                          "members": [{"shop_key": p["shop_key"], "offer_id": p["offer_id"]}],
                          "sales": p["sales"]}
@@ -190,8 +210,91 @@ class AnalysisService:
         with self._lock:
             snapshot = self._snapshots.get(analysis_id)
             if snapshot is None:
-                raise ValueError("分析已不存在，请重新选择日期；本阶段尚不支持关闭程序后恢复")
+                # 内存里没有就回落到已保存版本：重启后仍能打开同一次分析。
+                stored = self.store.read(analysis_id)
+                if stored is None:
+                    raise ValueError("分析已不存在，请重新选择日期")
+                snapshot = self._restore(stored)
+                self._snapshots[analysis_id] = snapshot
             return copy.deepcopy(snapshot)
+
+    def _restore(self, stored):
+        """把磁盘上的草稿还原成内存工作草稿：已保存版本没有未保存修改。"""
+        snapshot = self._rehydrate(stored.payload)
+        snapshot['dirty'] = False
+        snapshot['saved_at'] = stored.saved_at
+        return snapshot
+
+    def draft(self):
+        """最近一次成功保存的草稿摘要，供「继续上次分析」入口显示。"""
+        latest = self.store.latest()
+        if latest is None:
+            return {"available": False}
+        return {"available": True, "id": latest['id'], "start": latest['start'],
+                "end": latest['end'], "saved_at": latest['saved_at']}
+
+    def save_draft(self, analysis_id):
+        return self._save(analysis_id, require_confirmed=False)
+
+    def save_and_view(self, analysis_id):
+        return self._save(analysis_id, require_confirmed=True)
+
+    def _save(self, analysis_id, require_confirmed):
+        with self._lock:
+            snapshot = self._snapshots.get(analysis_id)
+            if snapshot is None:
+                raise ValueError('分析已不存在，请重新选择日期')
+            if require_confirmed and any(not group['confirmed'] for group in snapshot['groups']):
+                raise ValueError('还有待确认的同款组，请先完成确认')
+            saved_at = utcnow()
+            # 先落盘再改内存：写失败时本次修改仍留在页面，并保持未保存标记。
+            self.store.write(analysis_id, snapshot['start'], snapshot['end'], saved_at,
+                             self._draft_payload(snapshot, saved_at))
+            snapshot['dirty'] = False
+            snapshot['saved_at'] = saved_at
+            return copy.deepcopy(snapshot)
+
+    def discard(self, analysis_id):
+        """放弃未保存的修改：回到最近成功保存的版本；从未保存过则整体丢弃。"""
+        with self._lock:
+            stored = self.store.read(analysis_id)
+            if stored is None:
+                self._snapshots.pop(analysis_id, None)
+                return {"reverted": False}
+            self._snapshots[analysis_id] = self._restore(stored)
+            return {"reverted": True}
+
+    def _draft_payload(self, snapshot, saved_at):
+        """落盘的是这次保存后的完整版本：不带未保存标记，时间是本次保存时间。
+
+        图片不进草稿正文：只存内容哈希，读回时从持久图片资产取内容。
+        """
+        payload = copy.deepcopy(snapshot)
+        payload['dirty'] = False
+        payload['saved_at'] = saved_at
+        for product in payload['products']:
+            product['image_data'] = None
+        return payload
+
+    def _rehydrate(self, payload):
+        hashes = sorted({p['image_hash'] for p in payload['products'] if p.get('image_hash')})
+        assets = {}
+        if hashes:
+            with self._read() as conn:
+                for offset in range(0, len(hashes), 400):
+                    chunk = hashes[offset:offset+400]
+                    placeholders = ','.join('?' * len(chunk))
+                    for row in conn.execute(f"SELECT content_hash,mime,content FROM product_image_assets"
+                                            f" WHERE content_hash IN ({placeholders})", chunk):
+                        assets[row['content_hash']] = row
+        for product in payload['products']:
+            product['image_data'] = None
+            asset = assets.get(product.get('image_hash'))
+            if asset and asset['content']:
+                product['image_data'] = _data_url(asset['mime'], asset['content'])
+            elif product.get('image_hash') and not product.get('image_error'):
+                product['image_error'] = '历史图片资产不可用'
+        return payload
 
     def confirm(self, analysis_id, group_id):
         return self.confirm_groups(analysis_id, [group_id])
@@ -242,6 +345,10 @@ class AnalysisService:
 def _dates(start: str, end: str) -> list[str]:
     first, last = date.fromisoformat(start), date.fromisoformat(end)
     return [(first + timedelta(days=i)).isoformat() for i in range((last-first).days + 1)]
+
+
+def _data_url(mime: str, content: bytes) -> str:
+    return 'data:' + mime + ';base64,' + base64.b64encode(content).decode('ascii')
 
 
 def calculate_inventory(rows: list[dict], start: str, end: str) -> dict:

@@ -247,6 +247,7 @@ class GroupEditingTests(unittest.TestCase):
                 expect(self.page.locator('#groupDetail .group-status')).to_have_text('已确认' if source_confirmed else '待确认')
                 expect(self.page.locator('#groupDetail h3')).to_have_text('G1 · 1 个商品')
                 self.page.get_by_role('button',name='重新选择日期').click()
+                self.page.get_by_role('button',name='放弃修改').click()
 
     def test_browser_removal_auto_joins_only_unique_pending_group(self):
         self.model()
