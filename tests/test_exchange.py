@@ -1077,6 +1077,9 @@ class MutexTests(unittest.TestCase):
 
         self.assertEqual(code, 2)
         self.assertIn("已经在运行", out.getvalue())
+        # 被拒也要落账：exchange.log 里查得到原因（抢锁发生在日志配置之后，票 14 审查收口）
+        log_text = (world.box.tmp / "logs" / "exchange.log").read_text(encoding="utf-8")
+        self.assertIn("已经在运行", log_text)
 
     def test_a_second_window_pops_and_exits_zero(self):
         """第二个实例沿用界面那条约定（ADR-0008）：自己弹窗说明、退出 0 让启动壳保持安静。"""
@@ -1159,6 +1162,31 @@ class WindowConfigFailureTests(unittest.TestCase):
 
         self.assertEqual(code, 2)
         self.assertIn("找不到配置", err.getvalue())
+
+    def test_window_startup_failure_is_exit_two_so_the_shell_can_pop(self):
+        """窗口起不来折成退出码 2：启动壳的弹窗政策（2 与启动失败才弹）才够得着
+        子进程侧的启动失败——不然双击壳只会什么都不说（票 14 审查收口）。"""
+        world = ConsoleWorld(self)
+        config = write_config(world)
+        err = io.StringIO()
+        with patch.object(exchange, "open_window",
+                          side_effect=RuntimeError("WebView2 没装")), \
+                contextlib.redirect_stderr(err):
+            code = exchange.main(["--window", "--config", str(config)])
+
+        self.assertEqual(code, 2)
+        self.assertIn("WebView2 没装", err.getvalue())
+
+    def test_missing_pywebview_names_the_fix(self):
+        world = ConsoleWorld(self)
+        config = write_config(world)
+        err = io.StringIO()
+        with patch.object(exchange, "webview", None), contextlib.redirect_stderr(err):
+            code = exchange.main(["--window", "--config", str(config)])
+
+        self.assertEqual(code, 2)
+        self.assertIn("pywebview", err.getvalue())
+        self.assertIn("pip install -r requirements.txt", err.getvalue())
 
 
 if __name__ == "__main__":

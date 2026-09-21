@@ -5,7 +5,7 @@
     python exchange.py --only export       # 只跑导出这半（检查 + 导出 + 报告）
     python exchange.py --only merge        # 只跑汇总这半（检查 + 拉取 + 汇总 + 报告）
     python exchange.py --week 2026-W37     # 指定周窗口（补历史用）
-    python exchange.py --window            # 开小窗口（完整运行 + 两个次要按钮）
+    python exchange.py --window            # 开小窗口（导出&汇总 + 仅导出 / 仅汇总）
 
 退出码（spec §7）：`0` 干净 / `1` 有需要人看一眼的 / `2` 本机没做成事。逐次流水在
 `logs/exchange.log`；周报在 `<交换区根>/报告/<年>-W<周>.md`。窗口标题与快捷方式名用
@@ -20,10 +20,12 @@
 `--week`（补历史）、`--only`、`--config` 走本脚本。窗口不接周入口：`--window` 与
 `--week` 同传明确拒绝。
 
-窗口里两个次要按钮（只导出 / 只汇总）与命令行 `--only` 是同一入口；一次运行结束显示
+窗口里两个按钮「仅导出 / 仅汇总」与命令行 `--only` 是同一入口；一次运行结束显示
 **结局行**（与命令行收尾同一句：报告路径 + 退出码口径）。纯汇总机上「仅导出」入口保留
 并写明跳过（不藏掉），按钮置灰；点了就照「本机是纯汇总机，跳过」如实记。
 运行中关窗不拦、只记录（重跑能修：导出幂等、导入有幂等账、报告同周重写）。
+**窗口起不来按「本机没做成事」（退出码 2）退出**：缺 pywebview、页面读不到、WebView2
+起不来这类启动失败都折成 2，启动壳的弹窗政策（2 才弹）因此也管得住子进程侧的启动失败。
 """
 from __future__ import annotations
 
@@ -40,7 +42,13 @@ ROOT = Path(__file__).resolve().parent
 
 sys.path.insert(0, str(ROOT))
 
-import webview  # noqa: E402
+try:
+    import webview  # noqa: E402
+except ImportError as _exc:                # 缺 pywebview：命令行还能跑，开窗时点名报错
+    webview = None
+    _WEBVIEW_IMPORT_ERROR: ImportError | None = _exc
+else:
+    _WEBVIEW_IMPORT_ERROR = None
 
 from bestseller_monitor import exchange as console  # noqa: E402
 from bestseller_monitor import single_instance  # noqa: E402
@@ -63,7 +71,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         default=None, help="只跑一半：export（检查+导出）或 merge（检查+拉取+汇总）")
     parser.add_argument("--week", default=None, help="指定周窗口，如 2026-W37（补历史用）")
     parser.add_argument("--window", action="store_true",
-                        help="开小窗口（完整运行 + 两个次要按钮），不直接跑一次")
+                        help="开小窗口（导出&汇总 + 仅导出 / 仅汇总），不直接跑一次")
     return parser.parse_args(argv)
 
 
@@ -205,7 +213,32 @@ def _refuse_when_running(window: bool) -> int:
     if window:
         _notify(text + "\n\n这次不再开第二个窗口。", title="数据交换台 · 已经在运行")
         return console.EXIT_CLEAN          # 退出 0：照 ADR-0008 的约定让启动壳保持安静
+    logging.getLogger(__name__).info(text)
     print(text)
+    return console.EXIT_NOTHING_DONE
+
+
+def _open_window_or_fail(cfg) -> int:
+    """开窗；起不来（缺 pywebview、页面读不到、WebView2 之类）按「本机没做成事」退出 2。
+
+    折成 2 是有意的：启动壳的弹窗政策是「0/1 静默、2 与启动失败才弹」——子进程侧的
+    启动失败只有这样才够得着那条政策（不然双击壳只会什么都不说）。
+    """
+    if webview is None:
+        return _startup_failure(
+            f"窗口开不起来：缺 pywebview（{_WEBVIEW_IMPORT_ERROR}）。"
+            "请在项目根目录运行 python -m pip install -r requirements.txt。")
+    try:
+        return open_window(cfg)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).exception("窗口起不来")
+        return _startup_failure(f"窗口起不来：{exc}（详见日志）")
+
+
+def _startup_failure(text: str) -> int:
+    """启动失败：写 stderr（启动壳收着这条管道，弹窗里会带出来）+ 落日志。"""
+    logging.getLogger(__name__).error(text)
+    print(f"\n>>> {text}\n", file=sys.stderr)
     return console.EXIT_NOTHING_DONE
 
 
@@ -221,14 +254,14 @@ def main(argv: list[str] | None = None) -> int:
         # 窗口模式没人看控制台：写 stderr——启动壳收着这条管道，弹窗里会带出来
         print(f"\n>>> {exc}\n", file=sys.stderr if args.window else sys.stdout)
         return console.EXIT_NOTHING_DONE
+    cfg.ensure_dirs()
+    _configure_logging(cfg)                # 抢锁被拒这类也要落账（exchange.log 里查得到原因）
     lock = single_instance.acquire(single_instance.EXCHANGE_LOCK)
     if lock is None:
         return _refuse_when_running(args.window)
     try:
-        cfg.ensure_dirs()
-        _configure_logging(cfg)
         if args.window:
-            return open_window(cfg)
+            return _open_window_or_fail(cfg)
         try:
             outcome = console.run_once(cfg, only=args.only, week=args.week, emit=print)
         except PlanError as exc:              # --week 写错这类：点名说清楚，不吐栈

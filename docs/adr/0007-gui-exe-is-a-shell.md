@@ -21,7 +21,7 @@
 - 壳优先用 `pythonw.exe` 拉起界面（不带控制台窗口），退到 `python.exe` + `CREATE_NO_WINDOW`，`BESTSELLER_PYTHON` 可覆盖；选解释器的责任归壳。`gui.py` 自己只认 `sys.executable`，只在它是 `pythonw` 时把采集子进程换成同目录的 `python.exe`，保持采集既有的调用方式。
 - 壳常驻等待子进程；stderr 收管道写进 `<项目根>\logs\gui_launcher.log`；**非零退出弹 MessageBox**（中文原因 + 报错尾部几行 + 日志路径），用户正常关窗（退出码 0）不弹。
 - 找不到 python、缺 `pywebview`、项目根校验不过、其余未预期异常，四类失败各给一句人话并落日志。
-- 重建固定为 `tools/build_gui_exe.py`，构建后读 `build/bestseller_gui/Analysis-00.toc` 断言产物不含 `bestseller_monitor` 与 `gui`。
+- 重建固定为 `tools/build_exe.py --target gui`（原 `tools/build_gui_exe.py`，票 14 泛化，见文末落地实证），构建后读 `build/bestseller_gui/Analysis-00.toc` 断言产物不含 `bestseller_monitor` 与 `gui`。
 - 壳支持 `--check [--check-report <路径>]`：不开界面，只做推导与校验并写出 JSON 报告（项目根、解释器、冻结态、是否夹带项目代码），供构建自检与自动化验证使用。
 - `pywebview>=6.2` 进 `requirements.txt`（pythonnet / clr_loader 由它自带，不单列）；README 安装段补 WebView2 运行时前置。
 
@@ -37,7 +37,7 @@
 - **保留混合形态、加一致性校验**（启动时比对两处版本，不一致就在首页提示）：改动最小，但把「随时可能半套代码」永久留着，只是在事后加了个体温计。
 - **取消 exe**（`pythonw` + 快捷方式）：零打包、零漂移，代价是丢掉「双击一个文件就能起来」的手感，而壳能用同样的手感拿到同样的好处。
 
-相关工单为 IS-52；实现见 `gui_launcher.py`、`bestseller_gui.spec`、`tools/build_gui_exe.py`。运行形态的操作口径见 README 的「打包与运行形态」一节。
+相关工单为 IS-52；实现见 `gui_launcher.py`、`bestseller_gui.spec`、`tools/build_exe.py --target gui`。运行形态的操作口径见 README 的「打包与运行形态」一节。
 
 **落地实证（2026-09-21，票 14）**：壳正文抽芯为 `launcher_core.py`，两只薄入口
 （`gui_launcher.py` / `exchange_launcher.py`）各自填目标差异：拉起的脚本、项目根标记、日志名、
