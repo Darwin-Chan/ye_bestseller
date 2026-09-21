@@ -156,7 +156,8 @@ def main(argv: list[str] | None = None) -> int:
     except PlanError as exc:                  # --week 写错这类：点名说清楚，不吐栈
         print(f"\n>>> {exc}\n")
         return console.EXIT_NOTHING_DONE
-    print(f"\n报告：{outcome.report_path}")
+    if outcome.report_path is not None:       # 检查没过（交换区根不在）时没有报告可指
+        print(f"\n报告：{outcome.report_path}")
     print(f"退出码 {outcome.exit_code}：{console.VERDICT[outcome.exit_code]}")
     return outcome.exit_code
 

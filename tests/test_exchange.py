@@ -723,6 +723,22 @@ class EntryPointTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("周编号格式非法", out.getvalue())
 
+    def test_main_on_the_fatal_path_does_not_claim_a_report_file(self):
+        """交换区根不在（上机清单第 4/9 步还差着）：点名说清楚、退出码 2、不写报告——
+        收尾也不能说「报告：None」。"""
+        world = ConsoleWorld(self)
+        config = write_config(world)
+        shutil.rmtree(world.root)
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = exchange.main(["--config", str(config), "--week", WEEK])
+
+        self.assertEqual(code, 2)
+        self.assertIn("交换区根目录不存在", out.getvalue())
+        self.assertIn("退出码 2：本机没做成事", out.getvalue())
+        self.assertNotIn("报告", out.getvalue())
+
 
 class WindowTests(unittest.TestCase):
     """小窗口（独立小工具）：标题、状态与两个次要按钮走同一个 Api。"""
