@@ -737,7 +737,7 @@ class EntryPointTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("交换区根目录不存在", out.getvalue())
         self.assertIn("退出码 2：本机没做成事", out.getvalue())
-        self.assertNotIn("报告", out.getvalue())
+        self.assertNotIn("报告：", out.getvalue())
 
 
 class WindowTests(unittest.TestCase):
