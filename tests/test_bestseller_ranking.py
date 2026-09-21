@@ -21,8 +21,8 @@ def member(shop, offer, *, sales, points):
             'sales': sales, 'points': points, 'skus': []}
 
 
-def group(*members):
-    return {'id': 'G1', 'confirmed': False,
+def group(*members, id='G1'):
+    return {'id': id, 'confirmed': False,
             'members': [{'shop_key': m['shop_key'], 'offer_id': m['offer_id']} for m in members]}
 
 
@@ -67,6 +67,15 @@ class GroupRankingTests(unittest.TestCase):
             day('2026-09-08', 90, 10, 'green', segment_start=True),
             day('2026-09-09', None),
         ])
+
+    def test_ranking_orders_groups_by_sales_with_stable_ties(self):
+        first = member('A01', '11', sales=20, points=[day('2026-09-07', 100)])
+        best = member('A02', '22', sales=70, points=[day('2026-09-07', 200)])
+        tied = member('A03', '33', sales=20, points=[day('2026-09-07', 50)])
+        snapshot = {'products': [first, best, tied],
+                    'groups': [group(first, id='G1'), group(best, id='G2'), group(tied, id='G3')]}
+        rank_groups(snapshot)
+        self.assertEqual(snapshot['ranking'], ['G2', 'G1', 'G3'])
 
 
 class RankingBrowserTests(unittest.TestCase):
@@ -143,7 +152,7 @@ class RankingBrowserTests(unittest.TestCase):
         row = rows.first
         expect(row.locator('summary')).to_contain_text('杯子2')  # 70 > 40，代表是本区间最高成员
         expect(row.locator('summary .number')).to_have_text('150 销量')  # 整组 70+40+40，不是代表销量
-        expect(row.locator('summary')).to_contain_text('3 家店铺 · 3 个商品 · 3 个 SKU')
+        expect(row.locator('summary')).not_to_contain_text('家店铺')  # 排名行只给代表与整组销量
         self.page.get_by_label('显示零销量组').check()
         expect(rows).to_have_count(2)
         expect(rows.nth(1).locator('summary')).to_contain_text('杯子4')
@@ -176,7 +185,7 @@ class RankingBrowserTests(unittest.TestCase):
         row = self.page.locator('#ranking > details').first
         expect(row.locator(':scope > summary')).to_contain_text('杯子甲')
         expect(row.locator(':scope > summary .number')).to_have_text('50 销量')
-        expect(row.locator(':scope > summary')).to_contain_text('2 家店铺 · 2 个商品 · 2 个 SKU')
+        expect(row.locator(':scope > summary')).not_to_contain_text('家店铺')  # 排名行只给代表与整组销量
         expect(self.page.get_by_text('点击展开')).to_have_count(0)
         # 代表商品的来源图标打开新标签页，不触发行展开。
         self.page.context.route('https://detail.1688.com/**', lambda route: route.fulfill(body='source'))
@@ -193,11 +202,16 @@ class RankingBrowserTests(unittest.TestCase):
         expect(row.locator('.chart-block')).to_have_count(3)
         expect(row.locator('.sku-row .chart-block')).to_have_count(2)
         expect(row.get_by_role('heading', name='同款构成')).to_be_visible()
+        expect(row).to_contain_text('2 家店铺 · 2 个商品 · 2 个 SKU')
         expect(row).to_contain_text('店铺2')
         expect(row).to_contain_text('店铺3')
         expect(row.locator('.tree .product img')).to_have_count(2)
         expect(row).to_contain_text('商品销量 30')
         expect(row).to_contain_text('商品销量 20')
+        # 树内来源图标各自指向自己的商品（§8：同款树商品在图标范围内）。
+        tree_links = row.locator('.tree').get_by_role('link', name='商品源地址')
+        expect(tree_links).to_have_count(2)
+        self.assertEqual({link.get_attribute('data-source-offer') for link in tree_links.all()}, {'222', '333'})
         expect(row.locator('.sku-row[open]')).to_have_count(0)
         expect(row.locator('.sku-row .sku-total')).to_have_text(['销量 30', '销量 20'])
         expect(row.locator('.sku-row img')).to_have_count(0)

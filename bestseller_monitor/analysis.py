@@ -281,20 +281,17 @@ def calculate_inventory(rows: list[dict], start: str, end: str) -> dict:
                 sku['segment'] = index + 1
                 sku['sales'] = sum(p['sales'] for p in sku['points'])
                 skus.append(sku)
-        bucket = {'skus': skus, 'sales': sum(s['sales'] for s in skus), 'points': []}
+        bucket = {'skus': skus, 'sales': sum(s['sales'] for s in skus),
+                  'points': _aggregate_points([s['points'] for s in skus])}
         switches = {segment['start'] for segment in segments[1:]}
-        for i, day in enumerate(dates):
-            active = [s['points'][i] for s in skus if s['points'][i]['stock'] is not None]
-            bucket['points'].append({'date': day, 'stock': sum(p['stock'] for p in active) if active else None,
-                                    'segment_start': day in switches,
-                                    'sales': sum(p['sales'] for p in active),
-                                    'color': 'red' if any(p['color'] == 'red' for p in active) else 'green'})
+        for point in bucket['points']:
+            point['segment_start'] = point['date'] in switches
         result[key] = bucket
     return result
 
 
 def _calculate_segment(rows: list[dict], start: str, end: str) -> dict:
-    """Build SKU-first inventory points; this is the single calculation seam for the UI."""
+    """Build SKU-first inventory points: the per-SKU daily rows every layer aggregates from."""
     dates = _dates(start, end)
     by_sku = {}
     for row in rows:
@@ -325,44 +322,39 @@ def _calculate_segment(rows: list[dict], start: str, end: str) -> dict:
             points.append({"date": day, "stock": stock, "sales": sales, "color": color, "actual": actual})
             previous = stock
         product_key = key[:2]
-        bucket = products.setdefault(product_key, {"sales": 0, "points": [], "skus": []})
-        bucket["skus"].append({"sku_id": key[2], "name": observations[-1].get("sku_name") or key[2], "sales": sum(p["sales"] for p in points), "points": points})
-    for bucket in products.values():
-        bucket["sales"] = sum(sku["sales"] for sku in bucket["skus"])
-        bucket["points"] = [{
-            "date": day,
-            "stock": sum(sku["points"][i]["stock"] for sku in bucket["skus"] if sku["points"][i]["stock"] is not None) or None,
-            "sales": sum(sku["points"][i]["sales"] for sku in bucket["skus"]),
-            "color": "red" if any(sku["points"][i]["color"] == "red" for sku in bucket["skus"]) else "green",
-        } for i, day in enumerate(dates)]
+        products.setdefault(product_key, {"skus": []})["skus"].append(
+            {"sku_id": key[2], "name": observations[-1].get("sku_name") or key[2],
+             "sales": sum(p["sales"] for p in points), "points": points})
     return products
 
 
-def rank_groups(snapshot):
-    """组级排名视图：成员次序、组总销量与组图逐日点只从这里产出（规格 §4、§6、§14）。
+def rank_groups(snapshot: dict) -> None:
+    """组级排名视图：组序、成员次序、组总销量与组图逐日点只从这里产出（规格 §4、§6、§14）。
 
-    先按同款分组把成员收成稳定次序（销量降序，并列按身份），再把成员的逐日点聚到
-    组层。冻结后快照入库前调用一次，之后的读取与导出都消费同一份结果，页面不再自己
-    重算销量。只依赖快照数据，可以安全地对同一份快照反复调用。
+    先按同款分组把成员收成稳定次序（销量降序，并列按身份），再按组总销量降序给出组序
+    （并列保持原顺序，稳定），最后把成员的逐日点聚到组层。冻结后快照入库前调用一次，
+    之后的读取与导出都消费同一份结果，页面不再自己重算销量或排序。只依赖快照数据，
+    可以安全地对同一份快照反复调用。
     """
     products = {identity(p): p for p in snapshot['products']}
     for group in snapshot['groups']:
         summarize_group(group, products)
         group['points'] = _aggregate_points([products[identity(m)]['points'] for m in group['members']])
+    snapshot['ranking'] = [group['id'] for group in sorted(snapshot['groups'], key=lambda group: -group['sales'])]
 
 
-def _aggregate_points(series):
+def _aggregate_points(series: list[list[dict]]) -> list[dict]:
     """把多个成员的逐日点聚合成上一层：库存只累加当日有效观测（全缺即未知），销量求和，补货向上汇总。"""
     if not series:
         return []
     aggregated = []
-    for index, first in enumerate(series[0]):
-        active = [points[index] for points in series if points[index]['stock'] is not None]
+    for index, lead in enumerate(series[0]):
+        active = [member[index] for member in series if member[index]['stock'] is not None]
         aggregated.append({
-            'date': first['date'],
+            'date': lead['date'],
             'stock': sum(point['stock'] for point in active) if active else None,
-            'sales': sum(points[index]['sales'] for points in series),
-            'color': 'red' if any(points[index]['color'] == 'red' for points in series) else 'green',
-            'segment_start': any(points[index].get('segment_start') for points in series),
+            'sales': sum(member[index]['sales'] for member in series),
+            'color': 'red' if any(member[index]['color'] == 'red' for member in series) else 'green',
+            'segment_start': any(member[index].get('segment_start') for member in series),
         })
     return aggregated
