@@ -10,10 +10,10 @@ Issues and specs for this repo live as markdown files in `.scratch/`.
 - Triage state is recorded as a `Status:` line near the top of each issue file (see `triage-labels.md` for the role strings)
 - Comments and conversation history append to the bottom of the file under a `## Comments` heading
 - Rejected feature requests are closed with `Status: wontfix` and recorded one file per concept at
-  `.out-of-scope/<concept>.md` (decision, reason, prior requests). Check that directory before
+  `docs/out-of-scope/<concept>.md` (decision, reason, prior requests). Check that directory before
   re-litigating an enhancement.
 - `.scratch/` is gitignored: tickets are machine-local and reach no session that only sees the repo
-  (a fresh clone or a cloud session has no `.scratch/`). `.out-of-scope/` is the one tracked part,
+  (a fresh clone or a cloud session has no `.scratch/`). `docs/out-of-scope/` is the one tracked part,
   so wontfix decisions survive a clone.
 
 ## Existing notes

@@ -4,7 +4,7 @@
 串起来跑一遍，并核对 12 家店铺 / 3,012 商品的规模行为。A01—A46 里各票主责的数值与
 操作边界已由主责票自己的测试覆盖（test_analysis / test_matching / test_group_editing /
 test_review_at_scale / test_bestseller_ranking / test_offline_report / test_analysis_drafts /
-test_analysis_reuse），这里不重写；逐条对照见 docs/畅销品分析验收记录.md。
+test_analysis_reuse），这里不重写；逐条对照见 docs/ops/畅销品分析验收记录.md。
 
 只有外部模型与图像网络用可控替身（test_matching 的 ModelTransport），页面、分析服务、
 草稿库和临时库存库都是真的。
