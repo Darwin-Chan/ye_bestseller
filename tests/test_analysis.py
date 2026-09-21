@@ -297,6 +297,8 @@ class AnalysisBrowserTests(unittest.TestCase):
             self.page.get_by_role('button', name='确认当前分组', exact=True).click()
             expect(self.page.get_by_role('button', name='已确认', exact=True)).to_be_disabled()
         self.page.get_by_role('button', name='保存分组并查看畅销品').click()
+        # 等保存返回触发的结果重渲染落定再展开，否则展开会被重渲染关掉。
+        expect(self.page.locator('#ranking > details > summary').first).to_contain_text('30')
         self.page.locator('#ranking > details > summary').first.click()
         expect(self.page.locator('#ranking > details').first).to_contain_text('切换商品')
         expect(self.page.locator('#ranking > details > summary').first).to_contain_text('30')
@@ -331,8 +333,9 @@ class AnalysisBrowserTests(unittest.TestCase):
             self.page.locator('.group-choice').nth(index).click()
             expect(self.page.get_by_role('button', name='已确认', exact=True)).to_be_disabled()
         self.page.get_by_role('button', name='保存分组并查看畅销品').click()
-        self.page.locator('#ranking > details > summary').first.click()
+        # 同上：先等结果重渲染落定，再展开排名行。
         expect(self.page.locator('#ranking > details > summary').first).to_contain_text('50')
+        self.page.locator('#ranking > details > summary').first.click()
         final_chart = self.page.locator('#ranking > details').first.locator('details .inventory-chart').last
         expect(final_chart.locator('circle[data-stock]')).to_have_count(2)
         expect(final_chart.locator('circle[data-stock="0"]')).to_have_count(1)
@@ -583,6 +586,19 @@ class AnalysisBrowserTests(unittest.TestCase):
         expect(self.page.locator('#groupDetail aside.change')).to_contain_text('商品名称或图片已有变更，请核对当前信息。')
         Path('work').mkdir(exist_ok=True)
         self.page.screenshot(path='work/ticket09-reuse.png')
+        # 处理变更：把树叶杯并回已确认组并保存，重启后再验证人工判断未丢失。
+        self.page.locator('.group-choice').filter(has_text='杯子 ·').click()
+        self.page.get_by_role('button', name='组内新增商品').click()
+        self.page.get_by_role('textbox', name='搜索商品', exact=True).fill('树叶杯')
+        self.page.locator('#addResults').get_by_role('button', name='添加到当前组').click()
+        expect(self.page.locator('#groupDetail h3')).to_have_text('G1 · 3 个商品')
+        self.page.get_by_role('button', name='保存分组并查看畅销品').click()
+        expect(self.page.locator('#ranking > details > summary .number').first).to_have_text('90 销量')
+        self.restart_service()
+        self.page.get_by_role('button', name='继续上次分析').click()
+        expect(self.page.locator('#groupDetail h3')).to_have_text('G1 · 3 个商品')
+        expect(self.page.locator('#groupDetail .group-status')).to_have_text('已确认')
+        expect(self.page.locator('#groupDetail aside.change')).to_contain_text('商品名称或图片已有变更')
 
 
 class InventoryCalculationTests(unittest.TestCase):

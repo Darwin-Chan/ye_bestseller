@@ -15,17 +15,17 @@ from typing import NamedTuple
 
 SCHEMA_VERSION = 1
 
-# 账本三张表：关系按成员清单整行存，独立确认与排除按主键逐行存。
+# 账本三张表：关系按成员清单整行存（帶确认状态），独立确认与排除按主键逐行存。
 # 保存时整版覆盖：一次保存就是一个完整的人工决策版本。
-_DECISION_TABLES = (
-    """CREATE TABLE IF NOT EXISTS manual_relations (
-        members TEXT PRIMARY KEY, saved_at TEXT NOT NULL)""",
-    """CREATE TABLE IF NOT EXISTS manual_standalone (
+_DECISION_TABLES = {
+    'manual_relations': """CREATE TABLE IF NOT EXISTS manual_relations (
+        members TEXT PRIMARY KEY, confirmed INTEGER NOT NULL, saved_at TEXT NOT NULL)""",
+    'manual_standalone': """CREATE TABLE IF NOT EXISTS manual_standalone (
         identity TEXT PRIMARY KEY, version TEXT NOT NULL, saved_at TEXT NOT NULL)""",
-    """CREATE TABLE IF NOT EXISTS manual_exclusions (
+    'manual_exclusions': """CREATE TABLE IF NOT EXISTS manual_exclusions (
         pair_a TEXT NOT NULL, pair_b TEXT NOT NULL, saved_at TEXT NOT NULL,
         PRIMARY KEY(pair_a, pair_b))""",
-)
+}
 
 
 class StoredDraft(NamedTuple):
@@ -48,8 +48,8 @@ class DraftStore:
             start TEXT NOT NULL,
             end TEXT NOT NULL,
             payload TEXT NOT NULL)""")
-        for table in _DECISION_TABLES:
-            conn.execute(table)
+        for statement in _DECISION_TABLES.values():
+            conn.execute(statement)
         return conn
 
     def write(self, analysis_id, start, end, saved_at, payload, ledger):
@@ -65,11 +65,12 @@ class DraftStore:
                     schema_version=excluded.schema_version, start=excluded.start,
                     end=excluded.end, payload=excluded.payload""",
                     (analysis_id, saved_at, SCHEMA_VERSION, start, end, document))
-                for table in ('manual_relations', 'manual_standalone', 'manual_exclusions'):
+                for table in _DECISION_TABLES:
                     conn.execute(f'DELETE FROM {table}')
-                conn.executemany('INSERT INTO manual_relations(members,saved_at) VALUES(?,?)',
-                    [(json.dumps([[member, member_version] for member, member_version in members],
-                                 ensure_ascii=False), saved_at) for members in ledger['relations']])
+                conn.executemany('INSERT INTO manual_relations(members,confirmed,saved_at) VALUES(?,?,?)',
+                    [(json.dumps([[member, member_version] for member, member_version in relation['members']],
+                                 ensure_ascii=False), relation['confirmed'], saved_at)
+                     for relation in ledger['relations']])
                 conn.executemany('INSERT INTO manual_standalone(identity,version,saved_at) VALUES(?,?,?)',
                     [(member, member_version, saved_at) for member, member_version in ledger['standalone']])
                 conn.executemany('INSERT INTO manual_exclusions(pair_a,pair_b,saved_at) VALUES(?,?,?)',
@@ -89,7 +90,8 @@ class DraftStore:
         conn = sqlite3.connect(self.path)
         try:
             try:
-                relations = [json.loads(row[0]) for row in conn.execute('SELECT members FROM manual_relations')]
+                relations = [{'members': json.loads(row[0]), 'confirmed': bool(row[1])}
+                             for row in conn.execute('SELECT members,confirmed FROM manual_relations')]
                 standalone = [[row[0], row[1]] for row in conn.execute('SELECT identity,version FROM manual_standalone')]
                 excluded = [[row[0], row[1]] for row in conn.execute('SELECT pair_a,pair_b FROM manual_exclusions')]
             except sqlite3.OperationalError as exc:

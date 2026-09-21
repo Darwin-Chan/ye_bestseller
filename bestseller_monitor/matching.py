@@ -32,6 +32,11 @@ def version(product):
     return digest([product.get('product_name'), product.get('image_hash')])
 
 
+# 商品来源标注：模型证据与人工账本共用同一组取值（页面按取值筛选）。
+ORIGIN_NEW = '新商品'
+ORIGIN_CHANGED = '信息变更'
+
+
 @dataclass(frozen=True)
 class ModelConfig:
     endpoint: str = 'https://api.deepseek.com/v1/chat/completions'
@@ -264,7 +269,8 @@ class MatchingService:
             eligible = []
             for p in products:
                 known = conn.execute('SELECT version,origin FROM evidence WHERE identity=?', (identity(p),)).fetchall()
-                p['origin'] = next((r[1] for r in known if r[0] == version(p)), '信息变更' if known else '新商品')
+                p['origin'] = next((r[1] for r in known if r[0] == version(p)),
+                                   ORIGIN_CHANGED if known else ORIGIN_NEW)
                 p['matching_status'] = '缺少完整名称与图片证据' if not p.get('information_complete') else '待判断'
                 if p.get('information_complete'):
                     eligible.append(p)

@@ -171,6 +171,59 @@ class DecisionReuseTests(unittest.TestCase):
         self.assertEqual({m['offer_id'] for m in self.group_for(third, '11')['members']}, {'11', '22'})
         self.assertFalse(self.group_for(third, '33')['confirmed'])
 
+    def test_saving_a_single_member_range_keeps_the_whole_relation(self):
+        # 已保存三人关系后，新区间只观察到一名成员：保存不能把关系拆散。
+        first = self.service.start('2026-09-07', '2026-09-14')
+        sid1 = first['id']
+        self.join(sid1, '22', '11')
+        self.join(sid1, '33', '11')
+        self.service.confirm(sid1, self.group_for(self.service.get(sid1), '11')['id'])
+        self.service.save_draft(sid1)
+
+        submit_offer(self.db, '11', '2026-09-24', 45, name='月牙杯', color='red')
+        second = self.service.start('2026-09-23', '2026-09-24')
+        self.assertEqual([p['offer_id'] for p in second['products']], ['11'])
+        self.assertTrue(self.group_for(second, '11')['confirmed'])
+        self.service.save_draft(second['id'])
+
+        third = self.service.start('2026-09-07', '2026-09-21')
+        group = self.group_for(third, '11')
+        self.assertEqual({m['offer_id'] for m in group['members']}, {'11', '22', '33'})
+        self.assertTrue(group['confirmed'])
+
+    def test_withdrawal_across_ranges_keeps_members_without_confirmation(self):
+        first = self.service.start('2026-09-07', '2026-09-14')
+        sid1 = first['id']
+        self.join(sid1, '22', '11')
+        self.join(sid1, '33', '11')
+        self.service.confirm(sid1, self.group_for(self.service.get(sid1), '11')['id'])
+        self.service.save_draft(sid1)
+
+        # 新区间撤回并保存：成员保持一组待确认，下个区间不因账本复活成已确认。
+        second = self.service.start('2026-09-07', '2026-09-14')
+        self.service.withdraw(second['id'], self.group_for(second, '11')['id'])
+        self.service.save_draft(second['id'])
+        third = self.service.start('2026-09-07', '2026-09-14')
+        group = self.group_for(third, '11')
+        self.assertEqual({m['offer_id'] for m in group['members']}, {'11', '22', '33'})
+        self.assertFalse(group['confirmed'])
+
+    def test_information_change_mark_survives_restart_and_model_retry(self):
+        first = self.service.start('2026-09-07', '2026-09-14')
+        self.service.confirm(first['id'], self.group_for(first, '33')['id'])
+        self.service.save_draft(first['id'])
+        submit_offer(self.db, '33', '2026-09-14', 20, name='树叶杯', color='green')
+        second = self.service.start('2026-09-07', '2026-09-14')
+        self.service.save_draft(second['id'])
+
+        restarted = self.open_service()
+        restored = restarted.get(second['id'])
+        leaf = next(p for p in restored['products'] if p['offer_id'] == '33')
+        self.assertEqual(leaf['origin'], '信息变更')
+        retried = restarted.retry_matching(second['id'])
+        leaf = next(p for p in retried['products'] if p['offer_id'] == '33')
+        self.assertEqual(leaf['origin'], '信息变更')
+
     def test_standalone_confirmation_reuses_and_withdrawal_does_not_resurrect(self):
         # 只确认树叶杯的独立分组；另两个保持待确认也不进账本。
         first = self.service.start('2026-09-07', '2026-09-14')
