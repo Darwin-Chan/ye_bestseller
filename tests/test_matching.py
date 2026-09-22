@@ -13,8 +13,10 @@ from PIL import Image
 from playwright.sync_api import expect
 
 import test_analysis as browser_fixture
-from bestseller_monitor.matching import (ImageJudge, MatchingConfig, MatchingService, ModelConfig,
-                                         candidate_pairs, identity, request_json, ModelFailure)
+from bestseller_monitor.matching import (CONFIG_FAILURE_KEY, CONFIG_FAILURE_REDIRECT, CONFIG_FAILURE_VISION,
+                                         MATCH_NEEDS_CONFIG, ImageJudge, MatchingConfig, MatchingService,
+                                         ModelConfig, candidate_pairs, identity, request_json, ModelFailure,
+                                         state_of_status)
 from bestseller_monitor.analysis import AnalysisConfig
 from helpers import new_round, product_picture
 
@@ -127,6 +129,18 @@ class MatchingTests(unittest.TestCase):
 
         self.assertEqual(config.database.name, 'bestseller.db')
         self.assertIsNotNone(config.matching)
+
+    def test_config_class_failures_are_recognized_by_text(self):
+        """票 17 的三条配置类文案都认「需配置」：改配置才有用，页面不该提重试。
+
+        三条文案由 matching 一处持有、按文案分档（state_of_status）：走一遍真实的
+        核验失败拿到「未配置可用图像能力」，另两条直接对表。
+        """
+        with self.assertRaises(ModelFailure) as ctx:
+            ImageJudge(MatchingConfig(Path(self.tmp.name)/'cache.sqlite', mode='disabled')).verify()
+        self.assertEqual(str(ctx.exception), CONFIG_FAILURE_VISION)
+        for text in (CONFIG_FAILURE_KEY, CONFIG_FAILURE_VISION, CONFIG_FAILURE_REDIRECT):
+            self.assertEqual(state_of_status(text), MATCH_NEEDS_CONFIG, text)
 
     def test_real_transport_refuses_redirect_without_forwarding_key(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
