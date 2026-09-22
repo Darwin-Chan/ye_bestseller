@@ -165,7 +165,8 @@ python tools/build_exe.py --target analysis
 python tools/release_shells.py
 ```
 
-包落在 `dist\release\shells-<日期>\`，含三只 exe、`MANIFEST.json`（sha256 与来源提交）与
+包落在 `.scratch\tool-output\release\shells-<日期>\`（设计时工具的落点，`dist\` 只留三只壳本身），
+含三只 exe、`MANIFEST.json`（sha256 与来源提交）与
 `发布说明.txt`（放置与校验步骤）；接受方把三只 exe 放进 `<项目根>\dist\` 即可。
 程序改了**不需要**重发，只有壳正文（`shells/`）改了才要重出包。
 
