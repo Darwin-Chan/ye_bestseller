@@ -772,6 +772,15 @@ def unfilled_items(report_text: str) -> list[str]:
             re.finditer(rf"\*\*(.+?)\*\*：{re.escape(PLACEHOLDER)}", report_text)]
 
 
+def zip_path_for(bundle_dir: Path) -> Path:
+    """记录目录对应的 zip 路径：名字尾巴上加 `.zip`，**不换后缀**。
+
+    用 `with_suffix` 会把最后一个小数点后面当成后缀换掉——点题里带小数点（如「报错 v1.2」）
+    时 zip 就不跟目录同名了，`--list` 也会认不出它已经打过包。
+    """
+    return bundle_dir.with_name(bundle_dir.name + ".zip")
+
+
 def pack_bundle(bundle_dir: Path) -> tuple[Path, dict]:
     """算出 MANIFEST.json 并打成同名 .zip；返回 (zip 路径, 清单)。"""
     manifest_entries = []
@@ -786,7 +795,7 @@ def pack_bundle(bundle_dir: Path) -> tuple[Path, dict]:
                 "files": manifest_entries}
     _write_json(bundle_dir / MANIFEST_NAME, manifest)
 
-    zip_path = bundle_dir.with_suffix(".zip")
+    zip_path = zip_path_for(bundle_dir)
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(bundle_dir.rglob("*")):
             if path.is_file():
@@ -856,7 +865,7 @@ def list_bundles(out_root: Path | None = None) -> list[dict]:
     for directory in sorted([d for d in root.iterdir() if d.is_dir()]):
         report = directory / REPORT_NAME
         filled = report.is_file() and not unfilled_items(report.read_text(encoding="utf-8", errors="replace"))
-        zip_path = directory.with_suffix(".zip")
+        zip_path = zip_path_for(directory)
         entries.append({
             "dir": str(directory),
             "name": directory.name,

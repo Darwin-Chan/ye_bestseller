@@ -329,7 +329,7 @@ class PackTests(unittest.TestCase):
 
             zip_path, manifest = issue_bundle.pack_bundle(bundle)
 
-            self.assertEqual(zip_path, bundle.with_suffix(".zip"))
+            self.assertEqual(zip_path, issue_bundle.zip_path_for(bundle))
             self.assertTrue(zip_path.is_file())
             paths = [entry["path"] for entry in manifest["files"]]
             self.assertIn("REPORT.md", paths)
@@ -357,6 +357,32 @@ class PackTests(unittest.TestCase):
 
             self.assertEqual(issue_bundle.unfilled_items(report.read_text(encoding="utf-8")), [])
 
+    def test_a_dotted_title_does_not_lose_its_zip_name(self):
+        """点题带小数点（如「报错 v1.2」）时 zip 也要跟目录同名。
+
+        审查抓到的窄缺陷：`Path.with_suffix` 会把最后一个小数点后面当后缀换掉——zip 成了
+        `…-v1.zip`，`--list` 按同一条错规则找文件、于是还说「还没打包」。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            out_root = tmp_path / "issues"
+            root = _fake_root(tmp_path)
+            bundle = issue_bundle.create_bundle(
+                "报错 v1.2", root / "config" / "config.toml",
+                out_root=out_root, root=root, now=STAMP)
+            self.assertTrue(bundle.name.endswith("报错-v1.2"))
+
+            zip_path, _ = issue_bundle.pack_bundle(bundle)
+
+            self.assertEqual(zip_path.name, bundle.name + ".zip")
+            self.assertEqual(zip_path, issue_bundle.zip_path_for(bundle))
+            self.assertTrue(zip_path.is_file())
+            entry = issue_bundle.list_bundles(out_root)[0]           # --list 也要认出它已打包
+            self.assertEqual(entry["zip"], str(zip_path))
+            # 解包落地的目录名同样不能少一截（包内顶层目录名才是权威）
+            unpacked, _ = issue_bundle.unpack_bundle(zip_path, tmp_path / "inbox")
+            self.assertEqual(unpacked.name, bundle.name)
+
 
 class UnpackTests(unittest.TestCase):
     def _packed(self, tmp: Path) -> Path:
@@ -372,7 +398,7 @@ class UnpackTests(unittest.TestCase):
 
             bundle_dir, summary = issue_bundle.unpack_bundle(zip_path, tmp_path / "inbox")
 
-            self.assertEqual(bundle_dir, tmp_path / "inbox" / zip_path.stem)
+            self.assertEqual(bundle_dir.name, zip_path.name.removesuffix(".zip"))
             self.assertTrue((bundle_dir / "facts.json").is_file())
             self.assertTrue((bundle_dir / "logs" / "runtime" / "gui.log").is_file())
             self.assertIn("一、问题描述", summary)
@@ -421,7 +447,7 @@ class UnpackTests(unittest.TestCase):
                                           "--into", str(tmp_path / "inbox")])
             self.assertEqual(code, 0)
             self.assertIn("一、问题描述", out.getvalue())
-            self.assertTrue((tmp_path / "inbox" / zip_path.stem / "REPORT.md").is_file())
+            self.assertTrue((tmp_path / "inbox" / zip_path.name.removesuffix(".zip") / "REPORT.md").is_file())
 
 
 class CliTests(unittest.TestCase):
@@ -463,7 +489,7 @@ class CliTests(unittest.TestCase):
             code, out, _ = self._run(["--pack", str(bundle)])
             self.assertEqual(code, 0)
             self.assertIn("没有 REPORT.md", out)
-            self.assertTrue(bundle.with_suffix(".zip").is_file())
+            self.assertTrue(issue_bundle.zip_path_for(bundle).is_file())
 
 
 class InteractiveTests(unittest.TestCase):
@@ -504,7 +530,7 @@ class InteractiveTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertEqual([d for d in out_root.iterdir() if d.is_dir()], [first])
-            self.assertTrue(first.with_suffix(".zip").is_file())
+            self.assertTrue(issue_bundle.zip_path_for(first).is_file())
 
     def test_ctrl_c_at_the_title_leaves_everything_alone(self):
         with tempfile.TemporaryDirectory() as tmp:
