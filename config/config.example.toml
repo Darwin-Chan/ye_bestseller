@@ -16,7 +16,8 @@ role = "collector"
 # 「按机器改」，建议绝对路径；省略 = <data_dir 的上一级>/exchange。
 exchange_root = "exchange"
 # 凭据档位（只记档位、不记密钥；密钥都在仓库外：SSH 在 ~/.ssh，COS 走 coscli 配置或本地 secrets/）。
-# git_access："readwrite"（采集机：可 push 自己的 raw 库）或 "read_only"（纯汇总机：push 被拒 = 档位正确）。
+# git_access："readwrite"（采集机：可 push 自己的 raw 库）或 "read_only"（纯汇总机：采集通道不写——
+# 不导出、不写 raw-*；Gitee 凭据本身仍可写，判断库要发布判断，见 docs/ops/多机分片采集机制.md §1）。
 git_access = "readwrite"
 # cos_access："readwrite"（采集机：限 img/* 前缀读写）或 "read_only"（纯汇总机：只 Get/Head）。
 cos_access = "readwrite"

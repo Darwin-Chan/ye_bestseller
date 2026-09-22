@@ -82,7 +82,8 @@ def is_merge_only(cfg) -> bool:
 
 
 # 凭据档位（spec §11）：只记档位、不记密钥；密钥在仓库外（~/.ssh、secrets/ 或 coscli 配置）。
-# readwrite = 采集机档（git 可写、COS 限 img/* 读写）；read_only = 纯汇总机档（push/上传被拒即档位正确）。
+# readwrite = 采集机档（git 可写、COS 限 img/* 读写）；read_only = 纯汇总机档（采集通道只读：
+# COS 上传被拒、raw-* 不导出；git 凭据保留可写——判断库要发布判断，见 docs/ops/多机分片采集机制.md §1）。
 ACCESS_READWRITE = "readwrite"
 ACCESS_READ_ONLY = "read_only"
 _ACCESS_TIERS = (ACCESS_READWRITE, ACCESS_READ_ONLY)
