@@ -88,8 +88,13 @@ ACCESS_READ_ONLY = "read_only"
 _ACCESS_TIERS = (ACCESS_READWRITE, ACCESS_READ_ONLY)
 
 
+def _machine_id_value(machine: dict) -> str:
+    """[machine] 一节里那个编号（取不到就是空串）：解析口径只此一处，两处读法共用。"""
+    return str(machine.get("machine_id") or "").strip()
+
+
 def _machine_id(machine: dict, config_path: pathlib.Path) -> str:
-    machine_id = str(machine.get("machine_id") or "").strip()
+    machine_id = _machine_id_value(machine)
     if not machine_id:
         raise ValueError(
             "配置缺 machine.machine_id：本机在交换区里的唯一编号，"
@@ -115,6 +120,25 @@ def _access(key: str, v: object) -> str:
             f'只接受 "{ACCESS_READWRITE}" 或 "{ACCESS_READ_ONLY}"。'
         )
     return tier
+
+
+def machine_id_of(path: pathlib.Path) -> str:
+    """只读配置文件里 [machine] machine_id 这一件身份（供分析工具写判断的来源列）。
+
+    编号的权威只有 config.toml 一处（ADR-0034），而分析工具自带配置（analysis.toml）里
+    没有身份，所以按它同目录的 config.toml 借读——只读这一个键，不整份加载采集配置：
+    分析不该被采集配置里别的段落挡住。读不出（文件不在、没写、坏了）返回空串，
+    来源列如实留空，不替机器猜一个编号（猜错比留空更坏：它会被当成事实展示）。
+    """
+    try:
+        with path.open('rb') as stream:
+            raw = tomllib.load(stream)
+    except (OSError, tomllib.TOMLDecodeError):
+        return ''
+    machine = raw.get('machine')
+    if not isinstance(machine, dict):
+        return ''
+    return _machine_id_value(machine)
 
 
 @dataclass

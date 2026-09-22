@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from . import crawler_identity
 from .analysis_store import DraftStore
+from .config import machine_id_of
 from .db import utcnow
 from .matching import (MATCH_DISABLED, MatchingConfig, MatchingService, ModelConfig, ORIGIN_CHANGED,
                        STATUS_DISABLED, identity, matching_summary, state_of_status, summarize_group, version)
@@ -21,6 +22,9 @@ from .report import report_name, write_report
 
 DEFAULT_DRAFT_FILE = "analysis-drafts.sqlite"
 DEFAULT_OUTPUT_DIR = "output"
+# 机器编号的权威文件（与 analysis.toml 同在 config/ 下，ADR-0034）：分析工具没有身份，
+# 判断与决定的来源列要写本机编号，只从它借读 [machine] machine_id 这一个键。
+MACHINE_CONFIG_NAME = "config.toml"
 
 
 @dataclass(frozen=True)
@@ -32,6 +36,8 @@ class AnalysisConfig:
     store: Path | None = None
     # 离线报告的导出目录：缺省项目的 output 文件夹；配置文件里同样有缺省（见 from_file）。
     output: Path | None = None
+    # 本机编号（来源列的写入用，票 02）：配置里读不出就是空串，来源列如实留空。
+    machine: str = ''
 
     def __post_init__(self):
         if self.store is None:
@@ -82,7 +88,8 @@ class AnalysisConfig:
             matching = MatchingConfig(cache.resolve(), ModelConfig(**options.get('model', {})),
                 ModelConfig(**options['vision']) if 'vision' in options else None,
                 options.get('mode', 'disabled'), options.get('concurrency', 2), options.get('candidates', 6))
-        return cls(database.resolve(), weekday, matching, store.resolve(), output.resolve())
+        return cls(database.resolve(), weekday, matching, store.resolve(), output.resolve(),
+                   machine_id_of(path.with_name(MACHINE_CONFIG_NAME)))
 
 
 class AnalysisService:
@@ -91,12 +98,12 @@ class AnalysisService:
         self.running = running or crawler_identity.is_running
         self._snapshots = {}
         self._lock = threading.Lock()
-        self.matcher = MatchingService(config.matching) if config.matching and config.matching.mode != 'disabled' else None
+        self.matcher = MatchingService(config.matching, config.machine) if config.matching and config.matching.mode != 'disabled' else None
 
     @property
     def store(self):
         """草稿库跟着当前配置走：配置换了库或换了存储位置立即生效。"""
-        return DraftStore(self.config.store)
+        return DraftStore(self.config.store, self.config.machine)
 
     @contextmanager
     def _read(self):
@@ -271,7 +278,7 @@ class AnalysisService:
             # 草稿版本与决策账本同一次事务提交，页面此刻的确认/排除即全局最新。
             self.store.write(analysis_id, snapshot['start'], snapshot['end'], saved_at,
                              self._draft_payload(snapshot, saved_at),
-                             merge_decisions(snapshot, self.store.ledger()))
+                             merge_decisions(snapshot, self.store.ledger(), self.config.machine))
             snapshot['dirty'] = False
             snapshot['saved_at'] = saved_at
             return copy.deepcopy(snapshot)
@@ -545,8 +552,8 @@ def recorded_versions(decisions: dict) -> dict:
     for relation in decisions['relations']:
         for member, member_version in relation['members']:
             recorded.setdefault(member, set()).add(member_version)
-    for member, member_version in decisions['standalone']:
-        recorded.setdefault(member, set()).add(member_version)
+    for entry in decisions['standalone']:
+        recorded.setdefault(entry[0], set()).add(entry[1])
     return recorded
 
 
@@ -575,9 +582,9 @@ def reuse_decisions(snapshot: dict, decisions: dict) -> None:
         for member in intact[1:]:
             roots[kind][find(kind, intact[0])] = find(kind, member)
         (confirmed if relation['confirmed'] else pinned).update(intact)
-    for member, member_version in decisions['standalone']:
-        if current.get(member) == member_version:
-            confirmed.add(member)
+    for entry in decisions['standalone']:
+        if current.get(entry[0]) == entry[1]:
+            confirmed.add(entry[0])
     groups = []
     clusters = {}
 
@@ -604,7 +611,8 @@ def reuse_decisions(snapshot: dict, decisions: dict) -> None:
             group = open_group(False)
         group['members'].append({'shop_key': p['shop_key'], 'offer_id': p['offer_id']})
     snapshot['groups'] = groups
-    snapshot['excluded'] = [list(pair) for pair in decisions['excluded']
+    # 排除对只按身份生效（快照只带两端的身份，来源机器留在账本里）。
+    snapshot['excluded'] = [list(pair[:2]) for pair in decisions['excluded']
                             if pair[0] in current and pair[1] in current]
 
 
@@ -616,22 +624,30 @@ def mark_information_changes(snapshot: dict, recorded: dict) -> None:
             product['origin'] = ORIGIN_CHANGED
 
 
-def merge_decisions(snapshot: dict, decisions: dict) -> dict:
+def merge_decisions(snapshot: dict, decisions: dict, machine: str) -> dict:
     """保存这次人工整理后的完整账本。
 
     确认的分组按在场成员写回关系，并认领这次不显示的缺席成员——保存局部区间
     不能抹掉全局历史关系；撤回过的显示状态写入账本（成员保留、记为未确认）；
     证据版本已变或已被人工挪走的在场成员按最新决定移出关系。排除关系同理：
     只有两端都在本次分析里，这次保存才可能改写它们。
+
+    来源机器（票 02）：行上原有的来源随行保留（收进来的决定往返一次不被改写）——关系折进
+    本机的确认组时，来源随那条关系带走；独立确认与排除对按「身份（＋版本）」从原账本找回。
+    只有本机这次新产生的行才记 `machine`；只影响来源列，不改变任何一条合并规则。
     """
     present = product_versions(snapshot['products'])
     group_of = {identity(m): g for g in snapshot['groups'] for m in g['members']}
     clusters = {}
+    # 确认组本身不记来源（快照的组没有来源列）：来源从「折进这个组的关系」上找回；
+    # 多条关系折进同一个组时保留先遇到的那条——组的多来源呈现归票 04／07。
+    cluster_sources = {}
     for group in snapshot['groups']:
         if group['confirmed']:
             clusters[group['id']] = {identity(m): present[identity(m)] for m in group['members']}
     relations = []
     for relation in decisions['relations']:
+        source = relation.get('machine_id') or machine
         # 证据版本变了的在场成员不再适用于旧关系；缺席成员带旧版本原样保留。
         kept = [(member, present[member] if member in present else member_version)
                 for member, member_version in relation['members']
@@ -643,7 +659,8 @@ def merge_decisions(snapshot: dict, decisions: dict) -> dict:
             if len(current_groups) == 1:
                 (gid,) = current_groups
                 if gid in clusters:
-                    # 关系延续在这个确认组上：认领缺席成员后整条写回。
+                    # 关系延续在这个确认组上：认领缺席成员后整条写回，来源留给组。
+                    cluster_sources.setdefault(gid, source)
                     for member, member_version in kept:
                         if member not in present:
                             clusters[gid].setdefault(member, member_version)
@@ -659,19 +676,28 @@ def merge_decisions(snapshot: dict, decisions: dict) -> dict:
                         or (not group_of[member].get('adjusted')
                             and group_of[member]['id'] not in clusters)]
         if len(kept) > 1:
-            relations.append({'members': [list(member) for member in kept], 'confirmed': confirmed})
-    for members in clusters.values():
+            relations.append({'members': [list(member) for member in kept], 'confirmed': confirmed,
+                              'machine_id': source})
+    for gid, members in clusters.items():
         if len(members) > 1:
             relations.append({'members': [[member, member_version] for member, member_version in sorted(members.items())],
-                              'confirmed': True})
+                              'confirmed': True, 'machine_id': cluster_sources.get(gid, machine)})
+    # 独立确认与排除对按「身份（＋版本）」从原账本找回来源：键没变的行不是本机新产生的。
+    known_standalone = {tuple(entry[:2]): entry[2] for entry in decisions['standalone'] if len(entry) > 2}
     standalone = []
     for members in clusters.values():
         if len(members) == 1:
             (member, member_version), = members.items()
-            standalone.append([member, member_version])
-    excluded = [list(pair) for pair in decisions['excluded']
+            standalone.append([member, member_version,
+                               known_standalone.get((member, member_version), machine)])
+    known_excluded = {tuple(pair[:2]): pair[2] for pair in decisions['excluded'] if len(pair) > 2}
+
+    def with_source(pair):
+        return [pair[0], pair[1], known_excluded.get(tuple(pair[:2]), machine)]
+
+    excluded = [with_source(pair) for pair in decisions['excluded']
                 if not (pair[0] in present and pair[1] in present)]
-    excluded += [list(pair) for pair in snapshot.get('excluded', [])]
+    excluded += [with_source(pair) for pair in snapshot.get('excluded', [])]
     relations.sort(key=lambda relation: relation['members'])
     return {'relations': relations, 'standalone': sorted(standalone),
             'excluded': sorted({tuple(pair) for pair in excluded})}
