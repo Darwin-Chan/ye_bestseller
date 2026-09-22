@@ -13,9 +13,8 @@ desktop.ini
 *.log
 /logs/
 
-# 依赖与构建产物（dist/ 里的三只壳随库发布，clone 即可双击；只忽略发布包目录）
+# 依赖与构建产物（dist/ 里的三只壳随库发布，clone 即可双击；发布包是设计时工具输出，走 .scratch/tool-output/）
 node_modules/
-/dist/release/
 /build/
 
 # Python

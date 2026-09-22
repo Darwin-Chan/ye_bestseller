@@ -1,7 +1,7 @@
 """出壳的发布包：三只 exe 收进一个带校验清单的目录，供拷到别的机器（不上传、不进 git）。
 
 用法：
-    python tools/release_shells.py                # 重建三只壳，发布包落 dist/release/shells-<日期>/
+    python tools/release_shells.py                # 重建三只壳，发布包落 .scratch/tool-output/release/shells-<日期>/
     python tools/release_shells.py --no-build     # 不重建，直接打包 dist/ 里现成的 exe（可能过期）
     python tools/release_shells.py --out <目录>   # 自定义发布包位置
 
@@ -69,6 +69,12 @@ def source_state() -> dict:
     }
 
 
+def default_bundle_dir() -> Path:
+    """发布包的默认落点：设计时工具的输出归 `.scratch/tool-output/`（ADR-0033 第 4 条），
+    `dist/` 只留三只壳本身（第 6 条）。"""
+    return ROOT / ".scratch" / "tool-output" / "release" / f"shells-{datetime.date.today().isoformat()}"
+
+
 def write_bundle(out_dir: Path, sources: dict[str, Path], meta: dict) -> list[dict]:
     """把 {目标键: exe 路径} 收进 out_dir，写清单与说明；返回清单条目（同内容进 MANIFEST）。"""
     shutil.rmtree(out_dir, ignore_errors=True)
@@ -107,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="出壳的发布包：重建三只壳（或打包现成的），收成带 sha256 清单的目录。")
     parser.add_argument("--out", type=Path, default=None,
-                        help="发布包目录；缺省 dist/release/shells-<日期>/")
+                        help="发布包目录；缺省 .scratch/tool-output/release/shells-<日期>/")
     parser.add_argument("--no-build", action="store_true",
                         help="不重建，直接打包 dist/ 里现成的 exe（快；可能过期）")
     args = parser.parse_args(argv)
@@ -124,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
             build_exe.assert_no_project_code(target.toc)
             build_exe.verify_exe(key, target)
 
-    out_dir = args.out or ROOT / "dist" / "release" / f"shells-{datetime.date.today().isoformat()}"
+    out_dir = args.out or default_bundle_dir()
     sources = {key: target.exe for key, target in build_exe.TARGETS.items()}
     entries = write_bundle(out_dir, sources, source_state())
     print(f"OK：发布包 {out_dir}（{len(entries)} 只壳）")

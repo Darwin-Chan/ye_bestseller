@@ -77,5 +77,15 @@ class TargetsWiringTests(unittest.TestCase):
             self.assertEqual(target.exe.parent.name, "dist")
 
 
+class DefaultLocationTests(unittest.TestCase):
+    def test_default_bundle_dir_keeps_dist_for_the_shells_only(self):
+        """审查 2026-09-22：发布包曾默认落 dist/release/，违反 ADR-0033 第 4/6 条（已改落点）。"""
+        out = release_shells.default_bundle_dir()
+        rel = out.relative_to(release_shells.ROOT).parts
+
+        self.assertEqual(rel[:3], (".scratch", "tool-output", "release"))
+        self.assertTrue(rel[3].startswith("shells-"))
+
+
 if __name__ == "__main__":
     unittest.main()
