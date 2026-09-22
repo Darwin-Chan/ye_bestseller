@@ -412,23 +412,36 @@ clone_or_pull() {
 }
 
 # verify_push <克隆目录> <空提交消息> <重跑提示>：验写权限——有提交就推现状、空库推空提交。
+# 与远端一致时是空操作推送（远端照常收下这次推送请求），消息如实写出来、不冒称验过写权限。
 # 返回非 0 = 没通过（调用处自己决定要不要补一句上下文）。
 verify_push() {
-  local dir="$1" msg="$2" hint="$3"
+  local dir="$1" msg="$2" hint="$3" out upstream
   if git -C "$dir" rev-parse --verify -q HEAD >/dev/null 2>&1; then
-    if git -C "$dir" push >/dev/null 2>&1; then
-      ok "$(basename "$dir")：推送通过（写权限没问题）"
+    upstream=$(git -C "$dir" rev-parse --verify -q '@{u}' 2>/dev/null || true)
+    if out=$(git -C "$dir" push 2>&1); then
+      if [[ -n "$upstream" && "$upstream" == "$(git -C "$dir" rev-parse HEAD)" ]]; then
+        ok "$(basename "$dir")：推送通过（本地与远端一致，是空操作；远端照常收下了这次推送请求）"
+      else
+        ok "$(basename "$dir")：推送通过（写权限没问题）"
+      fi
       return 0
     fi
-    warn "$(basename "$dir")：推送失败——手动 git -C \"$dir\" push 看原话（被提示实名认证最常见）"
+    warn "$(basename "$dir")：推送失败——git 原话：$(printf '%s' "$out" | head -n1)"
+    warn "  （被提示实名认证最常见；修好后重跑本向导$hint）"
     return 1
   fi
-  if git -C "$dir" commit --allow-empty -m "$msg" >/dev/null 2>&1 \
-     && git -C "$dir" push -u origin HEAD >/dev/null 2>&1; then
+  if ! out=$(git -C "$dir" commit --allow-empty -m "$msg" 2>&1); then
+    warn "$(basename "$dir")：空提交没做成——git 原话：$(printf '%s' "$out" | head -n1)"
+    warn "  （全新机器多半是还没配身份：git config --global user.name \"你的名字\" 与 user.email \"你的邮箱\"；"
+    warn "   配好后重跑本向导$hint）"
+    return 1
+  fi
+  if out=$(git -C "$dir" push -u origin HEAD 2>&1); then
     ok "$(basename "$dir")：空提交推送成功（写权限通过）"
     return 0
   fi
-  warn "$(basename "$dir")：推送失败——照 git 的提示处理（被提示实名认证最常见），修好后重跑本向导$hint"
+  warn "$(basename "$dir")：推送失败——git 原话：$(printf '%s' "$out" | head -n1)"
+  warn "  （被提示实名认证最常见；修好后重跑本向导$hint）"
   return 1
 }
 
