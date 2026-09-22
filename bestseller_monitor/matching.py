@@ -113,6 +113,21 @@ class ImageJudge:
         self._lock = threading.Lock()
         self.captions = {}
 
+    def _challenge(self):
+        """给核验抽一组色块：**相邻两块必须不同色**。
+
+        同色相邻时，服务端缩放会把两块之间的边界糊掉，模型会把块数读错位——2026-09-22 实测：
+        deepseek-flash 在「前两块都是蓝」那次把 [蓝,蓝,红,绿,蓝] 读成 [蓝,红,绿,蓝,蓝]，
+        核验因此误杀了一个真有看图能力的模型。
+        """
+        colors = [('red', (255, 0, 0)), ('green', (0, 255, 0)), ('blue', (0, 0, 255))]
+        chosen = []
+        while len(chosen) < 5:
+            pick = secrets.choice(colors)
+            if not chosen or pick[0] != chosen[-1][0]:
+                chosen.append(pick)
+        return chosen
+
     def verify(self):
         with self._lock:
             if self._verified:
@@ -121,20 +136,24 @@ class ImageJudge:
             if cfg.mode == 'disabled' or (cfg.mode == 'caption' and cfg.vision is None):
                 raise ModelFailure('未配置可用图像能力')
             # Random visual challenge: a text-only endpoint must not pass by echoing a URL.
-            colors = [('red', (255, 0, 0)), ('green', (0, 255, 0)), ('blue', (0, 0, 255))]
-            chosen = [secrets.choice(colors) for _ in range(5)]
-            image = Image.new('RGB', (250, 50))
-            for i, (_, color) in enumerate(chosen):
-                image.paste(color, (i*50, 0, (i+1)*50, 50))
-            stream = io.BytesIO()
-            image.save(stream, format='PNG')
-            data = 'data:image/png;base64,'+base64.b64encode(stream.getvalue()).decode()
-            result = request_json(cfg.vision if cfg.mode == 'caption' else cfg.model,
-                                  [image_part(data), {'type': 'text', 'text': 'Return colors from left to right.'}],
-                                  'Read the five image blocks. Return JSON {"colors":[...]}, using red, green, blue only.')
-            if result.get('colors') != [c[0] for c in chosen]:
-                raise ModelFailure('图像能力核验未通过，不能仅凭名称判断同款')
-            self._verified = True
+            # 允许重试一次：残余的偶发误读不该把合法视觉模型挡在门外。文本模型每次猜中的概率
+            # 约 0.4%（3 的 5 次方分之一），两次都猜中约万分之零点二，核验仍然算数。
+            service = cfg.vision if cfg.mode == 'caption' else cfg.model
+            for _ in range(2):
+                chosen = self._challenge()
+                image = Image.new('RGB', (250, 50))
+                for i, (_, color) in enumerate(chosen):
+                    image.paste(color, (i*50, 0, (i+1)*50, 50))
+                stream = io.BytesIO()
+                image.save(stream, format='PNG')
+                data = 'data:image/png;base64,'+base64.b64encode(stream.getvalue()).decode()
+                result = request_json(service,
+                                      [image_part(data), {'type': 'text', 'text': 'Return colors from left to right.'}],
+                                      'Read the five image blocks. Return JSON {"colors":[...]}, using red, green, blue only.')
+                if result.get('colors') == [c[0] for c in chosen]:
+                    self._verified = True
+                    return
+            raise ModelFailure('图像能力核验未通过，不能仅凭名称判断同款')
 
     def compare(self, left, right):
         self.verify()

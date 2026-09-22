@@ -13,7 +13,7 @@ from PIL import Image
 from playwright.sync_api import expect
 
 import test_analysis as browser_fixture
-from bestseller_monitor.matching import (MatchingConfig, MatchingService, ModelConfig,
+from bestseller_monitor.matching import (ImageJudge, MatchingConfig, MatchingService, ModelConfig,
                                          candidate_pairs, identity, request_json, ModelFailure)
 from bestseller_monitor.analysis import AnalysisConfig
 from helpers import new_round, product_picture
@@ -43,6 +43,7 @@ class ModelTransport:
         self.decisions = {}
         self.fail_names = set()
         self.confidence = .99
+        self.misread_challenges = 0
 
     def __call__(self, request, timeout):
         payload = json.loads(request.data)
@@ -53,7 +54,11 @@ class ModelTransport:
                   for item in content if item['type'] == 'image_url']
         if 'five image blocks' in instruction:
             colors = {(255, 0, 0): 'red', (0, 255, 0): 'green', (0, 0, 255): 'blue'}
-            result = {'colors': [] if self.text_only else [colors[images[0].getpixel((i*50+25, 25))] for i in range(5)]}
+            if self.misread_challenges:
+                self.misread_challenges -= 1
+                result = {'colors': ['red'] * 5}   # 故意读错；相邻不同色的抽签不可能真是全红
+            else:
+                result = {'colors': [] if self.text_only else [colors[images[0].getpixel((i*50+25, 25))] for i in range(5)]}
         elif 'Describe physical' in instruction:
             result = {'description': str(images[0].getpixel((0, 0)))}
         else:
@@ -169,6 +174,21 @@ class MatchingTests(unittest.TestCase):
         self.assertNotIn('secret-value', json.dumps(products, ensure_ascii=False))
         self.transport.fail_comparisons = False
         self.assertEqual(len(matcher.suggest(products, groups)), 1)
+
+    def test_visual_challenge_keeps_neighbours_distinct_and_retries_once(self):
+        """相邻同色的色块在服务端缩放后边界会糊、模型会把块数读错位（2026-09-22 实测）。
+        所以抽签要避免相邻同色；读错一次就再抽一次，别误杀合法视觉模型。"""
+        judge = ImageJudge(self.config)
+        for _ in range(200):
+            chosen = judge._challenge()
+            self.assertEqual(len(chosen), 5)
+            self.assertTrue(all(left[0] != right[0] for left, right in zip(chosen, chosen[1:])),
+                            f'相邻同色：{[c[0] for c in chosen]}')
+        self.transport.misread_challenges = 1          # 第一次读错、第二次读对 → 通过
+        ImageJudge(self.config).verify()
+        self.transport.misread_challenges = 99         # 一直读错 → 仍然拒绝
+        with self.assertRaises(ModelFailure):
+            ImageJudge(self.config).verify()
 
     def test_caption_pipeline_and_manual_facts_take_precedence(self):
         config = MatchingConfig(self.config.cache, vision=ModelConfig(model='vision', key_env='VISION_API_KEY'), mode='caption')
