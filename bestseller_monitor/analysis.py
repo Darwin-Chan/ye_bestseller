@@ -208,9 +208,10 @@ class AnalysisService:
             self._snapshots[snapshot["id"]] = snapshot
         return copy.deepcopy(snapshot)
 
-    def _match(self, snapshot):
+    def _match(self, snapshot, reason=''):
         if self.matcher:
-            snapshot['groups'] = self.matcher.suggest(snapshot['products'], snapshot['groups'], snapshot.get('excluded', ()))
+            snapshot['groups'] = self.matcher.suggest(snapshot['products'], snapshot['groups'],
+                                                      snapshot.get('excluded', ()), reason=reason)
         else:
             for p in snapshot['products']:
                 p.update(origin='新商品', match_label='暂无匹配同款', candidate_groups=[],
@@ -225,7 +226,7 @@ class AnalysisService:
             # 信息变更是本次分析展示的事实（重开的草稿也带着它）：重试只重跑匹配，
             # 不把已经标出的变更刷回未标注。
             marked = {identity(p) for p in snapshot['products'] if p.get('origin') == ORIGIN_CHANGED}
-            self._match(snapshot)
+            self._match(snapshot, reason='重试')
             for p in snapshot['products']:
                 if identity(p) in marked:
                     p['origin'] = ORIGIN_CHANGED
