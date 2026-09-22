@@ -6,7 +6,9 @@
   本模块的命令行里只有桶名与 key，没有密钥。
 
 coscli 是外部二进制，它的输出格式是对外契约；解析只在这一处（`parse_listing`），
-认不出来的行当「不是 key」（宁可多传一张，不猜）。前缀口径与 key 的推法共用
+认不出来的行当「不是 key」（宁可多传一张，不猜）。已知两种形态（表格、URL 行）与
+「形态变了就报错」的闸都在 `parse_listing` 的 docstring 里（真机实测见 ADR-0041）。
+前缀口径与 key 的推法共用
 `image_store.IMAGE_PREFIX`——分开写迟早分家。
 """
 from __future__ import annotations
@@ -22,21 +24,60 @@ _TIMEOUT_SEC = 300
 
 
 def parse_listing(stdout: str) -> set[str]:
-    """从 `coscli ls` 的输出里取 key 集：认带 `cos://` 的行，取桶名之后的那段。
+    """从 `coscli ls -r` 的输出里取 `img/` 前缀的 key 集。认两种已知形态：
 
-    形如 `cos://<桶>/img/ab/….jpg   12345   2026-09-20 19:41:00 +0800 CST` 一行一条；
-    汇总行、报错行这类不含 `cos://` 的行直接跳过；前缀不是 `img/` 的（别的用途的对象）不算。
+    - **表格形态**（coscli v1.0.9 实测，2026-09-23 m4）：数据行首列是裸 key，形如
+      `  img/ab/<sha>.jpg | MAZ_STANDARD | 2026-09-23T00:51:12+08:00 | "<etag>" | …`；
+      表头、分隔行、`TOTAL OBJECTS` 汇总行的首列都够不着 `img/`，自然落空。
+    - **URL 行形态**（票 08 起保留的兼容面，无实测样本）：形如
+      `cos://<桶>/img/ab/<sha>.jpg   12345   2026-09-20 19:41:00 +0800 CST`。
+
+    两种都不认的行当「不是 key」（宁可多传一张，不猜）。但表格汇总行说有对象、却一个
+    key 都没认出（= 输出形态又变了）时报 ImageStoreError——宁可按「图片这半没做成事」
+    停下，也不悄悄把全部图片重传一遍（2026-09-23 的缺陷，ADR-0041）。
     """
     keys: set[str] = set()
+    total: int | None = None
     for line in stdout.splitlines():
-        marker = line.find("cos://")
-        if marker < 0:
-            continue
-        url = line[marker:].split(maxsplit=1)[0]
-        key = url[len("cos://"):].partition("/")[2]
-        if key.startswith(IMAGE_PREFIX):
+        key = _url_row_key(line)
+        if key is None:
+            key = _table_row_key(line)
+        if key is not None and key.startswith(IMAGE_PREFIX):
             keys.add(key)
+        listed = _listed_total(line)
+        if listed is not None:
+            total = listed
+    if total and not keys:
+        raise ImageStoreError(
+            f"coscli ls 的输出认不出：汇总行说有 {total} 个对象，却一个 key 都没解析出来"
+            "——输出形态可能变了，比照 tests/test_image_store.py 的夹具核对 parse_listing。")
     return keys
+
+
+def _url_row_key(line: str) -> str | None:
+    """URL 行形态的 key：`cos://<桶>/` 之后那段（含前缀，留给调用侧筛）；不是这种行返回 None。"""
+    marker = line.find("cos://")
+    if marker < 0:
+        return None
+    url = line[marker:].split(maxsplit=1)[0]
+    return url[len("cos://"):].partition("/")[2]
+
+
+def _table_row_key(line: str) -> str | None:
+    """表格形态的 key：`|` 分栏行里第一个 `|` 之前的那格就是裸 key；别的行返回 None。"""
+    if "|" not in line:
+        return None
+    head = line.split("|", 1)[0].strip()
+    return head or None
+
+
+def _listed_total(line: str) -> int | None:
+    """表格汇总行 `TOTAL OBJECTS:  |  855` 里的对象数；别的行返回 None。"""
+    marker = line.find("TOTAL OBJECTS:")
+    if marker < 0:
+        return None
+    cell = line[marker + len("TOTAL OBJECTS:"):].strip().lstrip("|").strip()
+    return int(cell) if cell.isdigit() else None
 
 
 class CosCliImageStore:
