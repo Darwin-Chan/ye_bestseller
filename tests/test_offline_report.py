@@ -260,7 +260,7 @@ class OfflineReportBrowserTests(unittest.TestCase):
         opened.value.close()
         # 无分组修改、保存草稿或采集控制动作；无本地服务的隐藏请求。
         for name in ['确认当前分组', '撤回当前分组', '组内新增商品', '暂时保存', '保存分组并查看畅销品',
-                     '重试模型匹配', '导出 HTML 报告', '上一页', '下一页']:
+                     '模型匹配同款', '导出 HTML 报告', '上一页', '下一页']:
             expect(self.page.get_by_role('button', name=name)).to_have_count(0)
         for text in ['完整范围', '实际抓取覆盖', '查看每天库存与销量计算', '进一步展开明细', '点击展开']:
             expect(self.page.locator('body')).not_to_contain_text(text)

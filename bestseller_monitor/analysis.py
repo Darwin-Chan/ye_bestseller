@@ -15,8 +15,8 @@ from uuid import uuid4
 from . import crawler_identity
 from .analysis_store import DraftStore
 from .db import utcnow
-from .matching import (MatchingConfig, MatchingService, ModelConfig, ORIGIN_CHANGED,
-                       identity, summarize_group, version)
+from .matching import (MATCH_DISABLED, MatchingConfig, MatchingService, ModelConfig, ORIGIN_CHANGED,
+                       STATUS_DISABLED, identity, matching_summary, state_of_status, summarize_group, version)
 from .report import report_name, write_report
 
 DEFAULT_DRAFT_FILE = "analysis-drafts.sqlite"
@@ -206,7 +206,9 @@ class AnalysisService:
             snapshot['groups'] = self.matcher.suggest(snapshot['products'], snapshot['groups'], snapshot.get('excluded', ()))
         else:
             for p in snapshot['products']:
-                p.update(origin='新商品', match_label='暂无匹配同款', candidate_groups=[], matching_status='模型匹配未启用')
+                p.update(origin='新商品', match_label='暂无匹配同款', candidate_groups=[],
+                         matching_status=STATUS_DISABLED, matching_state=MATCH_DISABLED)
+        snapshot['matching'] = matching_summary(snapshot['products'])
 
     def retry_matching(self, analysis_id):
         with self._lock:
@@ -314,6 +316,11 @@ class AnalysisService:
                 product['image_data'] = _data_url(asset['mime'], asset['content'])
             elif product.get('image_hash') and not product.get('image_error'):
                 product['image_error'] = '历史图片资产不可用'
+        # 票 17 之前保存的老草稿没有状态码：按文案回填。结论一律重算，与商品状态同源。
+        for product in payload['products']:
+            if not product.get('matching_state'):
+                product['matching_state'] = state_of_status(product.get('matching_status'))
+        payload['matching'] = matching_summary(payload['products'])
         return payload
 
     def confirm(self, analysis_id, group_id):

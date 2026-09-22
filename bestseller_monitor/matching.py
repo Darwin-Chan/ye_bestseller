@@ -36,6 +36,63 @@ def version(product):
 ORIGIN_NEW = '新商品'
 ORIGIN_CHANGED = '信息变更'
 
+# 「模型判断结果」：确认同款页的“模型匹配同款”控件只认状态码——按钮只在有可重试的
+# 失败时可用，其余一律置灰并给出原因（票 17）。文案与状态码都由本模块持有：
+# state_of_status 按文案认码，所以改文案就是改行为，取值只在这里写一遍。
+MATCH_DISABLED = '未启用'          # 本次分析没有可用的匹配服务
+MATCH_MISSING = '缺少证据'         # 名称或历史图片不完整，没进入模型判断
+MATCH_JUDGED = '已判断'            # 判断完成：缓存／模型／低把握／未召回
+MATCH_FAILED = '失败'              # 判断没完成，重试可能改变
+MATCH_NEEDS_CONFIG = '需配置'      # 判断没完成，且重试无效：要改配置后重启分析程序
+
+STATUS_DISABLED = '模型匹配未启用'
+STATUS_MISSING = '缺少完整名称与图片证据'
+STATUS_PENDING = '待判断'                  # 判断过程中的临时文案，结束时一定被替换
+STATUS_CACHE = '缓存'                      # 判断来源：复用缓存
+STATUS_MODEL = '模型'                      # 判断来源：本次模型给出
+STATUS_LOW = '低把握，待人工核对'
+STATUS_NO_CANDIDATE = '未召回候选，保持独立'
+_JUDGED_STATUSES = frozenset({STATUS_PENDING, STATUS_CACHE, STATUS_MODEL, STATUS_LOW, STATUS_NO_CANDIDATE})
+
+# 要改配置才能解决的模型失败：运行期内重试无效。文案就是页面上的失败原因，只在这里写
+# 一遍——raise 的地方与 state_of_status 的分档都读它。
+CONFIG_FAILURE_KEY = '模型密钥未配置'
+CONFIG_FAILURE_VISION = '未配置可用图像能力'
+CONFIG_FAILURE_REDIRECT = '模型地址发生重定向，请配置最终服务地址'
+_NEEDS_CONFIG_FAILURES = frozenset({CONFIG_FAILURE_KEY, CONFIG_FAILURE_VISION, CONFIG_FAILURE_REDIRECT})
+
+
+def state_of_status(text):
+    """按文案认状态码：_suggest 结束时统一推导，也用来回填没有状态码的老草稿。
+
+    认不出的文案一律当「失败」：方向安全——按钮可用，点一下就能看到真实原因。
+    """
+    if text == STATUS_DISABLED:
+        return MATCH_DISABLED
+    if text == STATUS_MISSING:
+        return MATCH_MISSING
+    if text in _JUDGED_STATUSES:
+        return MATCH_JUDGED
+    return MATCH_NEEDS_CONFIG if text in _NEEDS_CONFIG_FAILURES else MATCH_FAILED
+
+
+def matching_summary(products) -> dict:
+    """确认同款页的匹配结论：控件的亮／灰、常显状态行与点击结果都只消费这一处（票 17）。
+
+    计数单位是商品；reasons 按首次出现去重，页面照原样展示（失败原因就是模型的原文）。
+    """
+    states = [p.get('matching_state') for p in products]
+    reasons = []
+    for p in products:
+        text = p.get('matching_status')
+        if p.get('matching_state') in (MATCH_FAILED, MATCH_NEEDS_CONFIG) and text not in reasons:
+            reasons.append(text)
+    return {'judged': states.count(MATCH_JUDGED),
+            'failed': states.count(MATCH_FAILED) + states.count(MATCH_NEEDS_CONFIG),
+            'retryable': states.count(MATCH_FAILED), 'config': states.count(MATCH_NEEDS_CONFIG),
+            'missing_evidence': states.count(MATCH_MISSING), 'disabled': states.count(MATCH_DISABLED),
+            'reasons': reasons}
+
 
 @dataclass(frozen=True)
 class ModelConfig:
@@ -65,12 +122,13 @@ class MatchingConfig:
 
 
 class ModelFailure(Exception):
-    pass
+    """一次模型判断没有完成。分档看文案（state_of_status）：密钥、地址、图像能力
+    缺失要改配置后重启分析程序，页面对它们不提“重试”。"""
 
 
 class NoModelRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise ModelFailure('模型地址发生重定向，请配置最终服务地址')
+        raise ModelFailure(CONFIG_FAILURE_REDIRECT)
 
 
 def urlopen(request, timeout):
@@ -81,7 +139,7 @@ def urlopen(request, timeout):
 def request_json(config, content, instruction):
     key = os.environ.get(config.key_env)
     if not key:
-        raise ModelFailure('模型密钥未配置')
+        raise ModelFailure(CONFIG_FAILURE_KEY)
     payload = {'model': config.model, 'temperature': 0,
                'messages': [{'role': 'system', 'content': instruction},
                             {'role': 'user', 'content': content}],
@@ -97,6 +155,9 @@ def request_json(config, content, instruction):
         if not isinstance(value, dict):
             raise ValueError('object required')
         return value
+    except ModelFailure:
+        # 自己抛的失败（重定向、密钥、能力）要原样出去：文案与分档都靠它。
+        raise
     except Exception:
         # Provider bodies, URLs and exception strings can contain credentials.
         raise ModelFailure('模型请求失败或响应格式无效，请检查后台配置后重试') from None
@@ -134,7 +195,7 @@ class ImageJudge:
                 return
             cfg = self.config
             if cfg.mode == 'disabled' or (cfg.mode == 'caption' and cfg.vision is None):
-                raise ModelFailure('未配置可用图像能力')
+                raise ModelFailure(CONFIG_FAILURE_VISION)
             # Random visual challenge: a text-only endpoint must not pass by echoing a URL.
             # 允许重试一次：残余的偶发误读不该把合法视觉模型挡在门外。文本模型每次猜中的概率
             # 约 0.4%（3 的 5 次方分之一），两次都猜中约万分之零点二，核验仍然算数。
@@ -290,7 +351,7 @@ class MatchingService:
                 known = conn.execute('SELECT version,origin FROM evidence WHERE identity=?', (identity(p),)).fetchall()
                 p['origin'] = next((r[1] for r in known if r[0] == version(p)),
                                    ORIGIN_CHANGED if known else ORIGIN_NEW)
-                p['matching_status'] = '缺少完整名称与图片证据' if not p.get('information_complete') else '待判断'
+                p['matching_status'] = STATUS_MISSING if not p.get('information_complete') else STATUS_PENDING
                 if p.get('information_complete'):
                     eligible.append(p)
             cached, todo, errors = {}, {}, {}
@@ -301,7 +362,7 @@ class MatchingService:
                 pair_members[(identity(a), identity(b))] = pair
                 row = conn.execute('SELECT result FROM judgments WHERE pair=?', (pair,)).fetchone()
                 if row:
-                    cached[pair] = (json.loads(row[0]), '缓存')
+                    cached[pair] = (json.loads(row[0]), STATUS_CACHE)
                 else:
                     todo[pair] = (pair, a, b)
 
@@ -325,7 +386,7 @@ class MatchingService:
                         continue
                     conn.execute('INSERT OR IGNORE INTO judgments VALUES (?,?,?,?)',
                                  (pair, version(a), version(b), json.dumps(result)))
-                    cached[pair] = (result, '模型')
+                    cached[pair] = (result, STATUS_MODEL)
             positive = set()
             uncertain = set()
             eligible_by_id = {identity(p): p for p in eligible}
@@ -340,7 +401,7 @@ class MatchingService:
                 for member in (a, b):
                     p = eligible_by_id[member]
                     if p:
-                        p['matching_status'] = '低把握，待人工核对' if result['confidence'] < .8 else source
+                        p['matching_status'] = STATUS_LOW if result['confidence'] < .8 else source
                         conn.execute('INSERT OR IGNORE INTO evidence VALUES (?,?,?,?,?,?)',
                             (identity(p), version(p), p['product_name'], p['image_hash'], p['image_data'], p['origin']))
             failed_members = {member: errors[pair] for members, pair in pair_members.items() if pair in errors for member in members}
@@ -348,11 +409,14 @@ class MatchingService:
                 if identity(p) in failed_members:
                     p['matching_status'] = failed_members[identity(p)]
                 elif identity(p) in uncertain:
-                    p['matching_status'] = '低把握，待人工核对'
-                elif p['matching_status'] == '待判断':
-                    p['matching_status'] = '未召回候选，保持独立'
+                    p['matching_status'] = STATUS_LOW
+                elif p['matching_status'] == STATUS_PENDING:
+                    p['matching_status'] = STATUS_NO_CANDIDATE
                     conn.execute('INSERT OR IGNORE INTO evidence VALUES (?,?,?,?,?,?)',
                         (identity(p), version(p), p['product_name'], p['image_hash'], p['image_data'], p['origin']))
+            # 状态码在结果定稿后统一按文案推出（与读回老草稿同一个函数）。
+            for p in products:
+                p['matching_state'] = state_of_status(p['matching_status'])
             excluded = {frozenset(pair) for pair in excluded}
             positive -= excluded
             by_id = {identity(p): p for p in products}

@@ -152,8 +152,11 @@ class MatchingTests(unittest.TestCase):
             # Restore the real transport while keeping the environment fixture.
             from urllib.request import build_opener
             with patch('bestseller_monitor.matching.urlopen', side_effect=lambda request, timeout: build_opener(matching.NoModelRedirect()).open(request, timeout=timeout)):
-                with self.assertRaises(ModelFailure):
+                with self.assertRaises(ModelFailure) as ctx:
                     request_json(ModelConfig(endpoint=f'http://127.0.0.1:{server.server_port}/model'), [], 'test')
+            # 重定向文案要原样出来，还要被认成「需配置」（票 17）：通用失败文案不能把它顶掉。
+            self.assertIn('模型地址发生重定向', str(ctx.exception))
+            self.assertEqual(matching.state_of_status(str(ctx.exception)), matching.MATCH_NEEDS_CONFIG)
             self.assertEqual(hits, ['/model'])
         finally:
             server.shutdown()
@@ -276,21 +279,18 @@ class MatchingBrowserTests(unittest.TestCase):
             expect(self.page.locator('.group-choice')).to_have_count(3)
             expect(self.page.get_by_text('模型请求失败或响应格式无效，请检查后台配置后重试').first).to_be_visible()
             transport.fail_comparisons = False
-            self.page.get_by_role('button', name='重试模型匹配').click()
+            self.page.get_by_role('button', name='模型匹配同款').click()
             expect(self.page.locator('.group-choice')).to_have_count(2)
             expect(self.page.get_by_role('article').first).to_contain_text('陶瓷饮具')
             expect(self.page.get_by_role('article').first).to_contain_text('月牙杯')
             expect(self.page.get_by_role('button', name='匹配唯一同款')).to_have_count(0)
-            calls = len(transport.calls)
-            self.page.get_by_role('button', name='重试模型匹配').click()
-            expect(self.page.get_by_text('缓存', exact=True).first).to_be_visible()
-            self.assertEqual(len(transport.calls), calls)
+            # 判断都完成：控件置灰，界面上再没有第二次点击（重复请求不再发生，缓存复用见服务层用例）。
+            expect(self.page.get_by_role('button', name='模型匹配同款')).to_be_disabled()
             self.page.get_by_role('button', name='确认当前分组').first.click()
-            # 确认后的组离开「待确认」，到「已确认」页签核对它还在。
+            # 确认后的组离开「待确认」，到「已确认」页签核对它还在；控件仍置灰。
             self.switch_tab('已确认')
             expect(self.page.locator('.group-choice')).to_have_count(1)
-            self.page.get_by_role('button', name='重试模型匹配').click()
-            expect(self.page.locator('.group-choice')).to_have_count(1)
+            expect(self.page.get_by_role('button', name='模型匹配同款')).to_be_disabled()
             rid = self.conn.execute("SELECT MAX(round_id) FROM snapshots WHERE shop_key='A01'").fetchone()[0]
             calls = len(transport.calls)
             # Only the URL changes: same bytes and name reuse judgments in a new analysis.
