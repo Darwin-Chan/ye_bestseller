@@ -20,7 +20,8 @@ def edit_group(snapshot, action, group_id, member, target_id, matcher):
         if len(source['members']) == 1:
             raise ValueError('单商品组不能移除唯一商品')
         exclusions.update(frozenset((key, identity(m))) for m in source['members'] if m != member)
-        target = {'id': 'G'+uuid4().hex[:12], 'confirmed': False, 'members': [], 'sales': 0}
+        target = {'id': 'G'+uuid4().hex[:12], 'confirmed': False, 'members': [], 'sales': 0,
+                  'machine': ''}
         snapshot['groups'].append(target)
     else:
         raise ValueError('不支持的分组操作')

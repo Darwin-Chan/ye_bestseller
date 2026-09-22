@@ -42,7 +42,13 @@ _CONFLICT_DDL = f"""CREATE TABLE IF NOT EXISTS {CONFLICT_TABLE} (
     incoming TEXT NOT NULL,
     local_machines TEXT NOT NULL,
     local TEXT NOT NULL,
-    seen_at TEXT NOT NULL)"""
+    seen_at TEXT NOT NULL,
+    resolved_at TEXT NOT NULL DEFAULT '')"""
+
+# 冲突里「一侧说了什么」的三种形态（`_relation_content` 们铸、页面与周报照它渲染）。
+SIDE_RELATION = 'relation'
+SIDE_STANDALONE = 'standalone'
+SIDE_EXCLUSION = 'exclusion'
 
 # 账本三张表：关系按成员清单整行存（帶确认状态），独立确认与排除按主键逐行存。
 # 保存时整版覆盖：一次保存就是一个完整的人工决策版本。
@@ -59,7 +65,7 @@ _DECISION_TABLES = {
 }
 
 
-def _source_of(entry, default):
+def source_of(entry, default):
     """一行决定的来源机器：行上显式带了就用它（导入的行原样保留），没带就记本机。
 
     关系是带键的行（dict），独立确认与排除是按位置的行（list，第三位是来源）。
@@ -81,6 +87,9 @@ class Conflict:
     `recorded` 说这次收取有没有把它新记进冲突账：同一条冲突重复遇到（对方又发布了
     含它的新包）是 False——账不变，只是又核对了一遍。`local` 是列表：本机一侧可能
     由多行折成（多次收取叠出来的组）。
+
+    `resolved_at` 是人裁决过的时刻（票 07）：页面上用现有编辑动作裁决后、下一次保存
+    记下它；空串＝还没裁决。行照旧只增，裁决只标时刻。
     """
 
     digest: str
@@ -92,6 +101,7 @@ class Conflict:
     local: tuple[dict, ...]           # 本机一侧的决定内容（行上带各自的来源）
     seen_at: str
     recorded: bool = True
+    resolved_at: str = ''
 
 
 @dataclasses.dataclass(frozen=True)
@@ -122,7 +132,16 @@ class DraftStore:
             conn.execute(statement)
             self._add_machine_column(conn, table)
         conn.execute(_CONFLICT_DDL)
+        self._add_resolved_column(conn)
         return conn
+
+    def _add_resolved_column(self, conn):
+        """老库补上裁决时刻列（一次性，票 07）：补列前的冲突都没裁决过，空串即未裁决。"""
+        if 'resolved_at' in {row[1] for row in conn.execute(f'PRAGMA table_info({CONFLICT_TABLE})')}:
+            return
+        with conn:
+            conn.execute(f'ALTER TABLE {CONFLICT_TABLE}'
+                         " ADD COLUMN resolved_at TEXT NOT NULL DEFAULT ''")
 
     def _add_machine_column(self, conn, table):
         """老库补上来源机器列（一次性，票 02）：补列前的行只有本机能写，记本机编号。"""
@@ -132,7 +151,13 @@ class DraftStore:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN machine_id TEXT NOT NULL DEFAULT ''")
             conn.execute(f"UPDATE {table} SET machine_id=? WHERE machine_id=''", (self.machine,))
 
-    def write(self, analysis_id, start, end, saved_at, payload, ledger):
+    def write(self, analysis_id, start, end, saved_at, payload, ledger, *, resolved=()):
+        """保存一版草稿与账本；`resolved` 里是这次保存认定的、人已裁决过的冲突摘要。
+
+        裁决不属于账本（账本按现有编辑动作变化），但它跟保存一起生效：没保存就丢掉
+        的裁决不落账，保存下来的才写进冲突行的 `resolved_at`（票 07）。行只增，
+        这一步只标时刻。
+        """
         document = json.dumps(payload, ensure_ascii=False)
         conn = self._connect()
         try:
@@ -151,16 +176,18 @@ class DraftStore:
                                  ' VALUES(?,?,?,?)',
                     [(json.dumps([[member, member_version] for member, member_version in relation['members']],
                                  ensure_ascii=False), relation['confirmed'], saved_at,
-                      _source_of(relation, self.machine))
+                      source_of(relation, self.machine))
                      for relation in ledger['relations']])
                 conn.executemany('INSERT INTO manual_standalone(identity,version,saved_at,machine_id)'
                                  ' VALUES(?,?,?,?)',
-                    [(entry[0], entry[1], saved_at, _source_of(entry, self.machine))
+                    [(entry[0], entry[1], saved_at, source_of(entry, self.machine))
                      for entry in ledger['standalone']])
                 conn.executemany('INSERT INTO manual_exclusions(pair_a,pair_b,saved_at,machine_id)'
                                  ' VALUES(?,?,?,?)',
-                    [(pair[0], pair[1], saved_at, _source_of(pair, self.machine))
+                    [(pair[0], pair[1], saved_at, source_of(pair, self.machine))
                      for pair in ledger['excluded']])
+                conn.executemany(f'UPDATE {CONFLICT_TABLE} SET resolved_at=? WHERE digest=?',
+                                 [(saved_at, digest) for digest in resolved])
         finally:
             conn.close()
 
@@ -218,10 +245,11 @@ class DraftStore:
         return MergeResult(adopted=merge.adopted, conflicts=tuple(merge.conflicts))
 
     def conflicts(self):
-        """本机的冲突账（票 04）：只增不自动消解，页面上的裁决不删它（裁决改的是账本）。
+        """本机的冲突账（票 04）：只增不自动消解——页面上的裁决不删它（裁决改的是账本）。
 
         按记下的先后返回；形状与并入结果里的 `Conflict` 一致（`recorded` 恒为真——
-        记下来的都已经在账上）。
+        记下来的都已经在账上）。人裁决过的带 `resolved_at`（票 07）：页面按它把
+        已裁决的冲突从展示里摘掉，行本身照旧留着作历史。
         """
         if not self.path.exists():
             return []
@@ -229,13 +257,13 @@ class DraftStore:
         try:
             rows = conn.execute(
                 f'SELECT digest,kind,members,incoming_machine,incoming,'
-                f'local_machines,local,seen_at FROM {CONFLICT_TABLE} ORDER BY rowid').fetchall()
+                f'local_machines,local,seen_at,resolved_at FROM {CONFLICT_TABLE} ORDER BY rowid').fetchall()
         finally:
             conn.close()
         return [Conflict(digest=row[0], kind=row[1], members=tuple(json.loads(row[2])),
                          incoming_machine=row[3], incoming=json.loads(row[4]),
                          local_machines=tuple(json.loads(row[5])),
-                         local=tuple(json.loads(row[6])), seen_at=row[7])
+                         local=tuple(json.loads(row[6])), seen_at=row[7], resolved_at=row[8])
                 for row in rows]
 
     def latest(self):
@@ -316,18 +344,18 @@ class _Clash:
 # 冲突账里的「内容」：一侧说了什么——成员（带版本）、来源机器；关系多一个确认与否，
 # 排除对没有版本（排除本来就只按身份）。两侧同一形状，页面与周报都照它渲染。
 def _relation_content(members, confirmed, machine):
-    return {'kind': 'relation', 'confirmed': bool(confirmed),
+    return {'kind': SIDE_RELATION, 'confirmed': bool(confirmed),
             'members': [[member, member_version] for member, member_version in members],
             'machine': machine or ''}
 
 
 def _standalone_content(entry):
-    return {'kind': 'standalone', 'members': [[entry[0], entry[1]]],
+    return {'kind': SIDE_STANDALONE, 'members': [[entry[0], entry[1]]],
             'machine': entry[2] if len(entry) > 2 else ''}
 
 
 def _exclusion_content(pair):
-    return {'kind': 'exclusion', 'members': [[pair[0], None], [pair[1], None]],
+    return {'kind': SIDE_EXCLUSION, 'members': [[pair[0], None], [pair[1], None]],
             'machine': pair[2] if len(pair) > 2 else ''}
 
 
@@ -442,7 +470,7 @@ class _LedgerMerge:
     def relation(self, row):
         """一条外来关系：同一条跳过、相对记冲突、同一台机器的旧话让位、其余原样并入。"""
         members = [(member, member_version) for member, member_version in row['members']]
-        source = _source_of(row, self.source)
+        source = source_of(row, self.source)
         content = _relation_content(members, True, source)
         if any(_same_members(other['members'], members)
                for other in self.local['relations'] if other['confirmed']):
@@ -472,13 +500,13 @@ class _LedgerMerge:
     def standalone(self, entry):
         """一条外来单独成组：同一条跳过；同一台机器的旧话让位；相对记冲突；其余并入。"""
         member, member_version = entry[0], entry[1]
-        source = _source_of(entry, self.source)
+        source = source_of(entry, self.source)
         content = _standalone_content([member, member_version, source])
         known = self.local['standalone_by_id'].get(member)
         if known is not None:
             if known[1] == member_version:
                 return                                  # 同一条：成员与版本都对上
-            if _source_of(known, '') == source:
+            if source_of(known, '') == source:
                 self._retire([('standalone', known)])   # 同一台机器把版本更新了
             else:
                 self._conflict(CONFLICT_DIFFERENT_GROUPS, content,
@@ -496,7 +524,7 @@ class _LedgerMerge:
     def exclusion(self, pair):
         """一条外来排除对：本机排除过同一对就跳过；两端在本机同一个组里才可能相对。"""
         left, right = pair[0], pair[1]
-        source = _source_of(pair, self.source)
+        source = source_of(pair, self.source)
         if frozenset((left, right)) in self.local['exclusion_pairs']:
             return
         if self.groups.same_group(left, right):
@@ -527,7 +555,7 @@ class _LedgerMerge:
                 entry = self.local['standalone_by_id'].get(member)
                 if entry is None:
                     continue
-                rows, group_ids, machines = [entry], {member}, {_source_of(entry, '')}
+                rows, group_ids, machines = [entry], {member}, {source_of(entry, '')}
             else:
                 rows, group_ids, machines = group
             key = frozenset(group_ids)
@@ -550,7 +578,7 @@ class _LedgerMerge:
                 continue                    # 本机账本自己就矛盾的一对：不算在这条关系头上
             if not self.groups.joined_by(members, pair[0], pair[1]):
                 continue
-            if _source_of(pair, '') == source:
+            if source_of(pair, '') == source:
                 superseded.append(('exclusion', [pair[0], pair[1]]))
             else:
                 opponents.append(_exclusion_content(pair))

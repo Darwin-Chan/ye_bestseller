@@ -31,6 +31,18 @@ def identity(product):
     return json.dumps([product['shop_key'], product['offer_id']], ensure_ascii=False)
 
 
+def offer_of(member: str) -> str:
+    """账本身份串里的商品编号（提示文案用）：缺名字可看的商品按它交代。
+
+    身份的形状只有 identity() 一处铸（这里只解自己铸的），解不出来就原样奉还——
+    文案不因一条坏身份而炸。
+    """
+    try:
+        return json.loads(member)[1]
+    except (ValueError, IndexError, TypeError):
+        return member
+
+
 def version(product):
     return digest([product.get('product_name'), product.get('image_hash')])
 
@@ -220,8 +232,8 @@ def _usage_summary(usage, products, eligible, pairs, cached, errors, reason=''):
     这样「召回 = 本机命中 + 新判 + 失败」逐项加得起来。低于判断下限（`matching.min_score`）
     挡下的对仍计进召回、但不判，也不在上面三项里——挡下的对数由 `_suggest` 另起一行注明。
     """
-    hits = sum(1 for _, source in cached.values() if source == STATUS_CACHE)
-    judged = sum(1 for _, source in cached.values() if source == STATUS_MODEL)
+    hits = sum(1 for _, source, _ in cached.values() if source == STATUS_CACHE)
+    judged = sum(1 for _, source, _ in cached.values() if source == STATUS_MODEL)
     failed = {member for members, pair in pairs.items() if pair in errors for member in members}
     if usage.calls and usage.without_usage == usage.calls:
         tokens = '输入 - 输出 - tok'
@@ -614,6 +626,7 @@ class MatchingService:
                 p['origin'] = next((r[1] for r in known if r[0] == version(p)),
                                    ORIGIN_CHANGED if known else ORIGIN_NEW)
                 p['matching_status'] = STATUS_MISSING if not p.get('information_complete') else STATUS_PENDING
+                p['matching_source'] = ''          # 这条结论来自哪台机器（票 07）：判出来再定
                 if p.get('information_complete'):
                     eligible.append(p)
             cached, todo, errors = {}, {}, {}
@@ -627,10 +640,11 @@ class MatchingService:
                 pair = digest(sorted([version(a), version(b)]))
                 pair_members[(identity(a), identity(b))] = pair
                 # 命中只认本机署名的判断：只有异署名行等于未命中，本机照常调用模型。
-                row = conn.execute('SELECT result FROM judgments WHERE pair=? AND signature=?',
+                # 来源机器随行读出来：页面上要说「这条缓存来自哪台机器」（票 07）。
+                row = conn.execute('SELECT result, machine_id FROM judgments WHERE pair=? AND signature=?',
                                    (pair, local)).fetchone()
                 if row:
-                    cached[pair] = (json.loads(row[0]), STATUS_CACHE)
+                    cached[pair] = (json.loads(row[0]), STATUS_CACHE, row[1])
                 elif score < floor:
                     # 下限只管花不花钱：已判过的对照旧命中缓存（ADR-0040 决策 3），挡下的只有没判过的。
                     blocked.add(pair)
@@ -675,7 +689,7 @@ class MatchingService:
                         errors[pair] = error
                         continue
                     store_judgment(pair, a, b, result)
-                    cached[pair] = (result, STATUS_MODEL)
+                    cached[pair] = (result, STATUS_MODEL, self.machine_id)
                     pending += 1
                     committed += 1
                     if pending >= JUDGMENT_COMMIT_BATCH:
@@ -697,7 +711,7 @@ class MatchingService:
             for (a, b), pair in pair_members.items():
                 if pair not in cached:
                     continue
-                result, source = cached[pair]
+                result, source, judged_by = cached[pair]
                 if result['same'] and result['confidence'] >= .8:
                     positive.add(frozenset((a, b)))
                 if result['confidence'] < .8:
@@ -706,12 +720,14 @@ class MatchingService:
                     p = eligible_by_id[member]
                     if p:
                         p['matching_status'] = STATUS_LOW if result['confidence'] < .8 else source
+                        p['matching_source'] = judged_by
                         conn.execute('INSERT OR IGNORE INTO evidence VALUES (?,?,?,?,?,?)',
                             (identity(p), version(p), p['product_name'], p['image_hash'], p['image_data'], p['origin']))
             failed_members = {member: errors[pair] for members, pair in pair_members.items() if pair in errors for member in members}
             for p in eligible:
                 if identity(p) in failed_members:
                     p['matching_status'] = failed_members[identity(p)]
+                    p['matching_source'] = ''       # 判断没完成：来源跟着作废
                 elif identity(p) in uncertain:
                     p['matching_status'] = STATUS_LOW
                 elif p['matching_status'] == STATUS_PENDING:
@@ -752,7 +768,7 @@ class MatchingService:
                 if target is None:
                     while 'M'+str(serial) in used_ids:
                         serial += 1
-                    target = {'id': 'M'+str(serial), 'confirmed': False, 'members': []}
+                    target = {'id': 'M'+str(serial), 'confirmed': False, 'members': [], 'machine': ''}
                     serial += 1
                     output.append(target)
                     order[id(target)] = len(order)

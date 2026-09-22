@@ -13,11 +13,12 @@ from pathlib import Path
 from uuid import uuid4
 
 from . import crawler_identity
-from .analysis_store import DraftStore
+from .analysis_store import DraftStore, SIDE_EXCLUSION, SIDE_STANDALONE, source_of
 from .config import machine_id_of
 from .db import utcnow
 from .matching import (MATCH_DISABLED, MatchingConfig, MatchingService, ModelConfig, ORIGIN_CHANGED,
-                       STATUS_DISABLED, identity, matching_summary, state_of_status, summarize_group, version)
+                       STATUS_DISABLED, identity, matching_summary, offer_of, state_of_status,
+                       summarize_group, version)
 from .report import report_name, write_report
 
 DEFAULT_DRAFT_FILE = "analysis-drafts.sqlite"
@@ -119,7 +120,8 @@ class AnalysisService:
             conn.close()
 
     def settings(self):
-        return {"full_capture_weekday": self.config.full_capture_weekday}
+        return {"full_capture_weekday": self.config.full_capture_weekday,
+                "machine": self.config.machine}
 
     def coverage(self, day):
         date.fromisoformat(day)
@@ -206,6 +208,7 @@ class AnalysisService:
             self._match(snapshot)
             mark_information_changes(snapshot, recorded_versions(decisions))
             rank_groups(snapshot)
+            self._apply_conflicts(snapshot)
             self._snapshots[snapshot["id"]] = snapshot
         return copy.deepcopy(snapshot)
 
@@ -216,7 +219,8 @@ class AnalysisService:
         else:
             for p in snapshot['products']:
                 p.update(origin='新商品', match_label='暂无匹配同款', candidate_groups=[],
-                         matching_status=STATUS_DISABLED, matching_state=MATCH_DISABLED)
+                         matching_status=STATUS_DISABLED, matching_state=MATCH_DISABLED,
+                         matching_source='')
         snapshot['matching'] = matching_summary(snapshot['products'])
 
     def retry_matching(self, analysis_id):
@@ -232,6 +236,7 @@ class AnalysisService:
                 if identity(p) in marked:
                     p['origin'] = ORIGIN_CHANGED
             rank_groups(snapshot)
+            attach_conflicts(snapshot)
             self._snapshots[analysis_id] = snapshot
             return copy.deepcopy(snapshot)
 
@@ -252,7 +257,47 @@ class AnalysisService:
         snapshot = self._rehydrate(stored.payload)
         snapshot['dirty'] = False
         snapshot['saved_at'] = stored.saved_at
+        # 冲突不在草稿正文里（那是每次现读账的最新事实）：重开这一刻重挂一次，
+        # 保存之后又收进来的冲突因此照样看得到（票 07）。
+        self._apply_conflicts(snapshot)
         return snapshot
+
+    def _apply_conflicts(self, snapshot):
+        """把账上还没裁决的冲突折进这份快照（票 07）。
+
+        只带成员在本次分析里露过面的那些：一个都不在场说明这次区间管不着它，
+        留着等覆盖到它们的那次分析。裁决过（`resolved_at` 非空）的不再出现——
+        行还在账上，页面不再拦人。
+        """
+        present = {identity(p) for p in snapshot['products']}
+        names = {identity(p): (p.get('product_name') or p['offer_id']) for p in snapshot['products']}
+        entries = []
+        for conflict in self.store.conflicts():
+            if conflict.resolved_at:
+                continue
+            if not (set(conflict.members) & present):
+                continue
+            entries.append({'digest': conflict.digest, 'kind': conflict.kind,
+                            'members': list(conflict.members),
+                            'note': conflict_note(conflict, names, self.config.machine),
+                            'resolved': False})
+        snapshot['conflicts'] = entries
+        attach_conflicts(snapshot)
+
+    def _resolve_conflicts(self, snapshot, members):
+        """人在页面上动了这些商品：牵涉其中、还没裁决的冲突就此消解（票 07）。
+
+        消解是本次分析内与保存时的事：账本身不动（冲突行只增），保存时把裁决时刻
+        写进冲突行。裁决是人的动作，这里不判对错——重复点「确认」也算数。
+        """
+        resolved = False
+        for entry in snapshot.get('conflicts', []):
+            if not entry['resolved'] and set(entry['members']) & members:
+                entry['resolved'] = True
+                resolved = True
+        if resolved:
+            snapshot['dirty'] = True
+        attach_conflicts(snapshot)
 
     def draft(self):
         """最近一次成功保存的草稿摘要，供「继续上次分析」入口显示。"""
@@ -273,14 +318,17 @@ class AnalysisService:
             snapshot = self._snapshots.get(analysis_id)
             if snapshot is None:
                 raise ValueError('分析已不存在，请重新选择日期')
-            if require_confirmed and any(not group['confirmed'] for group in snapshot['groups']):
+            if require_confirmed and pending_groups(snapshot):
                 raise ValueError('还有待确认的同款组，请先完成确认')
             saved_at = utcnow()
             # 先落盘再改内存：写失败时本次修改仍留在页面，并保持未保存标记。
-            # 草稿版本与决策账本同一次事务提交，页面此刻的确认/排除即全局最新。
+            # 草稿版本与决策账本同一次事务提交，页面此刻的确认/排除即全局最新；
+            # 冲突的裁决（resolved_at）也跟这一次保存一起生效（票 07）。
+            resolved = [entry['digest'] for entry in snapshot['conflicts'] if entry['resolved']]
             self.store.write(analysis_id, snapshot['start'], snapshot['end'], saved_at,
                              self._draft_payload(snapshot, saved_at),
-                             merge_decisions(snapshot, self.store.ledger(), self.config.machine))
+                             merge_decisions(snapshot, self.store.ledger(), self.config.machine),
+                             resolved=resolved)
             snapshot['dirty'] = False
             snapshot['saved_at'] = saved_at
             return copy.deepcopy(snapshot)
@@ -298,11 +346,15 @@ class AnalysisService:
     def _draft_payload(self, snapshot, saved_at):
         """落盘的是这次保存后的完整版本：不带未保存标记，时间是本次保存时间。
 
-        图片不进草稿正文：只存内容哈希，读回时从持久图片资产取内容。
+        图片不进草稿正文：只存内容哈希，读回时从持久图片资产取内容。冲突与组上的
+        冲突说明也不进：那是账上现读的事实，读回时按那一刻重新挂（票 07）。
         """
         payload = copy.deepcopy(snapshot)
         payload['dirty'] = False
         payload['saved_at'] = saved_at
+        payload['conflicts'] = []
+        for group in payload['groups']:
+            group['conflicts'] = []
         for product in payload['products']:
             product['image_data'] = None
         return payload
@@ -329,6 +381,7 @@ class AnalysisService:
         for product in payload['products']:
             if not product.get('matching_state'):
                 product['matching_state'] = state_of_status(product.get('matching_status'))
+            product.setdefault('matching_source', '')   # 票 07 之前的草稿没有来源列
         payload['matching'] = matching_summary(payload['products'])
         return payload
 
@@ -361,6 +414,10 @@ class AnalysisService:
                     # A withdrawn human decision must survive model retries.
                     group['adjusted'] = True
                     snapshot['dirty'] = True
+            # 人动了这些组：牵涉其中的冲突就此算裁决过（票 07）。重复点「确认」这类
+            # 状态不动的动作也算——它表达的正是「就按本机的决定办」。
+            self._resolve_conflicts(
+                snapshot, {identity(m) for group in groups for m in group['members']})
             return copy.deepcopy(snapshot)
 
     def source(self, offer_id):
@@ -398,7 +455,7 @@ class AnalysisService:
                 raise ValueError("分析已不存在，请重新选择日期")
             if snapshot.get('dirty'):
                 raise ValueError('当前分析有未保存的修改，请先保存再导出')
-            if any(not group['confirmed'] for group in snapshot['groups']):
+            if pending_groups(snapshot):
                 raise ValueError('还有待确认的同款组，请先完成确认')
             start, end = snapshot['start'], snapshot['end']
         # 写盘放在锁外：导出只读快照，重名冲突由写入端的序号兜底。
@@ -412,7 +469,15 @@ class AnalysisService:
             if analysis_id not in self._snapshots:
                 raise ValueError('分析已不存在')
             snapshot = copy.deepcopy(self._snapshots[analysis_id])
+            moved = identity(member)
             edit_group(snapshot, action, group_id, member, target_id, self.matcher)
+            # 人挪了这个商品：它落进/离开的组上的冲突也算裁决过（票 07）；
+            # 说明跟着成员重挂，没被动的冲突照旧。
+            touched = {moved} | {identity(m) for group in snapshot['groups']
+                                 if group['id'] in (group_id, target_id)
+                                 or any(identity(m2) == moved for m2 in group['members'])
+                                 for m in group['members']}
+            self._resolve_conflicts(snapshot, touched)
             rank_groups(snapshot)
             self._snapshots[analysis_id] = snapshot
             return copy.deepcopy(snapshot)
@@ -559,12 +624,77 @@ def recorded_versions(decisions: dict) -> dict:
     return recorded
 
 
+# ---- 冲突落到分析页面上（票 07）：落回待确认、说明与两侧来源、裁决消解 ----
+
+
+def pending_groups(snapshot: dict) -> list[dict]:
+    """还没定下来的组：没确认的，或身上挂着未裁决冲突的（票 07）。
+
+    冲突组按待确认算（页面上的页签、计数与保存门都用这一条）——「回到人面前」。
+    """
+    return [group for group in snapshot['groups']
+            if not group['confirmed'] or group['conflicts']]
+
+
+def attach_conflicts(snapshot: dict) -> None:
+    """把没裁决的冲突挂到相关的组上：组上的 `conflicts` 就是页面要显示的那些说明。
+
+    冲突牵涉的商品在哪几个组里，说明就挂在哪几个组上（缺席的成员没有组，说明里
+    照旧点名）。组或冲突状态一变就重挂一次，说明因此跟着成员走。
+    """
+    by_member = {}
+    for group in snapshot['groups']:
+        for member in group['members']:
+            by_member.setdefault(identity(member), []).append(group)
+    attached = {}
+    for entry in snapshot.get('conflicts', []):
+        if entry['resolved']:
+            continue
+        for member in entry['members']:
+            for group in by_member.get(member, ()):
+                notes = attached.setdefault(group['id'], [])
+                if entry['note'] not in notes:
+                    notes.append(entry['note'])
+    for group in snapshot['groups']:
+        group['conflicts'] = attached.get(group['id'], [])
+
+
+def _display_name(member: str, names: dict) -> str:
+    """说明里对商品的称呼：在场的有名字用名字，缺席的退回商品号。"""
+    return names.get(member) or offer_of(member)
+
+
+def _side_phrase(content: dict, names: dict, machine: str) -> str:
+    """冲突一方的说法：谁（来源机器）说了什么（内容），人话一句。"""
+    who = '本机' if content.get('machine') == machine else (content.get('machine') or '未知机器')
+    listed = [_display_name(member, names) for member, _ in content['members']]
+    shown = '、'.join(listed[:3]) + (f' 等 {len(listed)} 个商品' if len(listed) > 3 else '')
+    if content['kind'] == SIDE_EXCLUSION:
+        return f'{who} 把 {shown} 排除在外（不成组）'
+    if content['kind'] == SIDE_STANDALONE:
+        return f'{who} 认为 {shown} 单独成组'
+    if not content.get('confirmed'):
+        return f'{who} 撤回过「{shown} 是一组」'
+    return f'{who} 认为 {shown} 是一组'
+
+
+def conflict_note(conflict, names: dict, machine: str) -> str:
+    """一条冲突的人话（票 07）：外来一侧先说，本机一侧跟上，两侧来源都在句子里。"""
+    sides = [_side_phrase(conflict.incoming, names, machine)]
+    sides += [_side_phrase(content, names, machine) for content in conflict.local]
+    return '冲突：' + '；'.join(sides) + '。请人工裁决。'
+
+
 def reuse_decisions(snapshot: dict, decisions: dict) -> None:
     """把账本里已保存的人工分组按证据版本套到新分析的成员上（票 09）。
 
     确认过的关系套回已确认组；撤回过的关系保留成员与成组次序、但不自动确认，
     也不让模型重排；版本变化与未参与的商品留在待确认由人工处理。排除关系按
     商品身份生效，只有两端都在本次分析里才加载。
+
+    组上带来源机器（票 07）：折进这个组的关系（或独立确认）里先遇到的那条说了算
+    ——页面要说「这组决定由谁确认」。写回（`merge_decisions`）对关系沿用同一条
+    「先折进来的那条留来源」的口径；这里只是把同一份来源提前读给页面看。
     """
     products = snapshot['products']
     current = product_versions(products)
@@ -577,6 +707,7 @@ def reuse_decisions(snapshot: dict, decisions: dict) -> None:
             member = roots[kind][member]
         return member
 
+    anchors = []                     # (kind, 首名成员, 来源机器)：等根定下来再归组
     for relation in decisions['relations']:
         intact = [member for member, member_version in relation['members']
                   if current.get(member) == member_version]
@@ -584,14 +715,21 @@ def reuse_decisions(snapshot: dict, decisions: dict) -> None:
         for member in intact[1:]:
             roots[kind][find(kind, intact[0])] = find(kind, member)
         (confirmed if relation['confirmed'] else pinned).update(intact)
+        if intact:
+            anchors.append((kind, intact[0], source_of(relation, '')))
     for entry in decisions['standalone']:
         if current.get(entry[0]) == entry[1]:
             confirmed.add(entry[0])
+            anchors.append(('confirmed', entry[0], source_of(entry, '')))
+    machines = {}
+    for kind, anchor, machine_id in anchors:
+        machines.setdefault((kind, find(kind, anchor)), machine_id)
     groups = []
     clusters = {}
 
-    def open_group(is_confirmed, adjusted=False):
-        group = {'id': f'G{len(groups) + 1}', 'confirmed': is_confirmed, 'members': []}
+    def open_group(is_confirmed, adjusted=False, machine=''):
+        group = {'id': f'G{len(groups) + 1}', 'confirmed': is_confirmed, 'members': [],
+                 'machine': machine}
         if adjusted:
             group['adjusted'] = True
         groups.append(group)
@@ -600,7 +738,8 @@ def reuse_decisions(snapshot: dict, decisions: dict) -> None:
     def group_for(kind, member):
         key = (kind, find(kind, member))
         if key not in clusters:
-            clusters[key] = open_group(kind == 'confirmed', adjusted=kind == 'pending')
+            clusters[key] = open_group(kind == 'confirmed', adjusted=kind == 'pending',
+                                       machine=machines.get(key, ''))
         return clusters[key]
 
     for p in products:
@@ -643,15 +782,15 @@ def merge_decisions(snapshot: dict, decisions: dict, machine: str) -> dict:
     present = product_versions(snapshot['products'])
     group_of = {identity(m): g for g in snapshot['groups'] for m in g['members']}
     clusters = {}
-    # 确认组本身不记来源（快照的组没有来源列）：来源从「折进这个组的关系」上找回；
-    # 多条关系折进同一个组时保留先遇到的那条——组的多来源呈现归票 04／07。
+    # 组的来源写回取自「折进这个组的关系」；多条关系折进同一个组时保留先遇到的那条
+    # ——与 `reuse_decisions` 给页面读的来源是同一份口径（票 07：组上的「由谁确认」）。
     cluster_sources = {}
     for group in snapshot['groups']:
         if group['confirmed']:
             clusters[group['id']] = {identity(m): present[identity(m)] for m in group['members']}
     relations = []
     for relation in decisions['relations']:
-        source = relation.get('machine_id') or machine
+        source = source_of(relation, machine)
         # 证据版本变了的在场成员不再适用于旧关系；缺席成员带旧版本原样保留。
         kept = [(member, present[member] if member in present else member_version)
                 for member, member_version in relation['members']
