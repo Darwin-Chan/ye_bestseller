@@ -170,14 +170,15 @@ python tools/release_shells.py
 `发布说明.txt`（放置与校验步骤）；接受方把三只 exe 放进 `<项目根>\dist\` 即可。
 程序改了**不需要**重发，只有壳正文（`shells/`）改了才要重出包。
 
-## 多机分片采集（机制按实现票落地中）
+## 多机分片采集
 
 三台采集机各自采集，通过**交换区**（git 私有库 + 对象存储图片）互递数据、各自汇总；
 通道选型与容量测算见 [docs/research/三机汇总通道调研.md](docs/research/三机汇总通道调研.md)。
 
 - **周计划**：打开程序时（命令行则开跑前）采集程序自动 pull `plan` 库 → 同步店铺清单 →
   确认（不存在就生成并发布）本周计划——各店归哪台机器、各给多少页；开始页默认勾选本机份额，
-  人核对用 `plan` 库里的 `plan/<年>-W<周>.md`。生成算法与发布步骤在实现票落地中。
+  人核对用 `plan` 库里的 `plan/<年>-W<周>.md`。生成算法在 `bestseller_monitor/weekly_plan.py`、
+  确认与发布步骤在 `bestseller_monitor/plan_step.py`。
 - **库存数据交换**（脚本 `exchange.py`，窗口标题用中文全名；双击入口 `dist\inventory_exchange.exe`，
   见「打包与运行形态」）：手工触发一次运行——检查 → 导出本机
   周包 → 拉取别人的包 → 汇总进本机库 → 写本机视角周报（`<交换区根>/报告/<年>-W<周>.md`，
@@ -187,10 +188,12 @@ python tools/release_shells.py
   同一台机器同一时刻至多一次交换台运行（窗口与命令行同规：窗口开着时命令行会被拒绝）。
 - **凭据**：每台机器自己的 SSH key 与 COS AK；纯汇总机只持只读档（push / 上传被拒即预期）。
   密钥都放仓库外，`config.toml` 只记档位。
-- 上机步骤（m1 增量、m2/m3 接入、纯汇总机、三机验收）见
+- 上机步骤（本机 m4 的现状与待办、采集机 m1/m2/m3 接入、纯汇总机、三机验收）见
   [docs/ops/三机上机清单.md](docs/ops/三机上机清单.md)——四段都可执行（含演练取证与判据；验收
-  核对用 `python tools/acceptance_check.py`）；机器本地全文在
-  `.scratch/multi-machine-collection/spec.md` §12。
+  核对用 `python tools/acceptance_check.py`）；逐屏带做的上机向导是 `bash tools/setup_wizard.sh`
+  （Windows 双击 `tools\setup_wizard.cmd`；本机 m4 的上机与将来转角色另见
+  [docs/ops/m4过渡期操作单.md](docs/ops/m4过渡期操作单.md)）；机制全文在
+  `.scratch/multi-machine-collection/spec.md` §12（机器本地文档）。
 
 ## 校准说明
 

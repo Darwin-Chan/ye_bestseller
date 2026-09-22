@@ -692,8 +692,8 @@ def export(cfg, *, week: str | None = None, store: ImageStore | None = None) -> 
                   package_size=len(built.package_gz))
     if not (raw_dir / ".git").exists():
         return ExportResult(**result, published=False, unchanged=False, failure=(
-            f"raw 库还没 clone 到 {raw_dir}：按上机清单第 9 步 clone 四个交换库，"
-            f"包已经在 {outbox} 里打好，clone 好重跑即可发布。"))
+            f"raw 库还没 clone 到 {raw_dir}：按上机清单第 9 步 clone 本机那条 raw 库"
+            f"（与 plan 库），包已经在 {outbox} 里打好，clone 好重跑即可发布。"))
 
     channel = GitChannel(raw_dir)
     try:

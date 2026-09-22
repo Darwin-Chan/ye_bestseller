@@ -202,8 +202,8 @@ def check_environment(cfg, *, db: Database, week: str, now: dt.datetime,
     if not root.is_dir():
         return CheckResult(fatal=(
             f"交换区根目录不存在：{root}\n"
-            "照上机清单第 4/9 步建好运行根与四个交换库的克隆（raw-m1、raw-m2、raw-m3、plan），"
-            "再跑交换台。"), notes=(), crawled=())
+            "照上机清单第 4/9 步建好运行根与交换库的克隆（本机那条 raw 库 + plan；"
+            "名册里别家的等它们入册再 clone），再跑交换台。"), notes=(), crawled=())
 
     notes: list[str] = []
     repos = {path.name for path in root.glob("raw-*") if path.is_dir()}
@@ -248,7 +248,8 @@ def _self_crawled_days(db: Database, week: str, machine_id: str,
 
 
 def _pull_others(cfg, machine_id: str, say) -> tuple[PullNote, ...]:
-    """对另外的每个交换库 pull：别的 raw 库 + `plan` 库（spec §7「对另外三个库 pull」）。
+    """对另外的每个交换库 pull：别的 raw 库 + `plan` 库（spec §7 原文「对另外三个库 pull」——
+    成稿于四库时代；五库时代即名册里别家的每条 raw 库 + `plan`）。
 
     plan 库跟着拉是纯汇总机那条线的要紧事：它不跑采集准备串，不拉就永远停在 clone
     时那份；采集机上重复拉一次无害（同内容是个空动作）。没 clone 的目录跳过——那是
