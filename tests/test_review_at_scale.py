@@ -15,6 +15,7 @@ class ReviewAtScaleTests(unittest.TestCase):
     submit = fixture.GroupEditingTests.submit
     dates = fixture.GroupEditingTests.dates
     seed = fixture.GroupEditingTests.seed
+    switch_tab = fixture.GroupEditingTests.switch_tab
     model = fixture.GroupEditingTests.model
     group_for = staticmethod(fixture.GroupEditingTests.group_for)
 
@@ -51,13 +52,13 @@ class ReviewAtScaleTests(unittest.TestCase):
         expect(dialog.locator('p').nth(0)).to_have_text('将确认3个同款分组，包含3个商品。')
         expect(dialog.locator('p').nth(1)).to_have_text('其中不含匹配到多组的商品')
         dialog.get_by_role('button', name='确认', exact=True).click()
-        expect(self.page.locator('#snapshotInfo')).to_contain_text('4商品 4组同款（其中0待确认）')
+        expect(self.page.locator('#snapshotInfo')).to_contain_text('4 个商品 · 4 组同款（其中 0 组待确认）')
         expect(self.page.locator('#dirtyStatus')).to_have_text('未保存')
         expect(self.page.get_by_role('button', name='确认当前筛选全部组')).to_be_disabled()
-        self.page.get_by_role('tab', name='已确认', exact=True).click()
+        self.switch_tab('已确认')
         self.page.get_by_role('button', name='撤回当前分组').click()
         expect(self.page.locator('.group-choice')).to_have_count(3)
-        self.page.get_by_role('tab', name='待确认', exact=True).click()
+        self.switch_tab('待确认')
         expect(self.page.locator('.group-choice')).to_have_count(1)
         expect(self.page.locator('#groupDetail h3')).to_have_text('G1 · 1 个商品')
         self.page.get_by_role('button', name='确认当前分组', exact=True).click()
@@ -102,7 +103,7 @@ class ReviewAtScaleTests(unittest.TestCase):
         expect(dialog).not_to_be_visible()
         after = self.service.get(sid)
         self.assertEqual([g['members'] for g in after['groups']], [g['members'] for g in before['groups']])
-        self.page.get_by_role('tab', name='已确认', exact=True).click()
+        self.switch_tab('已确认')
         self.page.get_by_role('button', name='撤回当前分组').click()
         expect(self.page.locator('.group-choice')).to_have_count(0)
         withdrawn = self.service.get(sid)
@@ -126,7 +127,7 @@ class ReviewAtScaleTests(unittest.TestCase):
                 collected_at='2026-09-14T04:00:00+00:00', attempt=1)
         self.dates()
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
-        expect(self.page.locator('#snapshotInfo')).to_contain_text('3012商品 3012组同款（其中3012待确认）', timeout=20000)
+        expect(self.page.locator('#snapshotInfo')).to_contain_text('3012 个商品 · 3012 组同款（其中 3012 组待确认）', timeout=20000)
         expect(self.page.locator('.group-choice')).to_have_count(20)
         for index in (1, 2):
             choice = self.page.locator('.group-choice').nth(index)
@@ -153,7 +154,7 @@ class ReviewAtScaleTests(unittest.TestCase):
         self.page.get_by_label('商品来源', exact=True).select_option('新商品')
         expect(self.page.locator('#selectionCount')).to_have_text('已勾选 0 组')
         self.page.get_by_role('checkbox').first.check()
-        self.page.get_by_role('tab', name='待确认', exact=True).click()
+        self.switch_tab('待确认')
         expect(self.page.locator('#selectionCount')).to_have_text('已勾选 0 组')
         self.page.get_by_label('搜索分组商品', exact=True).fill('')
         self.page.get_by_role('button', name='确认当前筛选全部组').click()
@@ -162,12 +163,12 @@ class ReviewAtScaleTests(unittest.TestCase):
         self.page.screenshot(path='.scratch/work/ticket07-scale.png')
         dialog.get_by_role('button', name='确认', exact=True).click()
         expect(dialog).not_to_be_visible(timeout=30000)
-        expect(self.page.locator('#snapshotInfo')).to_contain_text('其中0待确认')
+        expect(self.page.locator('#snapshotInfo')).to_contain_text('其中 0 组待确认')
         expect(self.page.locator('#groupDetail')).to_contain_text('暂无符合条件的分组')
         sid = self.page.url.split('analysis=')[1]
         result = self.service.get(sid)
         self.assertEqual(sum(g['confirmed'] for g in result['groups']), 3012)
-        self.page.get_by_role('tab', name='已确认', exact=True).click()
+        self.switch_tab('已确认')
         expect(self.page.locator('.group-choice')).to_have_count(20)
         self.page.get_by_role('button', name='撤回当前分组').click()
-        expect(self.page.locator('#snapshotInfo')).to_contain_text('其中1待确认')
+        expect(self.page.locator('#snapshotInfo')).to_contain_text('其中 1 组待确认')

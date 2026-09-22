@@ -4,6 +4,7 @@
 导出后停服务、断网打开生成的文件，核对 A44—A45。
 """
 import dataclasses
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -150,6 +151,7 @@ class OfflineReportBrowserTests(unittest.TestCase):
     seed_product = ranking.RankingBrowserTests.seed_product
     start_review = ranking.RankingBrowserTests.start_review
     save_and_show_results = ranking.RankingBrowserTests.save_and_show_results
+    switch_tab = ranking.RankingBrowserTests.switch_tab
 
     def setUp(self):
         fixture.AnalysisBrowserTests.setUp(self)
@@ -198,8 +200,9 @@ class OfflineReportBrowserTests(unittest.TestCase):
         expect(self.page.get_by_role('heading', name='销量分析报告')).to_be_visible()
         main = self.page.locator('main')
         expect(main).to_contain_text('2026-09-07 — 2026-09-14')
-        expect(main).to_contain_text(snapshot['frozen_at'])
-        expect(main).to_contain_text(snapshot['saved_at'])
+        # 报告里的时刻按本机时间读到秒，不再印原始 UTC 串。
+        expect(main).to_contain_text(re.compile(r'数据固定于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'))
+        expect(main).to_contain_text(re.compile(r'保存于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'))
         # 完整已确认分析：全部 24 组（不止当前第 2 页），零销量组也在。
         rows = self.page.locator('#ranking > details')
         expect(rows).to_have_count(24)
@@ -264,9 +267,9 @@ class OfflineReportBrowserTests(unittest.TestCase):
         content = path.read_text(encoding='utf-8')
         for forbidden in ['/api/', 'fetch(', 'DEEPSEEK_API_KEY', '127.0.0.1', 'localhost']:
             self.assertNotIn(forbidden, content)
-        # 必要样式内嵌：断网（服务已停）仍按原样式呈现。
+        # 必要样式内嵌：断网（服务已停）仍按原样式呈现（与库存抓取同一套底色）。
         self.assertEqual(self.page.evaluate('getComputedStyle(document.body).backgroundColor'),
-                         'rgb(243, 246, 244)')
+                         'rgb(245, 247, 250)')
 
     def test_failed_export_shows_the_real_error_and_retry_succeeds(self):
         sid = self.start_review()

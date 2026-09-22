@@ -73,6 +73,8 @@ def create_server(service, port=0):
                         return self.reply(service.confirm_groups(data['id'], data['groups']))
                     if data.get('action') == 'withdraw':
                         return self.reply(service.withdraw(data['id'], data['group']))
+                    if data.get('action') == 'withdraw_groups':
+                        return self.reply(service.withdraw_groups(data['id'], data['groups']))
                     if data.get('action') == 'retry_matching':
                         return self.reply(service.retry_matching(data['id']))
                     if data.get('action') in ('move', 'remove'):

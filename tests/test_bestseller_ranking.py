@@ -85,6 +85,7 @@ class RankingBrowserTests(unittest.TestCase):
     stop_server = fixture.AnalysisBrowserTests.stop_server
     submit = fixture.AnalysisBrowserTests.submit
     dates = fixture.AnalysisBrowserTests.dates
+    switch_tab = fixture.AnalysisBrowserTests.switch_tab
 
     def seed_product(self, shop, offer, name, observations, color='red'):
         """一个商品的多日观测：observations 为 [(日期, [(sku_id, sku_name, 库存), ...])]。"""
@@ -128,6 +129,8 @@ class RankingBrowserTests(unittest.TestCase):
         self.service.confirm_groups(sid, [g['id'] for g in snapshot['groups']])
         self.page.reload()
         expect(self.page.get_by_role('heading', name='确认同款')).to_be_visible()
+        # 重画后停在默认的「待确认」（此时已空）；切到「已确认」让列表回到全部组。
+        self.switch_tab('已确认')
         if self.page.get_by_role('button', name='保存分组并查看畅销品').count():
             self.page.get_by_role('button', name='保存分组并查看畅销品').click()
         expect(self.page.get_by_role('heading', name='初步畅销品')).to_be_visible()
@@ -163,6 +166,8 @@ class RankingBrowserTests(unittest.TestCase):
         self.page.get_by_role('button', name='继续', exact=True).click()  # 周二不是全量抓取日
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
         expect(self.page.get_by_role('heading', name='确认同款')).to_be_visible()
+        # 复用来的组已确认，默认的「待确认」页签是空的：切到「全部」看这个组。
+        self.switch_tab('全部')
         expect(self.page.locator('#groupDetail h3')).to_have_text('G1 · 3 个商品')
         expect(self.page.locator('#groupDetail .group-status')).to_have_text('已确认')
         self.save_and_show_results()

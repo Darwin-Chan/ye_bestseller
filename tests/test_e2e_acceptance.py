@@ -35,6 +35,7 @@ class EndToEndAcceptanceTests(unittest.TestCase):
     stop_server = fixture.AnalysisBrowserTests.stop_server
     restart_service = fixture.AnalysisBrowserTests.restart_service
     submit = fixture.AnalysisBrowserTests.submit  # 夹具 setUp 用它铺底数
+    switch_tab = fixture.AnalysisBrowserTests.switch_tab
 
     # ---------------------------------------------------------------- 夹具
 
@@ -160,7 +161,7 @@ class EndToEndAcceptanceTests(unittest.TestCase):
         self.assertTrue(all(g['confirmed'] for g in self.service.get(sid)['groups']))
 
         # 撤回：到「已确认」页签撤回一组，它回到待确认并且草稿标记未保存。
-        self.page.get_by_role('tab', name='已确认', exact=True).click()
+        self.switch_tab('已确认')
         self.page.get_by_role('button', name='撤回当前分组').click()
         expect(self.page.locator('#dirtyStatus')).to_have_text('未保存')
 
@@ -173,15 +174,15 @@ class EndToEndAcceptanceTests(unittest.TestCase):
         self.restart_service()
         expect(self.page.get_by_role('button', name='继续上次分析')).to_be_visible()
         self.page.get_by_role('button', name='继续上次分析').click()
-        expect(self.page.locator('#snapshotInfo')).to_contain_text('8商品')
+        expect(self.page.locator('#snapshotInfo')).to_contain_text('8 个商品')
         # 撤回过的组恢复后仍是待确认，保存没有被当成审核完成。
-        self.page.get_by_role('tab', name='待确认', exact=True).click()
+        self.switch_tab('待确认')
         expect(self.page.locator('.group-choice')).to_have_count(1)
 
         # 保存排名：仍有待确认时不能直接进结果页。
         expect(self.page.get_by_role('button', name='保存分组并查看畅销品')).to_be_disabled()
         expect(self.page.locator('#ranking')).to_be_hidden()
-        self.page.get_by_role('tab', name='全部', exact=True).click()
+        self.switch_tab('待确认')
         self.page.get_by_role('button', name='确认当前筛选全部组').click()
         self.page.get_by_role('dialog', name='确认同款商品分组', exact=True).get_by_role(
             'button', name='确认', exact=True).click()
@@ -313,7 +314,7 @@ class EndToEndAcceptanceTests(unittest.TestCase):
         expect(self.page.get_by_role('table', name='开始日期真实抓取').locator('tbody tr')).to_have_count(12)
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
 
-        expect(self.page.locator('#snapshotInfo')).to_contain_text('3012商品', timeout=30000)
+        expect(self.page.locator('#snapshotInfo')).to_contain_text('3012 个商品', timeout=30000)
         expect(self.page.locator('.group-choice')).to_have_count(20)
 
         # 搜索覆盖全量而不是当前页：最后一页的商品也能直接命中它的整组。
@@ -334,7 +335,8 @@ class EndToEndAcceptanceTests(unittest.TestCase):
         bulk = self.page.get_by_role('dialog', name='确认同款商品分组', exact=True)
         expect(bulk.locator('p').first).to_have_text('将确认2个同款分组，包含2个商品。')
         bulk.get_by_role('button', name='确认', exact=True).click()
-        expect(self.page.locator('#snapshotInfo')).to_contain_text('2待确认', timeout=10000)
+        # 3012 组里 2 组转为已确认，待确认计数落到 3010（旧文案下这条只靠「3012」里的 2 侥幸命中过）。
+        expect(self.page.locator('#snapshotInfo')).to_contain_text('其中 3010 组待确认', timeout=10000)
 
     # --------------------------------------------- 组合：草稿四态与新区间复用
 
@@ -387,8 +389,8 @@ class EndToEndAcceptanceTests(unittest.TestCase):
         self.assertEqual(next(g for g in original['groups'] if g['id'] == pair['id'])['sales'],
                          first_sales)
         # 页面上看到的是复用后的已确认组。
-        expect(self.page.locator('#snapshotInfo')).to_contain_text('2商品')
-        self.page.get_by_role('tab', name='已确认', exact=True).click()
+        expect(self.page.locator('#snapshotInfo')).to_contain_text('2 个商品')
+        self.switch_tab('已确认')
         expect(self.page.locator('.group-choice')).to_have_count(1)
 
     def test_draft_holding_all_four_states_survives_restart_and_source_changes(self):

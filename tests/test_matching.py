@@ -235,6 +235,7 @@ class MatchingBrowserTests(unittest.TestCase):
     stop_server = browser_fixture.AnalysisBrowserTests.stop_server
     submit = browser_fixture.AnalysisBrowserTests.submit
     dates = browser_fixture.AnalysisBrowserTests.dates
+    switch_tab = browser_fixture.AnalysisBrowserTests.switch_tab
 
     def test_browser_grouping_retry_cache_and_version_change(self):
         self.service.matcher = MatchingService(MatchingConfig(Path(self.tmp.name)/'matching.sqlite', mode='direct'))
@@ -265,9 +266,11 @@ class MatchingBrowserTests(unittest.TestCase):
             expect(self.page.get_by_text('缓存', exact=True).first).to_be_visible()
             self.assertEqual(len(transport.calls), calls)
             self.page.get_by_role('button', name='确认当前分组').first.click()
-            expect(self.page.get_by_role('button', name='已确认', exact=True)).to_have_count(1)
+            # 确认后的组离开「待确认」，到「已确认」页签核对它还在。
+            self.switch_tab('已确认')
+            expect(self.page.locator('.group-choice')).to_have_count(1)
             self.page.get_by_role('button', name='重试模型匹配').click()
-            expect(self.page.get_by_role('button', name='已确认', exact=True)).to_have_count(1)
+            expect(self.page.locator('.group-choice')).to_have_count(1)
             rid = self.conn.execute("SELECT MAX(round_id) FROM snapshots WHERE shop_key='A01'").fetchone()[0]
             calls = len(transport.calls)
             # Only the URL changes: same bytes and name reuse judgments in a new analysis.

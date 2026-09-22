@@ -323,10 +323,13 @@ class AnalysisService:
         return self._set_confirmation(analysis_id, group_ids, True)
 
     def withdraw(self, analysis_id, group_id):
-        return self._set_confirmation(analysis_id, [group_id], False)
+        return self.withdraw_groups(analysis_id, [group_id])
+
+    def withdraw_groups(self, analysis_id, group_ids):
+        return self._set_confirmation(analysis_id, group_ids, False)
 
     def _set_confirmation(self, analysis_id, group_ids, confirmed):
-        if not isinstance(group_ids, list) or not all(isinstance(g, str) for g in group_ids):
+        if not isinstance(group_ids, list) or not group_ids or not all(isinstance(g, str) for g in group_ids):
             raise ValueError('请选择有效同款组')
         with self._lock:
             snapshot = self._snapshots.get(analysis_id)

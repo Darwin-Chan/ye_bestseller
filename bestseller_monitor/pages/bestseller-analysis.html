@@ -1,11 +1,14 @@
 <!doctype html>
 <html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>1688 畅销品监控 · 销量分析</title>
 <style>
-*{box-sizing:border-box}body{margin:0;background:#f3f6f4;color:#203d33;font:14px/1.7 system-ui,sans-serif}header{background:#143e32;color:white;padding:24px max(24px,calc((100vw - 1120px)/2))}header h1{margin:0}main{max-width:1168px;margin:26px auto;padding:0 24px}.panel,article{background:white;border:1px solid #dce5df;border-radius:10px;padding:24px;margin:16px 0}.dates{display:grid;grid-template-columns:1fr 1fr;gap:28px}input,button{font:inherit;border:1px solid #b9cbc1;border-radius:5px;padding:8px 12px}button{cursor:pointer;background:white;color:#204d3d}button.primary{background:#196b51;color:white}button:disabled{opacity:.5;cursor:wait}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:8px;border-bottom:1px solid #e4eae6}th{color:#61796c}.muted{color:#718578}.error{color:#a32d23;background:#fff1ed;padding:14px;border-radius:6px}.bar{display:flex;align-items:center;justify-content:space-between;gap:14px}details{margin:12px 0}dialog{border:0;border-radius:10px;max-width:580px;padding:26px}dialog::backdrop{background:#173c3266}dialog button{float:right;margin-top:12px}[hidden]{display:none!important}@media(max-width:700px){.dates{grid-template-columns:1fr}.bar{flex-wrap:wrap}}
+/* 配色与「库存数据抓取」「库存数据交换」共用同一套变量：改这里时三处一起改。 */
+:root{--bg:#f5f7fa;--card:#fff;--line:#e5e9f0;--txt:#1f2937;--mut:#6b7280;--pri:#2563eb;--red:#dc2626;--grn:#16a34a;--amb:#d97706}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font-size:14px;line-height:1.7;font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}header{display:flex;align-items:baseline;gap:12px;padding:22px max(24px,calc((100vw - 1120px)/2))}header h1{margin:0;font-size:20px}header span{color:var(--mut);font-size:13px}main{max-width:1168px;margin:26px auto;padding:0 24px}.panel,article{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:24px;margin:16px 0}.dates{display:grid;grid-template-columns:1fr 1fr;gap:28px}input,button{font:inherit;border:1px solid var(--line);border-radius:5px;padding:8px 12px}button{cursor:pointer;background:white;color:var(--txt)}button.primary{background:var(--pri);color:white}button:disabled{opacity:.5;cursor:wait}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line)}th{color:var(--mut)}.muted{color:var(--mut)}.error{color:var(--red);background:#fee2e2;padding:14px;border-radius:6px}.bar{display:flex;align-items:center;justify-content:space-between;gap:14px}details{margin:12px 0}dialog{border:0;border-radius:10px;max-width:580px;padding:26px}dialog::backdrop{background:rgba(15,23,42,.35)}dialog button{float:right;margin-top:12px}[hidden]{display:none!important}@media(max-width:700px){.dates{grid-template-columns:1fr}.bar{flex-wrap:wrap}}
 
-.review-layout{display:grid;grid-template-columns:250px minmax(0,1fr);gap:20px;margin-top:20px}.group-choice{display:block;width:100%;text-align:left;margin:0 0 8px;padding:14px}.group-choice[aria-pressed=true]{border:2px solid #23795b;background:#edf6f1}.group-choice small{display:block}.matching-member{display:grid;grid-template-columns:130px minmax(0,1fr) 48px;gap:16px;border-top:1px solid #dce5df;padding:20px 0}.matching-member h4{margin:0 0 6px;font-size:16px}.matching-member p{margin:6px 0}.matching-tags span{display:block;font-size:12px;background:#edf5f0;border-radius:4px;padding:2px 6px;margin-top:5px}.member-info aside{border:1px solid #cbd9d0;border-radius:6px;padding:10px 12px;margin-top:10px}.member-info aside.change{border-color:#dfc99f}.remove-member{width:46px;height:58px;align-self:start;padding:9px}.remove-member svg{width:25px;height:28px}.group-actions{display:flex;gap:8px;flex-shrink:0}#groupDetail{margin:0;min-width:0}#groupDetail h3{margin:0}.member-info{min-width:0;overflow-wrap:anywhere}.member-info details{overflow:auto}.modal{width:min(850px,94vw);max-width:850px;max-height:90vh;padding:22px}.modal button{float:none;margin-top:0}.modal-body{max-height:50vh;overflow:auto;overscroll-behavior:contain}.modal-footer{border-top:1px solid #d8dfdb;padding-top:14px;margin-top:12px}.modal-actions{display:flex;align-items:center;gap:10px}.modal-actions .spacer{flex:1}.candidate{background:#f0f2f3;padding:12px;margin:10px 0;border:1px solid #dce1df;border-radius:6px}.candidate summary{cursor:pointer}.candidate .matching-member{grid-template-columns:120px minmax(0,1fr);padding:12px 0}.compare-current .matching-member{grid-template-columns:120px minmax(0,1fr);padding:10px 0;border:0}#candidateStatus{color:#79827e;margin:0 0 10px}#candidateStatus.selected{color:#2563ab}#candidateStatus small{display:block;color:#79827e}.search-item{display:flex;gap:14px;align-items:center;border-bottom:1px solid #dce5df;padding:12px}.search-item .member-info{flex:1}#removeDialog p{white-space:pre-line}#imageViewer{z-index:5}@media(max-width:800px){.review-layout{grid-template-columns:1fr}.matching-member{grid-template-columns:110px minmax(0,1fr) 44px;gap:8px}.group-actions{flex-wrap:wrap}.modal{padding:16px}}
-.review-filters{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:16px 0}.review-filters select{font:inherit;padding:8px;border:1px solid #b9cbc1;border-radius:5px}.review-tabs{display:flex;gap:8px;margin:16px 0}.review-tabs [aria-selected=true]{background:#196b51;color:white}.group-row{display:flex;gap:8px;align-items:start}.group-row input{margin-top:20px}.matching-member.filter-hit{background:#edf8ee}.matching-tags span{cursor:default}.matching-tags .multiple{background:#fff0d9;color:#875b15}.matching-tags .unique{background:#e4f2ea;color:#236445}.matching-tags .none{background:#edf0f2;color:#59656e}#dirtyStatus{color:#986815}#selectionCount{color:#61796c}.save-bar{justify-content:flex-end}.save-bar #saveStatus{color:#236445}
-.rank{border:1px solid #dce4dd;border-radius:9px;padding:8px 14px;margin:12px 0}.rank>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;background:white;cursor:pointer}.rank .product{display:flex;align-items:center;gap:12px}.rank .product img,.tree .product img{width:58px;height:58px;object-fit:contain;background:white;border:1px solid #edf0eb;border-radius:8px}.product-title{display:flex;gap:7px;align-items:center;min-width:0}.number{font-size:28px;font-weight:650;color:#176147;white-space:nowrap}.chart-block{margin:12px 0}.chart{overflow-x:auto;margin-top:6px}.chart svg{min-width:690px;width:100%;height:262px}.chart-toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-top:12px}.chart-key{display:flex;gap:20px;font-size:11px;margin:6px 0}.chart-key .sales{color:#5973b4}.stock-legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;justify-content:flex-end;font-size:11px;margin-left:auto}.green{color:#36906b}.stock-point.green{fill:#36906b}.yellow{color:#d7a735}.stock-point.yellow{fill:#d7a735}.red{color:#d6534e}.stock-point.red{fill:#d6534e}.point-label{paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round}.tree{padding-left:22px;border-left:2px solid #dce8df;margin:12px}.tree .product{margin:15px 0}.tree .product p{margin:6px 0}.tree-heading{justify-content:flex-start;gap:8px;margin-top:16px}.tree-heading h3{margin:8px 0}.subtle-button{font-size:12px;padding:4px 8px;background:transparent;border-color:transparent;color:#517464}.subtle-button:hover{background:#eaf2ec;border-color:#c9dbd0}.sku-row{margin:10px 0 10px 18px}.sku-row summary{display:flex;align-items:center;justify-content:space-between;cursor:pointer}.sku-row[open]{border:1px solid #e2e9e3;border-radius:7px;padding:6px}.ranking-controls{justify-content:flex-start;margin:12px 0}.export-bar{justify-content:flex-start;gap:14px;margin:12px 0}.empty{padding:32px;text-align:center;color:#788b7e}.tip{position:fixed;background:#203c32;color:white;padding:10px 14px;border-radius:6px;pointer-events:none;z-index:2147483647;max-width:320px}
+.review-layout{display:grid;grid-template-columns:250px minmax(0,1fr);gap:20px;margin-top:20px}.group-choice{display:block;width:100%;text-align:left;margin:0 0 8px;padding:14px}.group-choice[aria-pressed=true]{border:2px solid var(--pri);background:#eef2f7}.group-choice small{display:block}.matching-member{display:grid;grid-template-columns:130px minmax(0,1fr) 48px;gap:16px;border-top:1px solid var(--line);padding:20px 0}.matching-member h4{margin:0 0 6px;font-size:16px}.matching-member p{margin:6px 0}.matching-tags span{display:block;font-size:12px;background:#f1f4f9;border-radius:4px;padding:2px 6px;margin-top:5px}.member-info aside{border:1px solid var(--line);border-radius:6px;padding:10px 12px;margin-top:10px}.member-info aside.change{border-color:#fde68a}.remove-member{width:46px;height:58px;align-self:start;padding:9px}.remove-member svg{width:25px;height:28px}.group-actions{display:flex;gap:8px;flex-shrink:0}#groupDetail{margin:0;min-width:0}#groupDetail h3{margin:0}.member-info{min-width:0;overflow-wrap:anywhere}.member-info details{overflow:auto}.modal{width:min(850px,94vw);max-width:850px;max-height:90vh;padding:22px}.modal button{float:none;margin-top:0}.modal-body{max-height:50vh;overflow:auto;overscroll-behavior:contain}.modal-footer{border-top:1px solid var(--line);padding-top:14px;margin-top:12px}.modal-actions{display:flex;align-items:center;gap:10px}.modal-actions .spacer{flex:1}.candidate{background:#f8fafc;padding:12px;margin:10px 0;border:1px solid var(--line);border-radius:6px}.candidate summary{cursor:pointer}.candidate .matching-member{grid-template-columns:120px minmax(0,1fr);padding:12px 0}.compare-current .matching-member{grid-template-columns:120px minmax(0,1fr);padding:10px 0;border:0}#candidateStatus{color:var(--mut);margin:0 0 10px}#candidateStatus.selected{color:var(--pri)}#candidateStatus small{display:block;color:var(--mut)}.search-item{display:flex;gap:14px;align-items:center;border-bottom:1px solid var(--line);padding:12px}.search-item .member-info{flex:1}#removeDialog p{white-space:pre-line}#imageViewer{z-index:5}@media(max-width:800px){.review-layout{grid-template-columns:1fr}.matching-member{grid-template-columns:110px minmax(0,1fr) 44px;gap:8px}.group-actions{flex-wrap:wrap}.modal{padding:16px}}
+.review-filters{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:16px 0}.review-filters select{font:inherit;padding:8px;border:1px solid var(--line);border-radius:5px}.review-tabs{display:flex;gap:8px;margin:16px 0}.review-tabs [aria-selected=true]{background:var(--pri);color:white}.group-row{display:flex;gap:8px;align-items:start}.group-row input{margin-top:20px}.matching-member.filter-hit{background:#edf8ee}.matching-tags span{cursor:default}.matching-tags .multiple{background:#fef3c7;color:var(--amb)}.matching-tags .unique{background:#dcfce7;color:var(--grn)}.matching-tags .none{background:#f1f4f9;color:var(--mut)}#dirtyStatus{color:var(--amb)}#selectionCount{color:var(--mut)}.save-bar{justify-content:flex-end}.save-bar #saveStatus{color:var(--grn)}
+#snapshotInfo{margin:0}#snapshotInfo .snapshot-meta{margin:4px 0 0}#snapshotInfo .snapshot-meta span+span{margin-left:2em}#snapshotInfo .snapshot-tally{font-size:22px;font-weight:700;color:var(--pri);margin:6px 0 0}
+.rank{border:1px solid var(--line);border-radius:9px;padding:8px 14px;margin:12px 0}.rank>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;background:white;cursor:pointer}.rank .product{display:flex;align-items:center;gap:12px}.rank .product img,.tree .product img{width:58px;height:58px;object-fit:contain;background:white;border:1px solid #eef2f7;border-radius:8px}.product-title{display:flex;gap:7px;align-items:center;min-width:0}.number{font-size:28px;font-weight:650;color:var(--pri);white-space:nowrap}.chart-block{margin:12px 0}.chart{overflow-x:auto;margin-top:6px}.chart svg{min-width:690px;width:100%;height:262px}.chart-toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-top:12px}.chart-key{display:flex;gap:20px;font-size:11px;margin:6px 0}.chart-key .sales{color:var(--pri)}.stock-legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;justify-content:flex-end;font-size:11px;margin-left:auto}.green{color:var(--grn)}.stock-point.green{fill:var(--grn)}.yellow{color:var(--amb)}.stock-point.yellow{fill:var(--amb)}.red{color:var(--red)}.stock-point.red{fill:var(--red)}.stock-line{stroke:var(--grn)}.sales-line{stroke:var(--pri)}.sales-point{fill:#fff;stroke:var(--pri)}.grid-line{stroke:var(--line)}.date-label,.stock-axis,.stock-title{fill:var(--mut)}.sales-axis,.sales-value,.sales-title{fill:var(--pri)}.stock-value{fill:var(--grn)}.point-label{paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round}.tree{padding-left:22px;border-left:2px solid var(--line);margin:12px}.tree .product{margin:15px 0}.tree .product p{margin:6px 0}.tree-heading{justify-content:flex-start;gap:8px;margin-top:16px}.tree-heading h3{margin:8px 0}.subtle-button{font-size:12px;padding:4px 8px;background:transparent;border-color:transparent;color:var(--mut)}.subtle-button:hover{background:#f1f4f9;border-color:var(--line)}.sku-row{margin:10px 0 10px 18px}.sku-row summary{display:flex;align-items:center;justify-content:space-between;cursor:pointer}.sku-row[open]{border:1px solid var(--line);border-radius:7px;padding:6px}.ranking-controls{justify-content:flex-start;margin:12px 0}.export-bar{justify-content:flex-start;gap:14px;margin:12px 0}.empty{padding:32px;text-align:center;color:var(--mut)}.tip{position:fixed;background:#1f2937;color:white;padding:10px 14px;border-radius:6px;pointer-events:none;z-index:2147483647;max-width:320px}
 </style>
 <header><h1>1688 畅销品监控 · 销量分析</h1><span>选择日期 · 固定库存 · 核对商品</span></header>
 <main><div id="error" class="error" role="alert" hidden></div>
@@ -14,7 +17,7 @@
 <section><label>开始日期 <input id="start" type="date"></label><h3>当日真实抓取</h3><div id="startCoverage">请选择日期</div></section>
 <section><label>结束日期 <input id="end" type="date"></label><h3>当日真实抓取</h3><div id="endCoverage">请选择日期</div></section></div>
 <p><button id="begin" class="primary">下一步、进入同款确认</button></p></section>
-<section id="reviewPage" hidden><div class="bar"><h2>确认同款</h2><button id="back">重新选择日期</button></div><p id="snapshotInfo"></p><p class="muted">建议分组均待人工确认；失败项可重试模型匹配。低把握判断保留缓存，需人工核对。</p><button id="retryMatching" onclick="retryMatching()">重试模型匹配</button><div class="review-layout"><nav id="products" aria-label="同款分组列表"></nav><article id="groupDetail"></article></div><section id="results" hidden><h2>初步畅销品</h2><div id="ranking"></div><div class="bar export-bar"><button id="exportReport">导出 HTML 报告</button><span id="exportStatus" role="status"></span></div></section><div class="bar"><button id="prev">上一页</button><span id="pageInfo"></span><button id="next">下一页</button></div><div class="bar save-bar"><span id="saveStatus" role="status"></span><button id="saveDraft" data-mutation>暂时保存</button><button id="saveAndView" class="primary" data-mutation disabled>保存分组并查看畅销品</button></div></section>
+<section id="reviewPage" hidden><div class="bar"><h2>确认同款</h2><button id="back">重新选择日期</button></div><div id="snapshotInfo"></div><p class="muted">建议分组均待人工确认；失败项可重试模型匹配。低把握判断保留缓存，需人工核对。</p><button id="retryMatching" onclick="retryMatching()">重试模型匹配</button><div class="review-layout"><nav id="products" aria-label="同款分组列表"></nav><article id="groupDetail"></article></div><section id="results" hidden><h2>初步畅销品</h2><div id="ranking"></div><div class="bar export-bar"><button id="exportReport">导出 HTML 报告</button><span id="exportStatus" role="status"></span></div></section><div class="bar"><button id="prev">上一页</button><span id="pageInfo"></span><button id="next">下一页</button></div><div class="bar save-bar"><span id="saveStatus" role="status"></span><button id="saveDraft" data-mutation>暂时保存</button><button id="saveAndView" class="primary" data-mutation disabled>保存分组并查看畅销品</button></div></section>
 </main><dialog id="bulkDialog" class="modal" aria-label="确认同款商品分组"><h2>确认同款商品分组</h2><p id="bulkScope"></p><p id="bulkMultiple"></p><div class="modal-actions"><span class="spacer"></span><button onclick="$('bulkDialog').close()">取消</button><button id="bulkOK" data-mutation onclick="confirmBulk()">确认</button></div></dialog>
 <div id="tip" class="tip" hidden></div>
 <dialog id="notice"><p id="noticeText"></p><div class="modal-actions"><span class="spacer"></span><button id="noticeCancel" hidden>取消</button><button id="noticeOK">继续</button></div></dialog>
@@ -33,6 +36,7 @@ const pad = value => String(value).padStart(2, '0');
 const fmtTime = iso => {const d = new Date(iso); return `${pad(d.getHours())}:${pad(d.getMinutes())}`;};
 const fmtDayTime = iso => {const d = new Date(iso); return `${pad(d.getMonth()+1)}-${pad(d.getDate())} ${fmtTime(iso)}`;};
 const fmtMoment = iso => {const d = new Date(iso); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${fmtTime(iso)}`;};
+const fmtMomentSecond = iso => {const d = new Date(iso); return `${fmtMoment(iso)}:${pad(d.getSeconds())}`;};
 
 async function api(path, options) {
     const response = await fetch(path, options);
@@ -80,7 +84,7 @@ async function coverage(which) {
         if (input.value !== day) return;
         target.innerHTML = `<table aria-label="${which === 'start' ? '开始' : '结束'}日期真实抓取">
             <thead><tr><th>店铺</th><th>商品数</th><th>SKU 数</th></tr></thead><tbody>
-            ${rows.map(row => `<tr><td>${esc(row.shop_name || row.shop_key)}</td>
+            ${rows.map(row => `<tr><td>${esc([row.shop_key, row.shop_name].filter(Boolean).join(' '))}</td>
                 <td>${row.products}</td><td>${row.skus}</td></tr>`).join('')}
             </tbody></table>`;
         const weekday = new Date(day + 'T12:00:00+08:00').getUTCDay() || 7;
@@ -98,13 +102,13 @@ async function coverage(which) {
 for (const which of ['start', 'end']) {
     $(which).addEventListener('change', () => { clearError(); coverage(which); });
 }
-let currentSnapshot=null, productPage=0, selectedGroup=null, inventoryByProduct=new Map();
+let currentSnapshot=null, productPage=0, selectedGroup=null;
 let compareProduct=null, candidateTarget=null, removalProduct=null, addPage=0, editBusy=false;
-let reviewTab='all', checkedGroups=new Set(), bulkTargets=[];
+let reviewTab='pending', checkedGroups=new Set(), bulkTargets=[];
 let productsByKey=new Map(), groupsByProduct=new Map();
 const productKey=p=>JSON.stringify([p.shop_key,p.offer_id]);
 const reviewControls=document.createElement('div');
-reviewControls.innerHTML=`<p id="dirtyStatus" role="status"></p><div class="review-tabs" role="tablist" aria-label="确认状态"><button role="tab" data-tab="all" aria-selected="true">全部</button><button role="tab" data-tab="pending" aria-selected="false">待确认</button><button role="tab" data-tab="confirmed" aria-selected="false">已确认</button></div><div class="review-filters"><label>搜索分组商品 <input id="reviewQuery" placeholder="商品名称、编号或店铺"></label><label>商品来源 <select id="originFilter" aria-label="商品来源"><option value="">全部来源</option><option>新商品</option><option>信息变更</option></select></label><label>匹配状态 <select id="matchFilter" aria-label="匹配状态"><option value="">全部匹配状态</option><option>暂无匹配同款</option><option>匹配唯一同款</option><option>匹配多组同款</option></select></label></div><div class="review-filters"><button id="confirmSelected" onclick="openBulk(false)">确认勾选组</button><button id="confirmFiltered" onclick="openBulk(true)">确认当前筛选全部组</button><span id="selectionCount"></span></div>`;
+reviewControls.innerHTML=`<p id="dirtyStatus" role="status"></p><div class="review-tabs" role="tablist" aria-label="确认状态"><button role="tab" data-tab="pending" aria-selected="true">待确认</button><button role="tab" data-tab="confirmed" aria-selected="false">已确认</button><button role="tab" data-tab="all" aria-selected="false">全部</button></div><div class="review-filters"><label>搜索分组商品 <input id="reviewQuery" placeholder="商品名称、编号或店铺"></label><label>商品来源 <select id="originFilter" aria-label="商品来源"><option value="">全部来源</option><option>新商品</option><option>信息变更</option></select></label><label>匹配状态 <select id="matchFilter" aria-label="匹配状态"><option value="">全部匹配状态</option><option>暂无匹配同款</option><option>匹配唯一同款</option><option>匹配多组同款</option></select></label></div><div class="review-filters" id="batchRow"><button id="batchSelected" onclick="openBulk(false)"></button><button id="batchFiltered" onclick="openBulk(true)"></button><span id="selectionCount"></span></div>`;
 $('reviewPage').insertBefore(reviewControls,document.querySelector('.review-layout'));
 document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{reviewTab=button.dataset.tab;resetReview();});
 for(const id of ['reviewQuery','originFilter','matchFilter'])$(id).addEventListener(id==='reviewQuery'?'input':'change',resetReview);
@@ -118,41 +122,59 @@ function matchesProduct(p){
 function filteredGroups(){
     return currentSnapshot.groups.filter(g=>(reviewTab==='all'||g.confirmed===(reviewTab==='confirmed'))&&groupProducts(g).some(matchesProduct));
 }
-function updateBatchControls(){
+// 批量动作由页签定：待确认页是确认、已确认页是撤回；“全部”页没有批量动作，也没有勾选框。
+function batchMode(){
+    return reviewTab==='confirmed'
+        ? {action:'withdraw_groups', verb:'撤回', title:'撤回同款商品分组', confirmed:true}
+        : {action:'confirm_groups', verb:'确认', title:'确认同款商品分组', confirmed:false};
+}
+function updateBatchControls(filtered=filteredGroups()){
+    const {verb}=batchMode();
+    $('batchRow').hidden=reviewTab==='all';
+    $('batchSelected').textContent=`${verb}勾选组`;
+    $('batchFiltered').textContent=`${verb}当前筛选全部组`;
     $('selectionCount').textContent=`已勾选 ${checkedGroups.size} 组`;
-    $('confirmSelected').disabled=!currentSnapshot.groups.some(g=>!g.confirmed&&checkedGroups.has(g.id));
-    $('confirmFiltered').disabled=!filteredGroups().some(g=>!g.confirmed);
+    $('batchSelected').disabled=!checkedGroups.size;
+    $('batchFiltered').disabled=!filtered.length;
 }
 function checkGroup(id,checked){if(checked)checkedGroups.add(id);else checkedGroups.delete(id);updateBatchControls();}
 function openBulk(all){
     if(editBusy)return;
-    const targets=(all?filteredGroups():currentSnapshot.groups.filter(g=>checkedGroups.has(g.id))).filter(g=>!g.confirmed);
+    const mode=batchMode();
+    const targets=(all?filteredGroups():currentSnapshot.groups.filter(g=>checkedGroups.has(g.id))).filter(g=>g.confirmed===mode.confirmed);
     if(!targets.length)return;
     bulkTargets=targets.map(g=>g.id);
     const members=new Map(targets.flatMap(g=>groupProducts(g).map(p=>[productKey(p),p])));
     const multiple=[...members.values()].filter(p=>p.match_label==='匹配多组同款').length;
-    $('bulkScope').textContent=`将确认${targets.length}个同款分组，包含${members.size}个商品。`;
-    $('bulkMultiple').textContent=multiple?`其中包含${multiple}个匹配到多组的商品，这些商品按照系统推荐分组推进。`:'其中不含匹配到多组的商品';
+    $('bulkDialog').setAttribute('aria-label',mode.title);
+    $('bulkDialog').querySelector('h2').textContent=mode.title;
+    $('bulkScope').textContent=`将${mode.verb}${targets.length}个同款分组，包含${members.size}个商品。`;
+    // 第二行只在确认弹窗出现，撤回时连文案一起清掉，别让上一轮的正文留在 DOM 里。
+    $('bulkMultiple').textContent=mode.confirmed?'':(multiple?`其中包含${multiple}个匹配到多组的商品，这些商品按照系统推荐分组推进。`:'其中不含匹配到多组的商品');
+    $('bulkMultiple').hidden=mode.confirmed;
+    $('bulkOK').textContent=mode.verb;
     $('bulkDialog').showModal();
 }
-async function confirmBulk(){if(await updateDraft({action:'confirm_groups',groups:bulkTargets}))$('bulkDialog').close();}
+async function confirmBulk(){
+    const {action}=batchMode();
+    if(await updateDraft({action,groups:bulkTargets}))$('bulkDialog').close();
+}
+function snapshotInfoHTML(snapshot){
+    const pending=snapshot.groups.filter(g=>!g.confirmed).length;
+    return `<p class="snapshot-meta"><span><b>日期区间</b>：${esc(snapshot.start)} — ${esc(snapshot.end)}</span><span><b>数据固定于</b>：${fmtMomentSecond(snapshot.frozen_at)}</span></p>`
+        +`<p class="snapshot-tally">${snapshot.products.length} 个商品 · ${snapshot.groups.length} 组同款（其中 ${pending} 组待确认）</p>`;
+}
 function show(snapshot) {
     currentSnapshot=snapshot;
-    productPage=0; selectedGroup=null;reviewTab='all';checkedGroups.clear();showZeroGroups=false;
+    productPage=0; selectedGroup=null;reviewTab='pending';checkedGroups.clear();showZeroGroups=false;
     for(const id of ['reviewQuery','originFilter','matchFilter'])$(id).value='';
-    inventoryByProduct=new Map();
-    for(const row of snapshot.inventory) {
-        const key=JSON.stringify([row.shop_key,row.offer_id]);
-        if(!inventoryByProduct.has(key)) inventoryByProduct.set(key,[]);
-        inventoryByProduct.get(key).push(row);
-    }
     $('start').value=snapshot.start;
     $('end').value=snapshot.end;
     $('datePage').hidden=true;
     $('resumeBox').hidden=true;
     $('reviewPage').hidden=false;
     $('exportStatus').textContent='';
-    $('snapshotInfo').textContent=`${snapshot.start} — ${snapshot.end} · 数据固定于 ${snapshot.frozen_at} · ${snapshot.groups.length} 个同款组`;
+    $('snapshotInfo').innerHTML=snapshotInfoHTML(snapshot);
     renderProducts();
     history.replaceState(null,'','#analysis='+snapshot.id);
 }
@@ -199,8 +221,7 @@ function memberCard(p, full=false) {
     const hit=full&&[$('reviewQuery').value.trim(),$('originFilter').value,$('matchFilter').value].some(Boolean)&&matchesProduct(p);
     return `<section class="matching-member${hit?' filter-hit':''}" data-product="${esc(p.offer_id)}"><div>${productPhoto(p)}${full?`<div class="matching-tags"><span>${esc(p.origin)}</span><span class="${p.match_label==='匹配多组同款'?'multiple':p.match_label==='匹配唯一同款'?'unique':'none'}">${esc(p.match_label)}</span></div>`:''}</div><div class="member-info"><h4>${esc(p.product_name||p.offer_id)} ${sourceIcon(p)}</h4><p>${esc(shopName(p))} · 商品 ${esc(p.offer_id)}</p><p>区间销量 <b>${p.sales}</b></p>${full?`
         <p class="muted">${esc(p.matching_status)}</p>${p.origin==='信息变更'||p.information_note?`<aside class="change"><b>信息变更</b><p>${esc(p.information_note||'商品名称或图片已有变更，请核对当前信息。')}</p></aside>`:''}
-        <aside><b>其他疑似归组</b><p>${candidates.length?candidates.map(id=>`<button data-group="${esc(id)}" onclick="openCompare(${index},this.dataset.group)">${esc(id)}</button>`).join(' '):'暂无匹配同款'}</p></aside>
-        ${p.skus.map(sku=>`<details open><summary>${esc(sku.name)} · 第 ${sku.segment} 段 · SKU ${esc(sku.sku_id)} · 销量 <b>${sku.sales}</b></summary><table><thead><tr><th>日期</th><th>库存</th><th>当日销量</th><th>状态</th></tr></thead><tbody>${sku.points.map(point=>`<tr><td>${point.date}</td><td>${point.stock??'—'}</td><td>${point.sales}</td><td>${point.color==='inactive'?'不在有效段':point.color==='red'?'疑似补货':point.color==='yellow'?'当日未抓取库存':'正常观测'}</td></tr>`).join('')}</tbody></table></details>`).join('')}`:''}</div>
+        <aside><b>其他疑似归组</b><p>${candidates.length?candidates.map(id=>`<button data-group="${esc(id)}" onclick="openCompare(${index},this.dataset.group)">${esc(id)}</button>`).join(' '):'暂无匹配同款'}</p></aside>`:''}</div>
         ${full&&group.members.length>1?`<button class="remove-member" data-mutation aria-label="从当前分组移除商品" title="从当前分组移除商品" onclick="requestRemoval(${index})"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg></button>`:''}</section>`;
 }
 function selectGroup(id) {selectedGroup=id;renderProducts();}
@@ -208,19 +229,20 @@ function renderProducts() {
     const snapshot=currentSnapshot;
     productsByKey=new Map(snapshot.products.map(p=>[productKey(p),p]));
     groupsByProduct=new Map(snapshot.groups.flatMap(g=>g.members.map(m=>[productKey(m),g])));
-    checkedGroups=new Set([...checkedGroups].filter(id=>snapshot.groups.some(g=>g.id===id&&!g.confirmed)));
+    const groupsById=new Map(snapshot.groups.map(g=>[g.id,g]));
+    checkedGroups=new Set([...checkedGroups].filter(id=>groupsById.get(id)?.confirmed===batchMode().confirmed));
     const filtered=filteredGroups(), pages=Math.max(1,Math.ceil(filtered.length/20));
     productPage=Math.min(productPage,pages-1);
     const visible=filtered.slice(productPage*20,productPage*20+20);
     if(!visible.some(g=>g.id===selectedGroup))selectedGroup=visible[0]?.id;
-    $('products').innerHTML=visible.map(g=>`<div class="group-row"><input type="checkbox" aria-label="勾选 ${esc(g.id)}" data-group="${esc(g.id)}" ${checkedGroups.has(g.id)?'checked':''} ${g.confirmed?'disabled':''} onchange="checkGroup(this.dataset.group,this.checked)"><button class="group-choice" aria-pressed="${g.id===selectedGroup}" data-group="${esc(g.id)}" onclick="selectGroup(this.dataset.group)"><b>${esc(g.id)} · ${g.members.length} 个商品</b><small>${esc(groupProducts(g)[0].product_name)} · 销量 ${g.sales}</small><small>状态：${g.confirmed?'已确认':'待确认'}</small></button></div>`).join('');
-    const group=snapshot.groups.find(g=>g.id===selectedGroup);
-    $('groupDetail').innerHTML=group?`<div class="bar"><h3>${esc(group.id)} · ${group.members.length} 个商品</h3><div class="group-actions"><button data-mutation ${group.confirmed&&reviewTab!=='confirmed'?'disabled':''} onclick="${group.confirmed?"updateDraft({action:'withdraw',group:selectedGroup})":'confirmGroup(selectedGroup)'}">${group.confirmed?(reviewTab==='confirmed'?'撤回当前分组':'已确认'):'确认当前分组'}</button><button onclick="openAdd()">组内新增商品</button></div></div><p>同款组销量 <b>${group.sales}</b> · <span class="group-status">${group.confirmed?'已确认':'待确认'}</span></p>${groupProducts(group).map(p=>memberCard(p,true)).join('')}`:'暂无符合条件的分组';
+    $('products').innerHTML=visible.map(g=>`<div class="group-row">${reviewTab==='all'?'':`<input type="checkbox" aria-label="勾选 ${esc(g.id)}" data-group="${esc(g.id)}" ${checkedGroups.has(g.id)?'checked':''} onchange="checkGroup(this.dataset.group,this.checked)">`}<button class="group-choice" aria-pressed="${g.id===selectedGroup}" data-group="${esc(g.id)}" onclick="selectGroup(this.dataset.group)"><b>${esc(g.id)} · ${g.members.length} 个商品</b><small>${esc(groupProducts(g)[0].product_name)} · 销量 ${g.sales}</small><small>状态：${g.confirmed?'已确认':'待确认'}</small></button></div>`).join('');
+    const group=groupsById.get(selectedGroup);
+    $('groupDetail').innerHTML=group?`<div class="bar"><h3>${esc(group.id)} · ${group.members.length} 个商品</h3><div class="group-actions"><button data-mutation onclick="${group.confirmed?"updateDraft({action:'withdraw',group:selectedGroup})":'confirmGroup(selectedGroup)'}">${group.confirmed?'撤回当前分组':'确认当前分组'}</button><button onclick="openAdd()">组内新增商品</button></div></div><p>同款组销量 <b>${group.sales}</b> · <span class="group-status">${group.confirmed?'已确认':'待确认'}</span></p>${groupProducts(group).map(p=>memberCard(p,true)).join('')}`:'暂无符合条件的分组';
     $('dirtyStatus').textContent=snapshot.dirty?'未保存':'';
     updateSaveGate();
     document.querySelectorAll('[data-tab]').forEach(button=>button.setAttribute('aria-selected',button.dataset.tab===reviewTab));
-    updateBatchControls();
-    $('snapshotInfo').textContent=`${snapshot.start} — ${snapshot.end} · 数据固定于 ${snapshot.frozen_at} · ${snapshot.products.length}商品 ${snapshot.groups.length}组同款（其中${snapshot.groups.filter(g=>!g.confirmed).length}待确认）`;
+    updateBatchControls(filtered);
+    $('snapshotInfo').innerHTML=snapshotInfoHTML(snapshot);
     $('pageInfo').textContent=`${productPage+1} / ${pages}`;
     $('prev').disabled=productPage===0;
     $('next').disabled=productPage+1>=pages;
@@ -319,18 +341,18 @@ function chart(points, sku=false){
     let lines='', salesLine='';
     points.forEach((p,i)=>{
         // 库存线只连相邻的两个有效观测；切换日与未知日都不画，不用 0 补线。
-        if(i&&p.stock!==null&&points[i-1].stock!==null&&!p.segment_start)lines+=`<line class="stock-line" x1="${X(i-1)}" y1="${Y(points[i-1].stock)}" x2="${X(i)}" y2="${Y(p.stock)}" stroke="#83a797" stroke-width="2"/>`;
-        if(i)salesLine+=`<line class="sales-line" x1="${X(i-1)}" y1="${S(cumulative[i-1])}" x2="${X(i)}" y2="${S(cumulative[i])}" stroke="#5973b4" stroke-width="2" stroke-dasharray="6 4"/>`;
+        if(i&&p.stock!==null&&points[i-1].stock!==null&&!p.segment_start)lines+=`<line class="stock-line" x1="${X(i-1)}" y1="${Y(points[i-1].stock)}" x2="${X(i)}" y2="${Y(p.stock)}" stroke-width="2"/>`;
+        if(i)salesLine+=`<line class="sales-line" x1="${X(i-1)}" y1="${S(cumulative[i-1])}" x2="${X(i)}" y2="${S(cumulative[i])}" stroke-width="2" stroke-dasharray="6 4"/>`;
     });
     const plot=points.map((p,i)=>{
         const sy=S(cumulative[i]), iy=p.stock===null?null:Y(p.stock), stockAbove=iy!==null&&iy<=sy;
         const labelSales=sy+(stockAbove||iy===null?18:-12), labelStock=iy+(stockAbove?-12:18);
         const showLabel=n<=16||i===0||i===n-1||i%Math.ceil(n/12)===0;
         const tip=p.color==='red'?(sku?'库存增加，疑似补货，该时段销量设定为0':'存在疑似补货SKU'):p.color==='yellow'?'当日未抓取库存':'';
-        return `${showLabel?`<text x="${X(i)}" y="242" text-anchor="middle" font-size="11" fill="#687d70">${p.date.slice(5)}</text>`:''}<path class="sales-point" data-date="${p.date}" data-x="${X(i)}" data-y="${sy}" d="M ${X(i)} ${sy-4} l 4 4 -4 4 -4 -4 z" fill="white" stroke="#5973b4" stroke-width="1.6"/>${showLabel?`<text class="point-label" x="${X(i)}" y="${labelSales}" text-anchor="middle" font-size="11" fill="#5973b4">${chartNumber(cumulative[i])}</text>`:''}${iy===null?'':`<circle class="stock-point ${p.color}" data-date="${p.date}" data-stock="${p.stock}" cx="${X(i)}" cy="${iy}" r="5"${tip?` data-tip="${tip}"`:''}/>${showLabel?`<text class="point-label" x="${X(i)}" y="${labelStock}" text-anchor="middle" font-size="11" fill="#466d57">${chartNumber(p.stock)}</text>`:''}`}`;
+        return `${showLabel?`<text class="date-label" x="${X(i)}" y="242" text-anchor="middle" font-size="11">${p.date.slice(5)}</text>`:''}<path class="sales-point" data-date="${p.date}" data-x="${X(i)}" data-y="${sy}" d="M ${X(i)} ${sy-4} l 4 4 -4 4 -4 -4 z" stroke-width="1.6"/>${showLabel?`<text class="point-label sales-value" x="${X(i)}" y="${labelSales}" text-anchor="middle" font-size="11">${chartNumber(cumulative[i])}</text>`:''}${iy===null?'':`<circle class="stock-point ${p.color}" data-date="${p.date}" data-stock="${p.stock}" cx="${X(i)}" cy="${iy}" r="5"${tip?` data-tip="${tip}"`:''}/>${showLabel?`<text class="point-label stock-value" x="${X(i)}" y="${labelStock}" text-anchor="middle" font-size="11">${chartNumber(p.stock)}</text>`:''}`}`;
     }).join('');
-    const ticks=[0,.5,1].map(t=>`<line x1="88" x2="808" y1="${bottom-t*height}" y2="${bottom-t*height}" stroke="#e5ebe6"/><text class="axis-label stock-axis" x="77" y="${bottom-t*height+4}" text-anchor="end" font-size="10" fill="#718178">${chartNumber(low+(high-low)*t)}</text><text class="axis-label sales-axis" x="826" y="${bottom-t*height+4}" font-size="10" fill="#5973b4">${chartNumber(salesHigh*t)}</text>`).join('');
-    return `<div class="chart-block" data-sku="${sku}"><div class="chart-toolbar"><div class="chart-key"><span>━ 库存（左轴）</span><span class="sales">┄ ◇ 累计销量（右轴）</span></div><div class="stock-legend"><span class="green">● 正常观测</span>${sku?'<span class="yellow">● 当日未抓取库存</span>':''}<span class="red">● 疑似补货</span></div></div><div class="chart"><svg class="inventory-chart" viewBox="0 0 920 262" role="img" aria-label="${sku?'SKU':'同款组'}库存与累计销量"><text x="77" y="17" text-anchor="end" fill="#718178" font-size="11">库存</text><text x="826" y="17" fill="#5973b4" font-size="11">累计销量</text>${ticks}${lines}${salesLine}${plot}</svg></div></div>`;
+    const ticks=[0,.5,1].map(t=>`<line class="grid-line" x1="88" x2="808" y1="${bottom-t*height}" y2="${bottom-t*height}"/><text class="axis-label stock-axis" x="77" y="${bottom-t*height+4}" text-anchor="end" font-size="10">${chartNumber(low+(high-low)*t)}</text><text class="axis-label sales-axis" x="826" y="${bottom-t*height+4}" font-size="10">${chartNumber(salesHigh*t)}</text>`).join('');
+    return `<div class="chart-block" data-sku="${sku}"><div class="chart-toolbar"><div class="chart-key"><span>━ 库存（左轴）</span><span class="sales">┄ ◇ 累计销量（右轴）</span></div><div class="stock-legend"><span class="green">● 正常观测</span>${sku?'<span class="yellow">● 当日未抓取库存</span>':''}<span class="red">● 疑似补货</span></div></div><div class="chart"><svg class="inventory-chart" viewBox="0 0 920 262" role="img" aria-label="${sku?'SKU':'同款组'}库存与累计销量"><text class="axis-title stock-title" x="77" y="17" text-anchor="end" font-size="11">库存</text><text class="axis-title sales-title" x="826" y="17" font-size="11">累计销量</text>${ticks}${lines}${salesLine}${plot}</svg></div></div>`;
 }
 function toggleSku(button){
     const rows=[...button.closest('.rank').querySelectorAll('.sku-row')], open=!rows.every(row=>row.open);
@@ -382,7 +404,7 @@ function buildReport(snapshot, urls) {
         const script=['const $ = id => document.getElementById(id);',`${tipOver}`,`${tipOut}`,`${toggleSku}`,
             "document.addEventListener('pointerover', tipOver);","document.addEventListener('pointerout', tipOut);"]
             .join('\n').replace(/<\/script/gi,'<\\/script');
-        return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>销量分析报告 ${esc(snapshot.start)} — ${esc(snapshot.end)}</title><style>${document.querySelector('style').textContent}</style><header><h1>销量分析报告</h1><span>离线副本 · 无需本地服务与网络</span></header><main><section class="panel"><h2>${esc(snapshot.start)} — ${esc(snapshot.end)}</h2><p>数据固定于 <b>${esc(snapshot.frozen_at)}</b>${snapshot.saved_at?`，保存于 <b>${esc(snapshot.saved_at)}</b>`:''}，导出于 ${fmtMoment(new Date().toISOString())}。</p><p class="muted">分析 ${esc(snapshot.id)} · ${snapshot.products.length} 个商品 · ${snapshot.groups.length} 个同款组（含零销量组），随附全部 SKU 明细与库存 / 累计销量图。商品源图标指向导出时的详情地址，打开它需要网络，不影响本页离线阅读。</p></section><section class="panel"><h2>畅销品排名</h2><div id="ranking">${rows||'<p class="empty">本区间没有符合条件的畅销品。</p>'}</div></section></main><div id="tip" class="tip" hidden></div><script>${script}<\/script></body></html>`;
+        return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>销量分析报告 ${esc(snapshot.start)} — ${esc(snapshot.end)}</title><style>${document.querySelector('style').textContent}</style><header><h1>销量分析报告</h1><span>离线副本 · 无需本地服务与网络</span></header><main><section class="panel"><h2>${esc(snapshot.start)} — ${esc(snapshot.end)}</h2><p>数据固定于 <b>${fmtMomentSecond(snapshot.frozen_at)}</b>${snapshot.saved_at?`，保存于 <b>${fmtMomentSecond(snapshot.saved_at)}</b>`:''}，导出于 ${fmtMomentSecond(new Date().toISOString())}。</p><p class="muted">分析 ${esc(snapshot.id)} · ${snapshot.products.length} 个商品 · ${snapshot.groups.length} 个同款组（含零销量组），随附全部 SKU 明细与库存 / 累计销量图。商品源图标指向导出时的详情地址，打开它需要网络，不影响本页离线阅读。</p></section><section class="panel"><h2>畅销品排名</h2><div id="ranking">${rows||'<p class="empty">本区间没有符合条件的畅销品。</p>'}</div></section></main><div id="tip" class="tip" hidden></div><script>${script}<\/script></body></html>`;
     } finally {
         exportSources=null;
     }

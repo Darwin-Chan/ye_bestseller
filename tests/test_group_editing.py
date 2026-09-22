@@ -16,6 +16,7 @@ class GroupEditingTests(unittest.TestCase):
     stop_server = fixture.AnalysisBrowserTests.stop_server
     submit = fixture.AnalysisBrowserTests.submit
     dates = fixture.AnalysisBrowserTests.dates
+    switch_tab = fixture.AnalysisBrowserTests.switch_tab
 
     def seed(self, count=4):
         for i in range(1, count + 1):
@@ -66,6 +67,8 @@ class GroupEditingTests(unittest.TestCase):
         self.seed()
         self.dates()
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
+        # 这个用例确认后还要接着操作同一组，「全部」页签下组不因确认离开列表。
+        self.switch_tab('全部')
         expect(self.page.locator('.group-choice')).to_have_count(4)
         self.page.locator('.group-choice').nth(1).click()
         expect(self.page.locator('#groupDetail h3')).to_have_text('G2 · 1 个商品')
@@ -138,6 +141,8 @@ class GroupEditingTests(unittest.TestCase):
         self.model()
         self.dates()
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
+        # 确认一组之后还要从它的成员卡进对比弹窗，「全部」页签下这一组不会离开列表。
+        self.switch_tab('全部')
         expect(self.page.locator('.group-choice')).to_have_count(4)
         self.page.get_by_role('button', name='确认当前分组',exact=True).click()
         card = self.page.locator('#groupDetail [data-product="33"]')
@@ -225,10 +230,12 @@ class GroupEditingTests(unittest.TestCase):
             for target_confirmed in (False,True):
                 self.dates()
                 self.page.get_by_role('button',name='下一步、进入同款确认').click()
+                # 四种状态组合要在同一份列表里来回切换，「全部」页签下组不因状态离开列表。
+                self.switch_tab('全部')
                 expect(self.page.locator('.group-choice')).to_have_count(4)
                 if source_confirmed:
                     self.page.get_by_role('button',name='确认当前分组',exact=True).click()
-                    expect(self.page.get_by_role('button',name='已确认',exact=True)).to_be_disabled()
+                    expect(self.page.locator('#groupDetail .group-status')).to_have_text('已确认')
                 # Add B to A so the source survives the subsequent move.
                 self.page.get_by_role('button',name='组内新增商品').click()
                 self.page.get_by_role('textbox',name='搜索商品').fill('杯子2')
@@ -237,7 +244,7 @@ class GroupEditingTests(unittest.TestCase):
                 self.page.locator('.group-choice').filter(has_text='G3 ·').click()
                 if target_confirmed:
                     self.page.get_by_role('button',name='确认当前分组',exact=True).click()
-                    expect(self.page.get_by_role('button',name='已确认',exact=True)).to_be_disabled()
+                    expect(self.page.locator('#groupDetail .group-status')).to_have_text('已确认')
                 self.page.get_by_role('button',name='组内新增商品').click()
                 self.page.get_by_role('textbox',name='搜索商品').fill('杯子2')
                 self.page.locator('#addResults').get_by_role('button',name='添加到当前组').click()
@@ -253,6 +260,8 @@ class GroupEditingTests(unittest.TestCase):
         self.model()
         self.dates()
         self.page.get_by_role('button',name='下一步、进入同款确认').click()
+        # 确认两组后要接着对它们做移除／查看状态，「全部」页签下组不会离开列表。
+        self.switch_tab('全部')
         expect(self.page.locator('.group-choice')).to_have_count(4)
         self.page.locator('.group-choice').filter(has_text='杯子5 ·').click()
         self.page.get_by_role('button',name='确认当前分组',exact=True).click()
