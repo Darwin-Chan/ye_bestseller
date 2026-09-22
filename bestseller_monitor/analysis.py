@@ -631,7 +631,9 @@ def merge_decisions(snapshot: dict, decisions: dict, machine: str) -> dict:
     确认的分组按在场成员写回关系，并认领这次不显示的缺席成员——保存局部区间
     不能抹掉全局历史关系；撤回过的显示状态写入账本（成员保留、记为未确认）；
     证据版本已变或已被人工挪走的在场成员按最新决定移出关系。排除关系同理：
-    只有两端都在本次分析里，这次保存才可能改写它们。
+    只有两端都在本次分析里，这次保存才可能改写它们。独立确认同规（票 04）：
+    成员不在本次分析里的行原样保留（版本与来源随行），在场而没被确认的照旧不写——
+    撤回独立确认即删除它。
 
     来源机器（票 02）：行上原有的来源随行保留（收进来的决定往返一次不被改写）——关系折进
     本机的确认组时，来源随那条关系带走；独立确认与排除对按「身份（＋版本）」从原账本找回。
@@ -691,6 +693,9 @@ def merge_decisions(snapshot: dict, decisions: dict, machine: str) -> dict:
             (member, member_version), = members.items()
             standalone.append([member, member_version,
                                known_standalone.get((member, member_version), machine)])
+    # 认领缺席的独立确认（票 04）：成员不在本次分析里的行原样保留——与关系同一口径，
+    # 保存局部区间不能抹掉全局历史；在场而没被确认的照旧不写（撤回即删除）。
+    standalone += [list(entry) for entry in decisions['standalone'] if entry[0] not in present]
     known_excluded = {tuple(pair[:2]): pair[2] for pair in decisions['excluded'] if len(pair) > 2}
 
     def with_source(pair):

@@ -137,6 +137,30 @@ class DecisionReuseTests(unittest.TestCase):
         # 旧草稿保留自己的结果，不被后来的分析改写。
         self.assertEqual(self.group_for(self.open_service().get(sid1), '11')['sales'], 40)
 
+    def test_partial_save_keeps_a_standalone_confirmation_of_an_absent_member(self):
+        """独立确认的成员不在本次分析里：与关系同一口径，保存局部区间不能把它抹掉（票 04）。"""
+        # 7—14：只确认树叶杯的独立分组并保存。
+        first = self.service.start('2026-09-07', '2026-09-14')
+        self.service.confirm(first['id'], self.group_for(first, '33')['id'])
+        self.service.save_draft(first['id'])
+        leaf = identity({'shop_key': 'A01', 'offer_id': '33'})
+        self.assertEqual([entry[0] for entry in self.service.store.ledger()['standalone']], [leaf])
+
+        # 15—21 只见得到前两个杯子：树叶杯缺席，保存不能丢掉它的独立确认。
+        second = self.service.start('2026-09-15', '2026-09-21')
+        self.assertEqual([p['offer_id'] for p in second['products']], ['11', '22'])
+        self.service.save_draft(second['id'])
+        self.assertEqual([entry[0] for entry in self.service.store.ledger()['standalone']], [leaf])
+
+        # 树叶杯回来：独立确认仍在、自动生效。
+        third = self.service.start('2026-09-07', '2026-09-14')
+        self.assertTrue(self.group_for(third, '33')['confirmed'])
+
+        # 在场时撤回：行随存随删，缺席保留不等于撤回不掉。
+        self.service.withdraw(third['id'], self.group_for(third, '33')['id'])
+        self.service.save_draft(third['id'])
+        self.assertEqual(self.service.store.ledger()['standalone'], [])
+
     def test_exclusions_survive_partial_saves_and_reappearing_members(self):
         first = self.service.start('2026-09-07', '2026-09-14')
         sid1 = first['id']
