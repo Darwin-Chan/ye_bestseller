@@ -111,10 +111,12 @@ class DetailVisitTests(unittest.TestCase):
         它的子类，本来就会原样上抛。删掉它顺带把 `click_listing` 为拿一个常量而写的延迟
         import（与它引出的那条 import 环）一并去掉。
 
-        **这条非用签名不可**：多传一个位置实参会被静默绑到下一个参数上。
+        **这条非用签名不可**：多传一个位置实参会被静默绑到下一个参数上。加参数也要在这里
+        露一面——`pacing` 就是 2026-09-22 按 ADR-0038 加进来的那一个（主动停顿的两步都收在
+        这条 seam 上）。
         """
         self.assertEqual(list(inspect.signature(detail_visit.begin_detail_visit).parameters),
-                         ["acquire", "cfg", "emit", "deny_tracker", "shop_key"])
+                         ["acquire", "cfg", "emit", "deny_tracker", "shop_key", "pacing"])
         self.assertNotIn("_reraise",
                          {field.name for field in dataclasses.fields(detail_visit.ReadyDetailVisit)})
         with self.assertRaises(TypeError):

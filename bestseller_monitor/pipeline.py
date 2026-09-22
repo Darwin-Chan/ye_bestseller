@@ -324,21 +324,19 @@ def _report_late_stop(settled: Round, reason: TerminalReason) -> None:
 
 
 def _capture_pending_offers(db: Database, cfg: Config, human: Humanizer, round_id: int,
-                            offers, capture, pacing: "Pacing | None" = None) -> int:
+                            offers, capture) -> int:
     """逐个补采；停止那一族原样抛出，其余异常记为失败后继续。
 
     兜底失败记录接着本轮的尝试额度编号，初次访问和补采共用同一份额度。
     停止那一族按 `_STOP_OUTCOMES` 的全部登记项放行：注意 `ShopDenyExceeded` 只跳过单店，
     所以它是「放行到这里、由店铺那一层收尾」（候选 04）。
 
-    `pacing` 是整轮那一个（与点击路径共用）：补采按「30 个详情 = 1 页」折算进同一份
-    主动停顿配额（ADR-0037），所以它记在**详情开始之前**。
+    主动停顿不在这里：它记在详情页真的打开之后，那一处在 `_capture_one_pw` 的观测回调里
+    （ADR-0038）——在这里按 offer 记会连「今天采过、页都没开」的那些一起算上。
     """
     processed = 0
     for offer in offers:
         processed += 1
-        if pacing is not None:
-            pacing.detail_started(shop_key=offer["shop_key"])
         try:
             capture(offer)
         except STOP_WITH_OUTCOME:
@@ -427,7 +425,7 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
                     emit=None, deny_tracker=None) -> None:
     done = db.completed_listing_keys(round_id)
     human = Humanizer(cfg)
-    # 主动停顿的配额账本也是整轮一个：点击路径与逐店补采共用（ADR-0037）。
+    # 主动停顿的配额账本也是整轮一个：点击路径与逐店补采共用（ADR-0038）。
     pacing = Pacing(cfg, human, emit=emit)
     for shop in shops:
         # 每家店开始之前先问轮次：跨天收尾发生在还没动这家店的干净点上。
@@ -464,8 +462,8 @@ def _retry_shop_pending_pw(db: Database, cfg: Config, round_id: int, shop: Shop,
     """某店榜单保存完成后，立即补抓该店本轮尚未成功的商品，再进入下一家店。
 
     `deny_tracker` 是整轮那一个（与点击路径共用）：补采命中 deny 也计入店铺/整轮阈值
-    （候选 04）。`pacing` 同理——补采按「30 个详情 = 1 页」折算进同一份主动停顿配额
-    （ADR-0037），别让这一段成为防范真空。
+    （候选 04）。`pacing` 同理——它是整轮那一份主动停顿配额（ADR-0038），跟着
+    `_capture_one_pw` 走，记在详情页真的打开之后。
     """
     offers = _pending_detail_offers(db, round_id, cfg, shop_key=shop.key)
     if not offers:
@@ -474,18 +472,20 @@ def _retry_shop_pending_pw(db: Database, cfg: Config, round_id: int, shop: Shop,
     _capture_pending_offers(
         db, cfg, human, round_id, offers,
         lambda offer: _capture_one_pw(db, cfg, human, round_id, offer, page, emit=emit,
-                                      deny_tracker=deny_tracker),
-        pacing=pacing,
+                                      deny_tracker=deny_tracker, pacing=pacing),
     )
 
 
 def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, offer, page,
-                    emit=None, deny_tracker=None) -> None:
+                    emit=None, deny_tracker=None, pacing=None) -> None:
     """逐店补采一个商品：共享详情访问交回验证后的当前观测。
 
     编号在取观测前就已知，所以「今天采过就不打开页面、额度用尽就不进详情」这条省事的路
     在这里成立（候选 02 / ADR-0013）；访问顺序由 `detail_visit` 统一，规则仍在
     `detail.capture_observation`。补采命中的 deny 与点击路径共用一个账目（候选 04）。
+
+    主动停顿（ADR-0038）跟着 `pacing` 传进共享 seam（`begin_detail_visit`），记在页面真的
+    到手之后：上面那条省事的路根本不走观测回调，也就一次都不占配额——这正是它该有的样子。
     """
     def emit_detail(event: str, **kw: object) -> None:
         if emit is not None:
@@ -497,7 +497,7 @@ def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, 
             lambda: browser_pw.navigate_detail(
                 page, offer["product_url"], emit=emit_detail),
             cfg, emit=emit_detail, deny_tracker=deny_tracker,
-            shop_key=offer["shop_key"],
+            shop_key=offer["shop_key"], pacing=pacing,
         )
         if isinstance(visit, detail_visit.NotOpenedVisit):
             raise RuntimeError("逐店补采的导航 adapter 不应返回 NotOpenedVisit")

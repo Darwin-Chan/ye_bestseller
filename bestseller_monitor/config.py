@@ -19,15 +19,35 @@ def _tuple2(name: str, v: object) -> tuple[float, float]:
     return (a, b)
 
 
-def _pause_every_pages(v: object) -> int:
-    """主动停顿的页配额（ADR-0037）：0 = 关闭这条规则。
+def _pause_every_detail_visits(v: object) -> int:
+    """主动停顿的详情访问配额（ADR-0038）：0 = 关闭这条规则。
 
     负数没有意义，报错而不是静默当成关闭——「写错了」与「故意关掉」要分得开。
     """
-    pages = int(v)
-    if pages < 0:
-        raise ValueError(f"配置 human.pause_every_pages 不能为负（0 = 关闭主动停顿）：{pages}")
-    return pages
+    visits = int(v)
+    if visits < 0:
+        raise ValueError(
+            f"配置 human.pause_every_detail_visits 不能为负（0 = 关闭主动停顿）：{visits}")
+    return visits
+
+
+# ADR-0038 之前的键名：配额那时按「页」记，一页折算 30 个详情。
+SUPERSEDED_PAUSE_PAGES_KEY = "pause_every_pages"
+
+
+def _reject_superseded_pause_pages(human: Mapping) -> None:
+    """见到旧键就报错，不替机器猜意图。
+
+    旧值 6 折算过来恰好等于新默认 180，看上去可以静默换算；但某台机器若写着 0（故意关掉）
+    或别的值，两种做法都会悄悄改掉它的松紧——点名字报错才安全（ADR-0038）。
+    """
+    if SUPERSEDED_PAUSE_PAGES_KEY in human:
+        raise ValueError(
+            f"配置 human.{SUPERSEDED_PAUSE_PAGES_KEY} = "
+            f"{human[SUPERSEDED_PAUSE_PAGES_KEY]!r} 已下线：主动停顿的配额改按详情访问计"
+            f"（一页不再折算成 30 个详情），请改写为 human.pause_every_detail_visits = 180"
+            f"（见 ADR-0038）。旧值 6 折算过来就是 180，但 0（关闭）或别的值不该被替你猜。"
+        )
 
 
 # 唯一的采集驱动：Playwright 连接接管 + 点击式列表（ADR-0010）。
@@ -129,8 +149,8 @@ class Config:
     detail_delay_sec: tuple[float, float]
     long_pause_interval: tuple[int, int]
     long_pause_sec: tuple[float, float]
-    # 主动停顿（ADR-0037）：每 N 页停一次，每次在 pause_sec 区间里随机取；0 = 关闭
-    pause_every_pages: int
+    # 主动停顿（ADR-0038）：每 N 次详情访问停一次，每次在 pause_sec 区间里随机取；0 = 关闭
+    pause_every_detail_visits: int
     pause_sec: tuple[float, float]
     batch_size: int
     batch_rest_sec: tuple[float, float]
@@ -174,6 +194,7 @@ class Config:
         run = raw["run"]
         human = raw["human"]
         browser = raw["browser"]
+        _reject_superseded_pause_pages(human)
         machine = raw.get("machine", {})
         if not isinstance(machine, dict):
             raise ValueError(
@@ -227,7 +248,8 @@ class Config:
                 int(human["long_pause_interval"][1]),
             ),
             long_pause_sec=_tuple2("human.long_pause_sec", human["long_pause_sec"]),
-            pause_every_pages=_pause_every_pages(human.get("pause_every_pages", 6)),
+            pause_every_detail_visits=_pause_every_detail_visits(
+                human.get("pause_every_detail_visits", 180)),
             pause_sec=_tuple2("human.pause_sec", human.get("pause_sec", [1500, 2100])),
             batch_size=int(human["batch_size"]),
             batch_rest_sec=_tuple2("human.batch_rest_sec", human["batch_rest_sec"]),

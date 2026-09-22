@@ -49,8 +49,8 @@ def crawler_cfg(**overrides):
         "detail_delay_sec": (0.0, 0.0),
         "long_pause_interval": (1, 1),
         "long_pause_sec": (0.0, 0.0),
-        # 主动停顿默认关闭（0 = 关闭）：考它的用例自己给 pause_every_pages / pause_sec。
-        "pause_every_pages": 0,
+        # 主动停顿默认关闭（0 = 关闭）：考它的用例自己给 pause_every_detail_visits / pause_sec。
+        "pause_every_detail_visits": 0,
         "pause_sec": (0.0, 0.0),
         "batch_size": 1,
         "batch_rest_sec": (0.0, 0.0),

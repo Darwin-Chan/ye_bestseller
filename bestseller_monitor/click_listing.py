@@ -92,7 +92,6 @@ class ShopWalk:
         self.listing_page.prepare(f"店铺 {shop.key} 首屏", emit=self.emit)
         while self.pages_read < max_pages:
             self.pages_read += 1
-            self._page_started()
             self.human.before_list_page()
             self.emit("list_page", note=f"page={self.pages_read}")
             count = self.listing_page.scroll_to_load("滚动加载新卡片")
@@ -109,12 +108,6 @@ class ShopWalk:
         if not self.offers:
             self.listing_page.load_failed(f"店铺列表未解析到商品：{shop.url}")
         return self.offers, self.pages_read
-
-    def _page_started(self) -> None:
-        """新的一页就要开始（主遍历与补抓同规）：先问主动停顿（ADR-0037），
-        再把这一页记进配额。配额到点时停在这里，页面还没翻——下一批请求也就还没发出。"""
-        if self.pacing is not None:
-            self.pacing.page_started(shop_key=self.shop.key)
 
     def _visit_card(self, index: int) -> None:
         """列表页上第 index 张卡：读名字、按名暂缓、进详情。"""
@@ -180,6 +173,7 @@ class ShopWalk:
                 visit = detail_visit.begin_detail_visit(
                     card.acquire, self.cfg, emit=self.emit,
                     deny_tracker=self.deny_tracker, shop_key=self.shop.key,
+                    pacing=self.pacing,
                 )
             except (ShopDenyExceeded, RoundDenyExceeded) as exc:
                 # 账目与判据都在 guard，这里只把它记成事件再上抛。
@@ -315,7 +309,6 @@ class ShopWalk:
         # 补抓第二遍与主页走同一份准备：顺序、兜底、事件都不再各写一遍。
         self.listing_page.prepare(f"店铺 {shop.key} 补抓首屏", emit=self.emit)
         for rescue_page in range(1, rescue_last_page + 1):
-            self._page_started()
             self.human.before_list_page()
             self.emit("list_page", note=f"rescue_page={rescue_page}")
             if rescue_page in ambiguous_pages:

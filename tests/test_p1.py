@@ -844,7 +844,8 @@ class P1Tests(unittest.TestCase):
             oid = "1" if shop.key == "A01" else "2"
             return [(1, oid, f"https://detail.1688.com/offer/{oid}.html", f"商品{oid}", "")], 1
 
-        def fake_capture(db, cfg_, human, rid, offer, page, emit=None, deny_tracker=None):
+        def fake_capture(db, cfg_, human, rid, offer, page, emit=None, deny_tracker=None,
+                         pacing=None):
             events.append(("retry", offer["shop_key"]))
 
         with patch.object(click_listing, "crawl_store_by_click", side_effect=fake_crawl), \

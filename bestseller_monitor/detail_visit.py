@@ -120,8 +120,17 @@ def begin_detail_visit(
     emit=None,
     deny_tracker: DenyTracker | None = None,
     shop_key: str | None = None,
+    pacing=None,
 ) -> NotOpenedVisit | ReadFailedVisit | DeniedVisit | ReadyDetailVisit:
-    """取得详情页并完成初次 guard，交回一次性的后续读取 capability。"""
+    """取得详情页并完成初次 guard，交回一次性的后续读取 capability。
+
+    主动停顿（ADR-0038）的两步也在这条共享 seam 上，只此一处持有：**取得之前**问一次
+    （配额到点就停在这里，请求还没发出）、**adapter 真的交回页面之后**记一次。记账点放在
+    取得之后，所以「点了没打开」与「取得时报错」都不占配额，而 guard 判出来的 deny 页、
+    以及在 deny 页上越界抛出的那一次都算——配额量的是打到详情接口的请求。
+    """
+    if pacing is not None:
+        pacing.before_detail_visit(shop_key=shop_key)
     try:
         opened = acquire()
     except BROWSER_IO_ERRORS as exc:
@@ -131,6 +140,9 @@ def begin_detail_visit(
         return NotOpenedVisit()
     if not isinstance(opened, OpenedDetail):
         raise TypeError(f"详情 adapter 必须交回 OpenedDetail，收到 {type(opened)!r}")
+
+    if pacing is not None:
+        pacing.detail_visit_opened()
 
     try:
         denied = ready_detail_page(
