@@ -34,6 +34,7 @@ Approval: approved
 | 13 | [完整浏览器流程与真实样本验收](issues/13-end-to-end-acceptance.md) | 03、09、11、12 | 12 店铺和 3,012 商品下，从选日期走到重启恢复、新区间复用及离线报告 |
 | 14 | [畅销品分析打包成壳 exe，并加运行互斥](issues/14-analyze-shell-exe.md) | 无 | 双击 `dist\bestseller_analysis.exe` 起分析，第二次起壳提示已打开并退出 0；`--target analysis` 过构建自检 |
 | 15 | [销量分析界面七处调整](issues/15-analysis-ui-adjustments.md) | 无 | 确认同款页配色与库存抓取一致、页签改序并默认待确认、批量行按页签分工（已确认页签可批量撤回）、“全部”页签无勾选与批量行、成员卡不再展示逐日 SKU 明细；日期页覆盖表带店铺编号 |
+| 16 | [分析页顶部阶段图例](issues/16-analysis-stage-legend.md) | 无 | 顶部三节点随屏幕推进亮灯：选择区间 → 确认同款 → 分析结果，退回重置；与库存抓取页同款、不可点 |
 
 ## 依赖说明
 
@@ -100,6 +101,7 @@ flowchart TD
 - 本轮未开始实现，验收清单仍全部未勾选，父规格未修改。
 - 2026-09-21：13 票全部完成（resolved）后补发第 14 张票——畅销品分析打包成壳 exe 并加运行互斥，发布为 `ready-for-agent`。它不在原 13 票的拆分里：原票 13 是收口票，而「分析没有双击入口」是票 14（多机线）显式延后的缺口（见该票边界的「`analyze 的壳（同规可随时补）`」）。依据引 ADR-0007／ADR-0008 与该边界句，本线 `spec.md` 无打包内容，未改父规格。
 - 2026-09-22：14 收口后补发第 15 张票——销量分析界面七处调整（用户逐条走查提出），发布为 `ready-for-agent`；同日实现、审查并 resolved。它不动销量计算、匹配与草稿契约，只改页面呈现与批量撤回入口，故未改父规格的结构，只改被推翻的四段（§2、§9、§10、§11）。
+- 2026-09-22：15 收口后补发第 16 张票——销量分析页顶部加与库存抓取同款的分阶段图例（用户逐条走查提出），发布为 `ready-for-agent`。它不动销量计算、匹配与草稿契约，只改页面呈现与两处选择器作用域，故未改父规格。设计结论（经两轮问答）：三节点「选择区间／确认同款／分析结果」；亮灯＝屏幕镜像、可逆；纯指示不可点；组件 markup/CSS 逐字照搬 ui_live.html 并放 `<main>` 内第一个元素；导出报告不带图例。
 
 ## 实施进展
 
@@ -136,3 +138,5 @@ flowchart TD
 - 2026-09-21：14 已完成并 resolved，主实现 `0d58645`、审查收口 `0aed959`。新增 `analysis_launcher.py` + `bestseller_analysis.spec` → `dist\bestseller_analysis.exe`（第三只壳，与另两只同形；名实分裂有意：键／spec／薄入口／日志／`--target` 叫 `analysis`，被拉的脚本仍叫 `analyze.py`）；`tools/build_exe.py` 泛化为 `--target gui|exchange|analysis`（`PROJECT_MODULES` 加 `analyze`）；`single_instance` 加第四把 `Local\bestseller_analysis`，`analyze.py` 的 `main()` 抢锁——窗口与 `--serve` 同规共用一把，抢不到就落日志、前置已有窗口、弹中文提示、退出 0（让分析壳保持安静），末尾改 `raise SystemExit(main())`。新增 `tests/test_analyze_launcher.py` 6 项与 `tests/test_analyze_entry.py` 8 项（锁、劝退、退出码、管道编码；锁用例每例一把自己的锁名，不跟本机真实运行的分析抢同一把）。全套 922 项通过（437.379 秒，基线 902）。演练（`.scratch/bestseller-analysis/ticket14/`）：三只壳重建不回归；起壳 → 真窗口 → 第二次起壳弹「分析已经打开」退出 0、`NO_DIALOG=1` 只落壳日志；失败面各弹对（config 缺失／找不到 python／壳拒绝 `--config`／`--serve`）；`python analyze.py` 与 `--serve` 共用一把锁、命令行路径不回归；真窗口里分析页面出数（选日期 → 当日真实抓取，截图同目录）。收口时修一处真机问题：子进程 stderr 走管道默认用本机代码页（GBK）、而壳正文按 UTF-8 读，中文在壳日志与失败弹窗里全成乱码（仓库 2026-09-12 的 `logs/gui_launcher.log` 同病）——分析入口把管道下的 stderr 对齐到 UTF-8；`gui.py`／`exchange.py` 两份入口不在本票范围，记录在案。Standards 0 硬性违规、3 条判断题 2 收 1 留；Spec 0 疑似做错、3 处轻微越界均属「让落日志真正可用」的合理连带、1 条存疑（按标题前置窗口可能命中 Explorer 的 TabProxyWindow，照 `gui.py` 先例）保留在案。
 
 - 2026-09-22：15 已完成并 resolved，主实现 `a742e67`。用户逐条走查提出七处界面调整，经两轮问答定稿后实现：配色与库存抓取／交换台共用同一套变量（页头色带去掉、图表取色改走 CSS 变量）、日期页覆盖表带店铺编号、确认同款页顶部改两行（数据固定时刻读到秒 + 22px 主色计数）、成员卡删除逐日 SKU 明细、页签改「待确认／已确认／全部」并默认待确认、「全部」页签去掉勾选框与批量行、已确认页签的批量按钮改为撤回（新增 `withdraw_groups`，弹窗一行）。新增 `tests/test_analysis_ui_adjustments.py` 9 项，切页签收进夹具 `switch_tab`，既有用例按新默认与新文案更新；全量 961 项通过（398.139 秒）。审查（max effort，10 角度）修掉五处：空列表批量请求不再被当成成功、批量动作改为提交时从页签推导、撤回弹窗清掉上一轮第二行文案、页头副标题与标题同排、报告三处时刻统一到秒；保留两项在案（`inventory` 仍随每次修改类 POST 往返、配色变量三页各存一份已加同步注释）。
+
+- 2026-09-22：16 已完成并 resolved，主实现 `4f31590`。新增 `tests/test_analysis_stage_legend.py` 2 项（三屏灯序：选择区间→确认同款→分析结果；重开沿 #analysis 自动恢复到结果；退回日期页重置；惰性探针按 onclick 属性与 property 双查、点击三节点后再断言；灯色按 computed style 钉住变量）。组件逐字照搬库存抓取页的 .tabs/.step（34px 圆点、2px 连线、四色变量），放 `<main>` 内第一个元素、常显；两处 `[data-tab]` 选择器收窄到 .review-tabs；导出报告不带图例。在 HEAD+本票的独立副本（`.scratch/work/isolated/bestseller`，补入机器本地 config）全套 963 项通过（478.166 秒）。评审（独立代理，只读）：运行时 0 缺陷，测试三处加强（原惰性探针是恒真式、点击后补一拍同步等待、灯色断言）。演练三态截图见 `.scratch/bestseller-analysis/ticket16/`。并发：同页票 17（模型匹配同款控件）在飞——实现提交用私有索引只带本票两文件（+116/−3）、共享索引按路径对齐；票号 16 归属经与对方会话确认；首次工作区全量里 test_matching 一处浏览器用例超时经单跑确认为负载抖动。
