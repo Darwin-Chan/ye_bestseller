@@ -20,6 +20,15 @@ Issues and specs for this repo live as markdown files in `.scratch/`.
 
 The former `docs/ISSUES.md` has been migrated into `.scratch/1688-inventory-snapshot/`: the current spec is `spec.md`, each `IS-xx` entry is a separate file under `issues/`, and the original document is preserved under `archive/`.
 
+## Runtime problem reports are a different channel
+
+Reports from machines running the program (crash, refusal, wrong output) arrive as hand-carried
+bundles under `.scratch/inbox/<bundle>/`, produced by `tools/issue_bundle.py` — spec and reading
+order in `docs/ops/问题记录与打包.md`. Confirm a report is a defect first, then open a ticket here
+and cite the bundle name (e.g. `2026-09-22-2033-m1-交换台报错`) as the evidence. Bundles are
+machine-local and never tracked; tickets here are likewise machine-local, so copy anything a ticket
+must keep into the ticket body itself.
+
 ## When a skill says "publish to the issue tracker"
 
 Create a new file under `.scratch/<feature-slug>/` (creating the directory if needed).

@@ -2,7 +2,8 @@
 
 外部行为接缝是 `weekly_plan` 的三个入口：`generate_plan`（算出计划文件）、
 `render_plan_md`（人核对的 .md）、`read_history`（读已发布的历史计划文件）。
-对照基准是 `.scratch/multi-machine-collection/prototype/` 的原型：
+对照基准来自设计期的原型（原型的存放目录 `.scratch/multi-machine-collection/prototype/`
+在开发机上、不进代码仓；期望值已固化进本仓库，跑测试不需要它）：
 
 - 六组分配样例来自 `prototype/samples.md`；期望值固定在
   `fixtures/plan_parity_expected.json`（由原型 `dump_plans.py` 导出，

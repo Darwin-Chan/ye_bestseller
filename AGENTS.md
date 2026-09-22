@@ -26,12 +26,21 @@
   `.scratch/logs/tickets/<slug>/<票号>/`（开发日志写 `.scratch/logs/dev/`）；
   诊断/截图类工具的默认输出写 `.scratch/tool-output/`；别往根目录或运行时文件夹
   （`logs/`、`output/`、`dist/`）放设计时产物。
+- **别的机器的记录包**：解压到 `.scratch/inbox/<包名>/` 再读；怎么记录、怎么读见
+  `docs/ops/问题记录与打包.md`。
 
 ## Agent skills
 
 ### Issue tracker
 
 Issues and specs live as markdown files under `.scratch/<feature-slug>/` in this repo. See `docs/agents/issue-tracker.md`.
+
+### 运行时问题记录（别的机器跑出来的问题）
+
+别的机器上运行程序出的问题走另一条人工通道：`tools/issue_bundle.py`（Windows 双击
+`tools\issue_bundle.cmd`）采集现场并打包，规范与读法见 `docs/ops/问题记录与打包.md`；
+收到的包解压到 `.scratch/inbox/<包名>/` 再读。它与上面的开发工单不是一回事——工单在本机、
+包可以拷来拷去。
 
 ### Triage labels
 

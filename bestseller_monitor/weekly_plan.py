@@ -15,8 +15,9 @@
 - 同一输入重跑逐格一致（`generated_at` / `generated_by` 是发布事实，不参与逐格对照）。
 
 发布物两份：JSON 计划文件（机器读，为准）与同名 .md（人核对）。
-对照基准在 `.scratch/multi-machine-collection/prototype/`（`samples.md` 六组样例、
-`plan-md-sample.md` 的 .md 形态）。
+机制全文见 `docs/ops/多机分片采集机制.md`；逐格对照基准钉在
+`tests/fixtures/plan_parity_expected.json` 与 `tests/test_weekly_plan.py`
+（设计期的原型样例在开发机的 `.scratch/multi-machine-collection/prototype/`，机器本地、不随仓库走）。
 """
 from __future__ import annotations
 
