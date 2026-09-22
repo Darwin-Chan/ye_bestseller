@@ -70,7 +70,7 @@ ORIGIN_CHANGED = '信息变更'
 # state_of_status 按文案认码，所以改文案就是改行为，取值只在这里写一遍。
 MATCH_DISABLED = '未启用'          # 本次分析没有可用的匹配服务
 MATCH_MISSING = '缺少证据'         # 名称或历史图片不完整，没进入模型判断
-MATCH_JUDGED = '已判断'            # 判断完成：缓存／模型／低把握／未召回
+MATCH_JUDGED = '已判断'            # 判断完成：缓存／模型／低把握／未召回／低于下限
 MATCH_FAILED = '失败'              # 判断没完成，重试可能改变
 MATCH_NEEDS_CONFIG = '需配置'      # 判断没完成，且重试无效：要改配置后重启分析程序
 
@@ -81,7 +81,9 @@ STATUS_CACHE = '缓存'                      # 判断来源：复用缓存
 STATUS_MODEL = '模型'                      # 判断来源：本次模型给出
 STATUS_LOW = '低把握，待人工核对'
 STATUS_NO_CANDIDATE = '未召回候选，保持独立'
-_JUDGED_STATUSES = frozenset({STATUS_PENDING, STATUS_CACHE, STATUS_MODEL, STATUS_LOW, STATUS_NO_CANDIDATE})
+STATUS_BELOW_FLOOR = '候选低于判断下限，未判断'   # 召回全被下限挡下、又没进任何已判对（票 18）
+_JUDGED_STATUSES = frozenset({STATUS_PENDING, STATUS_CACHE, STATUS_MODEL, STATUS_LOW, STATUS_NO_CANDIDATE,
+                              STATUS_BELOW_FLOOR})
 
 # 要改配置才能解决的模型失败：运行期内重试无效。文案就是页面上的失败原因，只在这里写
 # 一遍——raise 的地方与 state_of_status 的分档都读它。
@@ -139,12 +141,17 @@ class MatchingConfig:
     mode: str = 'disabled'  # disabled / direct / caption
     concurrency: int = 2
     candidates: int = 6
+    # 判断预算下限（ADR-0040 决策 3）：召回分（共享 token 数）低于它的对不交模型判断。
+    # 预算规则不是判定——被挡下的对保持「没判过」，不产生任何边；0 = 不设限（下限生效前的现状）。
+    min_score: int = 4
 
     def __post_init__(self):
         if self.mode not in ('disabled', 'direct', 'caption'):
             raise ValueError('同款图像模式必须为 disabled、direct 或 caption')
         if type(self.concurrency) is not int or type(self.candidates) is not int or not 1 <= self.concurrency <= 8 or not 1 <= self.candidates <= 20:
             raise ValueError('同款并发须为1–8，候选上限须为1–20')
+        if type(self.min_score) is not int or not 0 <= self.min_score <= 100:
+            raise ValueError('同款判断分数下限须为0–100的整数，0 表示不设限')
         for config in (self.model, self.vision):
             if config and (not config.endpoint.startswith(('https://', 'http://127.0.0.1:')) or not 0 < config.timeout <= 300):
                 raise ValueError('模型服务地址或超时无效')
@@ -210,7 +217,8 @@ def _usage_summary(usage, products, eligible, pairs, cached, errors, reason=''):
     """一次判断运行的收尾行，对齐采集与交换台的「一行汇总」风格。
 
     对数一律按**版本对**（判断的单位）计：同名同图的多个商品对会折叠成一条判断，
-    这样「召回 = 本机命中 + 新判 + 失败」逐项加得起来。
+    这样「召回 = 本机命中 + 新判 + 失败」逐项加得起来。低于判断下限（`matching.min_score`）
+    挡下的对仍计进召回、但不判，也不在上面三项里——挡下的对数由 `_suggest` 另起一行注明。
     """
     hits = sum(1 for _, source in cached.values() if source == STATUS_CACHE)
     judged = sum(1 for _, source in cached.values() if source == STATUS_MODEL)
@@ -387,8 +395,23 @@ class ImageJudge:
                 **signature_parts(self.config)}
 
 
-def candidate_pairs(products, limit):
-    """Bounded inverted-index recall; features retrieve, never decide sameness."""
+def _shared_visible(tokens_a, tokens_b, postings, later_index):
+    """两件共享、且倒排表把**较晚那一侧**也收进去的 token 数。
+
+    倒排表对超过 128 件的通用大桶只收前 128 件（`candidate_pairs` 的注释），太常见的
+    共享 token 因此不算——留下的才是真把两件连起来的那些，也是 E2 标定实测的刻度。
+    """
+    small, big = (tokens_a, tokens_b) if len(tokens_a) <= len(tokens_b) else (tokens_b, tokens_a)
+    return sum(1 for token in small if token in big and later_index in postings.get(token, ()))
+
+
+def scored_pairs(products, limit):
+    """带分数的有界召回：{(i, j): 分数}，分数＝共享的召回 token 数（见 `_shared_visible`）。
+
+    分数是**预算刻度**（低于 `MatchingConfig.min_score` 的对不交模型判断），不是同款判定；
+    特征照样只做召回——分数只决定判不判，不在判定里说话。`candidate_pairs` 返回同一批对、
+    只丢分数。
+    """
     postings = defaultdict(list)
     features = []
     for i, p in enumerate(products):
@@ -405,7 +428,8 @@ def candidate_pairs(products, limit):
             # Large generic buckets cannot grow into all-pairs requests.
             if len(postings[token]) < 128:
                 postings[token].append(i)
-    pairs = set()
+    postings = {token: set(holders) for token, holders in postings.items()}
+    pairs = {}
     for i, tokens in enumerate(features):
         scores = defaultdict(int)
         for token in tokens:
@@ -413,8 +437,15 @@ def candidate_pairs(products, limit):
                 if i != j:
                     scores[j] += 1
         for j in sorted(scores, key=lambda j: (-scores[j], identity(products[j])))[:limit]:
-            pairs.add(tuple(sorted((i, j))))
-    return sorted(pairs)
+            pair = tuple(sorted((i, j)))
+            if pair not in pairs:
+                pairs[pair] = _shared_visible(tokens, features[j], postings, max(i, j))
+    return pairs
+
+
+def candidate_pairs(products, limit):
+    """Bounded inverted-index recall; features retrieve, never decide sameness."""
+    return sorted(scored_pairs(products, limit))
 
 
 def summarize_group(group, products_by_id):
@@ -587,7 +618,11 @@ class MatchingService:
                     eligible.append(p)
             cached, todo, errors = {}, {}, {}
             pair_members = {}
-            for i, j in candidate_pairs(eligible, self.config.candidates):
+            # 判断预算下限（票 18）：召回照旧（上限 candidates 只管召回数），下限只管判不判。
+            floor = self.config.min_score
+            blocked = set()          # 版本对：分数＜下限且没判过，不交模型
+            blocked_members = set()  # 出现过在挡下的对里的商品身份：定稿时再看它进没进已判对
+            for (i, j), score in sorted(scored_pairs(eligible, self.config.candidates).items()):
                 a, b = eligible[i], eligible[j]
                 pair = digest(sorted([version(a), version(b)]))
                 pair_members[(identity(a), identity(b))] = pair
@@ -596,8 +631,15 @@ class MatchingService:
                                    (pair, local)).fetchone()
                 if row:
                     cached[pair] = (json.loads(row[0]), STATUS_CACHE)
+                elif score < floor:
+                    # 下限只管花不花钱：已判过的对照旧命中缓存（ADR-0040 决策 3），挡下的只有没判过的。
+                    blocked.add(pair)
+                    blocked_members.update((identity(a), identity(b)))
                 else:
                     todo[pair] = (pair, a, b)
+            if blocked:
+                # 收尾行的「召回 N 对」按全部召回对计；这一行给出其中没判的那部分。
+                log.info('低于判断下限挡下 %d 对（分数＜%d，未交模型判断，保持未判）', len(blocked), floor)
 
             def compare(item):
                 pair, a, b = item
@@ -673,7 +715,8 @@ class MatchingService:
                 elif identity(p) in uncertain:
                     p['matching_status'] = STATUS_LOW
                 elif p['matching_status'] == STATUS_PENDING:
-                    p['matching_status'] = STATUS_NO_CANDIDATE
+                    # 走到这里＝没进任何已判对：召回全被下限挡下的，与「没召回候选」分开记。
+                    p['matching_status'] = STATUS_BELOW_FLOOR if identity(p) in blocked_members else STATUS_NO_CANDIDATE
                     conn.execute('INSERT OR IGNORE INTO evidence VALUES (?,?,?,?,?,?)',
                         (identity(p), version(p), p['product_name'], p['image_hash'], p['image_data'], p['origin']))
             # 状态码在结果定稿后统一按文案推出（与读回老草稿同一个函数）。

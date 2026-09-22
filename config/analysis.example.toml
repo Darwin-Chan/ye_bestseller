@@ -20,6 +20,12 @@ mode = "disabled"
 cache = "../data/matching.sqlite"
 concurrency = 2
 candidates = 6
+# 判断预算下限：召回分（名称双字片段与图片感知特征的共享 token 数）低于它的商品对不交模型
+# 判断。这是预算规则不是判定——被挡下的对保持「没判过」（未知，不是判否），不产生任何边；
+# 0 = 不设限（等价于下限生效前的现状）。跨机「分组对一眼一致」要求各机同值，与 candidates
+# 同规；换召回特征规则时要重新标定（ADR-0040）。缺省 4 的依据：实测 ≤3 分的对占判断预算
+# 42.8%、产 0 条正边。
+min_score = 4
 
 [matching.model]
 endpoint = "https://api.deepseek.com/v1/chat/completions"

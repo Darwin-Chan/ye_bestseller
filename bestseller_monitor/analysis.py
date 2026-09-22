@@ -87,7 +87,8 @@ class AnalysisConfig:
                 raise ValueError('同款缓存不能使用库存数据库')
             matching = MatchingConfig(cache.resolve(), ModelConfig(**options.get('model', {})),
                 ModelConfig(**options['vision']) if 'vision' in options else None,
-                options.get('mode', 'disabled'), options.get('concurrency', 2), options.get('candidates', 6))
+                options.get('mode', 'disabled'), options.get('concurrency', 2), options.get('candidates', 6),
+                options.get('min_score', 4))
         return cls(database.resolve(), weekday, matching, store.resolve(), output.resolve(),
                    machine_id_of(path.with_name(MACHINE_CONFIG_NAME)))
 
