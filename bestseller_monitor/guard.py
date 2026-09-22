@@ -62,8 +62,11 @@ class DenyTracker:
         return len(self.events)
 
 
-# 滑块/验证文案（含 punish，用于页面正文命中）
-SLIDER_MARKERS = ("向右滑动验证", "请完成验证", "滑块验证", "拖动滑块", "安全验证", "punish")
+# 滑块/验证文案（含 punish，用于页面正文命中）。
+# 末两词按 2026-09 起存档的「验证码拦截」页样本补入（53 份，见 ADR-0036）：该页顶着正常
+# 详情 URL，正文只有这两句拖动指引，原表无一命中，判定给 None，页面被静默记成解析失败。
+SLIDER_MARKERS = ("向右滑动验证", "请完成验证", "滑块验证", "拖动滑块", "安全验证",
+                  "请按住滑块", "拖动下方滑块", "punish")
 # 登录相关文案
 LOGIN_MARKERS = ("登录后查看", "请登录", "扫码登录", "确认登录", "快速进入")
 # deny / 反爬拦截页关键词
@@ -158,8 +161,10 @@ def _intervention_of(evidence: _PageEvidence) -> str | None:
         if m in evidence.body:
             return "滑块"
     if evidence.captcha:
-        # 可见验证容器：只有当页面确实带验证文案，或不是“点我反馈”这种纯反爬拦截页时，才算滑块
-        if any(m in evidence.body for m in SLIDER_MARKERS) or ("点我反馈" not in evidence.body):
+        # 可见验证容器：带文案的页上面正文支就已经判走；这一支只对「有容器、无表内文案」的页
+        # 做「点我反馈」豁免——有它（纯反爬拦截页的记号）不算滑块。正文支先于本支的次序由
+        # test_guard 的 captcha=True 用例钉着（ADR-0036）。
+        if "点我反馈" not in evidence.body:
             return "滑块"
     for m in LOGIN_MARKERS:
         if m in evidence.body and len(evidence.body) < 3000:

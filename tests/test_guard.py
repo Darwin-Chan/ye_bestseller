@@ -205,6 +205,47 @@ class InterventionResolutionTests(unittest.TestCase):
         self.assertEqual(_intervention_of(_PageEvidence(product, block_page, False)),
                          "登录墙")
 
+    def test_the_drag_captcha_page_copy_is_recognized_as_a_slider(self):
+        """round_35 现场的「验证码拦截」页：正文只有拖动式滑块文案，必须判「滑块」。
+
+        2026-09-22 18:27 生产实况：页面顶着正常详情 URL，正文是这两句拖动指引加一条
+        「点我反馈」页脚。改前原表无一命中，容器那一支又被「点我反馈」豁免否决，判据给
+        None——不等待、不响铃，页面被当成读不出 SKU 的详情页静默记失败。真实正文取自
+        round_35/1053682048.html 的渲染文本；两句再各自单独钉一遍——抓取时机不同，页面上
+        只渲染出其中一句是常态（存档 53 份里「拖动下方滑块」53/53、「请按住滑块」22/53），
+        谁都不是冗余。captcha=True 那一遍还钉住「正文支先于容器支」的次序（ADR-0036）。
+        """
+        from bestseller_monitor.guard import _PageEvidence, _intervention_of
+
+        product = "https://detail.1688.com/offer/11.html"
+        page_body = ("亲，请拖动下方滑块完成验证\n通过验证以确保正常访问\n"
+                     "请按住滑块，拖动到最右边\n点我反馈 >\n"
+                     "© 1999-2026 Alibaba.com. All rights reserved.")
+
+        for captcha in (False, True):
+            with self.subTest(captcha_visible=captcha):
+                self.assertEqual(
+                    _intervention_of(_PageEvidence(product, page_body, captcha)),
+                    "滑块",
+                )
+        for phrase in ("拖动下方滑块", "请按住滑块"):
+            with self.subTest(只渲染出=phrase):
+                self.assertEqual(
+                    _intervention_of(_PageEvidence(product, phrase, False)),
+                    "滑块",
+                )
+
+    def test_the_feedback_marker_vetoes_only_a_copy_less_container(self):
+        """「点我反馈」豁免的两头（ADR-0036 挂账）：容器可见、正文带反馈记号又无表内文案
+        → 仍判无介入；同一容器少掉这条记号就判「滑块」。两头都钉住，免得将来只改一半。
+        """
+        from bestseller_monitor.guard import _PageEvidence, _intervention_of
+
+        product = "https://detail.1688.com/offer/11.html"
+
+        self.assertIsNone(_intervention_of(_PageEvidence(product, "点我反馈 >", True)))
+        self.assertEqual(_intervention_of(_PageEvidence(product, "", True)), "滑块")
+
     def test_a_body_only_signal_survives_the_confirmation_window(self):
         """落在 DOM 上的信号不该被确认窗口当成「没有落点的瞬时报错」丢掉。
 
