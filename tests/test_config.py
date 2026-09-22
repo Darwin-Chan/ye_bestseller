@@ -109,6 +109,41 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual(cfg.driver, "pw_cdp")
 
+    def test_pacing_and_deny_defaults_when_the_keys_are_absent(self):
+        """主动停顿与 deny 阶梯（ADR-0037）：老机器的 config.toml 里没有这些键，
+        缺省也要落到出货的策略上，而不是旧值。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Config.from_file(self._write_config(tmp), root=Path(tmp))
+
+            self.assertEqual(cfg.pause_every_pages, 6)
+            self.assertEqual(cfg.pause_sec, (1500.0, 2100.0))
+            self.assertEqual((cfg.deny_shop_limit, cfg.deny_round_limit), (3, 6))
+
+    def test_pacing_keys_are_read_from_the_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            text = MINIMAL_CONFIG.replace(
+                "[human]\n", "[human]\npause_every_pages = 0\npause_sec = [10, 20]\n", 1)
+            path = Path(tmp) / "config.toml"
+            path.write_text(text, encoding="utf-8")
+
+            cfg = Config.from_file(path, root=Path(tmp))
+
+            self.assertEqual(cfg.pause_every_pages, 0, "0 = 关闭这条规则")
+            self.assertEqual(cfg.pause_sec, (10.0, 20.0))
+
+    def test_negative_pause_every_pages_is_named(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            text = MINIMAL_CONFIG.replace(
+                "[human]\n", "[human]\npause_every_pages = -1\n", 1)
+            path = Path(tmp) / "config.toml"
+            path.write_text(text, encoding="utf-8")
+
+            with self.assertRaises(ValueError) as ctx:
+                Config.from_file(path, root=Path(tmp))
+
+            self.assertIn("pause_every_pages", str(ctx.exception),
+                          "报错要点名是哪个键（写错了与故意关掉要分得开）")
+
     def test_shipped_example_config_passes_its_own_validation(self):
         """出厂的是示例配置（真配置每台自建、不进仓库，spec §10）：示例含全部键、必须被自己的
         校验接受——合法驱动值只在代码里声明一处（IS-23 审查发现）。"""

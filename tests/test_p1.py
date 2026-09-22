@@ -290,7 +290,7 @@ class P1Tests(unittest.TestCase):
         crawled: list[str] = []
 
         def fake_crawl(listing_page, shop, cfg_, human, *, db, round_id, emit=None,
-                       deny_tracker=None):
+                       deny_tracker=None, pacing=None):
             crawled.append(shop.key)
             oid = "11" if shop.key == "A01" else "22"
             return [(1, oid, f"https://detail.1688.com/offer/{oid}.html", f"商品{oid}", "")], 1
@@ -839,7 +839,7 @@ class P1Tests(unittest.TestCase):
         events = []
 
         def fake_crawl(page, shop, cfg_, human, db=None, round_id=None, emit=None,
-                       deny_tracker=None):
+                       deny_tracker=None, pacing=None):
             events.append(("list", shop.key))
             oid = "1" if shop.key == "A01" else "2"
             return [(1, oid, f"https://detail.1688.com/offer/{oid}.html", f"商品{oid}", "")], 1

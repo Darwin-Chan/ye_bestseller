@@ -342,6 +342,7 @@ CST = timezone(timedelta(hours=8))
 # 延迟/反爬相关配置键：用于生成 run_params 快照与 params_hash
 PARAMS_KEYS = (
     "detail_delay_sec", "list_delay_sec", "long_pause_interval", "long_pause_sec",
+    "pause_every_pages", "pause_sec",
     "batch_size", "batch_rest_sec", "action_delay_sec", "read_delay_sec",
     "retry_base_sec", "retry_jitter_sec", "max_pages_per_shop",
     "human_pause_minutes", "alarm_on_intervention",

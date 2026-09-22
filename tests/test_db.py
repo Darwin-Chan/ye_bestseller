@@ -823,6 +823,8 @@ class DbTests(unittest.TestCase):
             list_delay_sec = (1.5, 3.0)
             long_pause_interval = (12, 20)
             long_pause_sec = (10.0, 20.0)
+            pause_every_pages = 6
+            pause_sec = (1500.0, 2100.0)
             batch_size = 300
             batch_rest_sec = (20.0, 40.0)
             action_delay_sec = (0.6, 1.5)

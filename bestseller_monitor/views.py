@@ -16,7 +16,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from . import click_events, plan_step, rounds, weekly_plan
+from . import click_events, pacing, plan_step, rounds, weekly_plan
 from .config import effective_pages_limit, is_merge_only
 from .crawler_identity import CrawlerProcess
 from .db import CST, Database, RoundTally, cst_date
@@ -78,6 +78,48 @@ def _fmt_minutes(seconds: float | None) -> str:
     if seconds is None or seconds < 0:
         return "—"
     return f"{round(seconds / 60, 1)} 分"
+
+
+def _fmt_countdown(seconds: float | None) -> str:
+    """倒计时文本（mm:ss；超过一小时给 h:mm:ss）——主动停顿的「还要等多久」。"""
+    if seconds is None or seconds < 0:
+        return "—"
+    s = int(round(seconds))
+    h, rest = divmod(s, 3600)
+    m, sec = divmod(rest, 60)
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+
+def _pacing_state(conn: sqlite3.Connection, round_id: int, *, now: str,
+                  running: bool) -> tuple[int | None, float]:
+    """主动停顿的（剩余秒数、本轮累计秒数）；没有停顿记录就是 (None, 0.0)。
+
+    累计只算真的等过的：睡满的按 resume 事件的秒数加，正在进行的那次按已过时长加
+    （进程半路没了也只算等过的那一段）。剩余只在采集进程此刻还在跑时才给——
+    进程已经不在了，倒计时就是一条旧数据，不该继续走（ADR-0037）。
+    """
+    rows = conn.execute(
+        "SELECT event, ts, note FROM event_log WHERE round_id=? AND event IN (?, ?) "
+        "ORDER BY id",
+        (round_id, pacing.PAUSE_EVENT, pacing.RESUME_EVENT),
+    ).fetchall()
+    completed = 0.0
+    open_pause: tuple[str, float] | None = None
+    for row in rows:
+        seconds = pacing.note_seconds(row["note"]) or 0.0
+        if row["event"] == pacing.RESUME_EVENT:
+            completed += seconds
+            open_pause = None
+        else:
+            open_pause = (row["ts"], seconds)
+    if open_pause is None:
+        return None, completed
+    elapsed = _duration_seconds(open_pause[0], now)
+    elapsed = elapsed if elapsed is not None and elapsed > 0 else 0.0
+    planned = open_pause[1]
+    ongoing = min(elapsed, planned) if planned > 0 else elapsed
+    remaining = max(0, int(round(planned - elapsed))) if running else None
+    return remaining, completed + ongoing
 
 
 _TERMINAL_TEXT = {
@@ -407,6 +449,8 @@ def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str) -> di
     tally = Database(conn).round_tally(round_id)
     done, todo = _shop_breakdown(conn, round_id, tally)
     total, deny = _round_counts(conn, round_id)
+    pacing_remaining, pacing_paused = _pacing_state(
+        conn, round_id, now=now, running=state.crawler_running)
     return {
         "running": state.crawler_running,
         "manually_paused": state.manually_paused,
@@ -417,6 +461,9 @@ def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str) -> di
         "started_hhmm": _fmt_hhmm(active.started_at),
         "elapsed_sec": max(state.elapsed_sec, 0),
         "deny": deny,
+        "pacing_remaining_sec": pacing_remaining,
+        "pacing_remaining_text": _fmt_countdown(pacing_remaining),
+        "pacing_paused_sec": pacing_paused,
         "done_count": len(done),
         "total_count": total,
         "progress": (len(done) / total) if total else 0.0,

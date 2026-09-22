@@ -331,7 +331,9 @@ class DenyTests(ClickListingTestCase):
         card = FakeCard("商品1", offer_id="11", denied=True)
         tracker = guard.DenyTracker(600)
 
-        result = self.walk(ScriptedListing([[card]]),
+        # 店铺阈值给到 7：这条用例考的是商品层阶梯（第 3 次跳过商品），
+        # 别让店铺层（默认 3，见 ADR-0037）在这之前就把店先弃掉。
+        result = self.walk(ScriptedListing([[card]]), cfg=crawler_cfg(deny_shop_limit=7),
                            deny_tracker=tracker).capture(card, "商品1")
 
         self.assertIsNone(result, "第 3 次 deny 跳过当前商品")

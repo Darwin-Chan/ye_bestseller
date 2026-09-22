@@ -42,8 +42,8 @@ intervention_confirmation_sec = 2.0
 deny_backoff_sec = 30.0         # 商品第 1 次 deny 的退避
 deny_retry2_backoff_sec = 60.0  # 商品第 2 次 deny 的退避
 deny_window_minutes = 10        # deny 计数滚动窗口（分钟）
-deny_shop_limit = 7             # 窗口内该店 deny≥N -> 跳过该店
-deny_round_limit = 10           # 窗口内整轮 deny≥N -> 中止本轮
+deny_shop_limit = 3             # 窗口内该店 deny≥N -> 跳过该店
+deny_round_limit = 6            # 窗口内整轮 deny≥N -> 中止本轮
 # 是否打乱店铺内商品访问顺序（拟人化）
 shuffle_within_shop = true
 # 出现滑块/登录墙等需要人工干预时是否播放警报音
@@ -55,6 +55,10 @@ detail_delay_sec = [0.8, 2]
 # 每 N 个详情页后插入一次较长的停顿（N 在该区间随机）
 long_pause_interval = [12, 20]
 long_pause_sec = [10, 20]
+# 主动停顿（防反爬的主动节流）：每抓满 N 页商品主动停一次，停的秒数在 pause_sec 区间内随机。
+# 列表阶段每页记 1 页；补采阶段每 30 个详情折算 1 页（见 ADR-0037）。0 = 关闭这条规则。
+pause_every_pages = 6
+pause_sec = [1500, 2100]
 # 每完成一批商品后休息
 batch_size = 300
 batch_rest_sec = [20, 40]

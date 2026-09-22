@@ -25,6 +25,7 @@ from .db import (
     DETAIL_BUDGET_NOTE,
 )
 from .delay import Humanizer
+from .pacing import Pacing
 from .guard import RoundPauseRequired
 from .rounds import Round, RoundRequest, ShopScope, TerminalReason
 from .stop_request import StopRequested
@@ -323,16 +324,21 @@ def _report_late_stop(settled: Round, reason: TerminalReason) -> None:
 
 
 def _capture_pending_offers(db: Database, cfg: Config, human: Humanizer, round_id: int,
-                            offers, capture) -> int:
+                            offers, capture, pacing: "Pacing | None" = None) -> int:
     """逐个补采；停止那一族原样抛出，其余异常记为失败后继续。
 
     兜底失败记录接着本轮的尝试额度编号，初次访问和补采共用同一份额度。
     停止那一族按 `_STOP_OUTCOMES` 的全部登记项放行：注意 `ShopDenyExceeded` 只跳过单店，
     所以它是「放行到这里、由店铺那一层收尾」（候选 04）。
+
+    `pacing` 是整轮那一个（与点击路径共用）：补采按「30 个详情 = 1 页」折算进同一份
+    主动停顿配额（ADR-0037），所以它记在**详情开始之前**。
     """
     processed = 0
     for offer in offers:
         processed += 1
+        if pacing is not None:
+            pacing.detail_started(shop_key=offer["shop_key"])
         try:
             capture(offer)
         except STOP_WITH_OUTCOME:
@@ -421,6 +427,8 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
                     emit=None, deny_tracker=None) -> None:
     done = db.completed_listing_keys(round_id)
     human = Humanizer(cfg)
+    # 主动停顿的配额账本也是整轮一个：点击路径与逐店补采共用（ADR-0037）。
+    pacing = Pacing(cfg, human, emit=emit)
     for shop in shops:
         # 每家店开始之前先问轮次：跨天收尾发生在还没动这家店的干净点上。
         rounds.ensure_workable(db, round_id, utcnow())
@@ -431,7 +439,7 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
                 listing_page = click_listing.PlaywrightListing(page, shop, cfg, human)
                 offers, pages_read = click_listing.crawl_store_by_click(
                     listing_page, shop, cfg, human, db=db, round_id=round_id, emit=emit,
-                    deny_tracker=deny_tracker,
+                    deny_tracker=deny_tracker, pacing=pacing,
                 )
                 log.info("店铺 %s 榜单：%s 个商品（%s 页）",
                          shop.key, len(offers), pages_read)
@@ -439,7 +447,7 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
                                     offers, pages_read)
             # 补采也在这一层收尾：补采命中 deny 到阈值时同样是「这家店到此为止」。
             _retry_shop_pending_pw(db, cfg, round_id, shop, page, human, emit=emit,
-                                   deny_tracker=deny_tracker)
+                                   deny_tracker=deny_tracker, pacing=pacing)
         except STOP_WITH_OUTCOME as exc:
             # 该店如实记为未完成；整轮级的停止原样上抛、跳过单店的那种接着跑下一家。
             if not _record_shop_stop(db, round_id, shop, exc):
@@ -452,11 +460,12 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
 
 
 def _retry_shop_pending_pw(db: Database, cfg: Config, round_id: int, shop: Shop, page,
-                           human: Humanizer, emit=None, deny_tracker=None) -> None:
+                           human: Humanizer, emit=None, deny_tracker=None, pacing=None) -> None:
     """某店榜单保存完成后，立即补抓该店本轮尚未成功的商品，再进入下一家店。
 
     `deny_tracker` 是整轮那一个（与点击路径共用）：补采命中 deny 也计入店铺/整轮阈值
-    （候选 04）。
+    （候选 04）。`pacing` 同理——补采按「30 个详情 = 1 页」折算进同一份主动停顿配额
+    （ADR-0037），别让这一段成为防范真空。
     """
     offers = _pending_detail_offers(db, round_id, cfg, shop_key=shop.key)
     if not offers:
@@ -466,6 +475,7 @@ def _retry_shop_pending_pw(db: Database, cfg: Config, round_id: int, shop: Shop,
         db, cfg, human, round_id, offers,
         lambda offer: _capture_one_pw(db, cfg, human, round_id, offer, page, emit=emit,
                                       deny_tracker=deny_tracker),
+        pacing=pacing,
     )
 
 

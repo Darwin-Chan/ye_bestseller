@@ -19,6 +19,17 @@ def _tuple2(name: str, v: object) -> tuple[float, float]:
     return (a, b)
 
 
+def _pause_every_pages(v: object) -> int:
+    """主动停顿的页配额（ADR-0037）：0 = 关闭这条规则。
+
+    负数没有意义，报错而不是静默当成关闭——「写错了」与「故意关掉」要分得开。
+    """
+    pages = int(v)
+    if pages < 0:
+        raise ValueError(f"配置 human.pause_every_pages 不能为负（0 = 关闭主动停顿）：{pages}")
+    return pages
+
+
 # 唯一的采集驱动：Playwright 连接接管 + 点击式列表（ADR-0010）。
 # 这个配置键保留作过渡闸——老配置里写着别的驱动时要报错，而不是静默换一条路跑。
 ONLY_DRIVER = "pw_cdp"
@@ -118,6 +129,9 @@ class Config:
     detail_delay_sec: tuple[float, float]
     long_pause_interval: tuple[int, int]
     long_pause_sec: tuple[float, float]
+    # 主动停顿（ADR-0037）：每 N 页停一次，每次在 pause_sec 区间里随机取；0 = 关闭
+    pause_every_pages: int
+    pause_sec: tuple[float, float]
     batch_size: int
     batch_rest_sec: tuple[float, float]
     list_delay_sec: tuple[float, float]
@@ -198,8 +212,9 @@ class Config:
             deny_backoff_sec=float(run.get("deny_backoff_sec", 30.0)),
             deny_retry2_backoff_sec=float(run.get("deny_retry2_backoff_sec", 60.0)),
             deny_window_minutes=int(run.get("deny_window_minutes", 10)),
-            deny_shop_limit=int(run.get("deny_shop_limit", 7)),
-            deny_round_limit=int(run.get("deny_round_limit", 10)),
+            # deny 阶梯（ADR-0037）：店铺 3 次弃店、整轮 6 次中止。
+            deny_shop_limit=int(run.get("deny_shop_limit", 3)),
+            deny_round_limit=int(run.get("deny_round_limit", 6)),
             max_pages_per_shop=int(run["max_pages_per_shop"]),
             max_detail_opportunities_per_round=int(run["max_detail_opportunities_per_round"]),
             max_attempts_per_page=int(run["max_attempts_per_page"]),
@@ -212,6 +227,8 @@ class Config:
                 int(human["long_pause_interval"][1]),
             ),
             long_pause_sec=_tuple2("human.long_pause_sec", human["long_pause_sec"]),
+            pause_every_pages=_pause_every_pages(human.get("pause_every_pages", 6)),
+            pause_sec=_tuple2("human.pause_sec", human.get("pause_sec", [1500, 2100])),
             batch_size=int(human["batch_size"]),
             batch_rest_sec=_tuple2("human.batch_rest_sec", human["batch_rest_sec"]),
             list_delay_sec=_tuple2("human.list_delay_sec", human["list_delay_sec"]),

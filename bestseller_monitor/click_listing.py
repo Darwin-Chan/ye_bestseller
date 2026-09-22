@@ -39,14 +39,15 @@ WAIT_BACK_SEC = 8.0        # 从详情返回列表页后等就绪
 
 
 def crawl_store_by_click(listing_page, shop: Shop, cfg: Config, human: Humanizer, *,
-                         db, round_id: int, emit=None, deny_tracker=None):
+                         db, round_id: int, emit=None, deny_tracker=None, pacing=None):
     """点击商品图进详情，收集这家店本轮的榜单。
 
     `listing_page` 是页面 adapter（生产用 `PlaywrightListing`，测试给脚本化实现）。
     规则在 ShopWalk 里：主遍历 + 同名商品的第二遍补抓。
     """
     walk = ShopWalk(listing_page, shop, cfg, human,
-                    db=db, round_id=round_id, emit=emit, deny_tracker=deny_tracker)
+                    db=db, round_id=round_id, emit=emit, deny_tracker=deny_tracker,
+                    pacing=pacing)
     return walk.run()
 
 
@@ -54,7 +55,7 @@ class ShopWalk:
     """一家店这一次点击式遍历：账本、事件与每张卡的处理。"""
 
     def __init__(self, listing_page, shop: Shop, cfg: Config, human: Humanizer, *,
-                 db, round_id: int, emit=None, deny_tracker=None):
+                 db, round_id: int, emit=None, deny_tracker=None, pacing=None):
         self.listing_page = listing_page
         self.shop = shop
         self.cfg = cfg
@@ -62,6 +63,7 @@ class ShopWalk:
         self.db = db
         self.round_id = round_id
         self.deny_tracker = deny_tracker
+        self.pacing = pacing
         self.offers: list[tuple[int, str, str, str, str]] = []
         self.seen: set[str] = set()
         self.name_counter: dict[str, int] = {}
@@ -90,6 +92,7 @@ class ShopWalk:
         self.listing_page.prepare(f"店铺 {shop.key} 首屏", emit=self.emit)
         while self.pages_read < max_pages:
             self.pages_read += 1
+            self._page_started()
             self.human.before_list_page()
             self.emit("list_page", note=f"page={self.pages_read}")
             count = self.listing_page.scroll_to_load("滚动加载新卡片")
@@ -106,6 +109,12 @@ class ShopWalk:
         if not self.offers:
             self.listing_page.load_failed(f"店铺列表未解析到商品：{shop.url}")
         return self.offers, self.pages_read
+
+    def _page_started(self) -> None:
+        """新的一页就要开始（主遍历与补抓同规）：先问主动停顿（ADR-0037），
+        再把这一页记进配额。配额到点时停在这里，页面还没翻——下一批请求也就还没发出。"""
+        if self.pacing is not None:
+            self.pacing.page_started(shop_key=self.shop.key)
 
     def _visit_card(self, index: int) -> None:
         """列表页上第 index 张卡：读名字、按名暂缓、进详情。"""
@@ -306,6 +315,7 @@ class ShopWalk:
         # 补抓第二遍与主页走同一份准备：顺序、兜底、事件都不再各写一遍。
         self.listing_page.prepare(f"店铺 {shop.key} 补抓首屏", emit=self.emit)
         for rescue_page in range(1, rescue_last_page + 1):
+            self._page_started()
             self.human.before_list_page()
             self.emit("list_page", note=f"rescue_page={rescue_page}")
             if rescue_page in ambiguous_pages:

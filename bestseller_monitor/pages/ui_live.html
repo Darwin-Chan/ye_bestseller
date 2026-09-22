@@ -117,9 +117,10 @@
   <!-- 过程 -->
   <div class="panel" id="panel-run">
     <div class="card">
-      <div class="grid" style="grid-template-columns:repeat(3,1fr)">
+      <div class="grid" style="grid-template-columns:repeat(4,1fr)">
         <div class="stat"><div class="l">已完成店铺</div><div class="n" id="rDone">—</div></div>
         <div class="stat"><div class="l">已抓时长</div><div class="n" id="rElapsed">—</div></div>
+        <div class="stat"><div class="l">已停顿</div><div class="n" id="rPausedTotal">—</div></div>
         <div class="stat"><div class="l">deny 次数</div><div class="n" id="rDeny">0</div></div>
       </div>
       <div class="muted" style="margin:10px 0 0" id="rProgressLine">正在启动…</div>
@@ -429,10 +430,14 @@
     if (d.has_round) {
       $("rDone").textContent = d.done_count + " / " + d.total_count;
       $("rElapsed").textContent = fmtDur(d.elapsed_sec);
+      $("rPausedTotal").textContent = fmtDur(d.pacing_paused_sec || 0);
       $("rDeny").textContent = d.deny;
       $("rBar").style.width = (d.progress * 100) + "%";
       const cur = d.current_shop ? d.current_shop + "（第 " + (d.done_count + 1) + " 家）" : "准备中";
-      $("rProgressLine").textContent = "进度：当前处理 " + cur + " · 已抓 " + fmtDur(d.elapsed_sec);
+      // 主动停顿（ADR-0037）：程序自己在给站点降温，说清楚还要等多久，别像卡死。
+      $("rProgressLine").textContent = (d.pacing_remaining_sec != null)
+        ? "进度：主动停顿中，剩余 " + d.pacing_remaining_text + " · 当前处理 " + cur
+        : "进度：当前处理 " + cur + " · 已抓 " + fmtDur(d.elapsed_sec);
       $("rDoneTitle").textContent = "已完成店铺（" + d.done_count + "）";
       $("rDoneRows").innerHTML = d.done.map(s =>
         `<tr><td><b>${s.key}</b> ${s.name}</td><td>${s.products}</td><td>${s.skus}</td><td>${s.duration}</td><td>${s.deny}</td></tr>`
