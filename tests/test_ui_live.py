@@ -271,28 +271,47 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
 
 PLAN_GUARD_MOCK_API = r"""
 window.__calls = [];
-window.__ignorePlanFlags = [];
+window.__startCalls = [];
+window.__retries = [];
 const SHOPS = [
   {key:"A01", name:"店铺A", products:180, skus:1038, pages:23, default_checked:true,
-   plan_label:""},
+   plan_label:"", plan_mark:"本机", plan_mark_kind:"mine"},
   {key:"A02", name:"店铺B", products:0, skus:0, pages:8, default_checked:false,
-   plan_label:"本周计划归 m2"},
+   plan_label:"本周计划归 m2", plan_mark:"归 m2", plan_mark_kind:"other"},
 ];
+window.__gate = false;
+window.__stale = true;        // 「未能确认最新」：与闸门一样给「重试准备」
+window.__confirming = false;
+window.__planNote = () => window.__gate ? "拉不到计划库、本机也没有本周计划：界面先不开轮……"
+  : (window.__confirming ? "正在确认本周计划…（拉计划库 → 同步清单 → 确认计划）。"
+     : (window.__stale ? "未能确认最新：这次没从计划库确认到本周计划，用的是本地已落库的那份。" : ""));
 window.pywebview = { platform: "edgechromium", api: {
-  get_start: async () => ({
-    ov: {products: 180, skus: 1038},
-    summary: {started: false, rounds: 0, text: ""},
-    shops: SHOPS, total_shops: 2, start_hint: "", plan_note: "", crawler: null,
-  }),
+  get_start: async () => {
+    window.__calls.push("get_start");
+    return {
+      ov: {products: 180, skus: 1038},
+      summary: {started: false, rounds: 0, text: ""},
+      shops: SHOPS, total_shops: 2, start_hint: "", crawler: null,
+      plan_note: window.__planNote(),
+      plan_gate: window.__gate,
+      plan_locked: window.__gate || window.__confirming,
+      plan_confirming: window.__confirming,
+      plan_retry: window.__gate || window.__stale || window.__confirming,
+    };
+  },
   get_run: async () => ({running: false, manually_paused: false, has_round: false}),
   get_result: async () => ({has_round: false}),
-  start_run: async (keys, ignorePlan) => {
+  start_run: async (keys) => {
     window.__calls.push(["start_run", keys]);
-    window.__ignorePlanFlags.push(!!ignorePlan);
-    if (!ignorePlan) {
-      return {ok: false, escape_hatch: true,
-              error: "开轮前准备没通过，本次不开轮：拉不到计划库，且本地没有本周计划。"};
-    }
+    window.__startCalls.push(keys);
+    return window.__gate
+      ? {ok: false, error: "拉不到计划库、本机也没有本周计划：界面先不开轮——"
+                           + "命令行逃生口 python run.py --ignore-plan 仍在。"}
+      : {ok: true};
+  },
+  retry_prepare: async () => {
+    window.__retries.push(1);
+    window.__confirming = true;
     return {ok: true};
   },
   pause_run: async () => ({ok: true}),
@@ -303,7 +322,7 @@ window.pywebview = { platform: "edgechromium", api: {
 
 
 class UiLivePlanGuardTests(unittest.TestCase):
-    """票据 07：越权文案与降级逃生口在前端的表现（spec §6 的越权与降级表最后一行）。"""
+    """票据 15（ADR-0035）：计划标注与闸门在前端的表现——本机 / 归 m2 / 锁页与「重试准备」。"""
 
     @classmethod
     def setUpClass(cls):
@@ -328,55 +347,63 @@ class UiLivePlanGuardTests(unittest.TestCase):
         page.wait_for_selector("#rows input", timeout=5000)
         return page
 
-    def test_an_overreach_shop_names_the_machine_the_plan_gives_it_to(self):
+    def test_each_shop_carries_its_plan_mark(self):
+        """标注是标记不是锁：本机份额挂「本机」标，别机的店点名归谁（ADR-0035）。"""
         page = self.open_page()
         try:
             rows = page.eval_on_selector_all(
                 "#rows tr", "els => els.map(e => e.textContent)")
 
-            self.assertIn("本周计划归 m2", rows[1], "越权店要点名归谁，不泛泛说「越权」")
-            self.assertNotIn("本周计划归", rows[0], "归本机的店不点名")
+            self.assertIn("本机", rows[0], "本机份额带「本机」标")
+            self.assertIn("归 m2", rows[1], "别机的店点名归谁，不泛泛说「越权」")
+            self.assertNotIn("本机", rows[1])
+            self.assertEqual(
+                page.eval_on_selector("#rows tr:nth-child(2) span.pill", "el => el.title"),
+                "本周计划归 m2", "长理由（与记账同源的那句话）挂在悬浮说明上")
             self.assertFalse(
                 page.eval_on_selector("#rows tr:nth-child(2) input", "el => el.checked"),
                 "越权店默认不勾")
         finally:
             page.close()
 
-    def test_a_refused_start_confirms_before_free_collection(self):
-        """默认拒绝开轮：先确认再说后果；确认后按计划外采集开轮（第二次调用带旗标）。"""
+    def test_the_gate_locks_selection_and_start(self):
+        """本地没有本周计划（闸门）：勾选框、全选与开始都禁用，理由上页，「重试准备」在场。"""
         page = self.open_page()
         try:
-            page.click("#startBtn")
-            page.wait_for_selector("#confirmModal.show", timeout=5000)
-
-            sub = page.inner_text("#confirmSub")
-            self.assertIn("拉不到计划库", sub, "确认文案要先说为什么被拒")
-            self.assertIn("自由采集", sub)
-            self.assertIn("计划外", sub, "要说清继续跑的代价：这一轮记计划外")
-            self.assertEqual(page.evaluate("window.__ignorePlanFlags"), [False],
-                             "确认之前不许放行")
-
-            page.click("#confirmOk")
+            page.evaluate("window.__gate = true; loadStart();")
             page.wait_for_function(
-                "() => window.__ignorePlanFlags.length === 2", timeout=5000)
-            self.assertEqual(page.evaluate("window.__ignorePlanFlags"), [False, True])
-            page.wait_for_selector('.step.active[data-tab="run"]', timeout=5000)
+                "() => document.querySelector('#startBtn').disabled", timeout=5000)
+
+            self.assertIn("拉不到计划库", page.inner_text("#planBanner"))
+            self.assertIn("err", page.eval_on_selector("#planBanner", "el => el.className"),
+                          "闸门是红底横幅：现在开不了轮")
+            self.assertTrue(page.eval_on_selector("#rows input", "el => el.disabled"))
+            self.assertTrue(page.eval_on_selector("#selNoneBtn", "el => el.disabled"))
+            self.assertTrue(page.is_visible("#retryPrepBtn"))
+
+            page.click("#retryPrepBtn")
+            page.wait_for_function("() => window.__retries.length === 1", timeout=5000)
+            self.assertEqual(page.evaluate("window.__startCalls.length"), 0,
+                             "闸门没开：一下也点不出去")
         finally:
             page.close()
 
-    def test_cancelling_the_escape_hatch_stays_on_the_start_page(self):
+    def test_the_page_keeps_asking_while_confirming_and_settles_itself(self):
+        """按「重试准备」：页面进入「正在确认」并接着轮询，落定后自动更新（ADR-0035）。"""
         page = self.open_page()
         try:
-            page.click("#startBtn")
-            page.wait_for_selector("#confirmModal.show", timeout=5000)
+            page.evaluate("POLL_MS = 50")
+            page.click("#retryPrepBtn")
+            page.wait_for_function("() => window.__retries.length === 1", timeout=5000)
+            page.wait_for_function(
+                "() => document.querySelector('#startBtn').disabled", timeout=5000)
+            self.assertIn("正在确认", page.inner_text("#planBanner"))
 
-            page.click("#confirmCancel")
-
-            self.assertFalse(page.is_visible("#confirmModal"))
-            self.assertEqual(page.evaluate("window.__ignorePlanFlags"), [False],
-                             "取消不重发：没有第二次 start_run")
-            self.assertEqual(
-                page.eval_on_selector(".step.active .lbl", "el => el.textContent"), "开始")
+            page.evaluate("window.__confirming = false")
+            page.wait_for_function(
+                "() => !document.querySelector('#startBtn').disabled", timeout=5000)
+            self.assertTrue(page.eval_on_selector("#rows input", "el => el.checked"),
+                            "落定后自动套上默认勾选")
         finally:
             page.close()
 

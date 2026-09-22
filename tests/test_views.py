@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from bestseller_monitor import rounds, views, weekly_plan
+from bestseller_monitor import plan_step, rounds, views, weekly_plan
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import Database, connect
 from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
@@ -35,6 +35,11 @@ class ViewsTestCase(unittest.TestCase):
         pages = pages or {}
         store_weekly_plan(self.db, WEEK,
                           *[(key, machine, pages.get(key, 3)) for key, machine in assignments])
+
+    def preparation(self, status, *, week: str = WEEK) -> plan_step.PrepResult:
+        """本界面那一次准备的结局（页面据此定闸门与「未能确认最新」）。"""
+        return plan_step.PrepResult(status=status, week=week, machine="m-test",
+                                    reason="拉不到计划库，先修通道。")
 
     def submit(self, round_id, offer_id, *skus, shop_key="A01"):
         """按库存快照提交的口径写一条成功观测（每项是 (sku_name, stock)）。"""
@@ -101,13 +106,19 @@ class StartViewTests(ViewsTestCase):
         self.assertEqual(pages, {"A01": 23, "A02": 8},
                          "整周快照：别机的店也按计划页数显示（界面里它可被越权勾选）")
 
-    def test_without_a_stored_plan_nothing_is_checked_and_nothing_is_claimed(self):
-        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
-                                state=self.state, crawler=None, now=NOW)
+    def test_without_a_stored_plan_the_page_stops_at_the_gate(self):
+        """本地没有本周计划（ADR-0035）：闸门——不勾不开，给理由与「重试准备」。"""
+        view = views.start_view(
+            self.conn, cfg=self.cfg, shops=self.shops,
+            state=views.UiState(prep=self.preparation(plan_step.PrepStatus.REFUSED)),
+            crawler=None, now=NOW)
 
+        self.assertTrue(view["plan_gate"])
+        self.assertTrue(view["plan_locked"])
+        self.assertTrue(view["plan_retry"])
+        self.assertIn("拉不到计划库", view["plan_note"], "闸门理由就是那次准备的拒绝说明")
         self.assertFalse(view["shops"][0]["default_checked"])
         self.assertFalse(view["plan_idle"])
-        self.assertEqual(view["plan_note"], "", "没有落库计划：不说空手，也不冒充有计划")
 
     def test_a_week_with_no_shops_for_this_machine_is_idle_not_an_error(self):
         """本机本周没店：界面明说「空手」，照常渲出店铺表。"""
@@ -123,6 +134,46 @@ class StartViewTests(ViewsTestCase):
         self.assertIn(WEEK, view["plan_note"], "点明是哪一周的计划")
         self.assertFalse(any(shop["default_checked"] for shop in view["shops"]))
         self.assertEqual(view["total_shops"], 2)
+
+    def test_each_kind_of_shop_carries_its_plan_mark(self):
+        """标注（ADR-0035）：本机份额 / 归别机 / 计划没说到的店，三种标各就各位。"""
+        self.shops = [Shop("A01", "店铺A", "https://A01.example/"),
+                      Shop("A02", "店铺B", "https://A02.example/"),
+                      Shop("B07", "新店", "https://B07.example/")]
+        self.store_plan(("A01", "m-test"), ("A02", "m2"))
+
+        view = views.start_view(
+            self.conn, cfg=self.cfg, shops=self.shops,
+            state=views.UiState(prep=self.preparation(plan_step.PrepStatus.READY)),
+            crawler=None, now=NOW)
+
+        marks = {shop["key"]: (shop["plan_mark"], shop["plan_mark_kind"])
+                 for shop in view["shops"]}
+        self.assertEqual(marks, {"A01": ("本机", "mine"),
+                                 "A02": ("归 m2", "other"),
+                                 "B07": ("计划外", "out")})
+
+    def test_a_plan_from_another_week_asks_to_reopen_the_interface(self):
+        """跨周（ADR-0035）：落库计划不属于当前周时，页面提示重新打开。"""
+        store_weekly_plan(self.db, "2026-W38", ("A01", "m-test", 3))
+
+        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
+                                state=self.state, crawler=None, now=NOW)
+
+        self.assertIn("本周已变", view["plan_note"])
+        self.assertIn("2026-W38", view["plan_note"])
+        self.assertTrue(view["plan_gate"], "本周还没有计划：跨周提示与闸门一起出现")
+
+    def test_a_confirming_preparation_locks_the_page(self):
+        """点了「重试准备」（或超时兜底开的窗）：确认期间锁住勾选与开始，确认完自动更新。"""
+        self.store_plan(("A01", "m-test"))
+
+        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
+                                state=views.UiState(plan_confirming=True), crawler=None, now=NOW)
+
+        self.assertTrue(view["plan_confirming"])
+        self.assertTrue(view["plan_locked"])
+        self.assertIn("正在确认", view["plan_note"])
 
     def test_an_overreach_shop_carries_the_machine_the_plan_gives_it_to(self):
         """越权店（票据 07）：默认不勾之外，文案要点名它本周归谁——不泛泛说「越权」。
@@ -156,20 +207,37 @@ class StartViewTests(ViewsTestCase):
         """拉不到计划库、用的是本地那份：界面标注「未能确认最新」（spec §6 降级表）。"""
         self.store_plan(("A01", "m-test"))
 
-        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
-                                state=views.UiState(plan_stale=True),
-                                crawler=None, now=NOW)
+        view = views.start_view(
+            self.conn, cfg=self.cfg, shops=self.shops,
+            state=views.UiState(prep=self.preparation(plan_step.PrepStatus.READY_FROM_CACHE)),
+            crawler=None, now=NOW)
 
         self.assertIn("未能确认最新", view["plan_note"])
         self.assertFalse(view["plan_idle"])
+        self.assertFalse(view["plan_gate"], "本地有那份：照常可采")
+        self.assertFalse(view["plan_locked"])
+        self.assertTrue(view["plan_retry"], "「未能确认最新」也要能点「重试准备」")
+
+    def test_an_unsettled_preparation_with_a_local_plan_stays_usable_but_unconfirmed(self):
+        """超时兜底（ADR-0035）：本地有那份就照常用，只标未确认——禁的是拿不准，不是旧。"""
+        self.store_plan(("A01", "m-test"))
+
+        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
+                                state=self.state, crawler=None, now=NOW)
+
+        self.assertIn("未能确认最新", view["plan_note"])
+        self.assertTrue(view["shops"][0]["default_checked"], "本机份额照常勾上")
+        self.assertFalse(view["plan_locked"])
+        self.assertTrue(view["plan_retry"])
 
     def test_the_stale_note_composes_with_the_idle_note(self):
         """空手与「未能确认最新」可以同时成立：两句话都要在。"""
         self.store_plan(("A01", "m2"))
 
-        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
-                                state=views.UiState(plan_stale=True),
-                                crawler=None, now=NOW)
+        view = views.start_view(
+            self.conn, cfg=self.cfg, shops=self.shops,
+            state=views.UiState(prep=self.preparation(plan_step.PrepStatus.READY_FROM_CACHE)),
+            crawler=None, now=NOW)
 
         self.assertIn("未能确认最新", view["plan_note"])
         self.assertIn("空手", view["plan_note"])

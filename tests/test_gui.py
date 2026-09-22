@@ -49,6 +49,15 @@ def gui_api(*, shops=(), now=None, db_path=None, open_conn=None, stop_clock=None
                stop_clock=stop_clock)
 
 
+def store_today_plan(db_path, *assignments):
+    """给「今天」这一周落一份计划：闸门按本地计划表开合（ADR-0035）。"""
+    conn = connect(db_path)
+    try:
+        store_weekly_plan(Database(conn), weekly_plan.week_label(cst_date()), *assignments)
+    finally:
+        conn.close()
+
+
 class GuiPlanWiringTests(unittest.TestCase):
     """票据 06：界面打开时做一次开轮前准备；默认勾选、页数、拒开都读落库计划。"""
 
@@ -120,7 +129,7 @@ class GuiPlanWiringTests(unittest.TestCase):
         self.assertEqual(cached.status, plan_step.PrepStatus.READY_FROM_CACHE)
         with patch.object(Api, "_spawn_crawler") as spawn:
             self.assertTrue(api.start_run(["A01"])["ok"])
-            spawn.assert_called_once_with(["A01"], ignore_plan=False)
+            spawn.assert_called_once_with(["A01"])
 
     def test_start_run_is_refused_when_the_preparation_did_not_pass(self):
         api = self.api()
@@ -133,8 +142,8 @@ class GuiPlanWiringTests(unittest.TestCase):
         self.assertIn("准备", result["error"])
         spawn.assert_not_called()
 
-    def test_a_refused_start_offers_the_escape_hatch_to_the_interface(self):
-        """拉不到计划库、本地也没有：默认拒绝开轮，但带上旗标——界面据此给确认（票据 07）。"""
+    def test_a_refused_start_puts_the_page_at_the_gate(self):
+        """拉不到计划库、本地也没有：闸门——不勾不开，页面给理由与「重试准备」（ADR-0035）。"""
         api = self.api()
         api.prepare()
 
@@ -142,30 +151,51 @@ class GuiPlanWiringTests(unittest.TestCase):
             result = api.start_run(["A01"])
 
         self.assertFalse(result["ok"])
-        self.assertTrue(result["escape_hatch"])
+        self.assertIn("--ignore-plan", result["error"], "理由里指出命令行逃生口还在")
         spawn.assert_not_called()
 
-    def test_the_escape_hatch_spawns_the_free_collection_with_the_flag(self):
-        """界面确认后：放行开轮，子进程带 --ignore-plan（自由采集 + 记账为计划外）。"""
+        start = api.get_start()
+        self.assertTrue(start["plan_gate"])
+        self.assertTrue(start["plan_locked"])
+        self.assertTrue(start["plan_retry"])
+
+    def test_a_local_plan_opens_the_gate_even_without_a_preparation(self):
+        """本地有本周计划而这次准备还没落定（超时兜底）：照常可采。"""
+        self.store_plan(("A01", "m-test", 23))
         api = self.api()
-        api.prepare()
 
         with patch.object(Api, "_spawn_crawler") as spawn:
-            result = api.start_run(["A01"], ignore_plan=True)
+            result = api.start_run(["A01"])
 
         self.assertTrue(result["ok"])
-        spawn.assert_called_once_with(["A01"], ignore_plan=True)
+        spawn.assert_called_once_with(["A01"])
+        self.assertIn("未能确认最新", api.get_start()["plan_note"])
 
-    def test_the_merge_only_machine_gets_no_escape_hatch(self):
-        """纯汇总机不做采集：这条路没有逃生口，ignore_plan 也放不出去。"""
+    def test_retry_prepare_runs_again_and_locks_the_page_while_it_does(self):
+        """「重试准备」（闸门与「未能确认最新」两态）：后台重跑，确认中锁住勾选与开始。"""
+        api = self.api()
+        api.prepare()
+        self.assertFalse(api._prep_confirming)
+
+        with patch.object(Api, "prepare") as prepare_again:
+            result = api.retry_prepare()
+
+        self.assertTrue(result["ok"], "点了就放行，等它在后台跑完")
+        self.assertTrue(api._prep_confirming, "页面立刻进入「正在确认」")
+        self.assertTrue(api.get_start()["plan_locked"])
+        self.assertFalse(api.retry_prepare()["ok"], "确认中不许再点一次")
+        prepare_again.assert_called_once_with()
+
+    def test_the_merge_only_machine_is_refused_with_its_own_words(self):
+        """纯汇总机不做采集：拒绝说的是角色，不是闸门（闸门与它无关）。"""
         api = self.api(role=ROLE_MERGE_ONLY)
         api.prepare()
 
         with patch.object(Api, "_spawn_crawler") as spawn:
-            result = api.start_run(["A01"], ignore_plan=True)
+            result = api.start_run(["A01"])
 
         self.assertFalse(result["ok"])
-        self.assertFalse(result["escape_hatch"])
+        self.assertIn("纯汇总机", result["error"])
         spawn.assert_not_called()
 
     def test_the_merge_only_refusal_does_not_wait_for_the_preparation(self):
@@ -173,11 +203,10 @@ class GuiPlanWiringTests(unittest.TestCase):
         api = self.api(role=ROLE_MERGE_ONLY)
 
         with patch.object(Api, "_spawn_crawler") as spawn:
-            result = api.start_run(["A01"], ignore_plan=True)
+            result = api.start_run(["A01"])
 
         self.assertFalse(result["ok"])
         self.assertIn("纯汇总机", result["error"])
-        self.assertFalse(result["escape_hatch"])
         spawn.assert_not_called()
 
     def test_a_merge_only_machine_cannot_resume_an_active_round(self):
@@ -235,8 +264,8 @@ class GuiPlanWiringTests(unittest.TestCase):
 
         self.assertIn("未能确认最新", start["plan_note"])
 
-    def test_a_stale_mark_from_another_week_is_not_shown(self):
-        """跨了周的那次准备不算数：这周的页面不该拿旧周的结局标「未能确认最新」。"""
+    def test_a_preparation_from_another_week_does_not_pass_as_this_weeks_confirmation(self):
+        """跨了周的那次准备不算数：这周的页面标「未能确认最新」，不冒充确认过（ADR-0035）。"""
         self.store_plan(("A01", "m-test", 23))
         api = self.api()
         api.prepare()
@@ -244,7 +273,8 @@ class GuiPlanWiringTests(unittest.TestCase):
 
         start = api.get_start()
 
-        self.assertNotIn("未能确认最新", start["plan_note"])
+        self.assertIn("未能确认最新", start["plan_note"])
+        self.assertFalse(start["plan_locked"], "本地有那份：照常可采")
 
     def test_start_run_resumes_todays_round_instead_of_blocking_without_a_plan(self):
         """今天已有轮次（逃生口开出来的）：点开始是续跑——与 run.py 同一条规则，不拦。"""
@@ -259,15 +289,19 @@ class GuiPlanWiringTests(unittest.TestCase):
         with patch.object(Api, "_spawn_crawler") as spawn:
             result = api.start_run(["A01"])
 
-        self.assertTrue(result["ok"], "续跑不受「默认拒绝开轮」管（范围以轮次自身为准）")
-        spawn.assert_called_once_with(["A01"], ignore_plan=False)
+        self.assertTrue(result["ok"], "续跑不受闸门管（范围以轮次自身为准）")
+        spawn.assert_called_once_with(["A01"])
 
-    def test_start_run_without_a_preparation_lets_the_child_decide(self):
-        """准备还没跑完（或没跑）时不拦：子进程 run.py 自己会做准备。"""
+    def test_start_run_without_a_preparation_and_without_a_local_plan_is_refused(self):
+        """准备没跑过、本地也没有本周计划：闸门照拦（不再是「让子进程去决定」）。"""
         api = self.api()
 
-        with patch.object(Api, "_spawn_crawler"):
-            self.assertTrue(api.start_run(["A01"])["ok"])
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            result = api.start_run(["A01"])
+
+        self.assertFalse(result["ok"])
+        self.assertIn("还没落定", result["error"])
+        spawn.assert_not_called()
 
     def test_a_child_refused_by_the_plan_check_is_reported_on_the_page(self):
         """子进程自己那一层被拒（准备没通过，退出码 5）：页面也要有文案，不能像没点过。"""
@@ -289,16 +323,8 @@ class GuiPlanWiringTests(unittest.TestCase):
 
         cmd = popen.call_args.args[0]
         self.assertNotIn("--pages-per-shop", cmd)
-        self.assertNotIn("--ignore-plan", cmd, "正常开轮不发逃生口旗标")
+        self.assertNotIn("--ignore-plan", cmd, "界面从不发逃生口旗标（ADR-0035：逃生口只在命令行）")
         self.assertIn("--limit-shops", cmd)
-
-    def test_the_spawned_command_carries_the_escape_hatch_flag(self):
-        api = self.api()
-
-        with patch.object(gui.subprocess, "Popen") as popen:
-            api._spawn_crawler(["A01"], ignore_plan=True)
-
-        self.assertIn("--ignore-plan", popen.call_args.args[0])
 
 
 class GuiWindowHeightTests(unittest.TestCase):
@@ -670,6 +696,7 @@ class GuiRoundScopeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "test.db"
             api = self._api(db_path)
+            store_today_plan(db_path, ("A01", "m-test", 3), ("A02", "m-test", 3))
 
             with patch.object(Api, "_spawn_crawler") as spawn:
                 result = api.start_run(["A02"])
@@ -681,7 +708,7 @@ class GuiRoundScopeTests(unittest.TestCase):
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM rounds").fetchone()[0], 0)
             finally:
                 conn.close()
-            spawn.assert_called_once_with(["A02"], ignore_plan=False)
+            spawn.assert_called_once_with(["A02"])
 
     def test_start_run_reports_scope_mismatch_instead_of_merging(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -701,7 +728,7 @@ class GuiRoundScopeTests(unittest.TestCase):
 
             self.assertFalse(result["ok"])
             self.assertIn("范围", result["error"])
-            spawn.assert_called_once_with(["A01"], ignore_plan=False)
+            spawn.assert_called_once_with(["A01"])
             conn = connect(db_path)
             try:
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM rounds").fetchone()[0], 1)
@@ -798,13 +825,45 @@ class GuiSingleInstanceTests(unittest.TestCase):
         lock.release.assert_called_once_with()
         self.assertEqual(len(window.closing_handlers), 1, "关窗要接上告知回调")
 
+    def test_the_window_waits_for_the_preparation_to_settle(self):
+        """窗口等准备落定再建（ADR-0035）：建窗一定发生在准备返回之后。"""
+        order = []
+        lock = MagicMock()
+        window = _FakeWindow()
+        api = SimpleNamespace(prepare=lambda: order.append("prepare"), cfg=None)
+
+        def create_window(*args, **kwargs):
+            order.append("window")
+            return window
+
+        with patch.object(single_instance, "acquire", return_value=lock), \
+                patch.object(gui, "Api", return_value=api), \
+                patch.object(gui, "_configure_gui_logging"), \
+                patch.object(gui.webview, "create_window", side_effect=create_window), \
+                patch.object(gui.webview, "start"):
+            code = gui.main()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(order, ["prepare", "window"], "建窗不许抢在准备落定之前")
+
     def test_already_open_notice_points_at_the_existing_window(self):
-        with patch.object(gui, "_focus_existing_window", return_value=False) as focus, \
+        with patch.object(gui, "_window_exists", return_value=True), \
+                patch.object(gui, "_focus_existing_window", return_value=False) as focus, \
                 patch.object(gui, "_notify") as notify:
             gui._announce_already_open()
 
         focus.assert_called_once_with(gui.WINDOW_TITLE)
         self.assertIn("已经打开", notify.call_args.args[0])
+
+    def test_a_second_launch_during_the_wait_says_it_is_starting(self):
+        """窗口要等准备落定才建（ADR-0035）：锁在、窗口不在时不能说「请看已打开的窗口」。"""
+        with patch.object(gui, "_window_exists", return_value=False), \
+                patch.object(gui, "_notify") as notify:
+            gui._announce_already_open()
+
+        message = notify.call_args.args[0]
+        self.assertIn("正在启动", message)
+        self.assertNotIn("请看已打开的窗口", message)
 
     def test_the_window_and_its_page_carry_the_product_display_name(self):
         """显示名与另两个程序同族（ADR-0007 的 2026-09-22 改名）：窗口标题就是页面标题。"""

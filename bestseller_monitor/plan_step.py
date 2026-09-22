@@ -12,11 +12,11 @@
   哈希（按归一化文本算——BOM/CRLF 差异不算另一份计划）；同周重跑幂等。
 - **读法**（`stored_plan` / `visible_shops`）：界面与命令行读**同一份落库计划**，不各自
   解析计划文件——开始页默认勾选、轮次店铺范围、页数四层里的「计划快照」层都从这里取。
-- **降级**（spec §6 表逐行，判定都在这里，界面/命令行入口见票据 07）：拉不到计划库 +
-  本地已落库 → 用本地那份（`READY_FROM_CACHE`，即「未能确认最新」）；拉不到 + 本地没有
-  → 默认拒绝开轮（`REFUSED`）并留显式逃生口；生成失败（pages 空缺点名、名册读不到）落到
-  同样两行；计划文件在但读不动不猜也不覆盖，同样走降级；纯汇总机不检查、不生成、不发布；
-  本机本周没店是合法空态（`idle`）。
+- **降级**（spec §6 表逐行，判定都在这里）：拉不到计划库 + 本地已落库 → 用本地那份
+  （`READY_FROM_CACHE`，即「未能确认最新」）；拉不到 + 本地没有 → `REFUSED`——界面停在
+  闸门（`start_plan` 给理由与「重试准备」），命令行逃生口 `--ignore-plan` 照旧（ADR-0035）；
+  生成失败（pages 空缺点名、名册读不到）落到同样两行；计划文件在但读不动不猜也不覆盖，
+  同样走降级；纯汇总机不检查、不生成、不发布；本机本周没店是合法空态（`idle`）。
 - **留痕**（放行并上报）：这一轮采了越权（店在计划内、本周归别人）或计划外（逃生口自由
   采集、计划没说到）的店时，`record_deviations` 把偏离写进轮次备注与本机计划外账
   （`db.recorded_deviations` 读它，不入交换集）；汇总侧据此给冲突加「计划外多采」那层
@@ -33,7 +33,7 @@
   同周重跑因此逐行幂等。
 
 整周没有任何店铺的空计划在本机计划表里留不下行（表按「周 × 店铺」记）；这种周离线重开
-会被当作「本地没有」拒绝——空计划本就没有可采的店，走逃生口也只是不采任何店。
+会被当作「本地没有」停在闸门——空计划本就没有可采的店，命令行逃生口放行也只是不采任何店。
 """
 from __future__ import annotations
 
@@ -87,7 +87,7 @@ class PrepStatus(str, enum.Enum):
 
     READY = "ready"                          # 计划就位（读到了或刚生成发布）
     READY_FROM_CACHE = "ready_from_cache"    # 拉不到计划库，用本地已落库那份（未能确认最新）
-    REFUSED = "refused"                      # 默认拒绝开轮，留显式逃生口
+    REFUSED = "refused"                      # 本地没有本周计划：界面停在闸门，逃生口只在命令行
     SKIPPED_MERGE_ONLY = "skipped_merge_only"  # 纯汇总机：不检查、不生成、不发布
 
 
@@ -136,8 +136,8 @@ class GapScan:
 class PrepResult:
     """开轮前准备的结局与账目。
 
-    `can_start` 就是开轮判定的答案；`REFUSED` 时 `escape_hatch_available` 为真——
-    走逃生口（命令行 `--ignore-plan` / 界面确认）之后按「自由采集 + 记账为计划外」运行。
+    `can_start` 就是开轮判定的答案；`REFUSED` 时界面停在闸门（开始页给理由与
+    「重试准备」，ADR-0035），命令行逃生口 `--ignore-plan` 仍照旧。
     """
 
     status: PrepStatus
@@ -148,7 +148,7 @@ class PrepResult:
     my_shops: tuple[str, ...] = ()          # 本周计划里归本机的店（按编号排序）
     idle: bool = False                      # 本机本周没店：合法正常态，不是报错
     warnings: tuple[str, ...] = ()
-    reason: str | None = None               # REFUSED 的判定解释（也是给逃生口决策看的）
+    reason: str | None = None               # REFUSED 的判定解释（界面闸门拿它当横幅）
     shops_sync: shops_sync.SyncResult | None = None
     gaps: GapScan | None = None
 
@@ -160,10 +160,6 @@ class PrepResult:
     def stale(self) -> bool:
         """拉不到计划库、用了本地缓存：界面要标注「未能确认最新」。"""
         return self.status is PrepStatus.READY_FROM_CACHE
-
-    @property
-    def escape_hatch_available(self) -> bool:
-        return self.status is PrepStatus.REFUSED
 
 
 @dataclasses.dataclass(frozen=True)
@@ -212,6 +208,62 @@ def visible_shops(cfg, plan: StoredPlan | None) -> list[Shop]:
     planned_keys = set(plan.pages()) if plan is not None else set()
     return [shop for shop in load_shops(cfg.shop_csv)
             if shop.active or shop.key in planned_keys]
+
+
+@dataclasses.dataclass(frozen=True)
+class StartPlan:
+    """开始页要的计划情况（ADR-0035）：本地那份、本机份额、开轮闸门与两句标注。
+
+    一处判定、两处消费：`gui.Api` 用它定「开不开轮」，`views.start_view` 用它渲染
+    默认勾选、标注与横幅。闸门只看**本地有没有本周计划**——这次准备确认到没有，
+    只决定标不标「未能确认最新」（降级落定与还没落定都标，本地那份都照常可用）。
+    """
+
+    week: str
+    machine: str
+    plan: StoredPlan | None = None      # 本地计划表里这一周的那份；没有就是 None
+    blocked: bool = False               # 闸门：本地没有本周计划，界面不开轮
+    reason: str | None = None           # 闸门理由（给人看的那段话）
+    stale: bool = False                 # 这次没能确认到最新（本地那份照常可用）
+    week_changed: str | None = None     # 本地最新的那份属于另一个周：页面提示跨周
+
+    @property
+    def mine(self) -> frozenset[str]:
+        """本机份额：归本机的店（没有本地计划时为空）。"""
+        return (frozenset(self.plan.machine_keys(self.machine))
+                if self.plan is not None else frozenset())
+
+
+UNSETTLED_GATE_REASON = (
+    "开轮前准备还没落定（还在确认，或等了 30 秒没回来）：本机也没有本周（{week}）"
+    "已落库的计划，界面先不开轮——三台各自脱网时都自由采集，会把同一批店各打一遍。"
+    "点「重试准备」再试一次。")
+
+
+def start_plan(db: Database, cfg, week: str, prep: PrepResult | None) -> StartPlan:
+    """把「本地有没有本周计划」「这次准备确认到没有」折成开始页要的一份事实。
+
+    `prep` 只收本界面这一次、且属于这一周的准备（跨周的那次不算数）。闸门
+    （ADR-0035）：本地没有本周计划就不开轮——理由取那次准备的拒绝说明，或一句
+    「还没落定」；命令行逃生口不在界面里。纯汇总机不做采集，闸门与它无关。
+    """
+    plan = stored_plan(db, week)
+    machine = str(cfg.machine_id)
+    if is_merge_only(cfg):
+        return StartPlan(week=week, machine=machine, plan=plan)
+    settled = prep if prep is not None and prep.week == week else None
+    stale = plan is not None and not (settled is not None
+                                      and settled.status is PrepStatus.READY)
+    latest = db.latest_weekly_plan_week()
+    week_changed = latest if latest is not None and latest != week else None
+    if plan is not None:
+        return StartPlan(week=week, machine=machine, plan=plan, stale=stale,
+                         week_changed=week_changed)
+    reason = (settled.reason if settled is not None
+              and settled.status is PrepStatus.REFUSED
+              else UNSETTLED_GATE_REASON.format(week=week))
+    return StartPlan(week=week, machine=machine, blocked=True, reason=reason,
+                     week_changed=week_changed)
 
 
 class DeviationKind(str, enum.Enum):
@@ -642,11 +694,14 @@ def _fallback_reason(outcome: _PlanOutcome | None, sync: shops_sync.SyncResult |
 
 
 def prepare_week(cfg, db: Database, *, now: dt.datetime | None = None,
-                 state_path: str | pathlib.Path | None = None) -> PrepResult:
+                 state_path: str | pathlib.Path | None = None,
+                 gap_scan: bool = True) -> PrepResult:
     """开轮前的一次准备：走完「拉计划库 → 同步清单 → 确认计划 → 落库 → 缺口告警」，
-    返回结局与判定（开不开轮由调用方照 `PrepResult` 决定，逃生口入口见票据 07）。
+    返回结局与判定（开不开轮由调用方照 `PrepResult` 决定，界面闸门见 ADR-0035）。
 
     `cfg` 取 `machine_id` / `role` / `shop_csv` / `exchange_root`（其余键不读）。
+    `gap_scan=False` 跳过缺口检查（只告警的慢活，`gaps` 随之为 None）：界面用它把
+    开窗的阻塞段压到最小，落定之后再自己扫一遍。
     """
     now = now or dt.datetime.now(CST)
     week = weekly_plan.iso_week_label(now.date())
@@ -698,20 +753,21 @@ def prepare_week(cfg, db: Database, *, now: dt.datetime | None = None,
             reason = (
                 f"{why}\n本机也没有本周（{week}）已落库的计划：默认拒绝开轮——三台各自"
                 "脱网时都自由采集，会把同一批店三台各打一遍，正是分片设计要避免的。\n"
-                "要照常开轮，走显式逃生口（命令行 --ignore-plan / 界面确认），按"
-                "「自由采集 + 记账为计划外」运行。")
+                "界面停在闸门：给这段理由与「重试准备」；要照常开轮，走命令行逃生口 "
+                "`python run.py --ignore-plan`，按「自由采集 + 记账为计划外」运行。")
 
-    try:
-        gaps = scan_exchange_gaps(cfg.exchange_root, db.conn, week)
-    except Exception as exc:            # 只告警不拦：缺口检查坏了也不该挡住开轮
-        warnings.append(f"缺口检查没做成（不影响开轮）：{exc}")
-        gaps = None
-    else:
-        if gaps.warning_message:
-            warnings.append(gaps.warning_message)
-        if gaps.notes:
-            warnings.append("缺口检查注记：" + "；".join(gaps.notes))
-
+    gaps = None
+    if gap_scan:
+        try:
+            gaps = scan_exchange_gaps(cfg.exchange_root, db.conn, week)
+        except Exception as exc:        # 只告警不拦：缺口检查坏了也不该挡住开轮
+            warnings.append(f"缺口检查没做成（不影响开轮）：{exc}")
+            gaps = None
+        else:
+            if gaps.warning_message:
+                warnings.append(gaps.warning_message)
+            if gaps.notes:
+                warnings.append("缺口检查注记：" + "；".join(gaps.notes))
     stored = stored_plan(db, week)
     my_shops = stored.machine_keys(machine) if stored is not None else ()
     return PrepResult(

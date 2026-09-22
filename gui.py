@@ -2,11 +2,12 @@
 
 行为约定：
   - GUI 只做启动器/监控，抓取仍由本机 `python run.py --limit-shops=...` 子进程执行。
-  - 界面打开时在后台走一次「开轮前的一次准备」（spec §6，`plan_step.prepare_week`）：
-    拉计划库 → 同步清单 → 确认/生成/发布本周计划 → 落库。开始页的默认勾选与页数
-    都读落库计划（与命令行同一份）；准备没通过则默认拒绝开轮——拉不到计划库、本地也
-    没有时点「开始」会先给确认（逃生口，按「自由采集 + 记账为计划外」跑）；用本地
-    那份降级开轮时页面标注「未能确认最新」。
+  - 界面打开时先走一次「开轮前的一次准备」（spec §6，`plan_step.prepare_week`）：
+    拉计划库 → 同步清单 → 确认/生成/发布本周计划 → 落库。**窗口等它落定再建**
+    （上限 30 秒，ADR-0035）——开始页画出来时默认勾选与页数就已经是本机份额那份。
+    等不到就按「本地有没有本周计划」分岔：有则用本地那份、标「未能确认最新」；
+    没有则停在闸门（给理由与「重试准备」，界面不开轮）。「重试准备」在闸门与
+    「未能确认最新」两态都可点。
   - GUI 读 data/bestseller.db 展示“今日/各店”数据；过程页上一次刷新回来之后才排下一次
     （节拍约 2 秒），慢查询不会把请求堆起来，暂停/中止也不必排在它们后面（IS-38）。
   - “暂停”＝写下停止请求，轮次保留为“进行中”（可续跑）。
@@ -78,6 +79,10 @@ _SW_RESTORE = 9
 # 「已经有采集在跑」的拒绝文案：三个入口共用一句，免得改了半处。
 _BUSY_ERROR = "已有抓取任务在运行，请先暂停或中止。"
 
+# 窗口等「开轮前准备」落定的上限（秒，ADR-0035）：等不到就照开，页面按本地有没有
+# 本周计划分岔（有则照常可用并标「未能确认最新」，没有则停在闸门）。
+PREPARE_WAIT_SEC = 30.0
+
 
 def _local_shops(cfg) -> list[Shop]:
     """本机采集清单里启用的店。
@@ -138,9 +143,11 @@ class Api:
             lambda: connect(self.cfg.db_file))
         self._shops_injected = shops is not None
         self.shops = (list(shops) if shops is not None else _local_shops(self.cfg))
-        # 开轮前准备（spec §6）的结局：`prepare()` 落在这里，`start_run` 拿它做
-        # 「默认拒绝开轮」的判定；没跑过就是 None（子进程开轮前还会再准备一次）。
+        # 开轮前准备（spec §6）的结局：`prepare()` 落在这里，闸门判定（`_plan_block_reason`）
+        # 与开始页（`_ui_state`）都读它；没跑过就是 None。`_prep_confirming` 与它配对：
+        # 准备在跑（超时兜底开了窗，或点了「重试准备」）时页面锁住勾选与开始。
         self._prep: plan_step.PrepResult | None = None
+        self._prep_confirming = False
         self._lock = threading.RLock()
         self.proc: subprocess.Popen | None = None
         self.round_id: int | None = None
@@ -190,7 +197,8 @@ class Api:
             stop_grace_sec=self._stop_watch.grace_sec,
             elapsed_sec=self._current_elapsed(),
             start_error=self._refused_start_message(),
-            plan_stale=self._prep_is_stale(),
+            prep=self._prep_this_week(),
+            plan_confirming=self._prep_confirming,
         )
 
     # ---------- 开始页 ----------
@@ -199,65 +207,94 @@ class Api:
         return weekly_plan.week_label(self._today())
 
     def prepare(self) -> plan_step.PrepResult | None:
-        """界面打开时的一次（开轮前）准备（spec §6）：与命令行开跑前同一步。
+        """开轮前的一次准备（spec §6）：与命令行开跑前同一步（ADR-0035）。
 
-        `main()` 在后台线程里跑它——拉计划库与确认计划通常要几秒，不该挡着窗口打开；
-        落库后开始页的下一次轮询就按本周计划给默认勾选与页数。失败只记日志：界面
-        照常可用，「默认拒绝开轮」的判定在 `_plan_block_reason`，逃生口入口见票据
-        07。返回结局供测试与日志用；意外异常返回 None。
+        `main()` 先起这个线程、等它落定（上限 30 秒）再建窗口——开始页画出来时默认
+        勾选就是本机份额那份。「重试准备」（闸门与「未能确认最新」两态）走同一条路。
+        失败只记日志：界面照常可用，闸门判定在 `_plan_block_reason`。返回结局供测试
+        与日志用；意外异常返回 None。
         """
+        with self._lock:
+            self._prep_confirming = True
         try:
-            conn = self._open_conn()
-            try:
-                # prepare_week 按北京日期算周：注入的时刻先折算到 CST，免得跨夜差一周
-                moment = dt.datetime.fromisoformat(self._now()).astimezone(CST)
-                result = plan_step.prepare_week(self.cfg, Database(conn), now=moment)
-            finally:
-                conn.close()
+            result = self._prepare_once()
         except Exception as exc:                       # noqa: BLE001
             log.warning("开轮前准备没做成（界面照常可用，子进程开轮前还会再准备一次）：%s", exc)
+            result = None
+        with self._lock:                # 只锁这两次赋值：准备本身（含 git）不占锁
+            self._prep_confirming = False
+            if result is not None:
+                self._prep = result
+        if result is None:
             return None
-        with self._lock:                # 只锁这一次赋值：准备本身（含 git）不占锁
-            self._prep = result
         log.info("开轮前准备：%s（本周 %s，本机 %s 家店）",
                  result.status.value, result.week, len(result.my_shops))
         for warning in result.warnings:
             log.warning("开轮前准备：%s", warning)
+        if result.status is not plan_step.PrepStatus.SKIPPED_MERGE_ONLY:
+            # 缺口检查是只告警的慢活：不进开窗的阻塞段。它属于采集机开轮前的准备
+            # （提醒本机落后了、去跑交换台）；纯汇总机没有开轮这一步，跳过。
+            self._scan_gaps(result.week)
         return result
 
-    def _plan_block_reason(self, db: Database | None = None) -> str | None:
-        """准备没通过就默认拒绝开轮（spec §6 降级表；逃生口入口见票据 07）。
+    def _prepare_once(self) -> plan_step.PrepResult:
+        """跑一次准备串的阻塞段（拉计划库 → 同步清单 → 确认/发布 → 落库）。"""
+        conn = self._open_conn()
+        try:
+            # prepare_week 按北京日期算周：注入的时刻先折算到 CST，免得跨夜差一周
+            moment = dt.datetime.fromisoformat(self._now()).astimezone(CST)
+            return plan_step.prepare_week(self.cfg, Database(conn), now=moment, gap_scan=False)
+        finally:
+            conn.close()
 
-        **纯汇总机先判、且不指望准备**：角色是配置事实，这台机器不做采集——准备还没
-        跑完（或意外没落定）也不许把子进程放出去。其余判据只认本界面刚做过、且是本周的
-        那次准备：没跑过或跨了周就不拦——子进程 run.py 开跑前自己会做准备，那里有同样
-        的判定与同一条退出码（它的拒绝在这里也有文案，见 `_refused_start_message`）。
-        今天已有进行中的轮次同样不拦：那是续跑，范围以轮次自身为准（与 run.py 同一条
-        规则，逃生口开出来的那一轮也才续得下去）。
+    def _scan_gaps(self, week: str) -> None:
+        """缺口检查（只告警不拦）：落定之后再单独扫一遍，坏了也只记日志。"""
+        try:
+            conn = self._open_conn()
+            try:
+                gaps = plan_step.scan_exchange_gaps(self.cfg.exchange_root, conn, week)
+            finally:
+                conn.close()
+        except Exception as exc:                        # noqa: BLE001
+            log.warning("缺口检查没做成（不影响开轮）：%s", exc)
+            return
+        if gaps.warning_message:
+            log.warning("开轮前准备：%s", gaps.warning_message)
+        if gaps.notes:
+            log.warning("缺口检查注记：%s", "；".join(gaps.notes))
+
+    def retry_prepare(self) -> dict:
+        """「重试准备」入口：后台重跑一次开轮前准备（闸门与「未能确认最新」两态）。
+
+        先立起 confirming 再起线程：紧接着的那次取数要立刻看到「正在确认」，页面才会
+        接着轮询、落定后自动更新。
+        """
+        with self._lock:
+            if self._prep_confirming:
+                return {"ok": False, "error": "正在确认中：等这一次跑完。"}
+            self._prep_confirming = True
+        threading.Thread(target=self.prepare, name="plan-prepare-retry", daemon=True).start()
+        return {"ok": True}
+
+    def _plan_block_reason(self, db: Database) -> str | None:
+        """闸门判定（ADR-0035）：本地没有本周计划就不开轮——与开始页同一处判定。
+
+        **纯汇总机先判**：角色是配置事实，这台机器不做采集。今天已有进行中的轮次不拦：
+        那是续跑，范围以轮次自身为准（与 run.py 同一条规则）。闸门拦的只是新开轮；子
+        进程 run.py 开跑前自己还会准备一次，那里有同样的判定与同一条退出码（它的拒绝
+        在这里也有文案，见 `_refused_start_message`）。
         """
         if is_merge_only(self.cfg):
             return plan_step.MERGE_ONLY_REFUSAL
-        prep = self._prep_this_week()
-        if prep is None or prep.can_start:
+        if rounds.active_round(db, self._today()) is not None:
             return None
-        if db is not None and rounds.active_round(db, self._today()) is not None:
-            return None
-        return "开轮前准备没通过，本次不开轮：\n" + (prep.reason or "拉不到计划库，且本地没有本周计划。")
+        plan = plan_step.start_plan(db, self.cfg, self._current_week(), self._prep_this_week())
+        return plan.reason if plan.blocked else None
 
     def _prep_this_week(self) -> plan_step.PrepResult | None:
         """本界面刚做过、且属于本周的那次准备；没跑过或跨周就是 None。"""
         prep = self._prep
         return prep if prep is not None and prep.week == self._current_week() else None
-
-    def _escape_hatch_available(self) -> bool:
-        """这次拒绝有没有逃生口：只有「拉不到计划库、本地也没有」那一行有（纯汇总机没有）。"""
-        prep = self._prep_this_week()
-        return prep is not None and prep.escape_hatch_available
-
-    def _prep_is_stale(self) -> bool:
-        """这次准备是不是降级来的（用本地那份、未能确认最新）：页面要标注（票据 07）。"""
-        prep = self._prep_this_week()
-        return prep is not None and prep.stale
 
     def _refresh_shops(self, conn) -> None:
         """店铺全量的最新读法：本机启用的店 + 本周计划说到的店。
@@ -321,19 +358,15 @@ class Api:
             own_round_id=self.round_id,
         )
 
-    def _spawn_crawler(self, keys: list[str] | None = None, *,
-                       ignore_plan: bool = False):
+    def _spawn_crawler(self, keys: list[str] | None = None):
         """拉起采集子进程；keys 为空表示「开始或续跑」，范围由子进程按轮次决定。
 
-        `ignore_plan=True` 是逃生口（界面确认后）：子进程在「拉不到计划库、本地也没有」
-        时照开轮，按「自由采集 + 记账为计划外」运行（run.py 的 `--ignore-plan`）。
+        界面不发 `--ignore-plan`：逃生口只在命令行（ADR-0035）。
         """
         cmd = [_crawler_python(), str(PROJECT_ROOT / "run.py")]
         limit = ",".join(k for k in (keys or []) if k)
         if limit:
             cmd += ["--limit-shops", limit]
-        if ignore_plan:
-            cmd += ["--ignore-plan"]
         # 子进程静默运行：不弹控制台窗口，stdout/stderr 丢弃（详细日志仍写入 run.log）
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         self.proc = subprocess.Popen(
@@ -344,18 +377,21 @@ class Api:
             creationflags=flags,
         )
 
-    def start_run(self, keys: list[str], ignore_plan: bool = False) -> dict:
-        """开始一轮；`ignore_plan=True` 只有界面确认过逃生口才会传（否则默认拒绝开轮）。"""
+    def start_run(self, keys: list[str]) -> dict:
+        """开始一轮（按勾选的店铺）；已有采集在跑、闸门没开或角色不许时不发子进程。"""
         with self._lock:
             conn = self._open_conn()
             try:
                 self._stop_watch.tick(conn)
                 db = Database(conn)
+                # 有采集进程在跑就不许再起一个：界面与命令行共用同一把会话锁，
+                # 判据是环境事实，不是「本界面记不记得自己拉过子进程」。这一条比闸门
+                # 先判：机器上正在发生的事比计划状态更该先说给人听。
+                if self.current_crawler(conn) is not None:
+                    return {"ok": False, "error": _BUSY_ERROR}
                 reason = self._plan_block_reason(db)
                 if reason is not None:
-                    escape = self._escape_hatch_available()
-                    if not (ignore_plan and escape):
-                        return {"ok": False, "error": reason, "escape_hatch": escape}
+                    return {"ok": False, "error": reason}
                 by_key = {shop.key: shop for shop in self.shops}
                 missing = [key for key in keys if key not in by_key]
                 if missing:
@@ -370,10 +406,6 @@ class Api:
                 if self._stop_watch.status.phase is not stop_request.StopPhase.IDLE:
                     return {"ok": False, "error": "上一次停止仍在核验或收尾，请稍后重试。",
                             "retryable": True}
-                # 有采集进程在跑就不许再起一个：界面与命令行共用同一把会话锁，
-                # 判据是环境事实，不是「本界面记不记得自己拉过子进程」。
-                if self.current_crawler(conn) is not None:
-                    return {"ok": False, "error": _BUSY_ERROR}
                 # 只读地问一句会不会被拒：今天已有轮次但范围不同就给出可读理由。
                 # 轮次本身由采集子进程创建，启动失败不会留下空的「进行中」轮次。
                 rounds.check_scope(db, request)
@@ -387,7 +419,7 @@ class Api:
             self._elapsed_base = 0.0
             self._run_start_ts = time.time()
             try:
-                self._spawn_crawler(keys, ignore_plan=ignore_plan)
+                self._spawn_crawler(keys)
             except Exception as exc:  # noqa: BLE001
                 return {"ok": False, "error": f"启动抓取失败：{exc}"}
             return {"ok": True}
@@ -628,12 +660,37 @@ def _focus_existing_window(title: str) -> bool:
         return False
 
 
+def _window_exists(title: str) -> bool:
+    """按标题问一句窗口在不在（第二个实例据此区分「已经在跑」与「还在启动」）。
+
+    非 Windows 上无从查证：当它在——照旧说「已经打开」。
+    """
+    if os.name != "nt":
+        return True
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.FindWindowW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        user32.FindWindowW.restype = ctypes.c_void_p
+        return bool(user32.FindWindowW(None, title))
+    except OSError:
+        return True
+
+
 def _announce_already_open() -> None:
-    """第二个实例不建窗口：告诉用户界面已经开着，并尽量把那个窗口叫到前面。"""
+    """第二个实例不建窗口：界面已经开着就说它在哪；窗口还没出现就说它在启动。
+
+    ADR-0035 起窗口要等「开轮前准备」落定才建，等待期的第二次双击会撞上「锁在、
+    窗口不在」——那时说「请看已打开的窗口」会指向一个尚不存在的窗口。
+    """
     log.info("界面已经打开，本次启动不建立第二个窗口。")
-    if not _focus_existing_window(WINDOW_TITLE):
-        log.info("没能把已有窗口前置，只做提示。")
-    _notify("界面已经打开，请看已打开的那个窗口。", title=f"{WINDOW_TITLE}（已经在运行）")
+    if _window_exists(WINDOW_TITLE):
+        if not _focus_existing_window(WINDOW_TITLE):
+            log.info("没能把已有窗口前置，只做提示。")
+        _notify("界面已经打开，请看已打开的那个窗口。", title=f"{WINDOW_TITLE}（已经在运行）")
+        return
+    log.info("界面锁在，但窗口还没建起来（开轮前准备未落定）：提示它在启动。")
+    _notify("界面正在启动，请稍候——窗口会在确认完本周计划之后出现。",
+            title=f"{WINDOW_TITLE}（正在启动）")
 
 
 def _warn_crawler_keeps_running(api) -> bool:
@@ -661,9 +718,12 @@ def main() -> int:
     try:
         api = Api()
         _configure_gui_logging(api.cfg)
-        # 界面打开时的一次（开轮前）准备（spec §6）：后台跑，落库后开始页的下一次轮询
-        # 就按本周计划给默认勾选与页数；失败只记日志，开轮时子进程还会再准备一次。
-        threading.Thread(target=api.prepare, name="plan-prepare", daemon=True).start()
+        # 窗口等「开轮前准备」落定再建（ADR-0035）：开始页画出来时默认勾选就已经是
+        # 本机份额那份。等待上限 30 秒；等不到也照开，页面按「本地有没有本周计划」
+        # 分岔（有则照常可用并标「未能确认最新」，没有则停在闸门等「重试准备」）。
+        prepare_thread = threading.Thread(target=api.prepare, name="plan-prepare", daemon=True)
+        prepare_thread.start()
+        prepare_thread.join(PREPARE_WAIT_SEC)
         html = (PROJECT_ROOT / "bestseller_monitor" / "pages" / "ui_live.html").read_text(encoding="utf-8")
         window = webview.create_window(
             WINDOW_TITLE,

@@ -37,9 +37,11 @@ class UiState:
     stop_grace_sec: float = 0.0
     elapsed_sec: float = 0.0
     start_error: str | None = None
-    # 这次开窗时的那次准备是降级来的（拉不到计划库、用了本地那份）：页面要标注
-    # 「未能确认最新」（spec §6 降级表）。事实源是界面那次准备，不是库里的计划表。
-    plan_stale: bool = False
+    # 本界面这一次、属于本周的开轮前准备（ADR-0035）：闸门与「未能确认最新」的事实源
+    # 是它，不是库里的计划表——库里的表回答「本地有没有」，它回答「这次确认到没有」。
+    prep: plan_step.PrepResult | None = None
+    # 准备正在跑（超时兜底开了窗，或点了「重试准备」）：页面锁住勾选与开始。
+    plan_confirming: bool = False
 
 
 # ---------- 渲染：事实 → 页面上的字符串 ----------
@@ -159,30 +161,51 @@ def _start_summary(conn: sqlite3.Connection, today: str) -> dict:
     return {"started": True, "rounds": len(today_rounds), "text": "\n".join(lines)}
 
 
+def _plan_mark(shop_key: str, plan: plan_step.StartPlan,
+               deviation: plan_step.PlanDeviation | None) -> tuple[str, str]:
+    """这家店的计划标注（ADR-0035）：短文案 + 种类，页面据此挂 pill。
+
+    计划在：归本机 = `本机`、归别机 = `归 m2`、计划没说到 = `计划外`；没有计划
+    （闸门 / 命令行逃生口）不挂标——那层话由横幅说。标注是标记不是锁：越权店照旧可勾。
+    """
+    if plan.plan is None:
+        return "", ""
+    if shop_key in plan.mine:
+        return "本机", "mine"
+    if deviation is not None and deviation.kind is plan_step.DeviationKind.OVERREACH:
+        return f"归 {deviation.planned_machine}", "other"
+    return "计划外", "out"
+
+
 def _start_shops(conn: sqlite3.Connection, shops, cfg, today: str, *,
-                 plan: plan_step.StoredPlan | None, mine: frozenset[str]) -> list[dict]:
+                 plan: plan_step.StartPlan) -> list[dict]:
     out = []
-    plan_pages = plan.pages() if plan is not None else None
+    plan_pages = plan.plan.pages() if plan.plan is not None else None
     # 越权店（店在计划内、本周归别人）：点名它归谁（票据 07）——判定与文案跟记账同源
-    # （plan_step），界面只负责把这句话放进括号；归本机的店与计划没说到的店都没有这句。
-    notes = {d.shop_key: d.reason
-             for d in plan_step.plan_deviations(plan, str(cfg.machine_id),
-                                                [shop.key for shop in shops])
-             if d.kind is plan_step.DeviationKind.OVERREACH}
+    # （plan_step），界面只负责把它放进悬浮说明；归本机的店与计划没说到的店都没有这句。
+    deviations = {d.shop_key: d
+                  for d in plan_step.plan_deviations(plan.plan, plan.machine,
+                                                     [shop.key for shop in shops])}
     for shop in shops:
         products, skus = _inventory_counts(conn, today, shop.key)
         # 该店本轮实际翻页上限：四层优先取第一个有值的（命令行覆盖 > 计划快照 >
         # 店铺 pages > 全局默认），与抓取逻辑同一处口径
         pages = effective_pages_limit(shop, cfg, plan_pages=plan_pages)
+        deviation = deviations.get(shop.key)
+        mark, mark_kind = _plan_mark(shop.key, plan, deviation)
         out.append({
             "key": shop.key,
             "name": shop.name,
             "products": products,
             "skus": skus,
             "pages": pages,
-            # 默认勾选 = 本周计划里归本机的店（票据 06）；越权店默认不勾、可显式勾上
-            "default_checked": shop.key in mine,
-            "plan_label": notes.get(shop.key, ""),
+            # 默认勾选 = 本机份额（本周计划里归本机的店，票据 06）；越权店默认不勾、
+            # 可显式勾上
+            "default_checked": shop.key in plan.mine,
+            "plan_label": (deviation.reason if deviation is not None
+                           and deviation.kind is plan_step.DeviationKind.OVERREACH else ""),
+            "plan_mark": mark,
+            "plan_mark_kind": mark_kind,
         })
     return out
 
@@ -203,30 +226,40 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
                crawler: CrawlerProcess | None, now: str) -> dict:
     """开始页取数：今日大盘、每店今日进度、以及「点开始会发生什么」的提示。
 
-    默认勾选与页数都读**本周落库计划**（`plan_step.stored_plan`，与命令行同一份；
-    不解析计划文件）。越权店（计划归别机）默认不勾，并按 `plan_label` 点名它归谁
-    （票据 07）。本机本周没店（空手）是合法正常态：照常给出店铺表，另附一句说明，
-    不报错。`state.plan_stale`（这次准备是降级来的）再加一句「未能确认最新」。
+    计划情况（闸门、默认勾选、标注、页数）读 **plan_step.start_plan** 那一份
+    （ADR-0035，与拦开轮是同一处判定）：本地没有本周计划就停在闸门——不勾不开，
+    给理由与「重试准备」；本地有那份而这次没确认到最新，就标「未能确认最新」、
+    照常可采。本机本周没店（空手）是合法正常态：照常给出店铺表，另附一句说明。
     纯汇总机照常给这一页，但第一句就说清它不做采集（票据 11）。
     """
     today = cst_date(now)
     db = Database(conn)
-    plan = plan_step.stored_plan(db, weekly_plan.week_label(today))
-    mine = frozenset(plan.machine_keys(str(cfg.machine_id))) if plan is not None else frozenset()
-    idle = plan is not None and not mine
+    plan = plan_step.start_plan(db, cfg, weekly_plan.week_label(today), state.prep)
+    idle = plan.plan is not None and not plan.mine
     notes = []
+    if state.plan_confirming:
+        notes.append("正在确认本周计划…（拉计划库 → 同步清单 → 确认计划）："
+                     "确认完这一页会自动更新。")
     if is_merge_only(cfg):
         # 采集入口在这台机器上是被拒的（判定与命令行同源，见 plan_step.MERGE_ONLY_REFUSAL）：
         # 把话说在点「开始抓取」之前，而不是等人点了才知道。
         notes.append(plan_step.MERGE_ONLY_REFUSAL)
+    if plan.week_changed is not None:
+        notes.append(f"本周已变：本地最新的计划是 {plan.week_changed} 那一周，不是当前这一周——"
+                     "要按新周计划开轮，重新打开界面（窗口只在打开时确认一次计划）。")
+    if plan.blocked:
+        notes.append(plan.reason)
     if idle:
         notes.append(f"本周计划（{plan.week}）里没有归本机的店（空手）——合法状态，不用开轮。")
-    if state.plan_stale:
-        notes.append("未能确认最新：这次没拉到计划库，用的是本地已落库的本周计划"
+    if plan.stale:
+        notes.append("未能确认最新：这次没从计划库确认到本周计划，用的是本地已落库的那份"
                      "（发布后本周不重算，本地即权威）。")
     ov_products, ov_skus = _inventory_counts(conn, today)
     current = rounds.active_round(db, today)
     stale = None if current is not None else rounds.active_round(db)
+    # 今天已有进行中的轮次时，点「开始抓取」是续跑——范围以轮次自身为准（与 run.py
+    # 同一条规则），与闸门无关；所以闸门只锁「新建一轮」。
+    locked = state.plan_confirming or (plan.blocked and current is None)
     if is_merge_only(cfg):
         # 本机不做采集：页首那句已经说清，这里不再给「点开始抓取会…」这类承诺
         # （hint 只谈采集；库里留着进行中的轮次也不改这条）。
@@ -238,17 +271,22 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
                 "点「开始抓取」会按它的店铺范围续跑。")
     elif stale is not None:
         hint = (f"轮次 #{stale.id}（{stale.run_date}）已经跨天，不会再续跑；"
-                "点「开始抓取」会新建一轮。")
+                + ("本周计划还没确认，先新建不了新一轮。" if locked
+                   else "点「开始抓取」会新建一轮。"))
     else:
         hint = ""
     return {
         "ov": {"products": ov_products, "skus": ov_skus},
         "summary": _start_summary(conn, today),
-        "shops": _start_shops(conn, shops, cfg, today, plan=plan, mine=mine),
+        "shops": _start_shops(conn, shops, cfg, today, plan=plan),
         "total_shops": len(shops),
         "start_hint": hint,
         "plan_idle": idle,
         "plan_note": "\n".join(notes),
+        "plan_gate": plan.blocked,
+        "plan_locked": locked,
+        "plan_confirming": state.plan_confirming,
+        "plan_retry": plan.blocked or plan.stale,
         # 页面按 `d.crawler.round_id` 说话，跨 pywebview 那一步走 JSON：给回普通 dict。
         "crawler": crawler.to_payload() if crawler is not None else None,
         "stopping": state.stopping,

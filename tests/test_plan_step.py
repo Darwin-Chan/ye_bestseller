@@ -27,7 +27,7 @@ from bestseller_monitor.config import ROLE_MERGE_ONLY
 from bestseller_monitor.db import Database, WeeklyPlanRow
 from bestseller_monitor.rounds import RoundRequest, ShopScope
 from tests.git_repos import GitSandbox
-from tests.helpers import crawler_cfg
+from tests.helpers import crawler_cfg, store_weekly_plan
 
 # 样例世界：两家店、两台机器（手算：A01 页多 → m1，A02 → m2；见票 03 的算法口径）
 SHOPS_CSV = ("shop_key,shop_name,shop_url,pages,active\n"
@@ -296,6 +296,94 @@ class VisibleShopsTests(unittest.TestCase):
 
         self.assertEqual([shop.key for shop in shops], ["A01", "A02"],
                          "本机清单里没有的行（被删了）：没有地址，采不了")
+
+
+class StartPlanTests(unittest.TestCase):
+    """开始页的计划情况（ADR-0035）：本地那份、本机份额、开轮闸门与两句标注。
+
+    闸门只看「本地有没有本周计划」；这次准备确认到没有，决定标不标「未能确认最新」。
+    """
+
+    def setUp(self):
+        self.dir = pathlib.Path(tempfile.mkdtemp(prefix="bestseller-start-plan-"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.db = Database(dbm.connect(self.dir / "crawler.db"))
+        self.addCleanup(self.db.conn.close)
+        self.cfg = crawler_cfg(machine_id="m1")
+
+    def store(self, *assignments, week: str = WEEK) -> None:
+        store_weekly_plan(self.db, week, *assignments)
+
+    def preparation(self, status, *, week: str = WEEK) -> plan_step.PrepResult:
+        return plan_step.PrepResult(status=status, week=week, machine="m1",
+                                    reason="拉不到计划库，先修通道。")
+
+    def test_without_a_local_plan_the_gate_is_shut_with_the_refusals_reason(self):
+        plan = plan_step.start_plan(self.db, self.cfg, WEEK,
+                                    self.preparation(plan_step.PrepStatus.REFUSED))
+
+        self.assertTrue(plan.blocked)
+        self.assertEqual(plan.reason, "拉不到计划库，先修通道。")
+        self.assertEqual(plan.mine, frozenset())
+
+    def test_an_unsettled_preparation_shuts_the_gate_with_its_own_reason(self):
+        plan = plan_step.start_plan(self.db, self.cfg, WEEK, None)
+
+        self.assertTrue(plan.blocked)
+        self.assertIn("还没落定", plan.reason)
+        self.assertIn(WEEK, plan.reason)
+
+    def test_a_local_plan_opens_the_gate_with_this_machines_share(self):
+        self.store(("A01", "m1", 23), ("A02", "m2", 8))
+
+        plan = plan_step.start_plan(self.db, self.cfg, WEEK,
+                                    self.preparation(plan_step.PrepStatus.READY))
+
+        self.assertFalse(plan.blocked)
+        self.assertIsNone(plan.reason)
+        self.assertEqual(plan.mine, frozenset({"A01"}))
+        self.assertFalse(plan.stale, "这次准备确认到了最新：不标「未能确认最新」")
+
+    def test_a_degraded_or_unsettled_session_marks_the_local_plan_as_unconfirmed(self):
+        self.store(("A01", "m1", 23))
+
+        degraded = plan_step.start_plan(self.db, self.cfg, WEEK,
+                                        self.preparation(plan_step.PrepStatus.READY_FROM_CACHE))
+        unsettled = plan_step.start_plan(self.db, self.cfg, WEEK, None)
+
+        self.assertTrue(degraded.stale)
+        self.assertFalse(degraded.blocked, "降级落定：本地即权威，照常可采")
+        self.assertTrue(unsettled.stale, "超时还没落定：本地这份照常可用，但要标未确认")
+
+    def test_a_preparation_from_another_week_does_not_count_as_confirmed(self):
+        self.store(("A01", "m1", 23))
+
+        plan = plan_step.start_plan(self.db, self.cfg, WEEK,
+                                    self.preparation(plan_step.PrepStatus.READY, week="2026-W01"))
+
+        self.assertTrue(plan.stale, "跨了周的那次准备不算数")
+
+    def test_the_newest_stored_week_is_reported_so_the_page_can_say_the_week_changed(self):
+        self.store(("A01", "m1", 23), week="2026-W38")
+
+        plan = plan_step.start_plan(self.db, self.cfg, WEEK, None)
+
+        self.assertEqual(plan.week_changed, "2026-W38")
+        self.assertTrue(plan.blocked, "跨周之后本周还没有计划：停在闸门")
+
+    def test_a_current_week_plan_reports_no_week_change(self):
+        self.store(("A01", "m1", 23))
+
+        plan = plan_step.start_plan(self.db, self.cfg, WEEK,
+                                    self.preparation(plan_step.PrepStatus.READY))
+
+        self.assertIsNone(plan.week_changed)
+
+    def test_a_merge_only_machine_has_no_gate(self):
+        plan = plan_step.start_plan(self.db, crawler_cfg(machine_id="m1", role=ROLE_MERGE_ONLY),
+                                    WEEK, None)
+
+        self.assertFalse(plan.blocked, "纯汇总机不做采集：闸门与它无关，角色那句话由页面另说")
 
 
 class PlanDeviationTests(unittest.TestCase):
@@ -610,11 +698,34 @@ class OfflineTests(PrepWorldTestCase):
 
         self.assertEqual(result.status, plan_step.PrepStatus.REFUSED)
         self.assertFalse(result.can_start)
-        self.assertTrue(result.escape_hatch_available)
-        self.assertIn("--ignore-plan", result.reason, "拒绝理由里给出显式逃生口")
+        self.assertIn("--ignore-plan", result.reason, "拒绝理由里给出命令行逃生口")
         self.assertIn("自由采集", result.reason)
+        self.assertNotIn("界面确认", result.reason, "界面不再提供逃生口（ADR-0035）")
         self.assertEqual(m1.stored_rows(), [], "没确认到计划：不落库")
         self.assertEqual(result.my_shops, ())
+
+
+class DeferredGapScanTests(PrepWorldTestCase):
+    """缺口检查移出开窗阻塞段（ADR-0035）：界面传 `gap_scan=False`，命令行默认照扫。"""
+
+    def test_the_interface_can_defer_the_gap_scan(self):
+        self.seed_repo()
+        m1 = self.machine("m1")
+
+        result = plan_step.prepare_week(m1.cfg, m1.db,
+                                        now=dt.datetime.fromisoformat(NOW), gap_scan=False)
+
+        self.assertEqual(result.status, plan_step.PrepStatus.READY)
+        self.assertIsNone(result.gaps)
+        self.assertFalse([w for w in result.warnings if "缺口" in w])
+
+    def test_the_default_still_scans(self):
+        self.seed_repo()
+        m1 = self.machine("m1")
+
+        result = m1.prepare()
+
+        self.assertIsNotNone(result.gaps, "命令行那一路的默认行为不变")
 
 
 class GenerationFailureTests(PrepWorldTestCase):
@@ -729,7 +840,7 @@ class RoleAndIdleTests(PrepWorldTestCase):
 
         self.assertEqual(result.status, plan_step.PrepStatus.SKIPPED_MERGE_ONLY)
         self.assertFalse(result.can_start)
-        self.assertFalse(result.escape_hatch_available)
+        self.assertIsNone(result.reason, "不做采集：没有闸门理由要给人看")
         self.assertIsNone(result.shops_sync, "连清单都不同步（只读凭据）")
         self.assertIsNone(result.gaps, "不检查")
         self.assertEqual(m.stored_rows(), [])
