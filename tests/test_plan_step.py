@@ -324,7 +324,7 @@ class StartPlanTests(unittest.TestCase):
 
         self.assertTrue(plan.blocked)
         self.assertEqual(plan.reason, "拉不到计划库，先修通道。")
-        self.assertEqual(plan.mine, frozenset())
+        self.assertEqual(plan.my_shops, frozenset())
 
     def test_an_unsettled_preparation_shuts_the_gate_with_its_own_reason(self):
         plan = plan_step.start_plan(self.db, self.cfg, WEEK, None)
@@ -332,6 +332,7 @@ class StartPlanTests(unittest.TestCase):
         self.assertTrue(plan.blocked)
         self.assertIn("还没落定", plan.reason)
         self.assertIn(WEEK, plan.reason)
+        self.assertIn("上机清单", plan.reason, "闸门理由要带下一步指引")
 
     def test_a_local_plan_opens_the_gate_with_this_machines_share(self):
         self.store(("A01", "m1", 23), ("A02", "m2", 8))
@@ -341,7 +342,7 @@ class StartPlanTests(unittest.TestCase):
 
         self.assertFalse(plan.blocked)
         self.assertIsNone(plan.reason)
-        self.assertEqual(plan.mine, frozenset({"A01"}))
+        self.assertEqual(plan.my_shops, frozenset({"A01"}))
         self.assertFalse(plan.stale, "这次准备确认到了最新：不标「未能确认最新」")
 
     def test_a_degraded_or_unsettled_session_marks_the_local_plan_as_unconfirmed(self):
@@ -362,22 +363,25 @@ class StartPlanTests(unittest.TestCase):
                                     self.preparation(plan_step.PrepStatus.READY, week="2026-W01"))
 
         self.assertTrue(plan.stale, "跨了周的那次准备不算数")
+        self.assertEqual(plan.week_changed, "2026-W01", "它同时说明窗口跨周了")
 
-    def test_the_newest_stored_week_is_reported_so_the_page_can_say_the_week_changed(self):
+    def test_a_fresh_window_without_a_preparation_reports_no_week_change(self):
+        """新开窗（这次准备还没落定）只是闸门：旧周的行不该被说成「本周已变」。"""
         self.store(("A01", "m1", 23), week="2026-W38")
 
         plan = plan_step.start_plan(self.db, self.cfg, WEEK, None)
 
-        self.assertEqual(plan.week_changed, "2026-W38")
-        self.assertTrue(plan.blocked, "跨周之后本周还没有计划：停在闸门")
+        self.assertIsNone(plan.week_changed)
+        self.assertTrue(plan.blocked, "本周没有计划：停在闸门")
 
-    def test_a_current_week_plan_reports_no_week_change(self):
-        self.store(("A01", "m1", 23))
-
+    def test_an_empty_week_plan_says_so_instead_of_blaming_the_preparation(self):
+        """整周空计划留不下行（本地没有）：理由说清是空计划，不说「还没落定」。"""
         plan = plan_step.start_plan(self.db, self.cfg, WEEK,
                                     self.preparation(plan_step.PrepStatus.READY))
 
-        self.assertIsNone(plan.week_changed)
+        self.assertTrue(plan.blocked)
+        self.assertIn("一家店都没有", plan.reason)
+        self.assertNotIn("还没落定", plan.reason)
 
     def test_a_merge_only_machine_has_no_gate(self):
         plan = plan_step.start_plan(self.db, crawler_cfg(machine_id="m1", role=ROLE_MERGE_ONLY),

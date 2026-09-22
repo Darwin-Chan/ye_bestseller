@@ -310,9 +310,9 @@
     $("planBanner").className = "banner " + (d.plan_gate ? "err" : "warn");
     $("planBanner").textContent = d.plan_note || "";
     $("planBanner").style.display = d.plan_note ? "block" : "none";
-    // 「重试准备」：闸门与「未能确认最新」两态在场；确认中禁用（一次只跑一个）。
+    // 「重试准备」：闸门与「未能确认最新」两态在场；已经在跑就禁用（一次只跑一个）。
     $("planActions").style.display = d.plan_retry ? "block" : "none";
-    $("retryPrepBtn").disabled = !!d.plan_confirming;
+    $("retryPrepBtn").disabled = !!d.plan_waiting;
     // 有采集在跑（本界面或别处起的）就给中止入口：那一轮不从这里停，就只能等它跑完。
     const crawler = d.crawler || null;
     $("abortForeignBtn").textContent = crawler && crawler.round_id
@@ -331,9 +331,9 @@
     const rows = d.shops.map((s, i) => {
       const chk = s.default_checked ? "checked" : "";
       const dis = locked ? "disabled" : "";
-      // 标注（ADR-0035）：本机 / 归 m2 / 计划外——一眼看出谁是谁的；长理由挂悬浮说明。
-      const kind = s.plan_mark_kind === "mine" ? "g"
-        : (s.plan_mark_kind === "other" ? "a" : "n");
+      // 标注（ADR-0035）：后端给三种 kind——本机绿、归别机琥珀、计划外灰；
+      // 长理由（与记账同源的那句）挂悬浮说明。
+      const kind = {mine: "g", other: "a", out: "n"}[s.plan_mark_kind] || "n";
       const tip = s.plan_label ? ` title="${s.plan_label}"` : "";
       const mark = s.plan_mark ? ` <span class="pill ${kind}"${tip}>${s.plan_mark}</span>` : "";
       return `<tr><td class="chk"><input type="checkbox" data-i="${i}" ${chk} ${dis}></td>` +
@@ -344,8 +344,9 @@
     $("selCnt").textContent = "已选 " + document.querySelectorAll("#rows input:checked").length + " / " + total;
     document.querySelectorAll("#rows input").forEach(c => c.onchange = updateSel);
     api.__shops = d.shops;
-    // 准备还在跑：接着问，落定后这一页自动更新；停了就不再排。
-    if (d.plan_confirming) schedulePrepPoll(); else clearPrepPoll();
+    // 准备还在跑：接着问，落定后这一页自动更新；停了就不再排。锁人的是
+    // plan_locked（30 秒预算之内），轮询看的是 plan_waiting（准备真跑完才算完）。
+    if (d.plan_waiting) schedulePrepPoll(); else clearPrepPoll();
   }
 
   function clearPrepPoll() {

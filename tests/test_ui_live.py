@@ -296,6 +296,7 @@ window.pywebview = { platform: "edgechromium", api: {
       plan_gate: window.__gate,
       plan_locked: window.__gate || window.__confirming,
       plan_confirming: window.__confirming,
+      plan_waiting: window.__confirming,
       plan_retry: window.__gate || window.__stale || window.__confirming,
     };
   },
@@ -398,12 +399,15 @@ class UiLivePlanGuardTests(unittest.TestCase):
             page.wait_for_function(
                 "() => document.querySelector('#startBtn').disabled", timeout=5000)
             self.assertIn("正在确认", page.inner_text("#planBanner"))
+            self.assertTrue(page.eval_on_selector("#retryPrepBtn", "el => el.disabled"),
+                            "已经在跑：按钮禁用，不让人连点")
 
             page.evaluate("window.__confirming = false")
             page.wait_for_function(
                 "() => !document.querySelector('#startBtn').disabled", timeout=5000)
             self.assertTrue(page.eval_on_selector("#rows input", "el => el.checked"),
                             "落定后自动套上默认勾选")
+            self.assertFalse(page.eval_on_selector("#retryPrepBtn", "el => el.disabled"))
         finally:
             page.close()
 

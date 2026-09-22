@@ -221,47 +221,54 @@ class StartPlan:
 
     week: str
     machine: str
-    plan: StoredPlan | None = None      # 本地计划表里这一周的那份；没有就是 None
+    local: StoredPlan | None = None     # 本地计划表里这一周的那份；没有就是 None
     blocked: bool = False               # 闸门：本地没有本周计划，界面不开轮
     reason: str | None = None           # 闸门理由（给人看的那段话）
     stale: bool = False                 # 这次没能确认到最新（本地那份照常可用）
-    week_changed: str | None = None     # 本地最新的那份属于另一个周：页面提示跨周
+    week_changed: str | None = None     # 这次准备属于另一个周：窗口跨周了
 
     @property
-    def mine(self) -> frozenset[str]:
+    def my_shops(self) -> frozenset[str]:
         """本机份额：归本机的店（没有本地计划时为空）。"""
-        return (frozenset(self.plan.machine_keys(self.machine))
-                if self.plan is not None else frozenset())
+        return (frozenset(self.local.machine_keys(self.machine))
+                if self.local is not None else frozenset())
 
 
 UNSETTLED_GATE_REASON = (
     "开轮前准备还没落定（还在确认，或等了 30 秒没回来）：本机也没有本周（{week}）"
-    "已落库的计划，界面先不开轮——三台各自脱网时都自由采集，会把同一批店各打一遍。"
-    "点「重试准备」再试一次。")
+    "已落库的计划，先不开轮——三台各自脱网时都自由采集，会把同一批店各打一遍。"
+    "点「重试准备」再试一次；通道与计划库照上机清单第 9 / 11 步核对。")
+
+EMPTY_WEEK_GATE_REASON = (
+    "本周（{week}）的计划里一家店都没有（整周空计划在本机留不下行）：没有可采的店，"
+    "开轮也无事可做。")
 
 
 def start_plan(db: Database, cfg, week: str, prep: PrepResult | None) -> StartPlan:
     """把「本地有没有本周计划」「这次准备确认到没有」折成开始页要的一份事实。
 
-    `prep` 只收本界面这一次、且属于这一周的准备（跨周的那次不算数）。闸门
-    （ADR-0035）：本地没有本周计划就不开轮——理由取那次准备的拒绝说明，或一句
-    「还没落定」；命令行逃生口不在界面里。纯汇总机不做采集，闸门与它无关。
+    `prep` 给本界面这一次准备的结局（哪一周的都收：跨了周的那次不算本周的确认，
+    但它正好说明窗口跨周了）。闸门（ADR-0035）：本地没有本周计划就不开轮——理由取
+    那次准备的拒绝说明、整周空计划，或一句「还没落定」。纯汇总机不做采集，闸门与
+    它无关。
     """
-    plan = stored_plan(db, week)
+    local = stored_plan(db, week)
     machine = str(cfg.machine_id)
     if is_merge_only(cfg):
-        return StartPlan(week=week, machine=machine, plan=plan)
+        return StartPlan(week=week, machine=machine, local=local)
     settled = prep if prep is not None and prep.week == week else None
-    stale = plan is not None and not (settled is not None
-                                      and settled.status is PrepStatus.READY)
-    latest = db.latest_weekly_plan_week()
-    week_changed = latest if latest is not None and latest != week else None
-    if plan is not None:
-        return StartPlan(week=week, machine=machine, plan=plan, stale=stale,
+    stale = local is not None and not (settled is not None
+                                       and settled.status is PrepStatus.READY)
+    week_changed = prep.week if prep is not None and prep.week != week else None
+    if local is not None:
+        return StartPlan(week=week, machine=machine, local=local, stale=stale,
                          week_changed=week_changed)
-    reason = (settled.reason if settled is not None
-              and settled.status is PrepStatus.REFUSED
-              else UNSETTLED_GATE_REASON.format(week=week))
+    if settled is None:
+        reason = UNSETTLED_GATE_REASON.format(week=week)
+    elif settled.status is PrepStatus.REFUSED:
+        reason = settled.reason
+    else:
+        reason = EMPTY_WEEK_GATE_REASON.format(week=week)
     return StartPlan(week=week, machine=machine, blocked=True, reason=reason,
                      week_changed=week_changed)
 
@@ -681,6 +688,22 @@ def scan_exchange_gaps(exchange_root: str | pathlib.Path, local: sqlite3.Connect
     return GapScan(week=week, packages=tuple(packages), missing=missing, notes=tuple(notes))
 
 
+def gap_warnings(gaps: GapScan | None) -> list[str]:
+    """缺口检查结果 → 给人看的告警（只告警不拦；界面与命令行共用这一处口径）。
+
+    没有缺口就是空列表；读不动的包作为注记附在后面。`prepare_week` 与界面落定之后
+    的那次单扫都从这里取话，不再各写一遍。
+    """
+    if gaps is None:
+        return []
+    out = []
+    if gaps.warning_message:
+        out.append(gaps.warning_message)
+    if gaps.notes:
+        out.append("缺口检查注记：" + "；".join(gaps.notes))
+    return out
+
+
 def _fallback_reason(outcome: _PlanOutcome | None, sync: shops_sync.SyncResult | None,
                      sync_error: str | None, clone: pathlib.Path, week: str) -> str:
     """没确认到本周计划的原因（降级说明与拒绝理由共用）。"""
@@ -753,7 +776,7 @@ def prepare_week(cfg, db: Database, *, now: dt.datetime | None = None,
             reason = (
                 f"{why}\n本机也没有本周（{week}）已落库的计划：默认拒绝开轮——三台各自"
                 "脱网时都自由采集，会把同一批店三台各打一遍，正是分片设计要避免的。\n"
-                "界面停在闸门：给这段理由与「重试准备」；要照常开轮，走命令行逃生口 "
+                "通道与计划库照上机清单第 9 / 11 步核对；要照常开轮，走命令行逃生口 "
                 "`python run.py --ignore-plan`，按「自由采集 + 记账为计划外」运行。")
 
     gaps = None
@@ -764,10 +787,7 @@ def prepare_week(cfg, db: Database, *, now: dt.datetime | None = None,
             warnings.append(f"缺口检查没做成（不影响开轮）：{exc}")
             gaps = None
         else:
-            if gaps.warning_message:
-                warnings.append(gaps.warning_message)
-            if gaps.notes:
-                warnings.append("缺口检查注记：" + "；".join(gaps.notes))
+            warnings += gap_warnings(gaps)
     stored = stored_plan(db, week)
     my_shops = stored.machine_keys(machine) if stored is not None else ()
     return PrepResult(

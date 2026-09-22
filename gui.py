@@ -144,10 +144,13 @@ class Api:
         self._shops_injected = shops is not None
         self.shops = (list(shops) if shops is not None else _local_shops(self.cfg))
         # 开轮前准备（spec §6）的结局：`prepare()` 落在这里，闸门判定（`_plan_block_reason`）
-        # 与开始页（`_ui_state`）都读它；没跑过就是 None。`_prep_confirming` 与它配对：
-        # 准备在跑（超时兜底开了窗，或点了「重试准备」）时页面锁住勾选与开始。
+        # 与开始页（`_ui_state`）都读它；没跑过就是 None。`_prep_confirming` 与
+        # `_prep_started_at` 配对：准备在跑时页面接着轮询，30 秒预算之内还锁住勾选与
+        # 开始（`confirming_now`）；`_prep_settled` 是窗口那根等落定的线（ADR-0035）。
         self._prep: plan_step.PrepResult | None = None
         self._prep_confirming = False
+        self._prep_started_at: float | None = None
+        self._prep_settled = threading.Event()
         self._lock = threading.RLock()
         self.proc: subprocess.Popen | None = None
         self.round_id: int | None = None
@@ -197,8 +200,11 @@ class Api:
             stop_grace_sec=self._stop_watch.grace_sec,
             elapsed_sec=self._current_elapsed(),
             start_error=self._refused_start_message(),
-            prep=self._prep_this_week(),
-            plan_confirming=self._prep_confirming,
+            # 这次准备原样交给取数：跨周的那次不算本周的确认，但也正是「窗口跨周了」
+            # 的判据（plan_step.start_plan 自己按周折）。
+            prep=self._prep,
+            plan_confirming=self.confirming_now(),
+            plan_waiting=self.prepare_running(),
         )
 
     # ---------- 开始页 ----------
@@ -209,22 +215,22 @@ class Api:
     def prepare(self) -> plan_step.PrepResult | None:
         """开轮前的一次准备（spec §6）：与命令行开跑前同一步（ADR-0035）。
 
-        `main()` 先起这个线程、等它落定（上限 30 秒）再建窗口——开始页画出来时默认
-        勾选就是本机份额那份。「重试准备」（闸门与「未能确认最新」两态）走同一条路。
+        `main()` 先起这个线程、等**落定**（`_prep_settled`，上限 30 秒）再建窗口——
+        开始页画出来时默认勾选就是本机份额那份。「重试准备」（闸门与「未能确认最新」
+        两态）走同一条路。落定之后的缺口检查是只告警的慢活，不占开窗的等待。
+
         失败只记日志：界面照常可用，闸门判定在 `_plan_block_reason`。返回结局供测试
         与日志用；意外异常返回 None。
         """
         with self._lock:
             self._prep_confirming = True
+            self._prep_started_at = time.time()
         try:
             result = self._prepare_once()
         except Exception as exc:                       # noqa: BLE001
             log.warning("开轮前准备没做成（界面照常可用，子进程开轮前还会再准备一次）：%s", exc)
             result = None
-        with self._lock:                # 只锁这两次赋值：准备本身（含 git）不占锁
-            self._prep_confirming = False
-            if result is not None:
-                self._prep = result
+        self._settle(result)
         if result is None:
             return None
         log.info("开轮前准备：%s（本周 %s，本机 %s 家店）",
@@ -232,10 +238,34 @@ class Api:
         for warning in result.warnings:
             log.warning("开轮前准备：%s", warning)
         if result.status is not plan_step.PrepStatus.SKIPPED_MERGE_ONLY:
-            # 缺口检查是只告警的慢活：不进开窗的阻塞段。它属于采集机开轮前的准备
-            # （提醒本机落后了、去跑交换台）；纯汇总机没有开轮这一步，跳过。
+            # 缺口检查是只告警的慢活：落定之后才扫，不占窗口那根线。它属于采集机
+            # 开轮前的准备（提醒本机落后了、去跑交换台）；纯汇总机没有开轮这一步，跳过。
             self._scan_gaps(result.week)
         return result
+
+    def _settle(self, result: plan_step.PrepResult | None) -> None:
+        """准备落定：状态写回 + 唤醒等窗口的那根线（缺口检查还在后面跑）。"""
+        with self._lock:                # 只锁这几步：准备本身（含 git）不占锁
+            self._prep_confirming = False
+            self._prep_started_at = None
+            if result is not None:
+                self._prep = result
+        self._prep_settled.set()
+
+    def confirming_now(self) -> bool:
+        """「正在确认」：准备在跑、且还在 30 秒预算里——页面据此锁住勾选与开始。
+
+        预算之外不再拦着人（超时兜底：本地有那份就照常用、没有就停在闸门），但准备
+        还在跑（`prepare_running()`）时页面继续轮询，落定即自动更新。
+        """
+        with self._lock:
+            return (self._prep_confirming and self._prep_started_at is not None
+                    and time.time() - self._prep_started_at < PREPARE_WAIT_SEC)
+
+    def prepare_running(self) -> bool:
+        """准备还在跑吗（不限预算）：页面据此决定要不要接着轮询。"""
+        with self._lock:
+            return self._prep_confirming
 
     def _prepare_once(self) -> plan_step.PrepResult:
         """跑一次准备串的阻塞段（拉计划库 → 同步清单 → 确认/发布 → 落库）。"""
@@ -258,21 +288,20 @@ class Api:
         except Exception as exc:                        # noqa: BLE001
             log.warning("缺口检查没做成（不影响开轮）：%s", exc)
             return
-        if gaps.warning_message:
-            log.warning("开轮前准备：%s", gaps.warning_message)
-        if gaps.notes:
-            log.warning("缺口检查注记：%s", "；".join(gaps.notes))
+        for warning in plan_step.gap_warnings(gaps):
+            log.warning("开轮前准备：%s", warning)
 
     def retry_prepare(self) -> dict:
         """「重试准备」入口：后台重跑一次开轮前准备（闸门与「未能确认最新」两态）。
 
-        先立起 confirming 再起线程：紧接着的那次取数要立刻看到「正在确认」，页面才会
-        接着轮询、落定后自动更新。
+        先立起 confirming 与预算起点再起线程：紧接着的那次取数要立刻看到「正在确认」，
+        页面才会接着轮询、落定后自动更新。
         """
         with self._lock:
             if self._prep_confirming:
                 return {"ok": False, "error": "正在确认中：等这一次跑完。"}
             self._prep_confirming = True
+            self._prep_started_at = time.time()
         threading.Thread(target=self.prepare, name="plan-prepare-retry", daemon=True).start()
         return {"ok": True}
 
@@ -288,13 +317,8 @@ class Api:
             return plan_step.MERGE_ONLY_REFUSAL
         if rounds.active_round(db, self._today()) is not None:
             return None
-        plan = plan_step.start_plan(db, self.cfg, self._current_week(), self._prep_this_week())
+        plan = plan_step.start_plan(db, self.cfg, self._current_week(), self._prep)
         return plan.reason if plan.blocked else None
-
-    def _prep_this_week(self) -> plan_step.PrepResult | None:
-        """本界面刚做过、且属于本周的那次准备；没跑过或跨周就是 None。"""
-        prep = self._prep
-        return prep if prep is not None and prep.week == self._current_week() else None
 
     def _refresh_shops(self, conn) -> None:
         """店铺全量的最新读法：本机启用的店 + 本周计划说到的店。
@@ -378,17 +402,12 @@ class Api:
         )
 
     def start_run(self, keys: list[str]) -> dict:
-        """开始一轮（按勾选的店铺）；已有采集在跑、闸门没开或角色不许时不发子进程。"""
+        """开始一轮（按勾选的店铺）；闸门没开或角色不许时不发子进程（ADR-0035）。"""
         with self._lock:
             conn = self._open_conn()
             try:
                 self._stop_watch.tick(conn)
                 db = Database(conn)
-                # 有采集进程在跑就不许再起一个：界面与命令行共用同一把会话锁，
-                # 判据是环境事实，不是「本界面记不记得自己拉过子进程」。这一条比闸门
-                # 先判：机器上正在发生的事比计划状态更该先说给人听。
-                if self.current_crawler(conn) is not None:
-                    return {"ok": False, "error": _BUSY_ERROR}
                 reason = self._plan_block_reason(db)
                 if reason is not None:
                     return {"ok": False, "error": reason}
@@ -406,6 +425,10 @@ class Api:
                 if self._stop_watch.status.phase is not stop_request.StopPhase.IDLE:
                     return {"ok": False, "error": "上一次停止仍在核验或收尾，请稍后重试。",
                             "retryable": True}
+                # 有采集进程在跑就不许再起一个：界面与命令行共用同一把会话锁，
+                # 判据是环境事实，不是「本界面记不记得自己拉过子进程」。
+                if self.current_crawler(conn) is not None:
+                    return {"ok": False, "error": _BUSY_ERROR}
                 # 只读地问一句会不会被拒：今天已有轮次但范围不同就给出可读理由。
                 # 轮次本身由采集子进程创建，启动失败不会留下空的「进行中」轮次。
                 rounds.check_scope(db, request)
@@ -721,9 +744,9 @@ def main() -> int:
         # 窗口等「开轮前准备」落定再建（ADR-0035）：开始页画出来时默认勾选就已经是
         # 本机份额那份。等待上限 30 秒；等不到也照开，页面按「本地有没有本周计划」
         # 分岔（有则照常可用并标「未能确认最新」，没有则停在闸门等「重试准备」）。
-        prepare_thread = threading.Thread(target=api.prepare, name="plan-prepare", daemon=True)
-        prepare_thread.start()
-        prepare_thread.join(PREPARE_WAIT_SEC)
+        # 等的只是**落定**：缺口检查这类慢活还在准备线程里继续跑，不占开窗。
+        threading.Thread(target=api.prepare, name="plan-prepare", daemon=True).start()
+        api._prep_settled.wait(PREPARE_WAIT_SEC)
         html = (PROJECT_ROOT / "bestseller_monitor" / "pages" / "ui_live.html").read_text(encoding="utf-8")
         window = webview.create_window(
             WINDOW_TITLE,

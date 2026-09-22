@@ -154,26 +154,42 @@ class StartViewTests(ViewsTestCase):
                                  "B07": ("计划外", "out")})
 
     def test_a_plan_from_another_week_asks_to_reopen_the_interface(self):
-        """跨周（ADR-0035）：落库计划不属于当前周时，页面提示重新打开。"""
-        store_weekly_plan(self.db, "2026-W38", ("A01", "m-test", 3))
+        """跨周（ADR-0035）：这次准备属于上一周时，页面提示窗口跨了周、要重新打开。"""
+        store_weekly_plan(self.db, "2026-W36", ("A01", "m-test", 3))
 
-        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
-                                state=self.state, crawler=None, now=NOW)
+        view = views.start_view(
+            self.conn, cfg=self.cfg, shops=self.shops,
+            state=views.UiState(prep=self.preparation(plan_step.PrepStatus.READY, week="2026-W36")),
+            crawler=None, now=NOW)
 
         self.assertIn("本周已变", view["plan_note"])
-        self.assertIn("2026-W38", view["plan_note"])
+        self.assertIn("2026-W36", view["plan_note"])
         self.assertTrue(view["plan_gate"], "本周还没有计划：跨周提示与闸门一起出现")
 
     def test_a_confirming_preparation_locks_the_page(self):
         """点了「重试准备」（或超时兜底开的窗）：确认期间锁住勾选与开始，确认完自动更新。"""
         self.store_plan(("A01", "m-test"))
 
-        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
-                                state=views.UiState(plan_confirming=True), crawler=None, now=NOW)
+        view = views.start_view(
+            self.conn, cfg=self.cfg, shops=self.shops,
+            state=views.UiState(plan_confirming=True, plan_waiting=True),
+            crawler=None, now=NOW)
 
         self.assertTrue(view["plan_confirming"])
         self.assertTrue(view["plan_locked"])
         self.assertIn("正在确认", view["plan_note"])
+
+    def test_a_preparation_past_its_budget_keeps_asking_without_locking(self):
+        """30 秒预算用完（超时兜底）：不再拦着人，但页面接着等它落定（ADR-0035）。"""
+        self.store_plan(("A01", "m-test"))
+
+        view = views.start_view(
+            self.conn, cfg=self.cfg, shops=self.shops,
+            state=views.UiState(plan_waiting=True), crawler=None, now=NOW)
+
+        self.assertTrue(view["plan_waiting"], "准备还在跑：页面接着轮询")
+        self.assertFalse(view["plan_locked"], "预算之外不锁人")
+        self.assertIn("未能确认最新", view["plan_note"])
 
     def test_an_overreach_shop_carries_the_machine_the_plan_gives_it_to(self):
         """越权店（票据 07）：默认不勾之外，文案要点名它本周归谁——不泛泛说「越权」。

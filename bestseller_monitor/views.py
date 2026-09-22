@@ -40,8 +40,11 @@ class UiState:
     # 本界面这一次、属于本周的开轮前准备（ADR-0035）：闸门与「未能确认最新」的事实源
     # 是它，不是库里的计划表——库里的表回答「本地有没有」，它回答「这次确认到没有」。
     prep: plan_step.PrepResult | None = None
-    # 准备正在跑（超时兜底开了窗，或点了「重试准备」）：页面锁住勾选与开始。
+    # 准备正在跑、且还在 30 秒预算里（超时兜底开了窗，或刚点了「重试准备」）：
+    # 页面锁住勾选与开始。预算用完（`plan_waiting` 还在）就不再拦着人。
     plan_confirming: bool = False
+    # 准备还在跑（不限预算）：页面接着轮询，落定后自动更新。
+    plan_waiting: bool = False
 
 
 # ---------- 渲染：事实 → 页面上的字符串 ----------
@@ -161,38 +164,50 @@ def _start_summary(conn: sqlite3.Connection, today: str) -> dict:
     return {"started": True, "rounds": len(today_rounds), "text": "\n".join(lines)}
 
 
-def _plan_mark(shop_key: str, plan: plan_step.StartPlan,
-               deviation: plan_step.PlanDeviation | None) -> tuple[str, str]:
-    """这家店的计划标注（ADR-0035）：短文案 + 种类，页面据此挂 pill。
+@dataclass(frozen=True)
+class _ShopMark:
+    """一家店的计划标注：pill 上的短文案、种类（页面据此上色）与悬浮说明。
 
-    计划在：归本机 = `本机`、归别机 = `归 m2`、计划没说到 = `计划外`；没有计划
-    （闸门 / 命令行逃生口）不挂标——那层话由横幅说。标注是标记不是锁：越权店照旧可勾。
+    `kind` 三种：`mine`（本机份额，绿）/ `other`（归别机，琥珀）/ `out`（计划没说
+    到，灰）；空串 = 不挂标（没有计划）。`label` 是长理由（越权那句，与记账同源）。
     """
-    if plan.plan is None:
-        return "", ""
-    if shop_key in plan.mine:
-        return "本机", "mine"
+
+    text: str = ""
+    kind: str = ""
+    label: str = ""
+
+
+def _plan_mark(shop_key: str, plan: plan_step.StartPlan,
+               deviation: plan_step.PlanDeviation | None) -> _ShopMark:
+    """这家店的计划标注（ADR-0035）：本机 `本机`、归别机 `归 m2`、计划没说到 `计划外`。
+
+    没有计划（闸门 / 命令行逃生口）不挂标——那层话由横幅说。标注是标记不是锁：
+    越权店照旧可勾；它的长理由随 `label` 一起交出，由页面挂成悬浮说明。
+    """
+    if plan.local is None:
+        return _ShopMark()
+    if shop_key in plan.my_shops:
+        return _ShopMark("本机", "mine")
     if deviation is not None and deviation.kind is plan_step.DeviationKind.OVERREACH:
-        return f"归 {deviation.planned_machine}", "other"
-    return "计划外", "out"
+        return _ShopMark(f"归 {deviation.planned_machine}", "other", deviation.reason)
+    return _ShopMark("计划外", "out")
 
 
 def _start_shops(conn: sqlite3.Connection, shops, cfg, today: str, *,
                  plan: plan_step.StartPlan) -> list[dict]:
     out = []
-    plan_pages = plan.plan.pages() if plan.plan is not None else None
+    plan_pages = plan.local.pages() if plan.local is not None else None
     # 越权店（店在计划内、本周归别人）：点名它归谁（票据 07）——判定与文案跟记账同源
-    # （plan_step），界面只负责把它放进悬浮说明；归本机的店与计划没说到的店都没有这句。
+    # （plan_step），界面只负责把它挂进标注的悬浮说明。
     deviations = {d.shop_key: d
-                  for d in plan_step.plan_deviations(plan.plan, plan.machine,
+                  for d in plan_step.plan_deviations(plan.local, plan.machine,
                                                      [shop.key for shop in shops])}
     for shop in shops:
         products, skus = _inventory_counts(conn, today, shop.key)
         # 该店本轮实际翻页上限：四层优先取第一个有值的（命令行覆盖 > 计划快照 >
         # 店铺 pages > 全局默认），与抓取逻辑同一处口径
         pages = effective_pages_limit(shop, cfg, plan_pages=plan_pages)
-        deviation = deviations.get(shop.key)
-        mark, mark_kind = _plan_mark(shop.key, plan, deviation)
+        mark = _plan_mark(shop.key, plan, deviations.get(shop.key))
         out.append({
             "key": shop.key,
             "name": shop.name,
@@ -201,11 +216,10 @@ def _start_shops(conn: sqlite3.Connection, shops, cfg, today: str, *,
             "pages": pages,
             # 默认勾选 = 本机份额（本周计划里归本机的店，票据 06）；越权店默认不勾、
             # 可显式勾上
-            "default_checked": shop.key in plan.mine,
-            "plan_label": (deviation.reason if deviation is not None
-                           and deviation.kind is plan_step.DeviationKind.OVERREACH else ""),
-            "plan_mark": mark,
-            "plan_mark_kind": mark_kind,
+            "default_checked": shop.key in plan.my_shops,
+            "plan_label": mark.label,
+            "plan_mark": mark.text,
+            "plan_mark_kind": mark.kind,
         })
     return out
 
@@ -235,7 +249,7 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
     today = cst_date(now)
     db = Database(conn)
     plan = plan_step.start_plan(db, cfg, weekly_plan.week_label(today), state.prep)
-    idle = plan.plan is not None and not plan.mine
+    idle = plan.local is not None and not plan.my_shops
     notes = []
     if state.plan_confirming:
         notes.append("正在确认本周计划…（拉计划库 → 同步清单 → 确认计划）："
@@ -245,8 +259,9 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
         # 把话说在点「开始抓取」之前，而不是等人点了才知道。
         notes.append(plan_step.MERGE_ONLY_REFUSAL)
     if plan.week_changed is not None:
-        notes.append(f"本周已变：本地最新的计划是 {plan.week_changed} 那一周，不是当前这一周——"
-                     "要按新周计划开轮，重新打开界面（窗口只在打开时确认一次计划）。")
+        notes.append(f"本周已变：这个界面确认的是 {plan.week_changed} 那一周的计划，"
+                     "不是当前这一周——要按新周计划开轮，重新打开界面"
+                     "（窗口只在打开时确认一次计划）。")
     if plan.blocked:
         notes.append(plan.reason)
     if idle:
@@ -286,6 +301,7 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
         "plan_gate": plan.blocked,
         "plan_locked": locked,
         "plan_confirming": state.plan_confirming,
+        "plan_waiting": state.plan_waiting,
         "plan_retry": plan.blocked or plan.stale,
         # 页面按 `d.crawler.round_id` 说话，跨 pywebview 那一步走 JSON：给回普通 dict。
         "crawler": crawler.to_payload() if crawler is not None else None,

@@ -2,6 +2,7 @@ import dataclasses
 import logging
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timedelta
@@ -139,7 +140,8 @@ class GuiPlanWiringTests(unittest.TestCase):
             result = api.start_run(["A01"])
 
         self.assertFalse(result["ok"])
-        self.assertIn("准备", result["error"])
+        self.assertIn("拒绝开轮", result["error"])
+        self.assertIn("上机清单", result["error"], "闸门理由要带下一步指引")
         spawn.assert_not_called()
 
     def test_a_refused_start_puts_the_page_at_the_gate(self):
@@ -172,19 +174,33 @@ class GuiPlanWiringTests(unittest.TestCase):
         self.assertIn("未能确认最新", api.get_start()["plan_note"])
 
     def test_retry_prepare_runs_again_and_locks_the_page_while_it_does(self):
-        """「重试准备」（闸门与「未能确认最新」两态）：后台重跑，确认中锁住勾选与开始。"""
+        """「重试准备」（闸门与「未能确认最新」两态）：后台重跑，预算之内锁住勾选与开始。"""
         api = self.api()
         api.prepare()
-        self.assertFalse(api._prep_confirming)
+        self.assertFalse(api.prepare_running())
 
         with patch.object(Api, "prepare") as prepare_again:
             result = api.retry_prepare()
 
         self.assertTrue(result["ok"], "点了就放行，等它在后台跑完")
-        self.assertTrue(api._prep_confirming, "页面立刻进入「正在确认」")
+        self.assertTrue(api.prepare_running(), "准备在跑：页面接着轮询")
+        self.assertTrue(api.confirming_now(), "预算之内：锁住勾选与开始")
         self.assertTrue(api.get_start()["plan_locked"])
-        self.assertFalse(api.retry_prepare()["ok"], "确认中不许再点一次")
+        self.assertFalse(api.retry_prepare()["ok"], "已经在跑：不许再点一次")
         prepare_again.assert_called_once_with()
+
+    def test_a_preparation_past_its_budget_stops_locking_the_page(self):
+        """超时（30 秒预算用完）：不再锁页，但页面继续等它落定（ADR-0035）。"""
+        self.store_plan(("A01", "m-test", 23))
+        api = self.api()
+        api._prep_confirming = True
+        api._prep_started_at = time.time() - (gui.PREPARE_WAIT_SEC + 1)
+
+        start = api.get_start()
+
+        self.assertTrue(start["plan_waiting"], "准备还在跑：接着轮询")
+        self.assertFalse(start["plan_confirming"], "预算之外：不再叫「正在确认」")
+        self.assertFalse(start["plan_locked"], "不再拦着人")
 
     def test_the_merge_only_machine_is_refused_with_its_own_words(self):
         """纯汇总机不做采集：拒绝说的是角色，不是闸门（闸门与它无关）。"""
@@ -826,11 +842,17 @@ class GuiSingleInstanceTests(unittest.TestCase):
         self.assertEqual(len(window.closing_handlers), 1, "关窗要接上告知回调")
 
     def test_the_window_waits_for_the_preparation_to_settle(self):
-        """窗口等准备落定再建（ADR-0035）：建窗一定发生在准备返回之后。"""
+        """窗口等准备落定再建（ADR-0035）：建窗一定发生在准备落定之后。"""
         order = []
+        settled = threading.Event()
         lock = MagicMock()
         window = _FakeWindow()
-        api = SimpleNamespace(prepare=lambda: order.append("prepare"), cfg=None)
+
+        def fake_prepare():
+            order.append("prepare")
+            settled.set()
+
+        api = SimpleNamespace(prepare=fake_prepare, cfg=None, _prep_settled=settled)
 
         def create_window(*args, **kwargs):
             order.append("window")
@@ -845,6 +867,28 @@ class GuiSingleInstanceTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(order, ["prepare", "window"], "建窗不许抢在准备落定之前")
+
+    def test_the_window_opens_anyway_when_the_preparation_never_settles(self):
+        """准备卡住（超时）：窗口照开——页面按本地有没有本周计划分岔（ADR-0035）。"""
+        order = []
+        window = _FakeWindow()
+        api = SimpleNamespace(prepare=lambda: order.append("prepare"), cfg=None,
+                              _prep_settled=threading.Event())   # 永不落定
+
+        def create_window(*args, **kwargs):
+            order.append("window")
+            return window
+
+        with patch.object(single_instance, "acquire", return_value=MagicMock()), \
+                patch.object(gui, "Api", return_value=api), \
+                patch.object(gui, "_configure_gui_logging"), \
+                patch.object(gui, "PREPARE_WAIT_SEC", 0.05), \
+                patch.object(gui.webview, "create_window", side_effect=create_window), \
+                patch.object(gui.webview, "start"):
+            code = gui.main()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(order, ["prepare", "window"])
 
     def test_already_open_notice_points_at_the_existing_window(self):
         with patch.object(gui, "_window_exists", return_value=True), \
@@ -910,7 +954,9 @@ class GuiCrawlerMutexTests(unittest.TestCase):
 
     def test_start_run_is_refused_while_another_crawler_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
-            api = self._api(Path(tmp) / "test.db")
+            db_path = Path(tmp) / "test.db"
+            api = self._api(Path(db_path))
+            store_today_plan(db_path, ("A01", "m-test", 3))
             holding = single_instance.acquire(single_instance.CRAWLER_LOCK)
             try:
                 with patch.object(Api, "_spawn_crawler") as spawn:

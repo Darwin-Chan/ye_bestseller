@@ -936,14 +936,6 @@ class Database:
         return self.conn.execute(
             "SELECT * FROM weekly_plan WHERE week=? ORDER BY shop_key", (week,)).fetchall()
 
-    def latest_weekly_plan_week(self) -> str | None:
-        """本机计划表里最新落过的一周；一行都没有就是 None。
-
-        跨周提示用：窗口开着跨了周时，它就是那句「本周已变」里指的旧周。
-        """
-        row = self.conn.execute("SELECT MAX(week) FROM weekly_plan").fetchone()
-        return str(row[0]) if row is not None and row[0] else None
-
     def record_plan_deviations(self, rows, *, recorded_at: str) -> None:
         """把一轮里越权/计划外采过的店写进计划外账（本机账，不入交换集）。
 
