@@ -12,6 +12,7 @@ python -m playwright install chromium
 ```
 
 - 界面依赖 `pywebview`（在 `requirements.txt` 里），Windows 上走 Edge WebView2 后端，需要本机有 WebView2 运行时（Win10/11 随 Edge 自带）。
+- **双击入口随仓库发布**：clone 后 `dist\` 里已带三只壳（见「打包与运行形态」），装好上面两条依赖即可直接双击使用——壳本身不带代码，没有本机 Python 与依赖时只会提示「找不到本机 python」。
 
 ## 目录布局（运行时 / 设计时）
 
@@ -129,7 +130,8 @@ python analyze.py --serve
 
 三个入口程序各配一只**启动壳**（打包 exe；决定见 [ADR-0007](docs/adr/0007-gui-exe-is-a-shell.md)）：库存数据抓取
 `dist\inventory_fetch.exe`（采集壳）、库存数据交换 `dist\inventory_exchange.exe`（交换台壳）、销量分析
-`dist\bestseller_analysis.exe`（分析壳）。壳不是自带代码的程序：
+`dist\bestseller_analysis.exe`（分析壳）。**三只壳随仓库发布**——clone 后 `dist\` 里就是它们；
+壳正文改动极少，重建只在 `shells/` 改动后才需要（见本节末尾）。壳不是自带代码的程序：
 
 - exe 里不含项目代码，它只推导项目根、找到本机 python、拉起源码目录里那一个脚本（`<项目根>\gui.py` / `<项目根>\exchange.py --window` / `<项目根>\analyze.py` 不带参数）；
 - 界面 `gui.py`、交换台 `exchange.py`、分析 `analyze.py`、页面 `bestseller_monitor/pages/ui_live.html` / `bestseller_monitor/pages/ui_exchange.html` / `bestseller_monitor/pages/bestseller-analysis.html`、采集包 `bestseller_monitor`、`run.py` 全部来自源码目录，改这些文件**不需要重新打包**；
@@ -137,7 +139,7 @@ python analyze.py --serve
 - 项目根按 exe 位置推导（`dist` 的上一级），所以 exe 必须待在 `<项目根>\dist\`；可用环境变量 `BESTSELLER_PROJECT` 显式指定；
 - 失败会弹窗说明并留底日志（`<项目根>\logs\gui_launcher.log` / `exchange_launcher.log` / `analysis_launcher.log`）：采集壳与分析壳「非零退出都弹」；交换台壳「退出码 0/1 静默（1 是正常结局——有需要人看一眼的），2 与启动失败才弹」。自动化验证时设 `BESTSELLER_NO_DIALOG=1` 只落日志不弹窗；`--check --check-report <路径>` 可只做推导与校验并写出 JSON 报告。
 
-重新打包（建哪只就传哪个目标）：
+重建壳（只有 `shells/` 改动后才需要；建哪只就传哪个目标）：
 
 ```bash
 python tools/build_exe.py --target gui
