@@ -235,6 +235,11 @@ def _plan_mark(shop_key: str, plan: plan_step.StartPlan,
     return _ShopMark("计划外", "out")
 
 
+# 一页榜单约 30 张卡（同族事实的其它副本：`config.py` 的旧配额换算、`pacing.py` 与
+# `listing.py` 的实测注释）：「今日采够」判据 = 今日已采商品数 ≥ 页数 × 每页张数。
+_CARDS_PER_PAGE = 30
+
+
 def _start_shops(conn: sqlite3.Connection, shops, cfg, today: str, *,
                  plan: plan_step.StartPlan) -> list[dict]:
     out = []
@@ -256,9 +261,11 @@ def _start_shops(conn: sqlite3.Connection, shops, cfg, today: str, *,
             "products": products,
             "skus": skus,
             "pages": pages,
-            # 默认勾选 = 本机份额（本周计划里归本机的店，票据 06）；越权店默认不勾、
-            # 可显式勾上
-            "default_checked": shop.key in plan.my_shops,
+            # 默认勾选 = 本机份额（票据 06）里**今天还没采够**的（票据 17）：今日已采
+            # 商品数 ≥ 页数×每页张数判「采够」，默认不勾、可手工勾上重采——同日去重
+            # 只挡详情页，采够的店再来一遍只是白走列表页。越权店默认不勾、可显式勾上。
+            "default_checked": shop.key in plan.my_shops
+            and products < pages * _CARDS_PER_PAGE,
             "plan_label": mark.label,
             "plan_mark": mark.text,
             "plan_mark_kind": mark.kind,

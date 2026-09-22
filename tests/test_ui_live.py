@@ -279,6 +279,8 @@ const SHOPS = [
   {key:"A02", name:"店铺B", products:0, skus:0, pages:8, default_checked:false,
    plan_label:"本周计划归 m2", plan_mark:"归 m2", plan_mark_kind:"other"},
 ];
+window.__shops = SHOPS;   // add_init_script 的源码被包进函数作用域，evaluate 够不到
+                          // 里面的 const——留一个 window 引用给用例改数据重画
 window.__gate = false;
 window.__stale = true;        // 「未能确认最新」：与闸门一样给「重试准备」
 window.__confirming = false;
@@ -364,6 +366,29 @@ class UiLivePlanGuardTests(unittest.TestCase):
             self.assertFalse(
                 page.eval_on_selector("#rows tr:nth-child(2) input", "el => el.checked"),
                 "越权店默认不勾")
+        finally:
+            page.close()
+
+    def test_the_legend_spells_out_the_today_complete_default(self):
+        """票据 17：说明文字写明「份额里今天还没采够的才默认勾」；不勾的行照常显示已采数。"""
+        page = self.open_page()
+        try:
+            legend = page.inner_text("#selLegend")
+
+            self.assertIn("今天还没采够", legend)
+            self.assertIn("页数×30 视为采够", legend)
+            self.assertIn("可手工勾上重采", legend)
+
+            page.evaluate(
+                "window.__shops[0].products = 690; window.__shops[0].default_checked = false;"
+                " loadStart();")
+            page.wait_for_function(
+                "() => !document.querySelector('#rows tr:nth-child(1) input').checked",
+                timeout=5000)
+
+            self.assertIn("690", page.eval_on_selector(
+                "#rows tr:nth-child(1)", "el => el.textContent"),
+                "默认不勾的店照常显示今日已采数（数字列不受影响）")
         finally:
             page.close()
 

@@ -162,6 +162,21 @@ def store_weekly_plan(db, week: str, *assignments) -> None:
         source="pulled", plan_sha256="ab" * 32, stored_at="2026-09-21T08:00:00+08:00")
 
 
+def insert_inventory_rows(conn, rows) -> None:
+    """按库存表的列集直接写几行（列集只在 helpers 里一份，写完即提交）。
+
+    `rows` 是 (shop_key, offer_id, date) 三元组序列——给**不经过采集路径**的行用：
+    别的机器包导入进来的行、昨天的旧行等。写的就是该表的完整列集（交换集一张库存表，
+    没有来源列）；`sku_id` 取单规格的占位值——判据按日期数 DISTINCT offer_id，不读它。
+    """
+    conn.executemany(
+        "INSERT INTO inventory(shop_key, offer_id, sku_id, date, stock, price, "
+        "shop_name, product_name, sku_name) VALUES (?,?,?,?,?,?,?,?,?)",
+        [(shop_key, offer_id, "default", date, 3, None, f"店铺{shop_key}",
+          f"商品{offer_id}", "默认(单规格)") for shop_key, offer_id, date in rows])
+    conn.commit()
+
+
 class GuardClock:
     """`guard.time` 的替身：每次读时间往前走一步，`sleep` 不真睡。
 

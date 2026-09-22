@@ -18,7 +18,8 @@ from bestseller_monitor.db import (CST, DETAIL_BUDGET_NOTE, Database, connect,
                                    cst_date, utcnow)
 from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
 from gui import Api
-from helpers import crawler_cfg, isolated_locks, new_round, store_weekly_plan
+from helpers import crawler_cfg, insert_inventory_rows, isolated_locks, new_round, \
+    store_weekly_plan
 from tools import bench_refresh
 
 
@@ -103,6 +104,23 @@ class GuiPlanWiringTests(unittest.TestCase):
         self.assertFalse(shops["A02"]["default_checked"], "归 m2 的默认不勾")
         self.assertEqual(shops["A01"]["pages"], 23, "界面默认值吃计划快照")
         self.assertEqual(shops["A02"]["pages"], 8, "越权补采时也按本周预算")
+
+    def test_a_shop_that_reached_todays_budget_is_not_checked(self):
+        """票据 17：份额里今天已采够的店默认不勾（走真实清单+计划读法）；没采的照勾。"""
+        self.store_plan(("A01", "m-test", 3), ("A02", "m-test", 30))
+        conn = connect(self.db_path)
+        try:
+            insert_inventory_rows(conn,
+                                  [("A01", str(4000 + i), "2026-09-21") for i in range(90)])
+        finally:
+            conn.close()
+
+        start = self.api().get_start()
+
+        shops = {shop["key"]: shop for shop in start["shops"]}
+        self.assertEqual(shops["A01"]["products"], 90)
+        self.assertFalse(shops["A01"]["default_checked"], "90 = 3×30：采够，默认不勾")
+        self.assertTrue(shops["A02"]["default_checked"], "一件没采：照勾")
 
     def test_a_planned_shop_deactivated_midweek_stays_on_the_start_page(self):
         """计划已发布：周中把店标停用，本周它仍要出现在页面上、默认勾上。"""

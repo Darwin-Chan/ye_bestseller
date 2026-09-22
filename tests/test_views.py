@@ -11,11 +11,12 @@ from bestseller_monitor import plan_step, rounds, views, weekly_plan
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import Database, connect
 from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
-from helpers import crawler_cfg, new_round, store_weekly_plan
+from helpers import crawler_cfg, insert_inventory_rows, new_round, store_weekly_plan
 
 # 固定时刻：北京时间 2026-09-13 12:00。三个页面的「今天」都由它决定。
 NOW = "2026-09-13T04:00:00+00:00"
 TODAY = "2026-09-13"
+YESTERDAY = "2026-09-12"        # = TODAY 的前一天（「昨天行不算采够」用例用）
 WEEK = weekly_plan.week_label(TODAY)
 
 
@@ -41,8 +42,11 @@ class ViewsTestCase(unittest.TestCase):
         return plan_step.PrepResult(status=status, week=week, machine="m-test",
                                     reason="拉不到计划库，先修通道。")
 
-    def submit(self, round_id, offer_id, *skus, shop_key="A01"):
-        """按库存快照提交的口径写一条成功观测（每项是 (sku_name, stock)）。"""
+    def submit(self, round_id, offer_id, *skus, shop_key="A01", collected_at=NOW):
+        """按库存快照提交的口径写一条成功观测（每项是 (sku_name, stock)）。
+
+        `collected_at` 可改：`inventory.date` 由它折算（`cst_date`），写「昨天」的行要用。
+        """
         self.db.submit_inventory_snapshot(
             round_id=round_id,
             shop_key=shop_key,
@@ -54,7 +58,7 @@ class ViewsTestCase(unittest.TestCase):
             detail_title=f"商品{offer_id}",
             main_image_url="",
             sku_rows=[{"sku_name": name, "sku_stock": stock} for name, stock in skus],
-            collected_at=NOW,
+            collected_at=collected_at,
             attempt=1,
         )
 
@@ -91,6 +95,83 @@ class StartViewTests(ViewsTestCase):
         checked = {shop["key"]: shop["default_checked"] for shop in view["shops"]}
         self.assertEqual(checked, {"A01": True, "A02": False},
                          "A02 本周计划归 m2：默认不勾，可显式勾上（越权处置见票据 07）")
+
+    def test_a_shop_that_reached_todays_budget_is_unchecked_by_default(self):
+        """票据 17：份额里今天已采够（≥ 页数×30）的店默认不勾；差一件照勾。"""
+        round_id = new_round(self.db, "A01", run_date=TODAY)
+        for i in range(89):
+            self.submit(round_id, str(1000 + i), ("默认(单规格)", 3))
+        self.store_plan(("A01", "m-test"))
+
+        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
+                                state=self.state, crawler=None, now=NOW)
+
+        shop = view["shops"][0]
+        self.assertEqual((shop["products"], shop["pages"]), (89, 3))
+        self.assertTrue(shop["default_checked"], "89 < 3×30：还没采够，照勾")
+
+        self.submit(round_id, "1090", ("默认(单规格)", 3))     # 第 90 件 = 预算
+        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
+                                state=self.state, crawler=None, now=NOW)
+
+        shop = view["shops"][0]
+        self.assertEqual(shop["products"], 90)
+        self.assertFalse(shop["default_checked"], "90 = 3×30：采够，默认不勾（可手工勾上）")
+
+    def test_only_todays_rows_count_toward_the_budget(self):
+        """判据数的是「今天」：昨天的旧行不算采够（与行里显示的「今日已抓取」同口径）。"""
+        round_id = new_round(self.db, "A01", run_date=YESTERDAY)
+        for i in range(90):
+            self.submit(round_id, str(2000 + i), ("默认(单规格)", 3),
+                        collected_at=f"{YESTERDAY}T04:00:00+00:00")
+        self.store_plan(("A01", "m-test"))
+
+        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
+                                state=self.state, crawler=None, now=NOW)
+
+        shop = view["shops"][0]
+        self.assertEqual(shop["products"], 0, "今天还一件没采")
+        self.assertTrue(shop["default_checked"])
+
+    def test_imported_rows_count_toward_todays_budget(self):
+        """导入行与本机采集行同形（交换集一张库存表，没有来源列）：照样算「今天已采」。"""
+        self.store_plan(("A01", "m-test"))
+        insert_inventory_rows(self.conn,
+                              [("A01", str(3000 + i), TODAY) for i in range(90)])
+
+        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
+                                state=self.state, crawler=None, now=NOW)
+
+        shop = view["shops"][0]
+        self.assertEqual(shop["products"], 90)
+        self.assertFalse(shop["default_checked"], "别的机器包导入的行也算今天已采够")
+
+    def test_a_zero_page_budget_shop_is_unchecked_by_default(self):
+        """页数 = 0（计划快照说 0 页）：0×30 = 0，恒判采够、默认不勾（没什么可采）。"""
+        self.store_plan(("A01", "m-test"), pages={"A01": 0})
+
+        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
+                                state=self.state, crawler=None, now=NOW)
+
+        shop = view["shops"][0]
+        self.assertEqual(shop["pages"], 0)
+        self.assertFalse(shop["default_checked"])
+
+    def test_the_threshold_uses_the_plan_snapshot_pages_not_the_shop_default(self):
+        """阈值里的页数取四层最终值：计划快照 1 页压过店铺配置的 3 页（30 件即算采够）。"""
+        self.shops = [Shop("A01", "店铺A", "https://A01.example/", pages=3)]
+        round_id = new_round(self.db, "A01", run_date=TODAY)
+        for i in range(30):
+            self.submit(round_id, str(5000 + i), ("默认(单规格)", 3))
+        self.store_plan(("A01", "m-test"), pages={"A01": 1})
+
+        view = views.start_view(self.conn, cfg=self.cfg, shops=self.shops,
+                                state=self.state, crawler=None, now=NOW)
+
+        shop = view["shops"][0]
+        self.assertEqual((shop["products"], shop["pages"]), (30, 1))
+        self.assertFalse(shop["default_checked"],
+                         "计划说 1 页就按 30 件算采够；按店铺 3 页（90 件）算会误勾")
 
     def test_pages_default_comes_from_the_plan_snapshot(self):
         """页数四层的界面侧：默认值吃计划快照（计划说 23 页就显示 23 页）。"""
@@ -218,6 +299,8 @@ class StartViewTests(ViewsTestCase):
 
         shops = {shop["key"]: shop for shop in view["shops"]}
         self.assertEqual(shops["B07"]["plan_label"], "")
+        self.assertFalse(shops["B07"]["default_checked"],
+                         "计划没说到：默认不勾，可显式勾上（越权同款）")
 
     def test_a_degraded_preparation_is_marked_as_unconfirmed_on_the_page(self):
         """拉不到计划库、用的是本地那份：界面标注「未能确认最新」（spec §6 降级表）。"""
