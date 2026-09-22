@@ -357,7 +357,11 @@ class AnalysisBrowserTests(unittest.TestCase):
             self.page.locator('.group-choice').nth(index).click()
             expect(self.page.get_by_role('button', name='撤回当前分组', exact=True)).to_be_visible()
         self.page.get_by_role('button', name='保存分组并查看畅销品').click()
-        # 同上：先等结果重渲染落定，再展开排名行。
+        # 与上一段同一个意图：等保存触发的重渲染落定再展开排名行，但这里的判定信号不能再用
+        # 摘要销量——上一段的确认按版本复用，保存前结果就已渲染、摘要已含 50，等它区分不出
+        # 落定与否；负载下晚到几毫秒的保存响应会把刚展开的图表连同 #ranking 一起重渲染掉
+        # （2026-09-23 复现 7/48）。#saveStatus 只在保存响应渲染之后才出现，等它才算落定。
+        expect(self.page.locator('#saveStatus')).to_have_text(re.compile(r'^已保存 · \d{2}-\d{2} \d{2}:\d{2}$'))
         expect(self.page.locator('#ranking > details > summary').first).to_contain_text('50')
         self.page.locator('#ranking > details > summary').first.click()
         final_chart = self.page.locator('#ranking > details').first.locator('details .inventory-chart').last
