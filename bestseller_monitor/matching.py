@@ -333,8 +333,11 @@ CREATE TABLE IF NOT EXISTS visual_evidence (
     image_hash TEXT PRIMARY KEY, description TEXT, model TEXT);'''
 
 
-def _prepare_cache(conn, machine_id):
+def prepare_cache(conn, machine_id):
     """建表，并把老形状的判断表就地升级（票 02）：已有库只付一次条件判断。
+
+    判断集收取（`judgment_set.collect`）也走这一口：往缓存里写外来判断行之前，先把
+    表按当前形状备好。
 
     升级前这张表只有本机能写（没有导入路径），所以老行都算本机产生的、来源记本机；署名按
     结果里那四个字段推出——配置没变的老判断照常命中，**重开不再付模型钱**。升级只做一次：
@@ -443,7 +446,7 @@ class MatchingService:
                 raise
         conn = sqlite3.connect(self.config.cache)
         try:
-            _prepare_cache(conn, self.machine_id)
+            prepare_cache(conn, self.machine_id)
             return _positive_evidence(conn, local)
         finally:
             conn.close()
@@ -452,7 +455,7 @@ class MatchingService:
         self.config.cache.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.config.cache)
         try:
-            _prepare_cache(conn, self.machine_id)
+            prepare_cache(conn, self.machine_id)
             local = signature_of(self.config)
             self.judge.captions.update(dict(conn.execute('SELECT image_hash,description FROM visual_evidence')))
             eligible = []

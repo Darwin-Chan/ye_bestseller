@@ -418,13 +418,17 @@ def package_digest(conn: sqlite3.Connection) -> str:
         count = 0
         for row in conn.execute(f"SELECT {cols} FROM {table.name} ORDER BY {cols}"):
             count += 1
-            digest.update(_row_bytes(row))
+            digest.update(row_bytes(row))
         digest.update(f"-- {count}\n".encode("utf-8"))
     return digest.hexdigest()
 
 
-def _row_bytes(row: Iterable) -> bytes:
-    """一行的规范字节：空值、数字、文本各给可区分的标记，列间不可能混淆。"""
+def row_bytes(row: Iterable) -> bytes:
+    """一行的规范字节：空值、数字、文本各给可区分的标记，列间不可能混淆。
+
+    周包与判断集（`judgment_set`）的内容摘要共用这一份行编码——两处的「按内容认身份」
+    必须逐字节同规，各写一份迟早会悄悄分家。
+    """
     parts = []
     for value in row:
         if value is None:
@@ -496,14 +500,17 @@ class ExportResult:
         return self.failure is not None
 
 
-def _pack_gzip(data: bytes) -> bytes:
-    """统一形态的 gzip：不嵌构建时刻（同内容压出来一样，git 才认「没有变化」）。"""
+def pack_gzip(data: bytes) -> bytes:
+    """统一形态的 gzip：不嵌构建时刻（同内容压出来一样，git 才认「没有变化」）。
+
+    判断集的包（`judgment_set`）与周包共用这一份：发布形态的字节要可复现。
+    """
     return gzip.compress(data, mtime=0)
 
 
 def _manifest_bytes(package_name: str, images: tuple[ImageRef, ...]) -> bytes:
     manifest = {"package": package_name, "keys": [ref.key for ref in images]}
-    return _pack_gzip(json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
+    return pack_gzip(json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
 
 
 def _published_digest(published_gz: bytes) -> str | None:
@@ -524,9 +531,12 @@ def _published_digest(published_gz: bytes) -> str | None:
             conn.close()
 
 
-def _pull_fresh(channel: GitChannel) -> None:
+def pull_fresh(channel: GitChannel) -> None:
     """拉取远端。上次导出中断留下的脏工作区会让 pull --rebase 拒绝：先把克隆退回
-    远端状态（连未跟踪残迹一起清）再拉一次——raw 库是纯输出通道，本地没有不可重生的东西。"""
+    远端状态（连未跟踪残迹一起清）再拉一次——raw 库是纯输出通道，本地没有不可重生的东西。
+
+    判断集的 judged-<机器> 库同样是纯输出通道，共用这一份做法（`judgment_set`）。
+    """
     try:
         channel.pull()
     except ChannelError as first:
@@ -537,8 +547,11 @@ def _pull_fresh(channel: GitChannel) -> None:
         channel.pull()
 
 
-def _restore_remote(channel: GitChannel) -> str | None:
-    """推送失败后把克隆退回远端状态；回退不了就把原因带出去（包已在 outbox）。"""
+def restore_remote(channel: GitChannel) -> str | None:
+    """推送失败后把克隆退回远端状态；回退不了就把原因带出去（包已在 outbox）。
+
+    与 `pull_fresh` 同一条红线：机器管理的纯输出克隆里，写进去的都立刻提交、失败就退回。
+    """
     try:
         channel.reset_to_upstream(clean=True)
     except ChannelError as exc:
@@ -613,7 +626,7 @@ def _build(source: pathlib.Path, outbox: pathlib.Path, package_rel: str, *,
         images = package_image_keys(conn)
     finally:
         conn.close()
-    package_gz = _pack_gzip(package_path.read_bytes())
+    package_gz = pack_gzip(package_path.read_bytes())
     (outbox / f"{base}.db.gz").write_bytes(package_gz)
     return _BuiltPackage(base=base, package_gz=package_gz,
                          manifest_gz=_manifest_bytes(package_name, images),
@@ -655,7 +668,7 @@ def _publish(channel: GitChannel, raw_dir: pathlib.Path, package_rel: str,
         channel.commit(f"export {built.base}", [published_package, published_manifest])
         channel.push()
     except (ChannelError, OSError) as exc:
-        note = _restore_remote(channel)
+        note = restore_remote(channel)
         tail = f"\n（克隆没能退回远端状态：{note}）" if note else ""
         return _PublishOutcome(published=False, unchanged=False, failure=(
             f"推送没成功：{exc}\n包已经在 outbox 里打好，通道修好后重跑即可发布。{tail}"))
@@ -697,7 +710,7 @@ def export(cfg, *, week: str | None = None, store: ImageStore | None = None) -> 
 
     channel = GitChannel(raw_dir)
     try:
-        _pull_fresh(channel)
+        pull_fresh(channel)
     except ChannelError as exc:
         return ExportResult(**result, published=False, unchanged=False,
                             failure=f"拉不到 raw 库：{exc}\n包已经在 {outbox} 里打好，"
