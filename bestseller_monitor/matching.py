@@ -315,6 +315,13 @@ def update_candidates(products, groups, positive, excluded):
         p['match_label'] = '暂无匹配同款' if not candidates else '匹配唯一同款' if len(candidates) == 1 else '匹配多组同款'
 
 
+# 判断缓存的提交粒度（票 01）：每这么多条判断提交一次，判断行与它的证据索引行同批落盘。
+# 取固定小批而不是配置项——这是内部的耐久性取舍（损失窗口 ↔ 提交开销），没有按机器调整的
+# 语义：一批落在「中途退出最多丢几十秒模型调用」的量级上，而每批一次提交的库侧开销与整批
+# 一次提交相比可忽略（2026-09-22 实测，见票 01）。
+JUDGMENT_COMMIT_BATCH = 25
+
+
 class MatchingService:
     def __init__(self, config):
         self.config = config
@@ -373,20 +380,39 @@ class MatchingService:
                 except ModelFailure as exc:
                     return item, None, str(exc)
 
+            def store_judgment(pair, a, b, result):
+                """一条判断连同两名成员的证据索引行：同批提交，不留半截状态。"""
+                conn.execute('INSERT OR IGNORE INTO judgments VALUES (?,?,?,?)',
+                             (pair, version(a), version(b), json.dumps(result)))
+                for member in (a, b):
+                    conn.execute('INSERT OR IGNORE INTO evidence VALUES (?,?,?,?,?,?)',
+                                 (identity(member), version(member), member['product_name'],
+                                  member['image_hash'], member['image_data'], member['origin']))
+
             if todo:
                 try:
                     self.judge.verify()
                 except ModelFailure as exc:
                     errors.update({pair: str(exc) for pair in todo})
                     todo = {}
+            # 判断按批提交（票 01）：一次分析约两千次模型调用，整批一个事务时中途退出
+            # （关窗、结束进程）会把跑完的判断整体回滚（2026-09-22 实测）。已提交的批留在
+            # 库里、当前批整批回滚，重跑只补未判的——缓存命中不花模型调用。
+            pending = 0
             with ThreadPoolExecutor(max_workers=self.config.concurrency) as pool:
                 for (pair, a, b), result, error in pool.map(compare, todo.values()):
                     if error:
                         errors[pair] = error
                         continue
-                    conn.execute('INSERT OR IGNORE INTO judgments VALUES (?,?,?,?)',
-                                 (pair, version(a), version(b), json.dumps(result)))
+                    store_judgment(pair, a, b, result)
                     cached[pair] = (result, STATUS_MODEL)
+                    pending += 1
+                    if pending >= JUDGMENT_COMMIT_BATCH:
+                        conn.commit()
+                        pending = 0
+            if pending:
+                # 判断阶段收尾：余数批也落盘，后面的分组计算再久也不丢判断。
+                conn.commit()
             positive = set()
             uncertain = set()
             eligible_by_id = {identity(p): p for p in eligible}
