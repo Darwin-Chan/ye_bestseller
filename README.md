@@ -157,6 +157,16 @@ python tools/build_exe.py --target analysis
 壳与本机无关：可直接把 `dist\` 下三个 exe 拷到别的机器用（壳自己找本机 python 与源码目录）；
 重建壳才需要 `pyinstaller`（已在 `requirements.txt` 里）。
 
+出发布包（把三只壳连同 sha256 清单收成一个目录，供拷到别的机器）：
+
+```bash
+python tools/release_shells.py
+```
+
+包落在 `dist\release\shells-<日期>\`，含三只 exe、`MANIFEST.json`（sha256 与来源提交）与
+`发布说明.txt`（放置与校验步骤）；接受方把三只 exe 放进 `<项目根>\dist\` 即可。
+程序改了**不需要**重发，只有壳正文（`shells/`）改了才要重出包。
+
 ## 多机分片采集（机制按实现票落地中）
 
 三台采集机各自采集，通过**交换区**（git 私有库 + 对象存储图片）互递数据、各自汇总；
