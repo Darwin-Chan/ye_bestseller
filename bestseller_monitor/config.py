@@ -71,6 +71,10 @@ ROLE_MERGE_ONLY = "merge_only"
 # 档位的中文名一处写死：配置校验的报错、交换台的报告与窗口都用它。
 ROLE_GLOSS = {ROLE_COLLECTOR: "采集机", ROLE_MERGE_ONLY: "纯汇总机"}
 
+# 分析配置的文件名：与 config.toml 同目录（config/analysis.toml）。交换台靠它定位判断集
+# 的两个库（判断缓存与人工决定账本）——路径由 `Config.analysis_config` 带出去。
+ANALYSIS_CONFIG_NAME = "analysis.toml"
+
 
 def is_merge_only(cfg) -> bool:
     """这台机器是不是纯汇总机（spec §10 的角色档位）：角色判定只此一处。
@@ -196,6 +200,9 @@ class Config:
     # 本周计划的页数快照（shop_key → 预算）：开轮前的准备从落库的计划表读出来后挂在这里，
     # 采集路径深处（click_listing）靠它吃到计划层的预算；优先级见 effective_pages_limit()
     plan_pages: Mapping[str, int] | None = None
+    # 分析配置（config/analysis.toml）的路径：交换台判断集这半从它读判断缓存与账本的位置。
+    # 与 config.toml 同目录（`from_file` 按配置路径推），只给路径、不在这里解析它的内容。
+    analysis_config: pathlib.Path | None = None
 
     @classmethod
     def from_file(cls, path: pathlib.Path, root: pathlib.Path | None = None) -> "Config":
@@ -283,6 +290,7 @@ class Config:
             read_delay_sec=_tuple2("human.read_delay_sec", human["read_delay_sec"]),
             retry_base_sec=float(human["retry_base_sec"]),
             retry_jitter_sec=float(human["retry_jitter_sec"]),
+            analysis_config=path.resolve().with_name(ANALYSIS_CONFIG_NAME),
         )
 
     def replace(self, **kwargs: object) -> "Config":

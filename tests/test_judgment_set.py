@@ -41,7 +41,7 @@ from bestseller_monitor.matching import (STATUS_CACHE, STATUS_MODEL, MatchingCon
                                          MatchingService, ModelConfig, identity, prepare_cache,
                                          version)
 from tests.git_repos import GitSandbox
-from helpers import submit_offer
+from helpers import group, ledger_of, member, submit_offer
 from test_exchange import FakeImageStore
 from test_matching import ModelTransport, product, singles
 
@@ -62,24 +62,6 @@ STAMP_ISO = STAMP.isoformat(timespec="seconds")
 DAY = "2026-09-14"
 START, END = "2026-09-14", "2026-09-15"          # 分析区间（start 必须早于 end）
 WEEK = "2026-W38"
-
-
-def member(offer, shop="A01"):
-    """账本里的商品身份（与 `matching.identity` 同形）：纯账本用例用它当成员。"""
-    return identity({"shop_key": shop, "offer_id": offer})
-
-
-def group(*offers, machine="m1", confirmed=True, tag="v"):
-    """账本里的一条关系：成员版本取「商品号」拼的稳定值（纯账本用例不跑分析）。"""
-    return {"members": [[member(offer), f"{tag}{offer}"] for offer in offers],
-            "confirmed": confirmed, "machine_id": machine}
-
-
-def ledger_of(*, relations=(), standalone=(), excluded=()):
-    """账本的一版内容（与 `DraftStore.write` 的入参同形）。"""
-    return {"relations": list(relations),
-            "standalone": [list(entry) for entry in standalone],
-            "excluded": [list(pair) for pair in excluded]}
 
 
 class JudgmentSetCase(unittest.TestCase):

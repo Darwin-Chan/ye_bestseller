@@ -1,4 +1,4 @@
-"""测试共用件：建轮只走轮次模块这一条路；锁名字按用例隔离。"""
+"""测试共用件：建轮只走轮次模块这一条路；锁名字按用例隔离；判断账本的三样小件。"""
 from contextlib import contextmanager
 from pathlib import Path
 import tempfile
@@ -12,8 +12,27 @@ from bestseller_monitor.click_events import CardRef
 from bestseller_monitor.config import ACCESS_READWRITE, ROLE_COLLECTOR
 from bestseller_monitor.db import WeeklyPlanRow, cst_date
 from bestseller_monitor.listing import ListingLoadFailed
+from bestseller_monitor.matching import identity
 from bestseller_monitor.product_images import evidence
 from bestseller_monitor.rounds import RoundRequest, ShopScope
+
+
+def member(offer, shop="A01"):
+    """账本里的商品身份（与 `matching.identity` 同形）：纯账本用例用它当成员。"""
+    return identity({"shop_key": shop, "offer_id": offer})
+
+
+def group(*offers, machine="m1", confirmed=True, tag="v"):
+    """账本里的一条关系：成员版本取「商品号」拼的稳定值（纯账本用例不跑分析）。"""
+    return {"members": [[member(offer), f"{tag}{offer}"] for offer in offers],
+            "confirmed": confirmed, "machine_id": machine}
+
+
+def ledger_of(*, relations=(), standalone=(), excluded=()):
+    """账本的一版内容（与 `DraftStore.write` 的入参同形）。"""
+    return {"relations": list(relations),
+            "standalone": [list(entry) for entry in standalone],
+            "excluded": [list(pair) for pair in excluded]}
 
 # 采集配置替身存档原始页的地方（失败路径真会写文件；用例要断言就覆盖成本地 tmp）。
 _RAW_PAGE_DIR = Path(tempfile.gettempdir()) / "bestseller-test-raw"
@@ -85,6 +104,10 @@ def crawler_cfg(**overrides):
         "cos_bucket": "test-bucket",
         "git_access": ACCESS_READWRITE,
         "cos_access": ACCESS_READWRITE,
+        # 分析配置的路径（交换台判断集那半从它读两个库的位置）：默认指向一个**不存在**的
+        # 文件——判断集这半没做，用例要考它自己写一份进去并覆盖这个键。每次调用给一个新目录
+        # （与 raw_page_dir 同规）：万一哪个用例往这个路径写过东西，不留给后面的用例。
+        "analysis_config": _RAW_PAGE_DIR / "config" / uuid4().hex / "analysis.toml",
     }
     unknown = sorted(set(overrides) - set(values))
     if unknown:

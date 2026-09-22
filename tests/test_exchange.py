@@ -32,11 +32,13 @@ from unittest.mock import patch
 import exchange
 from bestseller_monitor import db as dbmod
 from bestseller_monitor import exchange as exchange_mod
-from bestseller_monitor import export, merge, single_instance
+from bestseller_monitor import export, judgment_set, merge, single_instance
+from bestseller_monitor.analysis_store import DraftStore
 from bestseller_monitor.config import ROLE_COLLECTOR, ROLE_MERGE_ONLY
 from bestseller_monitor.db import CST
 from bestseller_monitor.image_store import ImageStoreError
-from helpers import crawler_cfg, store_weekly_plan
+from bestseller_monitor.matching import prepare_cache
+from helpers import crawler_cfg, group, ledger_of, member, store_weekly_plan
 from tests.git_repos import GitSandbox
 
 WEEK = "2026-W38"
@@ -49,9 +51,27 @@ RUN_AT = dt.datetime(2026, 9, 20, 19, 41, tzinfo=CST)
 IMG_HASH = "ab" + "1" * 62
 
 
+def seed_judgments(cache, *, machine_id, rows=(("pair-1", "sig-1"),)) -> None:
+    """往判断缓存里预置判断行（spec「预置缓存行」的口径，不调模型）。
+
+    交换台这半不消费判断（消费在分析那半），所以结果正文只要是段 JSON、行能进包就行。
+    """
+    conn = sqlite3.connect(cache)
+    try:
+        prepare_cache(conn, machine_id)
+        conn.executemany(
+            "INSERT OR REPLACE INTO judgments(pair,signature,machine_id,evidence_a,evidence_b,"
+            "result) VALUES (?,?,?,?,?,?)",
+            [(pair, sig, machine_id, f"ev-{pair}-a", f"ev-{pair}-b", '{"same": true}')
+             for pair, sig in rows])
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def todo_of(report: str) -> str:
-    """报告「下次该做什么」那一节的正文：节号随冲突节在不在（四 / 五）变。"""
-    marker = "## 五、下次该做什么" if "## 五、下次该做什么" in report else "## 四、下次该做什么"
+    """报告「下次该做什么」那一节的正文：节号随冲突节在不在（五 / 六）变。"""
+    marker = "## 六、下次该做什么" if "## 六、下次该做什么" in report else "## 五、下次该做什么"
     return report.split(marker)[1]
 
 
@@ -157,6 +177,12 @@ class ConsoleWorld:
         self.conn = dbmod.open(self.db_path)
         test.addCleanup(self.conn.close)
         self.store = FakeImageStore()
+        # 判断集这半（票 05）：默认没配分析配置——要考它的用例调 analysis_config()／judged()
+        self.analysis_path: Path | None = None
+        self.cache: Path | None = None
+        self.judgment_store: Path | None = None
+        self.judged_remotes: dict = {}
+        self.judged_work: dict = {}
 
     # ---- 世界搭建 ----
 
@@ -205,12 +231,86 @@ class ConsoleWorld:
             message=f"export {week}-{machine}")
         return package
 
+    # ---- 判断集这半（票 05）：judged-* 库 + 分析配置 + 本机与别机的判断集 ----
+
+    def judged(self, *machines) -> None:
+        """给这些机器建 judged-<机器>：裸库当远端 + 交换区里的克隆 + 一个旁路克隆。
+
+        旁路克隆是「那台机器自己发布」用的（与 raw 那半的 `self.work` 同一个意思）：
+        交换区里那份要等交换台自己 pull 才到——与真实两机一致。
+        """
+        for machine in machines or ("m1", "m2", "m3"):
+            remote = self.box.new_remote(f"judged-{machine}.git")
+            self.judged_remotes[machine] = remote
+            self.box.clone(remote, f"exchange/judged-{machine}")
+            self.judged_work[machine] = self.box.clone(remote, f"{machine}-judged-work")
+
+    def analysis_config(self, *, cache=None, store=None) -> Path:
+        """写一份分析配置：判断缓存与人工决定账本指向本机的两个库（交换台从它读）。"""
+        self.cache = cache or self.box.tmp / "matching.sqlite"
+        self.judgment_store = store or self.box.tmp / "analysis-drafts.sqlite"
+        path = self.box.tmp / "config" / "analysis.toml"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(
+            "[analysis]\n"
+            f'database = "{self.db_path.as_posix()}"\n'
+            f'store = "{self.judgment_store.as_posix()}"\n'
+            "\n[matching]\n"
+            f'cache = "{self.cache.as_posix()}"\n',
+            encoding="utf-8")
+        self.analysis_path = path
+        return path
+
+    def judgments_local(self, rows=(("pair-1", "sig-1"),)) -> None:
+        """往本机判断缓存里预置判断行（spec「预置缓存行」的口径，不调模型）。"""
+        seed_judgments(self.cache, machine_id=self.machine_id, rows=rows)
+
+    def decisions_local(self, ledger, *, machine=None, store=None) -> None:
+        """往本机（或指定机器）的账本里写一版人工决定（与 `DraftStore.write` 同一条公开口）。"""
+        DraftStore(store or self.judgment_store, machine or self.machine_id).write(
+            "draft", "2026-09-01", "2026-09-02", "2026-09-22T20:00:00+08:00",
+            {"products": []}, ledger)
+
+    def judged_publish(self, machine, *, rows=(("pair-1", "sig-1"),), ledger=None) -> None:
+        """别的机器发布判断集：经它的旁路克隆推到裸库（真打包，与票 03 同一条路）。
+
+        包在 judged-<机器> 库里的相对路径就是 `PACKAGE_REL`（一个库一本、覆盖同名路径）。
+        """
+        cache = self.box.tmp / f"{machine}-cache.sqlite"
+        store = self.box.tmp / f"{machine}-drafts.sqlite"
+        seed_judgments(cache, machine_id=machine, rows=rows)
+        if ledger is not None:
+            DraftStore(store, machine).write("draft", "2026-09-01", "2026-09-02",
+                                             "2026-09-22T20:00:00+08:00",
+                                             {"products": []}, ledger)
+        package = self.box.tmp / f"judgments-{machine}.db"
+        judgment_set.build_package(cache, package, machine_id=machine,
+                                   generated_at=dt.datetime(2026, 9, 20, 19, 0, tzinfo=CST),
+                                   store=store)
+        self.box.commit_push(self.judged_work[machine],
+                             {judgment_set.PACKAGE_REL:
+                              gzip.compress(package.read_bytes(), mtime=0)},
+                             message=f"judged publish {machine}")
+
+    def publish_broken_judged(self, machine, payload=b"not a judgment set at all") -> None:
+        """别的机器那本 judged 库里放一个读不成判断集的包（坏包那一路）。"""
+        self.box.commit_push(self.judged_work[machine],
+                             {judgment_set.PACKAGE_REL: payload}, message=f"broken {machine}")
+
+    def judged_local_bytes(self, machine: str, rel: str | None = None) -> bytes | None:
+        """交换区里 judged-<机器> 那份克隆的 HEAD 里有没有这个文件（真 pull 之后可读）。"""
+        from bestseller_monitor.git_channel import GitChannel
+        return GitChannel(self.root / f"judged-{machine}").read_path(
+            rel or judgment_set.PACKAGE_REL)
+
     # ---- 跑一次 ----
 
     def cfg(self, **overrides):
         values = dict(machine_id=self.machine_id, role=self.role,
                       exchange_root=self.root, db_file=self.db_path,
                       cos_bucket="", logs_dir=self.box.tmp / "logs")
+        if self.analysis_path is not None:
+            values["analysis_config"] = self.analysis_path
         values.update(overrides)
         return crawler_cfg(**values)
 
@@ -265,12 +365,13 @@ class CleanRunTests(unittest.TestCase):
         self.assertTrue(report.startswith("# 库存数据交换周报 · 2026-W38\n"))
         self.assertIn("本机 **m1**（采集机）· 2026-09-20 19:41 运行 · 覆盖 9月14日 – 9月20日",
                       report)
-        self.assertIn("**结果**：干净（退出码 0）· 缺口 0 · 冲突 0 · 还没来的包 0", report)
+        self.assertIn("**结果**：干净（退出码 0）· 缺口 0 · 冲突 0 · 还没来的包 0 · "
+                      "判断集冲突 0", report)
         self.assertIn("**本次运行**：导出已发布 · 新收 2 个包（34 行）", report)
-        for title in ("## 一、本机发布", "## 二、收进来的包", "## 三、缺口与还没来的",
-                      "## 四、下次该做什么"):
+        for title in ("## 一、本机发布", "## 二、收进来的包", "## 三、判断集",
+                      "## 四、缺口与还没来的", "## 五、下次该做什么"):
             self.assertIn(title, report)
-        self.assertNotIn("## 四、冲突", report)     # 干净场景不出现冲突节（样例的同形）
+        self.assertNotIn("## 五、冲突", report)     # 干净场景不出现冲突节（样例的同形）
         self.assertIn("W38-m1.db.gz", report)
         self.assertIn("- 本机负责：A01", report)
         self.assertIn("- 行数：inventory 7 · products 1 · skus 1 · 版本 7", report)
@@ -346,9 +447,9 @@ class WeeklyReportTests(unittest.TestCase):
         self.assertEqual(outcome.exit_code, 1)
         report = self.world.report()
         self.assertIn("**结果**：有需要人看一眼的地方（退出码 1）· 缺口 1 · 冲突 1 · "
-                      "还没来的包 1", report)
+                      "还没来的包 1 · 判断集冲突 0", report)
         self.assertIn("**本次运行**：导出已发布 · 新收 1 个包", report)
-        # 三、缺口与还没来的：本机缺一天（带轮次终态的人话）+ 还没收到的包 + 口径
+        # 四、缺口与还没来的：本机缺一天（带轮次终态的人话）+ 还没收到的包 + 口径
         self.assertIn("- 本机缺一天：A03 09-17 —— 当天采集在详情预算耗尽后中止"
                       "（历史日期补不了，如实记一笔）", report)
         self.assertIn("- 还没收到的包：raw-m2 的 W38 还没发布或没拉到", report)
@@ -356,13 +457,13 @@ class WeeklyReportTests(unittest.TestCase):
                       report)
         # A04 归 m2（包没来）：它的七天不记缺口，只记「还没来的包」——A04 整个报告不出现
         self.assertNotIn("A04", report)
-        # 四、冲突：本机（计划外多采）与计划机，取后到者、覆盖与保留的行数按账里的事实
+        # 五、冲突：本机（计划外多采）与计划机，取后到者、覆盖与保留的行数按账里的事实
         # （本机那组两行：库存行同键被替换＝覆盖 1 行；版本行的 observed_at 不同键、留着＝保留 1 行）
         self.assertIn("- 重复采集：A02 09-15：本机 15:02（计划外多采）与计划机 16:40 都采到；"
                       "取后到者（m3），覆盖 1 行、保留 1 行", report)
         self.assertIn("- 明细记在本机导入账（本机视角：导入 raw-m3 时发现）；冲突不入交换区",
                       report)
-        # 五、下次该做什么：三件（还没来的包 / 别再勾选 A02 / 本机缺的一天）
+        # 六、下次该做什么：三件（还没来的包 / 别再勾选 A02 / 本机缺的一天）
         todo = todo_of(report)
         self.assertIn("raw-m2 的 W38 还没发布或没拉到", todo)
         self.assertIn("提醒本机操作者：不要手工勾选本期不归本机的店（A02）", todo)
@@ -420,6 +521,255 @@ class OnlyHalfTests(unittest.TestCase):
         report = self.world.report()
         self.assertIn("**本次运行**：只跑了汇总 · 新收 1 个包（17 行）", report)
         self.assertIn("- 导出：本次只跑了汇总（--only merge），没做导出", report)
+
+
+class AnalysisPathDefaultsTests(unittest.TestCase):
+    """交换台只读分析配置的两个键（不整份加载），缺省名必须与分析那半一致。
+
+    两处各写一遍是故意的（见 `exchange.judgment_paths` 的 docstring：交换台不该被分析配置
+    里别的段落挡住）；这条护栏让「写岔了」变成一次红灯，而不是悄悄指向另一个库。
+    """
+
+    def test_the_default_names_match_what_the_analysis_half_would_resolve(self):
+        # 延迟 import：只这条护栏依赖分析那半，别的用例不因它受牵连
+        from bestseller_monitor.analysis import AnalysisConfig
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "analysis.toml"
+            path.write_text('[analysis]\ndatabase = "stock.db"\n\n[matching]\nmode = "direct"\n',
+                            encoding="utf-8")
+            config = AnalysisConfig.from_file(path)
+
+        self.assertEqual(config.matching.cache,
+                         (Path(tmp) / exchange_mod.ANALYSIS_CACHE_DEFAULT).resolve())
+        self.assertEqual(config.store,
+                         (Path(tmp) / exchange_mod.ANALYSIS_STORE_DEFAULT).resolve())
+
+
+class JudgmentSetCase(unittest.TestCase):
+    """票 05 的共用夹具：一趟干净的数据交换（无缺口无冲突）＋ 判断集这半就位。
+
+    本机是 m1：判断缓存里预置两行判断、账本按用例给；judged-m1/m2/m3 三本库都建好。
+    """
+
+    def setUp(self):
+        self.world = ConsoleWorld(self)
+        self.world.plan(("A01", "m1", 3), ("A02", "m2", 3), ("A03", "m3", 3))
+        self.world.crawls([("A01", day) for day in DAYS])
+        self.world.publish("m2", [("A02", day) for day in DAYS])
+        self.world.publish("m3", [("A03", day) for day in DAYS])
+        self.world.judged()                  # judged-m1（本机那本）+ judged-m2/m3
+        self.world.analysis_config()         # 判断缓存与账本的位置（analysis.toml）
+        self.world.judgments_local(rows=(("pair-1", "sig-1"), ("pair-2", "sig-2")))
+
+    def cache_rows(self):
+        """本机缓存里的判断行 (pair, 来源机器) 与导入账的来源；导入账还没建就是空的。"""
+        with contextlib.closing(sqlite3.connect(self.world.cache)) as conn:
+            tables = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            rows = conn.execute(
+                "SELECT pair, machine_id FROM judgments ORDER BY pair").fetchall()
+            sources = ([row[0] for row in conn.execute(
+                "SELECT source_machine FROM judgment_imports ORDER BY rowid")]
+                if "judgment_imports" in tables else [])
+        return [tuple(row) for row in rows], sources
+
+    def draft_store(self):
+        return DraftStore(self.world.judgment_store, "m1")
+
+
+class JudgmentSetTests(JudgmentSetCase):
+    """整趟里判断集的两条动作（ADR-0039 决策 7）：发布与收取都在之内；周报第三节记账。"""
+
+    def test_a_full_run_publishes_our_set_and_collects_the_others(self):
+        self.world.judged_publish("m2", rows=(("m2-pair", "m2-sig"),))
+
+        outcome = self.world.run()
+
+        self.assertEqual(outcome.exit_code, 0, outcome.failures)
+        self.assertIsNotNone(self.world.judged_local_bytes("m1"), "本机那本真收到了包")
+        self.assertIsNotNone(self.world.judged_local_bytes("m2"), "收取那半拉过了别家那本")
+        rows, sources = self.cache_rows()
+        self.assertEqual(rows, [("m2-pair", "m2"), ("pair-1", "m1"), ("pair-2", "m1")])
+        self.assertEqual(sources, ["m2"])
+        report = self.world.report()
+        self.assertIn("## 三、判断集", report)
+        self.assertIn("- 发布：判断 2 条 · 视觉描述 0 条 · 证据 0 条 · 人工决定 0 条 → judged-m1 @ ",
+                      report)
+        self.assertIn("- 收取：judged-m2 —— 判断 1 条 · 视觉描述 0 条 · 证据 0 条 · 人工决定 0 条"
+                      "（新增 1 行）", report)
+        self.assertIn("- 收取：judged-m3 没有判断集可收", report)
+        self.assertIn("- 采纳：没有（收到的判断集里没有新的人工决定）", report)
+        self.assertIn("- 冲突：没有", report)
+        self.assertIn("**本次运行**：导出已发布 · 发布判断 2 条 · 新收 2 个包（34 行）"
+                      " · 收下 1 份判断集", report)
+
+    def test_a_confirmed_group_from_another_machine_is_adopted_and_named(self):
+        """判据 A04：m2 确认一组 → 本机收取后该组已是本机账本里的已确认组，周报点名来源。"""
+        self.world.judged_publish("m2", rows=(),
+                                  ledger=ledger_of(relations=[group("o1", "o2", machine="m2")]))
+
+        outcome = self.world.run()
+
+        self.assertEqual(outcome.exit_code, 0, outcome.failures)
+        report = self.world.report()
+        self.assertIn("- 收取：judged-m2 —— 判断 0 条 · 视觉描述 0 条 · 证据 0 条 · 人工决定 1 条"
+                      "（新增 1 行）", report)
+        self.assertIn("- 采纳：1 条人工决定（来自 m2）—— 已进本机账本", report)
+        relations = self.draft_store().ledger()["relations"]
+        self.assertEqual([row["members"] for row in relations],
+                         [[[member("o1"), "vo1"], [member("o2"), "vo2"]]])
+        self.assertEqual(relations[0]["machine_id"], "m2", "来源随行带走")
+
+    def test_a_new_conflict_asks_for_a_look_and_is_named_on_both_sides(self):
+        # 本机排除过 (o1, o2)，m2 把它们并进同一组：一边并组、一边排除（spec §6 第一类）
+        self.world.decisions_local(ledger_of(excluded=[[member("o1"), member("o2")]]))
+        self.world.judged_publish("m2", rows=(),
+                                  ledger=ledger_of(relations=[group("o1", "o2", machine="m2")]))
+
+        outcome = self.world.run()
+
+        self.assertEqual(outcome.exit_code, 1, "这趟新记下的冲突：有需要人看一眼的")
+        report = self.world.report()
+        self.assertIn("· 判断集冲突 1", report)
+        self.assertIn("- 冲突：一边并组、一边排除 —— 外来的 m2 的 组 vs 本机的 m1 的 排除对"
+                      f"（商品 {member('o1')}、{member('o2')}；在分析页面上裁决）", report)
+        self.assertEqual([c.kind for c in self.draft_store().conflicts()], ["group_vs_exclusion"])
+
+    def test_a_second_run_skips_the_collected_set_and_forwards_it_on(self):
+        """收进来的判断进了本机判断集：下一次发布把它带上（内容身份不变，票 03 的转发口径）；
+        那之后本机判断集不再变，发布才是空操作。"""
+        self.world.judged_publish("m2", rows=(("m2-pair", "m2-sig"),))
+        self.world.run()
+
+        outcome = self.world.run()
+
+        self.assertEqual(outcome.exit_code, 0, outcome.failures)
+        report = self.world.report()
+        self.assertIn("- 发布：判断 3 条 · 视觉描述 0 条 · 证据 0 条 · 人工决定 0 条 → judged-m1 @ ",
+                      report)
+        self.assertIn("- 收取：judged-m2 —— 已收过", report)
+        self.assertIn("跳过 1 份已收过的判断集", report)
+
+        third = self.world.run()
+
+        self.assertEqual(third.exit_code, 0, third.failures)
+        self.assertIn("与已发布那份同内容（无新提交）", self.world.report())
+
+
+class JudgmentActionAloneTests(JudgmentSetCase):
+    """两个动作可单独运行且互不依赖（票 05 的验收线）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.world.judged_publish("m2", rows=(("m2-pair", "m2-sig"),))
+        # 上次运行拉过（与 OnlyHalfTests 同一条约定）：只跑一个动作时不带拉取，
+        # 别家的周包要在本地克隆里看得到，退出码才只反映这个动作本身。
+        self.world.sync()
+
+    def test_publish_alone_leaves_both_other_halves_untouched(self):
+        outcome = self.world.run(only="publish")
+
+        self.assertEqual(outcome.exit_code, 0, outcome.failures)
+        self.assertIsNotNone(self.world.judged_local_bytes("m1"), "发布照常")
+        # 数据那半没动：没导出、没汇总；判断那半的收取也没动
+        self.assertIsNone(self.world.published_bytes("raw-m1", export.package_rel_path(WEEK, "m1")))
+        self.assertEqual(self.world.conn.execute(
+            "SELECT COUNT(*) FROM import_packages").fetchone()[0], 0)
+        self.assertEqual(self.cache_rows()[1], [])
+        report = self.world.report()
+        self.assertIn("- 导出：本次只跑了发布判断集（--only publish），没做导出", report)
+        self.assertIn("- 收取：本次只跑了发布判断集（--only publish），没做收取判断集", report)
+
+    def test_collect_alone_brings_the_set_without_publishing_ours(self):
+        outcome = self.world.run(only="collect")
+
+        self.assertEqual(outcome.exit_code, 0, outcome.failures)
+        self.assertEqual(self.cache_rows()[1], ["m2"])
+        self.assertIsNone(self.world.judged_local_bytes("m1"), "本机那本这次没发")
+        report = self.world.report()
+        self.assertIn("- 发布：本次只跑了收取判断集（--only collect），没做发布判断集", report)
+
+    def test_a_merge_only_machine_still_publishes_its_judgments(self):
+        """纯汇总机跳过的是采集包的导出，判断集照发（spec §9、ADR-0039 决策 3）。"""
+        world = ConsoleWorld(self, machine_id="m4", role=ROLE_MERGE_ONLY)
+        world.publish("m2", [("A02", day) for day in DAYS])
+        world.publish("m3", [("A03", day) for day in DAYS])
+        world.judged("m4", "m2", "m3")
+        world.analysis_config()
+        world.judgments_local(rows=(("pair-1", "sig-1"),))
+
+        outcome = world.run()
+
+        self.assertEqual(outcome.exit_code, 0, outcome.failures)
+        self.assertIsNotNone(world.judged_local_bytes("m4"), "转角色不影响发布")
+        report = world.report()
+        self.assertIn("- 导出：本机是纯汇总机，跳过", report)
+        self.assertIn("- 发布：判断 1 条 · 视觉描述 0 条 · 证据 0 条 · 人工决定 0 条 → judged-m4 @ ",
+                      report)
+
+
+class JudgmentTroubleTests(JudgmentSetCase):
+    """判断集这半的失败档位（与采集侧同规）与「不中止其余步骤」。"""
+
+    def test_a_missing_judged_repo_is_a_note_a_readable_failure_and_the_rest_runs(self):
+        self.world.judged_publish("m2", rows=(("m2-pair", "m2-sig"),))
+        shutil.rmtree(self.world.root / "judged-m1")      # 本机那本没 clone 上（第 14 步）
+
+        outcome = self.world.run()
+
+        self.assertEqual(outcome.exit_code, 2, "发布没成 = 本机没做成事（与「导出没成功」同规）")
+        notes = "\n".join(outcome.check.notes)
+        self.assertIn("judged-m1", notes)
+        self.assertIn("上机清单第 14 步", notes)
+        report = self.world.report()
+        self.assertIn("- 发布：判断 2 条 · 视觉描述 0 条 · 证据 0 条 · 人工决定 0 条 —— 没发出去（",
+                      report)
+        self.assertEqual(self.cache_rows()[1], ["m2"], "发布的失败不挡收取")
+        self.assertIn("本机判断集没发出去（见第三节）：通道或克隆修好后重跑一次",
+                      todo_of(report))
+
+    def test_a_broken_source_set_is_a_hard_failure_and_the_others_still_come_in(self):
+        self.world.publish_broken_judged("m2")
+        self.world.judged_publish("m3", rows=(("m3-pair", "m3-sig"),))
+
+        outcome = self.world.run()
+
+        self.assertEqual(outcome.exit_code, 2, "包读不出来 = 没收成（与「有包没导成」同规）")
+        report = self.world.report()
+        self.assertIn("- 收取：judged-m2 这本没收成（", report)
+        self.assertIn("- 收取：judged-m3 —— 判断 1 条", report)
+        self.assertEqual(self.cache_rows()[1], ["m3"], "坏的那家不挡别家")
+        self.assertIn("judged-m2 的判断集没导成（见第三节）", todo_of(report))
+
+    def test_an_unreachable_source_asks_for_a_look_without_stopping_the_others(self):
+        self.world.judged_publish("m2", rows=(("m2-pair", "m2-sig"),))
+        self.world.box.must("remote", "set-url", "origin",
+                            str(self.world.box.tmp / "gone.git"),
+                            cwd=self.world.root / "judged-m3")
+
+        outcome = self.world.run()
+
+        self.assertEqual(outcome.exit_code, 1, "拉不动 = 通道没拉成（软，与采集侧同规）")
+        report = self.world.report()
+        self.assertIn("- 收取：judged-m3 这本拉不动（", report)
+        self.assertEqual(self.cache_rows()[1], ["m2"], "坏的那家不挡别家")
+        self.assertIn("judged-m3 拉不动（见第三节）：通道恢复后重跑一次", todo_of(report))
+
+    def test_without_an_analysis_config_it_says_so_and_changes_nothing_else(self):
+        world = ConsoleWorld(self)          # 不写 analysis.toml：判断集这半整趟没做
+        world.plan(("A01", "m1", 3), ("A03", "m3", 3))
+        world.crawls([("A01", day) for day in DAYS])
+        world.publish("m3", [("A03", day) for day in DAYS])
+
+        outcome = world.run()
+
+        self.assertEqual(outcome.exit_code, 0, "配置的事不折成交换台的失败（同 cos_bucket 的处置）")
+        self.assertIn("判断集这半没做", "\n".join(outcome.check.notes))
+        report = world.report()
+        self.assertIn("- 这趟没做：本机还没有分析配置（", report)
+        self.assertIn("analysis.toml", report)
+        self.assertIn("**本次运行**：导出已发布 · 新收 1 个包（17 行）", report)
 
 
 class ExitCodeTwoTests(unittest.TestCase):
@@ -812,6 +1162,13 @@ class EntryPointTests(unittest.TestCase):
         self.assertIn("导入 W38-m3.db.gz", log_text)
         self.assertIn("报告已写到", log_text)
 
+    def test_only_takes_the_two_judgment_actions_too(self):
+        """`--only publish|collect` 与 export/merge 并列（票 05、ADR-0039 决策 7）。"""
+        for action in ("publish", "collect"):
+            self.assertEqual(exchange.parse_args(["--only", action]).only, action)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            exchange.parse_args(["--only", "publish-judgments"])
+
     def test_main_without_a_config_file_says_what_to_do_and_returns_two(self):
         with tempfile.TemporaryDirectory() as tmp:
             missing = Path(tmp) / "config.toml"
@@ -1014,6 +1371,13 @@ class WindowPageTests(unittest.TestCase):
         # 入口保留着、不藏（spec §7），但纯汇总机上没有可做的事：「仅导出」置灰。
         self.assertIn("merge_only", self.html)
         self.assertIn("exportBtn.disabled", self.html)
+
+    def test_the_two_judgment_actions_are_buttons_of_their_own(self):
+        """发布／收取判断集与整趟、两个半趟并列（ADR-0039 决策 7）：窗口里也点得到。"""
+        self.assertIn("发布判断集", self.html)
+        self.assertIn("收取判断集", self.html)
+        self.assertIn("start('publish')", self.html)
+        self.assertIn("start('collect')", self.html)
 
 
 class WeekWithWindowTests(unittest.TestCase):

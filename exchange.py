@@ -1,15 +1,18 @@
 """库存数据交换（spec §7）：独立小工具——命令行一次运行 + 小窗口并存。
 
 用法：
-    python exchange.py                     # 一次完整运行：检查 → 导出 → 拉取 → 汇总 → 报告
-    python exchange.py --only export       # 只跑导出这半（检查 + 导出 + 报告）
-    python exchange.py --only merge        # 只跑汇总这半（检查 + 拉取 + 汇总 + 报告）
+    python exchange.py                     # 整趟：检查 → 导出 → 发布判断集 → 拉取 → 汇总 → 收取判断集 → 报告
+    python exchange.py --only export       # 只跑导出（检查 + 导出 + 报告）
+    python exchange.py --only merge        # 只跑汇总（检查 + 拉取 + 汇总 + 报告）
+    python exchange.py --only publish      # 只发布判断集（检查 + 发布 + 报告）
+    python exchange.py --only collect      # 只收取判断集（检查 + 收取 + 报告）
     python exchange.py --week 2026-W37     # 指定周窗口（补历史用）
-    python exchange.py --window            # 开小窗口（导出&汇总 + 仅导出 / 仅汇总）
+    python exchange.py --window            # 开小窗口（整趟 + 只跑某一个动作）
 
-退出码（spec §7）：`0` 干净 / `1` 有需要人看一眼的 / `2` 本机没做成事。逐次流水在
-`logs/exchange.log`；周报在 `<交换区根>/报告/<年>-W<周>.md`。窗口标题与快捷方式名用
-中文全名「1688 畅销品监控 · 库存数据交换」；窗口不挂进现有采集界面（独立进程、独立锁）。
+退出码（spec §7）：`0` 干净 / `1` 有需要人看一眼的（含判断集这趟新记下的冲突）/ `2` 本机
+没做成事（含判断集没发出去、没收进来）。逐次流水在 `logs/exchange.log`；周报在
+`<交换区根>/报告/<年>-W<周>.md`。窗口标题与快捷方式名用中文全名「1688 畅销品监控 ·
+库存数据交换」；窗口不挂进现有采集界面（独立进程、独立锁）。
 
 **运行互斥**（票 14）：同一台机器同一时刻至多一次交换台运行——窗口与命令行同规，
 锁在这里取（不放启动壳里，改脚本不用重打包）：窗口开着时锁在窗口进程手里，第二个
@@ -20,8 +23,9 @@
 `--week`（补历史）、`--only`、`--config` 走本脚本。窗口不接周入口：`--window` 与
 `--week` 同传明确拒绝。
 
-窗口里两个按钮「仅导出 / 仅汇总」与命令行 `--only` 是同一入口；一次运行结束显示
-**结局行**（与命令行收尾同一句：报告路径 + 退出码口径）。纯汇总机上「仅导出」入口保留
+窗口里「导出&汇总 / 仅导出 / 仅汇总 / 发布判断集 / 收取判断集」五个按钮与命令行 `--only`
+是同一入口；一次运行结束显示 **结局行**（与命令行收尾同一句：报告路径 + 退出码口径）。
+纯汇总机上「仅导出」入口保留
 并写明跳过（不藏掉），按钮置灰；点了就照「本机是纯汇总机，跳过」如实记。
 运行中关窗不拦、只记录（重跑能修：导出幂等、导入有幂等账、报告同周重写）。
 **窗口起不来按「本机没做成事」（退出码 2）退出**：缺 pywebview、页面读不到、WebView2
@@ -67,11 +71,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", type=Path, default=ROOT / "config" / "config.toml",
                         help="配置路径（默认 <项目根>/config/config.toml）")
-    parser.add_argument("--only", choices=[console.ONLY_EXPORT, console.ONLY_MERGE],
-                        default=None, help="只跑一半：export（检查+导出）或 merge（检查+拉取+汇总）")
+    parser.add_argument("--only", choices=[console.ONLY_EXPORT, console.ONLY_MERGE,
+                                           console.ONLY_PUBLISH, console.ONLY_COLLECT],
+                        default=None,
+                        help="只跑一个动作：export（导出）/ merge（拉取+汇总）/ "
+                             "publish（发布判断集）/ collect（收取判断集）")
     parser.add_argument("--week", default=None, help="指定周窗口，如 2026-W37（补历史用）")
     parser.add_argument("--window", action="store_true",
-                        help="开小窗口（导出&汇总 + 仅导出 / 仅汇总），不直接跑一次")
+                        help="开小窗口（整趟 + 只跑某一个动作），不直接跑一次")
     return parser.parse_args(argv)
 
 

@@ -407,7 +407,8 @@ class CollectResult:
     `skipped` 为真表示同内容已收过：这次什么都没做，行数与新增数从账里回放（冲突不复现，
     冲突账是累计的、读它就好）。`conflicts` 是这次核对到的冲突（`analysis_store.Conflict`，
     `recorded` 说有没有新记一笔）。`note` 是「还没建库/没发布过」这类可读说明——不是失败，
-    别家照收。
+    别家照收。`unreachable` 标记失败出在**通道**（这本拉不动）而不是包本身——交换台
+    周报按它分退出码，与采集侧「通道没拉成」/「有包没导成」两档同规。
     """
 
     machine: str
@@ -419,6 +420,7 @@ class CollectResult:
     conflicts: tuple[Conflict, ...] = ()                              # 这次核对到的冲突
     imported_at: str = ""
     failure: str | None = None
+    unreachable: bool = False
     note: str | None = None
 
     @property
@@ -438,14 +440,19 @@ class CollectResult:
 
 @dataclasses.dataclass(frozen=True)
 class CollectOutcome:
-    """跑一次收取做了什么：逐个来源的结果 + 「没有可收的」这类整趟说明。"""
+    """跑一次收取做了什么：逐个来源的结果 + 「没有可收的」这类整趟说明。
+
+    `failure` 是**整趟**没做成的说明（判断缓存打不开这类，不是某一家的事）；各家自己的
+    结果照旧在 `results` 里。
+    """
 
     results: tuple[CollectResult, ...]
     notes: tuple[str, ...] = ()
+    failure: str | None = None
 
     @property
     def failed(self) -> bool:
-        return any(result.failed for result in self.results)
+        return self.failure is not None or any(result.failed for result in self.results)
 
 
 def judged_repos(exchange_root: str | pathlib.Path,
@@ -486,9 +493,9 @@ def collect(exchange_root: str | pathlib.Path, machine_id: str, cache: str | pat
     try:
         conn = _connect_cache(cache, machine_id)
     except sqlite3.Error as exc:
-        return CollectOutcome((), ((
+        return CollectOutcome((), failure=(
             f"判断缓存打不开（{cache}）：{exc}\n"
-            "分析程序正在跑的时候收不了判断集（它占着缓存的写口），等它跑完再重跑收取。"),))
+            "分析程序正在跑的时候收不了判断集（它占着缓存的写口），等它跑完再重跑收取。"))
     try:
         return CollectOutcome(tuple(
             _collect_one(conn, path, machine=machine, machine_id=machine_id, store=store, now=now)
@@ -539,7 +546,8 @@ def _collect_one(conn: sqlite3.Connection, repo: pathlib.Path, *,
     try:
         channel.pull()
     except ChannelError as exc:
-        return CollectResult(machine, rel, failure=f"拉不到 {repo.name}，这本这次没收：{exc}")
+        return CollectResult(machine, rel, unreachable=True,
+                             failure=f"拉不到 {repo.name}，这本这次没收：{exc}")
     published = channel.read_path(PACKAGE_REL)
     if published is None:
         return CollectResult(machine, rel, note=(

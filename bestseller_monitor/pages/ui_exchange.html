@@ -38,6 +38,8 @@
       <button class="btn" id="runBtn">导出&amp;汇总</button>
       <button class="btn ghost" id="exportBtn">仅导出</button>
       <button class="btn ghost" id="mergeBtn">仅汇总</button>
+      <button class="btn ghost" id="publishBtn">发布判断集</button>
+      <button class="btn ghost" id="collectBtn">收取判断集</button>
       <span id="note"></span>
     </div>
     <div class="row" style="margin-top:10px">
@@ -45,7 +47,7 @@
     </div>
   </div>
 
-  <div class="card"><pre id="log">（还没跑过。点「导出&amp;汇总」：检查 → 导出 → 拉取 → 汇总 → 报告。）</pre></div>
+  <div class="card"><pre id="log">（还没跑过。点「导出&amp;汇总」：检查 → 导出 → 发布判断集 → 拉取 → 汇总 → 收取判断集 → 报告。）</pre></div>
 
   <div class="row"><span id="status" class="pill n">待命</span></div>
 </div>
@@ -55,7 +57,8 @@ const logEl = document.getElementById('log');
 const statusEl = document.getElementById('status');
 const noteEl = document.getElementById('note');
 const exportBtn = document.getElementById('exportBtn');
-const buttons = ['runBtn', 'exportBtn', 'mergeBtn'].map(id => document.getElementById(id));
+const buttons = ['runBtn', 'exportBtn', 'mergeBtn', 'publishBtn', 'collectBtn']
+  .map(id => document.getElementById(id));
 let mergeOnly = false;
 
 function setStatus(text, cls) {
@@ -103,6 +106,8 @@ async function start(only) {
 document.getElementById('runBtn').onclick = () => start(null);
 document.getElementById('exportBtn').onclick = () => start('export');
 document.getElementById('mergeBtn').onclick = () => start('merge');
+document.getElementById('publishBtn').onclick = () => start('publish');
+document.getElementById('collectBtn').onclick = () => start('collect');
 
 window.addEventListener('pywebviewready', () => {
   refresh();
