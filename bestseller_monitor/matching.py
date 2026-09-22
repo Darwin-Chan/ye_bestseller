@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import heapq
 import io
 import json
 import logging
@@ -10,6 +11,7 @@ import os
 import secrets
 import sqlite3
 import threading
+import time
 from collections import defaultdict
 from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
@@ -466,15 +468,221 @@ def summarize_group(group, products_by_id):
     group['sales'] = sum(products_by_id[identity(m)]['sales'] for m in group['members'])
 
 
-def _positive_evidence(conn, signature):
-    """本机署名下的正例证据（同款且高把握）：异署名的判断只作参考，不进这个集合（票 02）。"""
-    positive = set()
+# 负边分歧权重（ADR-0040 决策 1／6）：判非同款却被并进一组的代价，相对拆分真同款的倍率
+# ——假阳更贵。随程序版本走、不进各机配置（决策 6）。2.0 取自 E2 标定实测
+# （`.scratch/bestseller-analysis/E2标定实测.md`：w=1 覆盖 94.1%／纯度 98.1%；w=2 纯度
+# 99.3%／覆盖 91.6%；w≥4 退化成团装配）；等人工确认轮拿到参照组后另票定稿。
+NEGATIVE_WEIGHT = 2.0
+
+
+def assemble_groups(products, groups, positive, negative, excluded=(), weight=NEGATIVE_WEIGHT):
+    """同款装配：带人工约束的相关聚类（票 19，ADR-0040 决策 1／2／6）。
+
+    输入＝商品清单、输入分组（人工复用来的确认／已整理组＋单商品组）、本机署名下**已判**
+    的边与排除对；输出＝与旧装配同形的分组（新组＝id／confirmed／members，成员只带
+    shop_key／offer_id；冻结组按输入原样保留）。边按**证据版本**记：一条判断覆盖所有
+    取到这两个版本的商品对（与判断表的键同口径）。
+
+    语义：**缺边是未知、不参与代价**——每轮在「正边跨越数 − weight×负边跨越数」最大且
+    严格大于 0 的两簇上合并，没有这样的簇对就停（簇数不预设）；并列按簇 id 对（簇 id＝
+    簇内最小商品下标）字典序。`confirmed`／`adjusted` 的输入组整组冻结：不拆、不增员、
+    不与他人并（spec §10「模型不得自动向已确认组增员」）——独立确认因此等价于它对所有
+    其他商品的 cannot-link；排除对跨越的两簇禁止合并。
+
+    确定性：贪心只依赖输入，同一输入两次调用逐组一致（ADR-0040 决策 6）。冻结组之外
+    成员按商品下标给出次序，组序与 id 复用照旧（沿用旧装配的前序组排序与按成员集合
+    复用原组 id 的规则）。
+    """
+    keys = [identity(p) for p in products]
+    position = {key: i for i, key in enumerate(keys)}
+    by_key = {key: p for key, p in zip(keys, products)}
+    fingerprints = {key: version(p) for key, p in zip(keys, products)}
+
+    output = []
+    frozen = set()
+    for group in groups:
+        if not (group['confirmed'] or group.get('adjusted')):
+            continue
+        frozen.update(identity(member) for member in group['members'])
+        # 冻结组整组保留：成员按身份重铸（只带 shop_key／offer_id），组上其余键照输入带过来
+        # ——旧装配用的是 dict(g)，工作草稿里的组还带着 sales／adjusted 这些键。
+        copy = dict(group)
+        copy['members'] = [{'shop_key': member['shop_key'], 'offer_id': member['offer_id']}
+                           for member in group['members']]
+        output.append(copy)
+
+    active = [key for key in keys if key not in frozen]
+    active_set = set(active)
+    version_members = defaultdict(list)
+    for key in active:
+        version_members[fingerprints[key]].append(key)
+
+    def adjacency(edges):
+        """版本级边表：{版本: {版本: 1}}。同版本商品之间的判断折成一件自己的边。"""
+        table = defaultdict(dict)
+        for edge in edges:
+            first = next(iter(edge))
+            if len(edge) == 1:
+                table[first][first] = 1
+            else:
+                second = next(version for version in edge if version != first)
+                table[first][second] = 1
+                table[second][first] = 1
+        return table
+
+    positive_of, negative_of = adjacency(positive), adjacency(negative)
+
+    @dataclass
+    class Cluster:
+        """一个簇：各版本的件数、成员身份，以及与簇内成员有排除关系、又在簇外的那些身份。"""
+
+        counts: dict
+        members: list
+        partners: set
+
+    clusters = {}    # 簇 id（簇内最小商品下标）→ Cluster
+    where = {}       # 商品身份 → 簇 id
+    for key in active:
+        cid = position[key]
+        where[key] = cid
+        clusters[cid] = Cluster({fingerprints[key]: 1}, [key], set())
+    for pair in excluded:
+        first, second = tuple(pair)
+        for one, other in ((first, second), (second, first)):
+            # 只记簇外**还在场**的那一端：不在本次分析里、或在冻结组里的都并不过来。
+            if one in where and other in active_set:
+                clusters[where[one]].partners.add(other)
+
+    def crossing(first, second, table):
+        """两簇之间的已判边数：按版本件数相乘求和（同版本的自边也照此）。"""
+        left, right = sorted((clusters[first], clusters[second]), key=lambda cluster: len(cluster.counts))
+        total = 0
+        for fingerprint, n in left.counts.items():
+            row = table.get(fingerprint)
+            if row:
+                total += n * sum(factor * right.counts.get(other, 0) for other, factor in row.items())
+        return total
+
+    def merge(small, big, cid):
+        """把小簇并进大簇；簇 id 记作并集里最小的商品下标，排除关系一并归并。"""
+        small_cluster, big_cluster = clusters.pop(small), clusters.pop(big)
+        big_cluster.members.extend(small_cluster.members)
+        for key in big_cluster.members:
+            where[key] = cid
+        for fingerprint, n in small_cluster.counts.items():
+            big_cluster.counts[fingerprint] = big_cluster.counts.get(fingerprint, 0) + n
+        big_cluster.partners |= small_cluster.partners
+        clusters[cid] = big_cluster
+
+    def pair_key(first, second):
+        return (first, second) if first < second else (second, first)
+
+    def blocked(first, second):
+        """排除对跨越这两簇（一端在 first 里、另一端在 second 里）：禁止合并。"""
+        return any(where[partner] == second for partner in clusters[first].partners)
+
+    # 候选对＝有正边跨越的簇对（gain 要严格大于 0，没有正边跨越的合并必被拒）；值＝
+    # 正边跨越数 − weight×负边跨越数，进一个小根堆取最大，并列按簇 id 对字典序。
+    # 堆里允许有陈旧项：端点被并走的对当场删掉、被重算覆盖的项按值不等辨认丢弃——
+    # 3000 商品、数千条正边的量级下每轮重扫全部候选是平方级的，堆只付「并一次、
+    # 改一圈」的钱（同一输入的结果与逐轮重扫一致：被弃的项都选不过当前值）。
+    pairs = {}
+    adjacent = defaultdict(set)      # 簇 id → 有候选关系的簇 id
+    heap = []
+
+    def refresh(first, second):
+        key = pair_key(first, second)
+        positive_count = crossing(key[0], key[1], positive_of)
+        negative_count = crossing(key[0], key[1], negative_of)
+        pairs[key] = (positive_count, negative_count)
+        heapq.heappush(heap, (weight*negative_count - positive_count, key))
+        adjacent[key[0]].add(key[1])
+        adjacent[key[1]].add(key[0])
+
+    candidates = set()
+    for fingerprint, row in positive_of.items():
+        for other in row:
+            for left in version_members.get(fingerprint, ()):
+                for right in version_members.get(other, ()):
+                    first, second = where[left], where[right]
+                    if first != second:
+                        candidates.add(pair_key(first, second))
+    for key in sorted(candidates):
+        refresh(*key)
+
+    while heap:
+        entry, key = heapq.heappop(heap)
+        current = pairs.get(key)
+        if current is None or weight*current[1] - current[0] != entry:
+            continue                                   # 陈旧项：端点已并走，或这对已被重算
+        if entry >= 0:
+            break                                      # 最大 gain 也 ≤ 0（并列时 id 对小者先到）
+        if blocked(*key):
+            del pairs[key]                             # 排除对挡住：这对永远并不得（禁并只增不减）
+            continue
+        first, second = key
+        small, big = ((first, second) if len(clusters[first].members) <= len(clusters[second].members)
+                      else (second, first))
+        cid = min(first, second)
+        merge(small, big, cid)
+        # 被并走的两簇的旧候选对整体作废（含这两簇彼此那对），再按新簇把邻接重算一圈。
+        stale = (adjacent.pop(small, set()) | adjacent.pop(big, set())) - {small, big}
+        pairs.pop(pair_key(small, big), None)
+        for other in stale:
+            adjacent[other].discard(small)
+            adjacent[other].discard(big)
+            pairs.pop(pair_key(small, other), None)
+            pairs.pop(pair_key(big, other), None)
+        adjacent[cid] = set()
+        for other in sorted(stale):
+            if not blocked(cid, other):
+                refresh(cid, other)
+
+    used_ids = {group['id'] for group in groups}
+    serial = 0
+    for cid in sorted(clusters):
+        while 'M'+str(serial) in used_ids:
+            serial += 1
+        group = {'id': 'M'+str(serial), 'confirmed': False, 'members': []}
+        serial += 1
+        for key in sorted(clusters[cid].members, key=position.get):
+            group['members'].append({'shop_key': by_key[key]['shop_key'], 'offer_id': by_key[key]['offer_id']})
+        output.append(group)
+    original_ids = {frozenset(identity(member) for member in group['members']): group['id']
+                    for group in groups}
+    for group in output:
+        original = original_ids.get(frozenset(identity(member) for member in group['members']))
+        if original:
+            group['id'] = original
+    previous_order = {group['id']: i for i, group in enumerate(groups)}
+    member_order = {identity(member): i for i, group in enumerate(groups) for member in group['members']}
+    output.sort(key=lambda group: previous_order.get(
+        group['id'], min(member_order.get(identity(member), len(groups)) for member in group['members'])))
+    return output
+
+
+def _judged_edges(conn, signature):
+    """本机署名下**已判**的全部边：正边（同款且高把握）与负边（已判但非正，含低把握）。
+
+    一次读全（票 19）：装配要正负两种边，分两趟读同一张表是白跑。**方向保守**——低把握
+    算负边，与 E2 标定实测的口径一致。量级与用法：行数与判断对数同阶（2026-09-22 实测
+    3786 行、3000 商品量级下几十毫秒），装配跑在判断之后、一次运行一次，不做增量读。
+    """
+    positive, negative = set(), set()
     for a, b, raw in conn.execute('SELECT evidence_a,evidence_b,result FROM judgments WHERE signature=?',
                                   (signature,)):
         result = json.loads(raw)
+        edge = frozenset((a, b))
         if result['same'] and result['confidence'] >= .8:
-            positive.add(frozenset((a, b)))
-    return positive
+            positive.add(edge)
+        else:
+            negative.add(edge)
+    return positive, negative
+
+
+def _positive_evidence(conn, signature):
+    """本机署名下的正例证据（同款且高把握）：异署名的判断只作参考，不进这个集合（票 02）。"""
+    return _judged_edges(conn, signature)[0]
 
 
 # 判断表的主键是 (版本对, 署名摘要)：同一对证据版本按署名各留各的（票 02）。
@@ -705,15 +913,12 @@ class MatchingService:
             # 一次运行的用量收尾行（对齐采集与交换台的「一行汇总」风格）。
             log.info('%s', _usage_summary(usage, products, eligible, pair_members, cached,
                                           errors, reason))
-            positive = set()
             uncertain = set()
             eligible_by_id = {identity(p): p for p in eligible}
             for (a, b), pair in pair_members.items():
                 if pair not in cached:
                     continue
                 result, source, judged_by = cached[pair]
-                if result['same'] and result['confidence'] >= .8:
-                    positive.add(frozenset((a, b)))
                 if result['confidence'] < .8:
                     uncertain.update((a, b))
                 for member in (a, b):
@@ -739,52 +944,18 @@ class MatchingService:
             for p in products:
                 p['matching_state'] = state_of_status(p['matching_status'])
             excluded = {frozenset(pair) for pair in excluded}
-            positive -= excluded
             by_id = {identity(p): p for p in products}
-            fingerprints = {key: version(p) for key, p in by_id.items()}
-            # Keep previously judged relationships even when new recall candidates displace them.
-            known_positive = _positive_evidence(conn, local)
-            neighbors = defaultdict(set)
-            for relation in known_positive:
-                for a in relation:
-                    neighbors[a].update(relation)
-
-            def matches(a, b):
-                return a != b and frozenset((a, b)) not in excluded and frozenset((fingerprints[a], fingerprints[b])) in known_positive
-
-            protected = [g for g in groups if g['confirmed'] or g.get('adjusted')]
-            assigned = {identity(m) for g in protected for m in g['members']}
-            output = [dict(g) for g in protected]
-            groups_by_version = defaultdict(dict)
-            order = {id(g): i for i, g in enumerate(output)}
-            used_ids = {g['id'] for g in groups}
-            serial = 0
-            for p in products:
-                key = identity(p)
-                if key in assigned:
-                    continue
-                options = {gid: g for fingerprint in neighbors[fingerprints[key]] for gid, g in groups_by_version[fingerprint].items()}
-                target = next((g for g in sorted(options.values(), key=lambda g: order[id(g)]) if all(matches(key, identity(m)) for m in g['members'])), None)
-                if target is None:
-                    while 'M'+str(serial) in used_ids:
-                        serial += 1
-                    target = {'id': 'M'+str(serial), 'confirmed': False, 'members': [], 'machine': ''}
-                    serial += 1
-                    output.append(target)
-                    order[id(target)] = len(order)
-                target['members'].append({'shop_key': p['shop_key'], 'offer_id': p['offer_id']})
-                groups_by_version[fingerprints[key]][id(target)] = target
-                assigned.add(key)
-            original_ids = {frozenset(identity(m) for m in g['members']): g['id'] for g in groups}
+            # 已判的正负两种边一次读全（票 19）：装配在判断之后、一次运行一次。
+            positive_edges, negative_edges = _judged_edges(conn, local)
+            started = time.monotonic()
+            output = assemble_groups(products, groups, positive_edges, negative_edges, excluded)
+            log.info('装配完成：耗时 %.2f 秒 · %d 组（≥2 件 %d 组 · 最大 %d 件）',
+                     time.monotonic() - started, len(output),
+                     sum(1 for group in output if len(group['members']) > 1),
+                     max((len(group['members']) for group in output), default=0))
             for g in output:
                 summarize_group(g, by_id)
-                original = original_ids.get(frozenset(identity(m) for m in g['members']))
-                if original:
-                    g['id'] = original
-            previous_order = {g['id']: i for i, g in enumerate(groups)}
-            member_order = {identity(m): i for i, g in enumerate(groups) for m in g['members']}
-            output.sort(key=lambda g: previous_order.get(g['id'], min(member_order.get(identity(m), len(groups)) for m in g['members'])))
-            update_candidates(products, output, known_positive, excluded)
+            update_candidates(products, output, positive_edges, excluded)
             conn.execute('INSERT INTO recommendations(payload) VALUES (?)', (json.dumps({'groups': output, 'products': [{'identity': identity(p), 'version': version(p), 'candidates': p['candidate_groups'], 'status': p['matching_status']} for p in products]}, ensure_ascii=False),))
             for image_hash, description in self.judge.captions.items():
                 conn.execute('INSERT OR IGNORE INTO visual_evidence VALUES (?,?,?)',

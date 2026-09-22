@@ -71,7 +71,7 @@ class MatchingUsageTests(unittest.TestCase):
     def test_summary_counts_products_pairs_calls_tokens_and_cache_hits(self):
         products = [distinct(i) for i in (1, 2, 3)]
         _, lines = self.run_suggest(products)
-        summary = lines[-1]
+        summary = test_matching.usage_line(lines)
         self.assertTrue(summary.startswith('本次判断用量：'), summary)
         # 3 个商品两两都被召回（top-6 覆盖全），3 次判断 + 1 次视觉核验 = 4 次调用。
         self.assertIn('商品 3（可判 3）', summary)
@@ -92,15 +92,16 @@ class MatchingUsageTests(unittest.TestCase):
         progress = [line for line in lines if line.startswith('判断进度：')]
         self.assertTrue(progress, '应每批落一次盘、每批打一行进度')
         self.assertTrue(progress[0].startswith('判断进度：新判 20/%d 对' % expected), progress[0])
-        self.assertIn('新判 %d · 失败 0 对' % expected, lines[-1])
-        self.assertIn('调用 %d 次（判断 %d/描述 0/核验 1）' % (expected+1, expected), lines[-1])
+        summary = test_matching.usage_line(lines)
+        self.assertIn('新判 %d · 失败 0 对' % expected, summary)
+        self.assertIn('调用 %d 次（判断 %d/描述 0/核验 1）' % (expected+1, expected), summary)
 
     def test_missing_usage_is_marked_not_counted_as_zero(self):
         plain = test_matching.ModelTransport()
         patch('bestseller_monitor.matching.urlopen', side_effect=plain).start()
         products = [distinct(i) for i in (1, 2, 3)]
         _, lines = self.run_suggest(products)
-        summary = lines[-1]
+        summary = test_matching.usage_line(lines)
         self.assertIn('输入 - 输出 - tok', summary)
         self.assertIn('供应商缓存命中 -', summary)
         self.assertIn('未提供用量 4 次', summary)
@@ -110,7 +111,7 @@ class MatchingUsageTests(unittest.TestCase):
         service = MatchingService(self.config)
         service.suggest(products, test_matching.singles(products))
         _, lines = self.run_suggest(products, service=service, reason='重试')
-        summary = lines[-1]
+        summary = test_matching.usage_line(lines)
         self.assertTrue(summary.startswith('本次判断用量（重试）：'), summary)
         self.assertIn('本机命中 3', summary)
         self.assertIn('新判 0', summary)
@@ -122,7 +123,7 @@ class MatchingUsageTests(unittest.TestCase):
         patch('bestseller_monitor.matching.urlopen', side_effect=transport).start()
         products = [distinct(i) for i in (1, 2, 3)]
         _, lines = self.run_suggest(products)
-        summary = lines[-1]
+        summary = test_matching.usage_line(lines)
         self.assertIn('失败 1 对', summary)
         # 3 次比较（1 次响应坏）+ 1 次核验 = 4 次调用；token 只来自 3 次可用响应。
         self.assertIn('调用 4 次（判断 3/描述 0/核验 1）', summary)

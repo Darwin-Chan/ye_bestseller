@@ -157,15 +157,15 @@ class FloorSuggestTests(unittest.TestCase):
         _, groups, lines = self.suggest(products)
         # 只判够得着下限的两对（1-3、2-4 都判成同款）：其余三对被挡在门外。
         self.assertEqual(self.compares(), 2)
-        # 被挡下的对不产生任何边：2 只与 4 同组，不与 1、3 同组（它们在没下限时是三件一组）。
+        # 被挡下的对不产生任何边：2 只与 4 同组，不与 1、3 同组（放开下限时四件合成一组——缺边不阻塞，票 19）。
         self.assertEqual(self.sizes(groups), [1, 1, 2, 2])
         grouped = {frozenset(member['offer_id'] for member in group['members'])
                    for group in groups if len(group['members']) == 2}
         self.assertEqual(grouped, {frozenset(('1', '3')), frozenset(('2', '4'))})
         # 收尾行的「召回 N 对」仍按全部召回对计（5 对），挡下另起一行（3 对）。
-        self.assertIn('召回 5 对', lines[-1])
-        self.assertIn('新判 2', lines[-1])
-        self.assertIn('失败 0', lines[-1])
+        self.assertIn('召回 5 对', test_matching.usage_line(lines))
+        self.assertIn('新判 2', test_matching.usage_line(lines))
+        self.assertIn('失败 0', test_matching.usage_line(lines))
         self.assertIn('低于判断下限挡下 3 对', '\n'.join(lines))
         # 被挡下的对不写判断行。
         with closing(sqlite3.connect(self.config().cache)) as conn:
@@ -200,9 +200,9 @@ class FloorSuggestTests(unittest.TestCase):
         self.assertEqual([p['matching_status'] for p in products[4:]], [STATUS_BELOW_FLOOR]*2)
         self.assertEqual([p['matching_status'] for p in products[:4]], [STATUS_CACHE]*4)
         # 被挡下的对每趟都照旧挡下（召回是每趟重算的），只是不花调用。
-        self.assertIn('本机命中 2', lines[-1])
-        self.assertIn('新判 0', lines[-1])
-        self.assertIn('召回 5 对', lines[-1])
+        self.assertIn('本机命中 2', test_matching.usage_line(lines))
+        self.assertIn('新判 0', test_matching.usage_line(lines))
+        self.assertIn('召回 5 对', test_matching.usage_line(lines))
 
     def test_a_judged_pair_below_the_floor_is_still_a_cache_hit(self):
         """下限只管花不花钱：已判过的对照旧命中缓存，不算被挡下、也不摘掉它的边（ADR-0040 决策 3）。
@@ -215,9 +215,9 @@ class FloorSuggestTests(unittest.TestCase):
         self.transport.calls.clear()
         _, groups, lines = self.suggest(products, service=service)    # 再按缺省下限 4 跑
         self.assertEqual(self.compares(), 0)
-        self.assertEqual(self.sizes(groups), [1, 2, 3])               # 与零下限那趟逐组一致
-        self.assertIn('本机命中 5', lines[-1])
-        self.assertIn('新判 0', lines[-1])
+        self.assertEqual(self.sizes(groups), [2, 4])                  # 与零下限那趟逐组一致
+        self.assertIn('本机命中 5', test_matching.usage_line(lines))
+        self.assertIn('新判 0', test_matching.usage_line(lines))
         self.assertNotIn('低于判断下限挡下', '\n'.join(lines))
         self.assertEqual([p['matching_status'] for p in products[4:]], [STATUS_CACHE]*2)
 
@@ -227,17 +227,18 @@ class FloorSuggestTests(unittest.TestCase):
         products = self.scenario()
         self.suggest(products)
         _, _, lines = self.suggest(products)
-        self.assertIn('失败 2 对', lines[-1])
+        self.assertIn('失败 2 对', test_matching.usage_line(lines))
         self.assertIn('低于判断下限挡下 3 对', '\n'.join(lines))
         self.assertEqual([p['matching_status'] for p in products[4:]], [STATUS_BELOW_FLOOR]*2)
         with closing(sqlite3.connect(self.config().cache)) as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM judgments').fetchone()[0], 0)
 
-    def test_zero_floor_reproduces_the_previous_behaviour(self):
+    def test_zero_floor_groups_by_judged_edges_alone(self):
+        """零下限＝五对全判：1-2-3-4 一组（4 靠与 2 的正边进组，与 1／3 没判过的边不再阻塞）、5-6 一对。"""
         products = self.scenario()
         _, groups, lines = self.suggest(products, min_score=0)
         self.assertEqual(self.compares(), 5)
-        self.assertEqual(self.sizes(groups), [1, 2, 3])   # 1-2-3 成团、5-6 成对
+        self.assertEqual(self.sizes(groups), [2, 4])
         self.assertNotIn('低于判断下限挡下', '\n'.join(lines))
         self.assertEqual([p['matching_status'] for p in products], [STATUS_MODEL]*6)
 

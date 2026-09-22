@@ -37,6 +37,11 @@ def singles(products):
                  confirmed=False, sales=p['sales']) for i, p in enumerate(products)]
 
 
+def usage_line(lines):
+    """一次运行日志里的「本次判断用量」收尾行（装配的汇总行排在它后面，票 19）。"""
+    return next(line for line in lines if line.startswith('本次判断用量'))
+
+
 class ModelTransport:
     def __init__(self):
         self.calls = []
