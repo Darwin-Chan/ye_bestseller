@@ -1,6 +1,6 @@
 # 0044. 长时判断的可见面与停止出口：进度遮罩 · 异步受理 · 关窗＝停下
 
-- 状态：已接受（2026-09-23；规格与票面见 `.scratch/matching-progress/`，票 01–03 待实施）
+- 状态：已接受，三票已落地（2026-09-23；规格与票面见 `.scratch/matching-progress/`，落地实况见文末）
 - 日期：2026-09-23
 
 ## 背景
@@ -104,10 +104,12 @@ F1 之下窗口与运行同生共死，"锁与工作同寿命"自然成立；最
 2026-09-23 三票全部落地、全部在 main：票 01（异步受理、判断进度与遮罩）`5880c61` ＋ 双轴审查
 整改 `4c6e60c`；票 02（停止匹配、停止后的落态、重试复用同一块遮罩）`34d8fc6`——`wait_terminal`
 返回即不再有任何写入的契约由 `tests/test_stop_matching.py` 钉住；票 03（`analyze.py` 的 closing
-钩子、原生确认框、收尾完成才关窗放锁）`27e4899`。票 01/02 与页面遮罩那一半由本线实施，票 03 与
-ADR-0043 由「同款匹配调用量与耗时估算」会话实施，两边靠 `request_stop`／读数 `state=stopping`／
-`wait_terminal` 的硬语义对接（`AnalysisService.in_flight_job()` 是关窗那层的发现读，落在票 02 的
-文件里）。验收与实测记录见本线工单 `.scratch/matching-progress/` 与证据日志
-`.scratch/logs/tickets/matching-progress/`（都不进版本库）：票 02 的提交树在隔离副本跑全量
-**1271 项通过**；票 03 的验收由该会话自认，记录见 `issues/03` 的 Comments。挂账：真实 DeepSeek
-模型的端到端验收仍未执行（`docs/ops/畅销品分析验收记录.md` 里已标）。
+钩子、原生确认框、收尾完成才关窗放锁）`27e4899` ＋ 审查整改 `d67dad5`（停止原语抽成
+`_stop_and_wait`、确认框可重入防叠框、确认文案与页面同用「预计时长正在估算」；接口与页面
+遮罩那半未动）。票 01/02 与页面遮罩那一半由本线实施，票 03 与 ADR-0043 由「同款匹配调用量
+与耗时估算」会话实施，两边靠 `request_stop`／读数 `state=stopping`／`wait_terminal` 的硬语义
+对接（`AnalysisService.in_flight_job()` 是关窗那层的发现读，落在票 02 的文件里）。验收与实测
+记录见本线工单 `.scratch/matching-progress/` 与证据日志 `.scratch/logs/tickets/matching-progress/`
+（都不进版本库）：票 02 的提交树在隔离副本跑全量 **1271 项通过**；票 03（含审查整改）的验收由
+该会话自认，记录见 `issues/03` 的 Comments。挂账：真实 DeepSeek 模型的端到端验收仍未执行
+（`docs/ops/畅销品分析验收记录.md` 里已标）。
