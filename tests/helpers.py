@@ -201,19 +201,21 @@ def insert_inventory_rows(conn, rows) -> None:
 
 
 def insert_sku_image(conn, *, day, shop_key="A01", offer_id="11", sku_id="s1",
-                     content_hash=None, image_error=None, url=None, source=None) -> None:
+                     observed_at=None, content_hash=None, image_error=None, url=None,
+                     source=None) -> None:
     """按 SKU 图流水的列集直接写一行（列集只在 helpers 里一份，写完即提交）。
 
     与 `insert_inventory_rows` 同一类用法：给**不经过采集路径**的流水行用（导出/汇总
-    用例的夹具）。观测时刻取当天 10:00（北京时刻）；`source` 缺省专属图，空图与代填
-    照 `db.SKU_IMAGE_*` 的三态显式给。
+    用例的夹具）。观测时刻缺省当天 10:00（北京时刻）；汇总用例要按时刻定 claim 与去重
+    键时显式给 `observed_at`。`source` 缺省专属图，空图与代填照 `db.SKU_IMAGE_*` 的
+    三态显式给。
     """
     conn.execute(
         "INSERT INTO sku_image_versions(shop_key, offer_id, sku_id, observed_at, "
         "observed_date, image_url, content_hash, image_error, source) "
         "VALUES (?,?,?,?,?,?,?,?,?)",
-        (shop_key, offer_id, sku_id, f"{day}T10:00:00+08:00", day, url, content_hash,
-         image_error, source or SKU_IMAGE_OWN))
+        (shop_key, offer_id, sku_id, observed_at or f"{day}T10:00:00+08:00", day, url,
+         content_hash, image_error, source or SKU_IMAGE_OWN))
     conn.commit()
 
 

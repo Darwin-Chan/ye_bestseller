@@ -23,7 +23,7 @@ from bestseller_monitor import db as dbmod
 from bestseller_monitor import export, merge, plan_step, rounds
 from bestseller_monitor.db import CST
 from bestseller_monitor.image_store import ImageStoreError, image_key
-from helpers import new_round, product_picture
+from helpers import insert_sku_image, new_round, product_picture
 
 JPEG = b"jpeg-bytes-1"
 PNG = b"png-bytes-2"
@@ -41,10 +41,14 @@ _UNSET = object()
 
 
 def sku_image(sku_id="s1", *, observed_at=D16_0900, day=DAY, content_hash=H1, url=None,
-              image_error=None, source="专属图", shop_key="A01", offer_id="11"):
-    """一条 SKU 图流水行的九列（列序照本机表；`id` 不进包）。"""
-    return (shop_key, offer_id, sku_id, observed_at, day, url, content_hash, image_error,
-            source)
+              image_error=None, source="专属图", shop_key="A01", offer_id="11") -> dict:
+    """一条 SKU 图流水行的夹具参数——交给 `helpers.insert_sku_image` 写（列集只在那一处）。
+
+    观测时刻显式给（缺省这台机器的 claim 时刻）：汇总用例靠它定 claim 与去重键。
+    """
+    return {"day": day, "shop_key": shop_key, "offer_id": offer_id, "sku_id": sku_id,
+            "observed_at": observed_at, "url": url, "content_hash": content_hash,
+            "image_error": image_error, "source": source}
 
 
 def machine_world(claim_at, *, stock, product_name="商品一", inventory_name=_UNSET,
@@ -101,9 +105,8 @@ def machine_source(path: pathlib.Path, *, shops=(), products=(), skus=(), invent
     conn.executemany("INSERT INTO product_information_versions(shop_key, offer_id, observed_at, "
                      "observed_date, product_name, image_url, content_hash, image_error) "
                      "VALUES (?,?,?,?,?,?,?,?)", versions)
-    conn.executemany("INSERT INTO sku_image_versions(shop_key, offer_id, sku_id, observed_at, "
-                     "observed_date, image_url, content_hash, image_error, source) "
-                     "VALUES (?,?,?,?,?,?,?,?,?)", sku_images)
+    for row in sku_images:              # SKU 图流水的列集在 helpers 一处（04 审查的门规）
+        insert_sku_image(conn, **row)
     conn.commit()
     conn.close()
 
@@ -640,16 +643,18 @@ class ProjectionTests(MergeCase):
 
 
 def degrade_to_v1(package: pathlib.Path) -> pathlib.Path:
-    """把一个真包演成 v1 旧包：新表 DROP、元数据里的 `rows_` 键删掉。
+    """把一个真包演成 v1 旧包：新表 DROP、元数据里的 `rows_` 键删掉、口径版本改回 v1。
 
-    照 ProjectionTests 那组兼容用例的改包手法（在包文件上动手、不改打包代码）——
-    上一版程序发的包长这样：没有 SKU 图流水，元数据里也没有它的行数键。
+    照 ProjectionTests 那组兼容用例的改包手法（在包文件上动手、不改打包代码）与
+    test_export 那条「上一版格式的包」的造法——上一版程序发的包就长这样：没有 SKU 图
+    流水，元数据里也没有它的行数键。
     """
     path = package.with_name(package.stem + "-v1.db")
     shutil.copyfile(package, path)
     sqlite_conn = sqlite3.connect(path)
     sqlite_conn.execute("DROP TABLE sku_image_versions")
     sqlite_conn.execute("DELETE FROM exchange_meta WHERE key='rows_sku_image_versions'")
+    sqlite_conn.execute("UPDATE exchange_meta SET value='v1' WHERE key='format_version'")
     sqlite_conn.commit()
     sqlite_conn.close()
     return path
@@ -1014,16 +1019,13 @@ class EndToEndTests(MergeCase):
         conn = self.local("m4")
         source_conn = dbmod.open(source)
         self.addCleanup(source_conn.close)
-        columns = ("shop_key, offer_id, sku_id, observed_at, observed_date, image_url, "
-                   "content_hash, image_error, source")
 
         result = self.import_(conn, package, machine_id="m4", store=store)
 
         self.assertFalse(result.failed, result.failure)
         self.assertEqual(
-            self.rows(conn, f"SELECT {columns} FROM sku_image_versions ORDER BY sku_id"),
-            self.rows(source_conn, f"SELECT {columns} FROM sku_image_versions ORDER BY sku_id"),
-            "两端 SKU 图流水逐行一致")
+            dump(conn)["sku_image_versions"], dump(source_conn)["sku_image_versions"],
+            "两端 SKU 图流水逐行一致（列集与行序取自包格式定义那一处）")
         self.assertEqual(
             self.rows(conn, "SELECT sku_id, source FROM sku_image_versions ORDER BY sku_id"),
             [("blank", "无图"), ("filled", "主图代填"), ("own", "专属图")],
