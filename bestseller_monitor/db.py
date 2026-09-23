@@ -1616,6 +1616,53 @@ class Database:
             self.conn.rollback()
             raise
 
+    def retry_sku_image(self, version_id: int) -> dict:
+        """重试某个 SKU 图失败行的最新版本：只补图，不动库存，不回填历史日期。
+
+        守卫同主图规：对象必须是失败行，且仍是那条（店铺、商品、SKU）的最新版本——
+        不是最新就当场拒绝。取到的新字节是重试当下的新证据：新开一行，绝不回填、
+        不覆盖原失败事实。重试只碰图——不重抓库存、不改失败率、不占详情重试账。
+        """
+        from .product_images import acquire
+        version = self.conn.execute(
+            'SELECT * FROM sku_image_versions WHERE id=?', (version_id,)).fetchone()
+        if version is None or not version['image_error']:
+            raise ValueError('只能重试失败的 SKU 图版本')
+        image = acquire(version['image_url'])
+        try:
+            self.conn.execute('BEGIN IMMEDIATE')
+            latest = self.conn.execute(
+                'SELECT id FROM sku_image_versions WHERE shop_key=? AND offer_id=? '
+                'AND sku_id=? ORDER BY observed_date DESC, observed_at DESC, id DESC LIMIT 1',
+                (version['shop_key'], version['offer_id'], version['sku_id'])).fetchone()
+            if latest['id'] != version_id:
+                raise ValueError('已有更新 SKU 图版本，请重试最新失败版本')
+            if 'content' in image:
+                self.conn.execute('INSERT OR IGNORE INTO product_image_assets VALUES (?,?,?)',
+                                  (image['hash'], image['mime'], image['content']))
+            now = utcnow()
+            # 同一秒里、同一图片结果的重试只留一条（SKU_IMAGE_DEDUPE_INDEX）：被忽略时
+            # 那次观测已在案，按去重键把已有那一行的 id 交回去。
+            self.conn.execute(
+                'INSERT OR IGNORE INTO sku_image_versions '
+                '(shop_key,offer_id,sku_id,observed_at,observed_date,image_url,content_hash,'
+                'image_error,source) VALUES (?,?,?,?,?,?,?,?,?)',
+                (version['shop_key'], version['offer_id'], version['sku_id'], now, cst_date(now),
+                 version['image_url'], image.get('hash'), image.get('error'), SKU_IMAGE_OWN))
+            new_version = self.conn.execute(
+                "SELECT id FROM sku_image_versions WHERE "
+                + " AND ".join(f"{column}=?" for column in SKU_IMAGE_DEDUPE_KEY)
+                + " ORDER BY id DESC LIMIT 1",
+                (version['shop_key'], version['offer_id'], version['sku_id'], now,
+                 image.get('hash') or '', image.get('error') or ''),
+            ).fetchone()['id']
+            self.conn.commit()
+            return {'retried_sku_image': version_id, 'new_version': new_version,
+                    'image_error': image.get('error')}
+        except Exception:
+            self.conn.rollback()
+            raise
+
     def _upsert_skus(self, rows: list[dict]) -> None:
         now = utcnow()
         sku_rows = [

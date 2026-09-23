@@ -45,13 +45,23 @@ def main():
     import argparse
     from pathlib import Path
     from .db import connect, Database
-    parser = argparse.ArgumentParser(description='重试最新失败商品图片；不重抓库存，不回填历史日期')
+    parser = argparse.ArgumentParser(
+        description='重试最新失败的图片记录：商品主图按版本行、SKU 图按流水行；'
+                    '不重抓库存，不回填历史日期')
     parser.add_argument('--database', type=Path, required=True)
-    parser.add_argument('--retry-version', type=int, required=True)
+    retry = parser.add_mutually_exclusive_group(required=True)
+    retry.add_argument('--retry-version', type=int,
+                       help='商品主图版本行编号（product_information_versions.id）')
+    retry.add_argument('--retry-sku-image', type=int,
+                       help='SKU 图流水行编号（sku_image_versions.id）')
     args = parser.parse_args()
     conn = connect(args.database)
     try:
-        print(Database(conn).retry_product_image(args.retry_version))
+        database = Database(conn)
+        if args.retry_sku_image is not None:
+            print(database.retry_sku_image(args.retry_sku_image))
+        else:
+            print(database.retry_product_image(args.retry_version))
     finally:
         conn.close()
 

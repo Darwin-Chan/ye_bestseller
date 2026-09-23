@@ -906,6 +906,174 @@ class DbTests(unittest.TestCase):
         count = self.conn.execute("SELECT COUNT(*) FROM sku_image_versions").fetchone()[0]
         self.assertEqual(count, 0)
 
+    def test_retry_refuses_a_sku_image_row_that_is_not_the_latest(self):
+        """守卫同主图规（票 03）：那条（店铺、商品、SKU）上已有更新的 SKU 图版本时，
+        过期的失败行不被重试——当场拒绝，文案照主图「已有更新版本」的形状。"""
+        rid = new_round(self.db)
+        blue = product_picture('blue')
+        base = dict(
+            round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
+            offer_id="11", product_url="https://a/offer/11.html", list_title="商品",
+            detail_title="商品详情", main_image_url=None,
+        )
+        self.db.submit_inventory_snapshot(
+            **base, collected_at="2026-09-05T02:00:00+00:00", attempt=1,
+            sku_rows=[{"sku_id": "s1", "sku_name": "蓝", "sku_stock": 1,
+                       "sku_image_evidence": {"url": "https://img.example/blue",
+                                              "source": SKU_IMAGE_OWN, "error": "offline"}}],
+        )
+        failed_id = self.conn.execute(
+            "SELECT MAX(id) FROM sku_image_versions").fetchone()[0]
+        self.db.submit_inventory_snapshot(
+            **base, collected_at="2026-09-06T02:00:00+00:00", attempt=2,
+            sku_rows=[{"sku_id": "s1", "sku_name": "蓝", "sku_stock": 1,
+                       "sku_image_evidence": {"url": "https://img.example/blue",
+                                              "source": SKU_IMAGE_OWN,
+                                              "hash": blue["hash"], "mime": blue["mime"],
+                                              "content": blue["content"]}}],
+        )
+
+        with patch("bestseller_monitor.product_images.acquire", return_value=blue):
+            with self.assertRaises(ValueError) as ctx:
+                self.db.retry_sku_image(failed_id)
+        self.assertEqual(str(ctx.exception), "已有更新 SKU 图版本，请重试最新失败版本")
+        count = self.conn.execute("SELECT COUNT(*) FROM sku_image_versions").fetchone()[0]
+        self.assertEqual(count, 2, "拒绝时不新开行")
+
+    def test_retrying_the_latest_failed_sku_image_opens_a_version_at_retry_time(self):
+        """重试成功是重试当下的新证据（票 03）：按重试时刻新开一行、字节进资产池、
+        来源仍是专属图；原失败行原样保留——不回填、不覆盖那次失败的事实。"""
+        rid = new_round(self.db)
+        blue = product_picture('blue')
+        self.db.submit_inventory_snapshot(
+            round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
+            offer_id="11", product_url="https://a/offer/11.html", list_title="商品",
+            detail_title="商品详情", main_image_url=None,
+            collected_at="2026-09-05T02:00:00+00:00", attempt=1,
+            sku_rows=[{"sku_id": "s1", "sku_name": "蓝", "sku_stock": 1,
+                       "sku_image_evidence": {"url": "https://img.example/blue",
+                                              "source": SKU_IMAGE_OWN, "error": "offline"}}],
+        )
+        failed_id = self.conn.execute(
+            "SELECT MAX(id) FROM sku_image_versions").fetchone()[0]
+
+        with patch("bestseller_monitor.product_images.acquire",
+                   side_effect=lambda url: blue if url == "https://img.example/blue"
+                   else {"error": f"意外的地址：{url}"}), \
+             patch("bestseller_monitor.db.utcnow",
+                   return_value="2026-09-18T04:00:00+00:00"):
+            retried = self.db.retry_sku_image(failed_id)
+
+        rows = self.conn.execute("SELECT * FROM sku_image_versions ORDER BY id").fetchall()
+        self.assertEqual(len(rows), 2, "原失败行 + 重试新开的一行")
+        new = rows[1]
+        self.assertEqual(retried, {"retried_sku_image": failed_id,
+                                   "new_version": new["id"], "image_error": None})
+        self.assertEqual(new["observed_at"], "2026-09-18T04:00:00+00:00")
+        self.assertEqual(new["observed_date"], "2026-09-18", "观测日期=重试当下，不回填")
+        self.assertEqual(new["image_url"], "https://img.example/blue", "地址照抄原失败行")
+        self.assertEqual(new["content_hash"], blue["hash"])
+        self.assertIsNone(new["image_error"])
+        self.assertEqual(new["source"], SKU_IMAGE_OWN)
+        failed = rows[0]
+        self.assertEqual(failed["image_error"], "offline", "原失败行保留")
+        self.assertIsNone(failed["content_hash"])
+        self.assertEqual(failed["observed_date"], "2026-09-05")
+        assets = {row[0] for row in
+                  self.conn.execute("SELECT content_hash FROM product_image_assets")}
+        self.assertEqual(assets, {blue["hash"]}, "重试取到的字节进资产池")
+
+    def test_retrying_a_sku_image_touches_nothing_but_the_image(self):
+        """重试只碰图（票 03）：库存行、快照、图片版本行、轮次与详情机会账都原样不动。
+        库存不重抓、历史日期不回填、失败率的输入不变、不占详情重试账。"""
+        rid = new_round(self.db)
+        blue = product_picture('blue')
+        self.db.submit_inventory_snapshot(
+            round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
+            offer_id="11", product_url="https://a/offer/11.html", list_title="商品",
+            detail_title="商品详情", main_image_url=None,
+            collected_at="2026-09-05T02:00:00+00:00", attempt=1,
+            sku_rows=[{"sku_id": "s1", "sku_name": "蓝", "sku_stock": 7,
+                       "sku_image_evidence": {"url": "https://img.example/blue",
+                                              "source": SKU_IMAGE_OWN, "error": "offline"}}],
+        )
+        self.db.add_detail_opportunity(rid, "A", "identity-1")
+        failed_id = self.conn.execute(
+            "SELECT MAX(id) FROM sku_image_versions").fetchone()[0]
+        tables = ("inventory", "snapshots", "product_information_versions",
+                  "detail_opportunities", "rounds")
+        before = {table: [tuple(row) for row in self.conn.execute(f"SELECT * FROM {table}")]
+                  for table in tables}
+        tally_before = self.db.round_tally(rid)
+
+        with patch("bestseller_monitor.product_images.acquire", return_value=blue), \
+             patch("bestseller_monitor.db.utcnow",
+                   return_value="2026-09-18T04:00:00+00:00"):
+            self.db.retry_sku_image(failed_id)
+
+        for table in tables:
+            self.assertEqual(
+                [tuple(row) for row in self.conn.execute(f"SELECT * FROM {table}")],
+                before[table], f"重试不该动 {table}")
+        self.assertEqual(self.db.round_tally(rid), tally_before, "失败率的输入不变")
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM sku_image_versions").fetchone()[0], 2,
+            "重试本身照常落一行——上面的「不动」不是因为它没跑")
+
+    def test_only_failed_sku_image_rows_can_be_retried(self):
+        """重试对象只能是失败行（票 03）：没失败过的行（这里是空图行）不重下——
+        这条通道对着的永远是记账为失败的那些行。"""
+        rid = new_round(self.db)
+        self.db.submit_inventory_snapshot(
+            round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
+            offer_id="11", product_url="https://a/offer/11.html", list_title="商品",
+            detail_title="商品详情", main_image_url=None,
+            collected_at="2026-09-05T02:00:00+00:00", attempt=1,
+            sku_rows=[{"sku_id": "s1", "sku_name": "随机", "sku_stock": 1,
+                       "sku_image_evidence": {"url": None, "source": SKU_IMAGE_NONE}}],
+        )
+        row_id = self.conn.execute(
+            "SELECT MAX(id) FROM sku_image_versions").fetchone()[0]
+
+        with patch("bestseller_monitor.product_images.acquire",
+                   side_effect=AssertionError("没失败过的行不该被重下")):
+            with self.assertRaises(ValueError) as ctx:
+                self.db.retry_sku_image(row_id)
+        self.assertEqual(str(ctx.exception), "只能重试失败的 SKU 图版本")
+
+    def test_retrying_a_sku_image_twice_in_a_second_reuses_the_row_already_recorded(self):
+        """重试也是流水行写者（票 03，照主图先例）：同一秒里、同一图片结果的重试不撞键
+        （SKU_IMAGE_DEDUPE_INDEX）——那次观测已在案，结果指回已有那一行。连败两次的
+        重试如实记成失败行：不补库存、不改原失败行。"""
+        rid = new_round(self.db)
+        self.db.submit_inventory_snapshot(
+            round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
+            offer_id="11", product_url="https://a/offer/11.html", list_title="商品",
+            detail_title="商品详情", main_image_url=None,
+            collected_at="2026-09-05T02:00:00+00:00", attempt=1,
+            sku_rows=[{"sku_id": "s1", "sku_name": "蓝", "sku_stock": 1,
+                       "sku_image_evidence": {"url": "https://img.example/blue",
+                                              "source": SKU_IMAGE_OWN, "error": "offline"}}],
+        )
+        failed_id = self.conn.execute(
+            "SELECT MAX(id) FROM sku_image_versions").fetchone()[0]
+
+        with patch("bestseller_monitor.product_images.acquire",
+                   return_value={"error": "offline"}), \
+             patch("bestseller_monitor.db.utcnow",
+                   return_value="2026-09-18T04:00:00+00:00"):
+            first = self.db.retry_sku_image(failed_id)
+            second = self.db.retry_sku_image(first["new_version"])
+
+        self.assertEqual(second["new_version"], first["new_version"],
+                         "同一秒内的重复重试指回同一行")
+        self.assertEqual(second["image_error"], "offline")
+        rows = self.conn.execute("SELECT * FROM sku_image_versions ORDER BY id").fetchall()
+        self.assertEqual(len(rows), 2, "原始失败行 + 一次重试行")
+        self.assertEqual(rows[1]["source"], SKU_IMAGE_OWN)
+        self.assertEqual(rows[1]["image_error"], "offline", "又败一次也是失败行")
+        self.assertIsNone(rows[1]["content_hash"])
+
     def test_event_log_append_only_and_interval_per_channel(self):
         rid = new_round(self.db)
         self.db.append_event(rid, "list_load", shop_key="A01", phase="listing")
