@@ -282,20 +282,20 @@ class InterventionResolutionTests(unittest.TestCase):
         alarm.assert_not_called()
 
     def test_a_signal_that_vanishes_inside_the_confirmation_window_is_ignored(self):
-        """窗口里自己解除的信号判误报早退：不刷新、不响铃、不发事件。
+        """窗口里自己消失的信号判误报早退：不刷新、不响铃、不发事件。
 
-        这段早退此前没有用例钉着——变异自证里把窗口改成不探测，全部用例仍绿
-        （票 05 的 M2 盲区）。判据打桩为「已解除」，钉的是接线本身：窗口探到真值
-        就早退，连刷新都不试；`resolved` 的读数次数兼钉「窗口确实探测过」。
+        这段早退此前没有用例钉着——同款变异（窗口不探测）在票 05 的既有用例面（票面演示
+        路径 57 项）上全绿（M2 盲区）。判据按脚本走「第一探还在、第二探已解除」：窗口
+        就此结束，没走到刷新那一步——变异正是死在这条与 `emit` 未调上。
         """
         page = FakePage(self.PRODUCT, body=self.LOGIN_WALL)
         emit = MagicMock()
 
-        with patch.object(guard, "resolved", return_value=True) as resolved, \
+        with patch.object(guard, "resolved", side_effect=[False, True]) as resolved, \
              patch.object(guard.sound, "play_alarm") as alarm:
             guard.wait_for_resolution(page, 1, emit=emit, confirm_sec=2.0)
 
-        self.assertGreaterEqual(resolved.call_count, 1, "确认窗口确实探测过")
+        self.assertEqual(resolved.call_count, 2, "窗口轮询判据：第一探未解除、第二探已解除")
         self.assertEqual(page.reloads, 0, "窗口内已解除，连刷新都不该试")
         emit.assert_not_called()
         alarm.assert_not_called()
