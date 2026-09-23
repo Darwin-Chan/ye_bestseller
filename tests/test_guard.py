@@ -286,7 +286,8 @@ class InterventionResolutionTests(unittest.TestCase):
 
         这段早退此前没有用例钉着——同款变异（窗口不探测）在票 05 的既有用例面（票面演示
         路径 57 项）上全绿（M2 盲区）。判据按脚本走「第一探还在、第二探已解除」：窗口
-        就此结束，没走到刷新那一步——变异正是死在这条与 `emit` 未调上。
+        就此结束，不走刷新——变异即死在 `page.reloads == 0` 这条上（断言串到此为止；
+        即使继续判下去，`emit` 未调也会红）。
         """
         page = FakePage(self.PRODUCT, body=self.LOGIN_WALL)
         emit = MagicMock()
