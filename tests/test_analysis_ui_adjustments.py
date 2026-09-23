@@ -177,7 +177,7 @@ class AnalysisUiAdjustmentTests(unittest.TestCase):
         self.page.get_by_role('button', name='确认当前筛选全部组').click()
         self.page.get_by_role('dialog').get_by_role('button', name='确认', exact=True).click()
         self.page.get_by_role('button', name='保存分组并查看畅销品').click()
-        expect(self.page.get_by_role('heading', name='初步畅销品')).to_be_visible()
+        expect(self.page.get_by_role('heading', name='畅销品', exact=True)).to_be_visible()
         self.page.locator('#ranking > details > summary').first.click()
         chart = self.page.locator('#ranking .inventory-chart').first
         expect(chart).to_be_visible()

@@ -18,6 +18,15 @@ class GroupEditingTests(unittest.TestCase):
     dates = fixture.AnalysisBrowserTests.dates
     switch_tab = fixture.AnalysisBrowserTests.switch_tab
 
+    def start_review(self):
+        """跑这趟分析并等快照真的落上（票 01/02 起这一屏先出骨架，快照随后才到）。
+
+        只等「确认同款」标题会在骨架期就通过：那时列表还是空的，随后填页还会把页签
+        重置回「待确认」——下面各用例切页签、点组都得以快照落定为前提。
+        """
+        self.page.get_by_role('button', name='下一步、进入同款确认').click()
+        expect(self.page.locator('#snapshotInfo')).to_contain_text('日期区间')
+
     def seed(self, count=4):
         for i in range(1, count + 1):
             shop, offer = f'A{i:02}', str(i * 11)
@@ -66,7 +75,7 @@ class GroupEditingTests(unittest.TestCase):
     def test_browser_search_move_remove_and_single_member_controls(self):
         self.seed()
         self.dates()
-        self.page.get_by_role('button', name='下一步、进入同款确认').click()
+        self.start_review()
         # 这个用例确认后还要接着操作同一组，「全部」页签下组不因确认离开列表。
         # 点哪一组与左列次序无关（票 05 起大组在前）：按组号选，别拿序号当组号。
         self.switch_tab('全部')
@@ -141,7 +150,7 @@ class GroupEditingTests(unittest.TestCase):
     def test_browser_candidate_comparison_preserves_selection_and_moves_atomically(self):
         self.model()
         self.dates()
-        self.page.get_by_role('button', name='下一步、进入同款确认').click()
+        self.start_review()
         # 确认一组之后还要从它的成员卡进对比弹窗，「全部」页签下这一组不会离开列表。
         self.switch_tab('全部')
         expect(self.page.locator('.group-choice')).to_have_count(4)
@@ -194,7 +203,7 @@ class GroupEditingTests(unittest.TestCase):
                               for i in range(1,25) for j in range(i+1,25)}
         self.service.matcher = MatchingService(MatchingConfig(Path(self.tmp.name)/'match.sqlite',mode='direct', candidates=20))
         self.dates()
-        self.page.get_by_role('button',name='下一步、进入同款确认').click()
+        self.start_review()
         card = self.page.locator('#groupDetail [data-product="33"]')
         card.locator('aside button').first.click()
         dialog=self.page.get_by_role('dialog',name='其他疑似归组',exact=True)
@@ -230,7 +239,7 @@ class GroupEditingTests(unittest.TestCase):
         for source_confirmed in (False,True):
             for target_confirmed in (False,True):
                 self.dates()
-                self.page.get_by_role('button',name='下一步、进入同款确认').click()
+                self.start_review()
                 # 四种状态组合要在同一份列表里来回切换，「全部」页签下组不因状态离开列表。
                 # 起点那一组显式点：默认选中的是左列第一组，而左列次序由服务端给（票 05）。
                 self.switch_tab('全部')
@@ -262,7 +271,7 @@ class GroupEditingTests(unittest.TestCase):
     def test_browser_removal_auto_joins_only_unique_pending_group(self):
         self.model()
         self.dates()
-        self.page.get_by_role('button',name='下一步、进入同款确认').click()
+        self.start_review()
         # 确认两组后要接着对它们做移除／查看状态，「全部」页签下组不会离开列表。
         self.switch_tab('全部')
         expect(self.page.locator('.group-choice')).to_have_count(4)

@@ -262,7 +262,8 @@ class EndToEndAcceptanceTests(unittest.TestCase):
         self.service.save_and_view(sid)
         self.restart_service()
         self.page.get_by_role('button', name='继续上次分析').click()
-        self.page.get_by_role('button', name='保存分组并查看畅销品').click()
+        # 已保存且无待确认组：门禁直接落结果屏（票 06），不必再点一次保存。
+        expect(self.page.get_by_role('heading', name='畅销品', exact=True)).to_be_visible()
         expect(self.page.locator('#ranking')).to_be_visible()
 
         # 组总销量是两名成员销量的和，不是代表商品自己的销量。
@@ -371,6 +372,9 @@ class EndToEndAcceptanceTests(unittest.TestCase):
         first_sales = next(g for g in self.service.get(sid)['groups'] if g['id'] == pair['id'])['sales']
 
         # 页面上换一个更长的区间：销量按新数据重算。
+        # 这一组已确认、草稿也暂存过：这趟落屏由门禁定（票 06 起就是结果屏），回确认屏再换区间。
+        expect(self.page.get_by_role('heading', name='畅销品', exact=True)).to_be_visible()
+        self.page.get_by_role('button', name='返回修改同款分组').click()
         self.page.get_by_role('button', name='重新选择日期').click()
         second_sid = self.dates(end='2026-09-21')
         self.assertNotEqual(second_sid, sid)
@@ -388,7 +392,9 @@ class EndToEndAcceptanceTests(unittest.TestCase):
         self.assertEqual(original['end'], '2026-09-14')
         self.assertEqual(next(g for g in original['groups'] if g['id'] == pair['id'])['sales'],
                          first_sales)
-        # 页面上看到的是复用后的已确认组。
+        # 页面上看到的是复用后的已确认组（复用来的确认生效：门禁给结果屏，回确认屏看名单）。
+        expect(self.page.get_by_role('heading', name='畅销品', exact=True)).to_be_visible()
+        self.page.get_by_role('button', name='返回修改同款分组').click()
         expect(self.page.locator('#snapshotInfo')).to_contain_text('2 个商品')
         self.switch_tab('已确认')
         expect(self.page.locator('.group-choice')).to_have_count(1)

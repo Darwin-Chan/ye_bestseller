@@ -86,6 +86,11 @@ class AnalysisBrowserTests(unittest.TestCase):
         """
         self.page.get_by_role('tab', name=re.compile(f'^{label}')).click()
 
+    def back_to_review(self):
+        """结果屏回确认屏（票 06）：两屏互斥显示，要接着改分组先回这一屏。"""
+        self.page.get_by_role('button', name='返回修改同款分组').click()
+        expect(self.page.locator('#reviewPage')).to_be_visible()
+
     def submit_product(self, offer, day, stock, *, name, color=None):
         submit_offer(self.db, offer, day, stock, name=name, color=color)
 
@@ -290,11 +295,11 @@ class AnalysisBrowserTests(unittest.TestCase):
     def test_confirmation_unlocks_initial_ranking_and_sku_details(self):
         self.dates()
         self.page.get_by_role("button", name="下一步、进入同款确认").click()
-        expect(self.page.get_by_role("heading", name="初步畅销品")).not_to_be_visible()
+        expect(self.page.get_by_role("heading", name="畅销品", exact=True)).not_to_be_visible()
         self.page.get_by_role("button", name="确认当前分组").click()
-        expect(self.page.get_by_role("heading", name="初步畅销品")).not_to_be_visible()
+        expect(self.page.get_by_role("heading", name="畅销品", exact=True)).not_to_be_visible()
         self.page.get_by_role("button", name="保存分组并查看畅销品").click()
-        expect(self.page.get_by_role("heading", name="初步畅销品")).to_be_visible()
+        expect(self.page.get_by_role("heading", name="畅销品", exact=True)).to_be_visible()
         rank = self.page.locator('#ranking > details').first
         expect(rank.locator(':scope > summary')).to_contain_text('01')
         expect(rank.locator(':scope > summary')).to_contain_text('杯子')
@@ -321,6 +326,9 @@ class AnalysisBrowserTests(unittest.TestCase):
                 collected_at=stamp+'T04:00:00+00:00', attempt=1)
         self.dates()
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
+        # 票 01/02 起这一屏先出骨架、快照随后才落：等统计行填上再切页签，否则这次切换会被
+        # 填页时的「回到待确认」重置掉，后面两轮循环就点在错的页签上。
+        expect(self.page.locator('#snapshotInfo')).to_contain_text('日期区间')
         # 「全部」页签下确认后的组仍留在列表里，两轮循环才能各自点到目标组。
         self.switch_tab('全部')
         expect(self.page.locator('.group-choice')).to_have_count(2)
@@ -354,12 +362,18 @@ class AnalysisBrowserTests(unittest.TestCase):
         # Existing analysis remains frozen after source changes.
         self.page.reload()
         expect(self.page.locator('#ranking > details > summary').first).to_contain_text('30')
+        # 已保存且无待确认组：重开落在结果屏（票 06），要换区间先回确认屏。
+        self.back_to_review()
         self.page.get_by_role('button', name='重新选择日期').click()
         self.dates()
         self.page.get_by_label('结束日期', exact=True).fill('2026-09-16')
         self.page.get_by_role('button', name='继续', exact=True).click()
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
-        # 上一段区间保存过的确认按版本复用：到这儿两个组已经已确认，不需要再点一遍。
+        # 上一段区间保存过的确认按版本复用：到这儿两个组已经已确认、快照不脏——落屏门禁
+        # 直接给结果屏（票 06），回确认屏看这两组。
+        expect(self.page.get_by_role('heading', name='畅销品', exact=True)).to_be_visible()
+        self.back_to_review()
+        # 两个组已经已确认，不需要再点一遍。
         self.switch_tab('已确认')
         expect(self.page.locator('.group-choice')).to_have_count(2)
         for index in range(2):
@@ -384,6 +398,8 @@ class AnalysisBrowserTests(unittest.TestCase):
         self.dates()
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
         expect(self.page.get_by_role('heading', name='确认同款')).to_be_visible()
+        # 骨架一出标题就可见、快照还没落：等统计行填上，这一趟运行才算结束（切页签才不会被重置）。
+        expect(self.page.locator('#snapshotInfo')).to_contain_text('日期区间')
         sid = self.page.url.split('analysis=')[1]
 
         # 部分确认：只确认杯子所在组。
@@ -454,7 +470,7 @@ class AnalysisBrowserTests(unittest.TestCase):
         self.choose_group('云朵杯')
         self.page.get_by_role('button', name='确认当前分组', exact=True).click()
         self.page.get_by_role('button', name='保存分组并查看畅销品').click()
-        expect(self.page.get_by_role('heading', name='初步畅销品')).to_be_visible()
+        expect(self.page.get_by_role('heading', name='畅销品', exact=True)).to_be_visible()
 
     def test_save_and_view_needs_no_pending_and_failed_saves_can_retry(self):
         self.add_product('22', '云朵杯', 60, 50)
@@ -465,10 +481,10 @@ class AnalysisBrowserTests(unittest.TestCase):
         self.page.get_by_role('button', name='确认当前分组', exact=True).click()
         # 仍有待确认组：不能跳过确认进入结果，但仍可暂存。
         expect(save_and_view).to_be_disabled()
-        expect(self.page.get_by_role('heading', name='初步畅销品')).not_to_be_visible()
+        expect(self.page.get_by_role('heading', name='畅销品', exact=True)).not_to_be_visible()
         self.page.get_by_role('button', name='暂时保存').click()
         expect(self.page.locator('#saveStatus')).to_have_text(re.compile(r'^已保存 · \d{2}-\d{2} \d{2}:\d{2}$'))
-        expect(self.page.get_by_role('heading', name='初步畅销品')).not_to_be_visible()
+        expect(self.page.get_by_role('heading', name='畅销品', exact=True)).not_to_be_visible()
 
         # 保存失败：留在原处、保持未保存标记，可重试。
         self.choose_group('云朵杯')
@@ -487,11 +503,11 @@ class AnalysisBrowserTests(unittest.TestCase):
         expect(save_and_view).to_be_enabled()
         save_and_view.click()
         expect(self.page.locator('#error')).to_contain_text('保存分析草稿失败')
-        expect(self.page.get_by_role('heading', name='初步畅销品')).not_to_be_visible()
+        expect(self.page.get_by_role('heading', name='畅销品', exact=True)).not_to_be_visible()
         # 修好存储后重试成功，才进入结果。
         self.service.config = AnalysisConfig(self.path)
         save_and_view.click()
-        expect(self.page.get_by_role('heading', name='初步畅销品')).to_be_visible()
+        expect(self.page.get_by_role('heading', name='畅销品', exact=True)).to_be_visible()
         expect(self.page.locator('#error')).not_to_be_visible()
 
     def test_unsaved_leave_prompt_and_old_draft_errors_stay_visible(self):
@@ -557,6 +573,7 @@ class AnalysisBrowserTests(unittest.TestCase):
                                     color='red' if offer == '22' else None)
         self.dates()
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
+        expect(self.page.locator('#snapshotInfo')).to_contain_text('日期区间')
         expect(self.page.locator('.group-choice')).to_have_count(3)
         # 人工把云朵杯、树叶杯并进杯子所在组并确认，保存进结果页。
         # 确认后这组不留在默认的「待确认」页签里，留在「全部」页签继续操作。
@@ -574,12 +591,16 @@ class AnalysisBrowserTests(unittest.TestCase):
         expect(self.page.locator('#ranking > details > summary .number').first).to_have_text('40 销量')
 
         # 新区间 15—21：只有杯子、云朵杯有观测；保存过的确认直接生效，不要求重新确认。
+        self.back_to_review()
         self.page.get_by_role('button', name='重新选择日期').click()
         self.page.get_by_label('开始日期', exact=True).fill('2026-09-15')
         self.page.get_by_role('button', name='继续', exact=True).click()  # 周二不是全量抓取日
         self.page.get_by_label('结束日期', exact=True).fill('2026-09-21')
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
-        # 复用来的组已确认，默认的「待确认」页签是空的：切到「全部」继续。
+        # 复用来的组已确认、快照不脏：落屏门禁直接给结果屏（票 06），回确认屏看分组。
+        expect(self.page.get_by_role('heading', name='畅销品', exact=True)).to_be_visible()
+        self.back_to_review()
+        # 默认的「待确认」页签是空的：切到「全部」继续。
         self.switch_tab('全部')
         expect(self.page.locator('.group-choice')).to_have_count(1)
         expect(self.page.locator('#groupDetail h3')).to_have_text('G1 · 2 个商品')
@@ -590,6 +611,7 @@ class AnalysisBrowserTests(unittest.TestCase):
         # 重启后继续这个区间：复用来的确认随草稿一起恢复。
         self.restart_service()
         self.page.get_by_role('button', name='继续上次分析').click()
+        self.back_to_review()
         self.switch_tab('全部')
         expect(self.page.locator('#snapshotInfo')).to_contain_text('其中 0 组待确认')
         expect(self.page.locator('#groupDetail .group-status')).to_have_text('已确认')
@@ -610,7 +632,10 @@ class AnalysisBrowserTests(unittest.TestCase):
         self.dates()
         self.page.get_by_label('结束日期', exact=True).fill('2026-09-21')
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
-        # 复用来的组已确认，默认的「待确认」页签是空的：切到「全部」继续。
+        # 复用来的组已确认、快照不脏：又直接落在结果屏（票 06）。
+        expect(self.page.get_by_role('heading', name='畅销品', exact=True)).to_be_visible()
+        self.back_to_review()
+        # 默认的「待确认」页签是空的：切到「全部」继续。
         self.switch_tab('全部')
         expect(self.page.locator('.group-choice')).to_have_count(1)
         expect(self.page.locator('#groupDetail h3')).to_have_text('G1 · 3 个商品')
@@ -620,6 +645,7 @@ class AnalysisBrowserTests(unittest.TestCase):
         expect(self.page.locator('#saveStatus')).to_have_text(re.compile(r'^已保存 · \d{2}-\d{2} \d{2}:\d{2}$'))
         self.restart_service()
         self.page.get_by_role('button', name='继续上次分析').click()
+        self.back_to_review()
         self.switch_tab('全部')
         expect(self.page.locator('#groupDetail h3')).to_have_text('G1 · 3 个商品')
         expect(self.page.locator('#groupDetail .group-status')).to_have_text('已确认')
@@ -630,6 +656,7 @@ class AnalysisBrowserTests(unittest.TestCase):
         self.dates()
         self.page.get_by_label('结束日期', exact=True).fill('2026-09-21')
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
+        expect(self.page.locator('#snapshotInfo')).to_contain_text('日期区间')
         self.switch_tab('全部')
         expect(self.page.locator('.group-choice')).to_have_count(2)
         expect(self.page.locator('#groupDetail h3')).to_have_text('G1 · 2 个商品')
@@ -649,6 +676,7 @@ class AnalysisBrowserTests(unittest.TestCase):
         expect(self.page.locator('#ranking > details > summary .number').first).to_have_text('90 销量')
         self.restart_service()
         self.page.get_by_role('button', name='继续上次分析').click()
+        self.back_to_review()
         self.switch_tab('全部')
         expect(self.page.locator('#groupDetail h3')).to_have_text('G1 · 3 个商品')
         expect(self.page.locator('#groupDetail .group-status')).to_have_text('已确认')

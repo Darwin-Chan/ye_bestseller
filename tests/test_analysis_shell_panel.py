@@ -95,7 +95,7 @@ class ShellPanelTests(unittest.TestCase):
         self.page.get_by_role('button', name='确认当前筛选全部组').click()
         self.page.get_by_role('dialog').get_by_role('button', name='确认', exact=True).click()
         self.page.get_by_role('button', name='保存分组并查看畅销品').click()
-        expect(self.page.get_by_role('heading', name='初步畅销品')).to_be_visible()
+        expect(self.page.get_by_role('heading', name='畅销品', exact=True)).to_be_visible()
         # 结果屏自己是一层白面板（与日期屏同款）；条目与它的展开行不再单独刷白，白底由面板承担。
         white = panel_style(self.page, '#datePage')[0]
         self.assertEqual(self.page.eval_on_selector(

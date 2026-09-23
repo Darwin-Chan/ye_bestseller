@@ -46,12 +46,16 @@ class StageLegendTests(unittest.TestCase):
         self.assertEqual(self.dot_color('分析结果'), 'rgb(255, 255, 255)')
         self.page.get_by_role('button', name='确认当前分组', exact=True).click()
         self.page.get_by_role('button', name='保存分组并查看畅销品').click()
-        expect(self.page.get_by_role('heading', name='初步畅销品')).to_be_visible()
+        expect(self.page.get_by_role('heading', name='畅销品', exact=True)).to_be_visible()
         self.assert_stages('分析结果', {'选择区间', '确认同款'})
         # 重开页面沿 #analysis= 自动恢复到结果屏，灯序不变。
         self.page.reload()
-        expect(self.page.get_by_role('heading', name='初步畅销品')).to_be_visible()
+        expect(self.page.get_by_role('heading', name='畅销品', exact=True)).to_be_visible()
         self.assert_stages('分析结果', {'选择区间', '确认同款'})
+        # 结果屏没有直达日期的路（票 06）：先「返回修改同款分组」回确认屏，再「重新选择日期」。
+        self.page.get_by_role('button', name='返回修改同款分组').click()
+        expect(self.page.get_by_role('heading', name='确认同款')).to_be_visible()
+        self.assert_stages('确认同款', {'选择区间'})
         self.page.get_by_role('button', name='重新选择日期').click()
         expect(self.page.get_by_role('heading', name='选择销量计算区间')).to_be_visible()
         self.assert_stages('选择区间', set())

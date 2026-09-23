@@ -150,8 +150,20 @@ class OfflineReportBrowserTests(unittest.TestCase):
     submit = fixture.AnalysisBrowserTests.submit  # 夹具 setUp 用它铺底数
     seed_product = ranking.RankingBrowserTests.seed_product
     start_review = ranking.RankingBrowserTests.start_review
-    save_and_show_results = ranking.RankingBrowserTests.save_and_show_results
     switch_tab = ranking.RankingBrowserTests.switch_tab
+
+    def save_and_show_results(self):
+        """服务端确认并保存后重开页面：门禁（票 06）直接落结果屏，页上不必再点一次保存。
+
+        不借 test_bestseller_ranking 的同名夹具：那一份按旧屏模型收尾（结果曾挂在确认屏
+        下方），票 06 改独立成屏后由它的会话更新；这里只要「已保存的分析摆在眼前」这一态。
+        """
+        sid = self.page.url.split('analysis=')[1]
+        snapshot = self.service.get(sid)
+        self.service.confirm_groups(sid, [g['id'] for g in snapshot['groups']])
+        self.service.save_and_view(sid)
+        self.page.reload()
+        expect(self.page.get_by_role('heading', name='畅销品', exact=True)).to_be_visible()
 
     def setUp(self):
         fixture.AnalysisBrowserTests.setUp(self)
@@ -179,9 +191,11 @@ class OfflineReportBrowserTests(unittest.TestCase):
         self.conn.execute("UPDATE products SET product_url='https://detail.1688.com/offer/222.html?export=1'"
                           " WHERE offer_id='222'")
         self.conn.commit()
-        # 导出时浏览器在分组列表第 2 页，所有行保持折叠。
-        self.page.get_by_role('button', name='下一页').click()
-        expect(self.page.locator('#pageInfo')).to_contain_text('2 / 2')
+        # 导出时浏览器停在结果屏：屏上默认只列有销量的组，翻到第 2 屏也不改报告的份量。
+        expect(self.page.locator('#rankPageInfo')).to_have_text('第 1 / 1 屏 · 共 2 组')
+        self.page.get_by_label('显示零销量组').check()
+        self.page.locator('.rank-pager').get_by_role('button', name='下一页').click()
+        expect(self.page.locator('#rankPageInfo')).to_have_text('第 2 / 2 屏 · 共 24 组')
         path = self.export()
         self.assertEqual(path.parent, self.out)
         self.assertIn('2026-09-07_2026-09-14', path.name)

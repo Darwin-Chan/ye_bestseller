@@ -408,6 +408,9 @@ class ConflictBrowserTests(unittest.TestCase):
         self.dates()
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
 
+        # 账本里两组都带确认、快照不脏：落屏门禁直接给结果屏（票 06）；要看的标注在确认屏。
+        expect(self.page.get_by_role('heading', name='畅销品', exact=True)).to_be_visible()
+        self.page.get_by_role('button', name='返回修改同款分组').click()
         self.switch_tab('已确认')
         self.page.locator('.group-choice').filter(has_text='云朵杯 ·').first.click()
         expect(self.page.locator('#groupDetail .group-status')).to_contain_text('由 m1 确认')
