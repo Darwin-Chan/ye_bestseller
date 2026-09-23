@@ -18,7 +18,6 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -35,7 +34,7 @@ def mode_child() -> int:
     from unittest.mock import patch
 
     from bestseller_monitor import pipeline, rounds, single_instance
-    from bestseller_monitor.config import Shop
+    from bestseller_monitor.config import Config, Shop
     from bestseller_monitor.delay import Humanizer
     from bestseller_monitor.db import utcnow
 
@@ -43,12 +42,11 @@ def mode_child() -> int:
     logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                         format="%(levelname)s %(message)s", force=True)
 
-    cfg = SimpleNamespace(
-        db_file=Path(os.environ[CHILD_ENV_DB]),
-        driver="pw_cdp",
-        shop_csv=None,
-        ensure_dirs=lambda: None,
-        long_pause_interval=(1, 1000),   # 不插长停顿
+    # cfg 从真配置造、只覆盖骨架必须改的字段：手搭字段清单的话，pipeline 每长一个
+    # 被读到的字段这里就静默断一次（machine_id 就这么断的，见文件头）。
+    cfg = Config.from_file(ROOT / "config/config.toml", root=ROOT).replace(
+        db_file=Path(os.environ[CHILD_ENV_DB]),   # 临时库，不碰真 data/bestseller.db
+        long_pause_interval=(1, 1000),            # 不插长停顿
         long_pause_sec=(0.0, 0.0),
         detail_delay_sec=(0.5, 0.5),
         list_delay_sec=(0.0, 0.0),
@@ -68,7 +66,9 @@ def mode_child() -> int:
             human.sleep(10)                                  # 切成 0.5 秒的片
 
     # 只换掉「怎么抓」这一段：轮次、身份行、停止通道都走真实代码。
-    with patch.object(single_instance, "CRAWLER_LOCK", os.environ[CHILD_ENV_LOCK]), \
+    # ensure_dirs 也打桩：真配置的目录字段指着运行期目录，骨架不需要建它们（也不该碰）。
+    with patch.object(Config, "ensure_dirs", lambda self: None), \
+            patch.object(single_instance, "CRAWLER_LOCK", os.environ[CHILD_ENV_LOCK]), \
             patch.object(pipeline, "_run_pwcdp_round", side_effect=skeletal_round):
         pipeline.run_round(cfg, shops)
     return 0
