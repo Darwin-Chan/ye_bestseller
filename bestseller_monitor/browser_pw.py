@@ -16,12 +16,12 @@ import os
 import re
 import subprocess
 import threading
-import time
+import time  # 本文件不再直接计时；留给 patch.object(browser_pw.time, …)（与 waiting 同一个 time 模块）
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from . import browser_proc, listing
+from . import browser_proc, listing, waiting
 from .click_listing import WAIT_POPUP_MS
 from .config import Config
 from .delay import Humanizer
@@ -120,15 +120,19 @@ def open_session(cfg: Config, *, publish_browser=None):
         resources.pw = sync_playwright().start()
         stage = "cdp"
         last_exc: Exception | None = None
-        deadline = time.monotonic() + _WAIT_LAUNCH_SEC
-        while time.monotonic() < deadline:
+
+        def probe() -> Any:
+            nonlocal last_exc
             try:
-                resources.br = resources.pw.chromium.connect_over_cdp(
+                return resources.pw.chromium.connect_over_cdp(
                     f"http://127.0.0.1:{resources.port}")
-                break
             except Exception as exc:  # noqa: BLE001 - retry until the readiness deadline
                 last_exc = exc
-                time.sleep(0.8)
+                return None
+
+        # 等待期间被停止请求打断时，取消异常从 until 原样穿出，走下面的清理与发布序列。
+        resources.br = waiting.until(probe, timeout_sec=_WAIT_LAUNCH_SEC, poll_sec=0.8,
+                                     describe=f"浏览器调试端口 {resources.port}")
         if resources.br is None:
             raise RuntimeError(
                 f"无法连接浏览器调试端口 {resources.port}（{last_exc}）")

@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_proc, browser_pw
+from bestseller_monitor import browser_proc, browser_pw, pipeline, stop_request
 
 
 class FakeProcess:
@@ -103,6 +103,54 @@ class BrowserSessionEstablishmentTests(unittest.TestCase):
             states,
             [("STARTING", 9222, None, None), ("UNKNOWN", 9222, None, None)],
         )
+
+    def test_stop_during_the_port_wait_cleans_up_then_propagates(self):
+        """等待期间被取消（A07）：清理序列照跑（停 Playwright、终止自启进程、发布 UNKNOWN），
+        随后 `StopRequested` 原样穿出——顶层按停止收尾（轮次保持可续跑），不是「无法连接」那条。
+        """
+        proc = FakeProcess(20313)
+        stop = stop_request.StopRequested("收到界面暂停请求")
+        pw = MagicMock()
+        pw.chromium.connect_over_cdp.side_effect = RuntimeError("connection refused")
+        factory = MagicMock()
+        factory.start.return_value = pw
+        states = []
+        checks = []
+
+        def hook():
+            checks.append(True)
+            if len(checks) > 1:      # 放行入口那次检查，让探针真跑一轮再被认领
+                raise stop
+
+        def terminate(pid):
+            proc.alive = False
+            return True
+
+        with patch("playwright.sync_api.sync_playwright", return_value=factory), \
+                patch.object(browser_pw.subprocess, "Popen", return_value=proc), \
+                patch.object(browser_proc, "process_creation_proof", return_value="proof"), \
+                patch.object(browser_proc, "terminate_process_tree", side_effect=terminate):
+            stop_request.install(hook)
+            try:
+                with self.assertRaises(stop_request.StopRequested) as raised:
+                    browser_pw.open_session(
+                        self.cfg(),
+                        publish_browser=lambda *state: states.append(state) or True,
+                    )
+            finally:
+                stop_request.uninstall()
+
+        self.assertIs(raised.exception, stop, "原样的停止异常，不换壳成连接失败那条")
+        pw.chromium.connect_over_cdp.assert_called_once_with("http://127.0.0.1:9222")
+        pw.stop.assert_called_once_with()
+        self.assertFalse(proc.alive)
+        self.assertEqual(
+            states,
+            [("STARTING", 9222, None, None), ("UNKNOWN", 9222, None, None)],
+        )
+        outcome = pipeline.stop_outcome(raised.exception)
+        self.assertIsNone(outcome.round_end, "顶层按停止收尾：轮次保持可续跑")
+        self.assertIs(outcome.scope, pipeline.StopScope.ROUND)
 
     def test_missing_default_context_cleans_only_acquired_resources(self):
         proc = FakeProcess(20303)
