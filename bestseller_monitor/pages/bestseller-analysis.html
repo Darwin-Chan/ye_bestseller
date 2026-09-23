@@ -67,7 +67,7 @@
 <section><label>开始日期 <input id="start" type="date"></label><h3>当日真实抓取</h3><div id="startCoverage">请选择日期</div></section>
 <section><label>结束日期 <input id="end" type="date"></label><h3>当日真实抓取</h3><div id="endCoverage">请选择日期</div></section></div>
 <p><button id="begin" class="primary">下一步、进入同款确认</button></p></section>
-<section id="reviewPage" class="panel" hidden><div class="bar"><h2>确认同款</h2><button id="back">重新选择日期</button></div><div id="snapshotInfo"></div><p class="muted">建议分组均待人工确认；低把握判断保留缓存，需人工核对。</p><div class="bar match-bar"><span id="matchControl" title=""><button id="runMatching" onclick="runMatching()">模型匹配同款</button></span><span id="matchingStatus" role="status"></span></div><div class="review-layout"><div class="review-side"><nav id="products" aria-label="同款分组列表"></nav><div class="bar review-pager"><button id="prev">上一页</button><span id="pageInfo"></span><button id="next">下一页</button></div></div><article id="groupDetail"></article></div><div class="bar save-bar"><span id="saveStatus" role="status"></span><button id="saveDraft" data-mutation>暂时保存</button><button id="saveAndView" class="primary" data-mutation disabled>保存分组并查看畅销品</button></div></section><section id="results" class="panel" hidden><div class="bar"><h2>畅销品</h2><button id="backToReview">返回修改同款分组</button></div><div id="ranking"></div><div class="bar rank-pager"><button id="rankPrev" aria-label="畅销品上一页">上一页</button><span id="rankPageInfo"></span><button id="rankNext" aria-label="畅销品下一页">下一页</button></div><div class="bar export-bar"><button id="exportReport">导出 HTML 报告</button><span id="exportStatus" role="status"></span></div></section>
+<section id="reviewPage" class="panel" hidden><div class="bar"><h2>确认同款</h2><button id="back">重新选择日期</button></div><div id="snapshotInfo"></div><p class="muted">建议分组均待人工确认；低把握判断保留缓存，需人工核对。</p><div class="bar match-bar"><span id="matchControl" title=""><button id="runMatching" onclick="runMatching()">模型匹配同款</button></span><span id="matchingStatus" role="status"></span></div><div class="review-layout"><div class="review-side"><nav id="products" aria-label="同款分组列表"></nav><div class="bar review-pager"><button id="prev">上一页</button><span id="pageInfo"></span><button id="next">下一页</button></div></div><article id="groupDetail"></article></div><div class="bar save-bar"><span id="saveStatus" role="status"></span><button id="saveDraft" data-mutation>暂时保存</button><button id="saveAndView" class="primary" data-mutation disabled>保存分组并查看畅销品</button></div></section><section id="results" class="panel" hidden><div class="bar"><h2>畅销品</h2><button id="backToReview">返回修改同款分组</button></div><div id="ranking"></div><div class="bar export-bar"><button id="exportReport">导出 HTML 报告</button><span id="exportStatus" role="status"></span></div><div class="bar rank-pager"><button id="rankPrev" aria-label="畅销品上一页">上一页</button><span id="rankPageInfo"></span><button id="rankNext" aria-label="畅销品下一页">下一页</button></div></section>
 </main><dialog id="bulkDialog" class="modal" aria-label="确认同款商品分组"><h2>确认同款商品分组</h2><p id="bulkScope"></p><p id="bulkMultiple"></p><div class="modal-actions"><span class="spacer"></span><button onclick="$('bulkDialog').close()">取消</button><button id="bulkOK" data-mutation onclick="confirmBulk()">确认</button></div></dialog>
 <div id="tip" class="tip" hidden></div>
 <dialog id="notice"><p id="noticeText"></p><div class="modal-actions"><span class="spacer"></span><button id="noticeCancel" hidden>取消</button><button id="noticeOK">继续</button></div></dialog>
@@ -164,6 +164,8 @@ for (const which of ['start', 'end']) {
 let currentSnapshot=null, productPage=0, selectedGroup=null, renderedGroup=null, renderedPage=null;
 let compareProduct=null, candidateTarget=null, removalProduct=null, addPage=0, editBusy=false;
 let reviewTab='pending', checkedGroups=new Set(), bulkTargets=[];
+// 一屏多少组：确认屏左列与结果屏都是 20（规格 §9／§14），改这里两处一起改。
+const GROUPS_PER_PAGE=20;
 // 本次点击“模型匹配同款”的结果：只属于这一次点击，换组／切页签／下一次匹配时清掉（票 17）。
 let matchResult=null;
 let productsByKey=new Map(), groupsByProduct=new Map();
@@ -349,9 +351,9 @@ function renderProducts() {
     groupsByProduct=new Map(snapshot.groups.flatMap(g=>g.members.map(m=>[productKey(m),g])));
     const groupsById=new Map(snapshot.groups.map(g=>[g.id,g]));
     checkedGroups=new Set([...checkedGroups].filter(id=>{const g=groupsById.get(id);return g&&groupConfirmed(g)===batchMode().confirmed;}));
-    const filtered=filteredGroups(), pages=Math.max(1,Math.ceil(filtered.length/20));
+    const filtered=filteredGroups(), pages=Math.max(1,Math.ceil(filtered.length/GROUPS_PER_PAGE));
     productPage=Math.min(productPage,pages-1);
-    const visible=filtered.slice(productPage*20,productPage*20+20);
+    const visible=filtered.slice(productPage*GROUPS_PER_PAGE,productPage*GROUPS_PER_PAGE+GROUPS_PER_PAGE);
     if(!visible.some(g=>g.id===selectedGroup))selectedGroup=visible[0]?.id;
     $('products').innerHTML=visible.map(g=>`<div class="group-row">${reviewTab==='all'?'':`<input type="checkbox" aria-label="勾选 ${esc(g.id)}" data-group="${esc(g.id)}" ${checkedGroups.has(g.id)?'checked':''} onchange="checkGroup(this.dataset.group,this.checked)">`}<button class="group-choice" aria-pressed="${g.id===selectedGroup}" data-group="${esc(g.id)}" onclick="selectGroup(this.dataset.group)"><b>${esc(g.id)} · ${g.members.length} 个商品</b><small>${esc(groupProducts(g)[0].product_name)} · 销量 ${g.sales}</small><small>状态：${groupConfirmed(g)?'已确认':'待确认'}${groupConflicted(g)?'（有冲突）':''}</small></button></div>`).join('');
     // 翻页后左列从顶部看起：勾选、确认这类原地重画不动它，只有真的换了一页才回顶。
@@ -535,7 +537,6 @@ async function confirmGroup(group) {
 }
 // 排名与双轴图只消费服务层算好的逐日点：这里不重算销量、库存或补货（规格 §4、§6、§14）。
 let showZeroGroups=false;
-const RESULTS_PER_PAGE=20;   // 结果屏一屏 20 组（票 06）
 let rankPage=0;             // 结果屏当前分屏：进屏与切「显示零销量组」都回第 1 屏
 function chartNumber(n){return Number(n.toFixed(2)).toLocaleString('en-US')}
 function chartLayout(points){
@@ -610,20 +611,20 @@ function rankedGroups() {
     return (currentSnapshot.ranking||[]).map(id=>byId.get(id)).filter(group=>group&&(showZeroGroups||group.sales>0));
 }
 function renderRanking() {
-    const groups=rankedGroups(), pages=Math.max(1,Math.ceil(groups.length/RESULTS_PER_PAGE));
+    const groups=rankedGroups(), pages=Math.max(1,Math.ceil(groups.length/GROUPS_PER_PAGE));
     rankPage=Math.min(rankPage,pages-1);   // 组数变少时（切开关）别停在不存在的屏
-    const visible=groups.slice(rankPage*RESULTS_PER_PAGE,rankPage*RESULTS_PER_PAGE+RESULTS_PER_PAGE);
+    const visible=groups.slice(rankPage*GROUPS_PER_PAGE,rankPage*GROUPS_PER_PAGE+GROUPS_PER_PAGE);
     // 名次是全局序号：第 2 屏第一行接着 21。分页只切显示，重排名次的事不在这儿做。
-    const rows=visible.map((group,offset)=>`<details class="rank" data-group="${esc(group.id)}" ontoggle="renderRankDetail(this)"><summary>${rankSummary(group,rankPage*RESULTS_PER_PAGE+offset)}</summary></details>`).join('');
+    const rows=visible.map((group,offset)=>`<details class="rank" data-group="${esc(group.id)}" ontoggle="renderRankDetail(this)"><summary>${rankSummary(group,rankPage*GROUPS_PER_PAGE+offset)}</summary></details>`).join('');
     $('ranking').innerHTML=`<div class="bar ranking-controls"><label class="muted"><input type="checkbox" id="showZeroGroups" ${showZeroGroups?'checked':''} onchange="showZeroGroups=this.checked;rankPage=0;renderRanking()"> 显示零销量组</label></div>`+(rows||'<p class="empty">本区间没有符合条件的畅销品。</p>');
     $('rankPageInfo').textContent=`第 ${rankPage+1} / ${pages} 屏 · 共 ${groups.length} 组`;
     $('rankPrev').disabled=rankPage===0;
     $('rankNext').disabled=rankPage+1>=pages;
 }
 $('rankPrev').onclick=()=>{if(rankPage>0){rankPage--;renderRanking()}};
-$('rankNext').onclick=()=>{if((rankPage+1)*RESULTS_PER_PAGE<rankedGroups().length){rankPage++;renderRanking()}};
+$('rankNext').onclick=()=>{if((rankPage+1)*GROUPS_PER_PAGE<rankedGroups().length){rankPage++;renderRanking()}};
 $('prev').onclick=()=>{if(productPage>0){productPage--;renderProducts()}};
-$('next').onclick=()=>{if((productPage+1)*20<filteredGroups().length){productPage++;renderProducts()}};
+$('next').onclick=()=>{if((productPage+1)*GROUPS_PER_PAGE<filteredGroups().length){productPage++;renderProducts()}};
 // 离线报告：用同一份渲染函数把完整已确认快照烤成静态 HTML，由本地服务写进 output。
 // 报告没有分组、保存或采集入口，也不带任何对本地服务的请求；展开与图表 hover
 // 直接内嵌这里的实现（函数源码），与在线行为一致（规格 §15）。

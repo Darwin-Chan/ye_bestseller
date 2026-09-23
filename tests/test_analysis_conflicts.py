@@ -320,6 +320,7 @@ class ConflictBrowserTests(unittest.TestCase):
     add_product = fixture.AnalysisBrowserTests.add_product
     dates = fixture.AnalysisBrowserTests.dates
     switch_tab = fixture.AnalysisBrowserTests.switch_tab
+    back_to_review = fixture.AnalysisBrowserTests.back_to_review
 
     def seed_group(self, *, machine, offers=('11', '22')):
         """本机账本里确认一组（来源机器由用例给）。"""
@@ -410,7 +411,7 @@ class ConflictBrowserTests(unittest.TestCase):
 
         # 账本里两组都带确认、快照不脏：落屏门禁直接给结果屏（票 06）；要看的标注在确认屏。
         expect(self.page.get_by_role('heading', name='畅销品', exact=True)).to_be_visible()
-        self.page.get_by_role('button', name='返回修改同款分组').click()
+        self.back_to_review()
         self.switch_tab('已确认')
         self.page.locator('.group-choice').filter(has_text='云朵杯 ·').first.click()
         expect(self.page.locator('#groupDetail .group-status')).to_contain_text('由 m1 确认')

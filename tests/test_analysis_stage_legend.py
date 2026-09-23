@@ -7,6 +7,7 @@ import unittest
 
 from playwright.sync_api import expect
 
+import test_analysis as analysis_fixture
 import test_group_editing as fixture
 
 
@@ -16,6 +17,7 @@ class StageLegendTests(unittest.TestCase):
     submit = fixture.GroupEditingTests.submit
     dates = fixture.GroupEditingTests.dates
     switch_tab = fixture.GroupEditingTests.switch_tab
+    back_to_review = analysis_fixture.AnalysisBrowserTests.back_to_review
 
     def stages(self):
         """图例三节点的 [标签, 当前, 已完成]，顺序即节点顺序。"""
@@ -53,7 +55,7 @@ class StageLegendTests(unittest.TestCase):
         expect(self.page.get_by_role('heading', name='畅销品', exact=True)).to_be_visible()
         self.assert_stages('分析结果', {'选择区间', '确认同款'})
         # 结果屏没有直达日期的路（票 06）：先「返回修改同款分组」回确认屏，再「重新选择日期」。
-        self.page.get_by_role('button', name='返回修改同款分组').click()
+        self.back_to_review()
         expect(self.page.get_by_role('heading', name='确认同款')).to_be_visible()
         self.assert_stages('确认同款', {'选择区间'})
         self.page.get_by_role('button', name='重新选择日期').click()

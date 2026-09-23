@@ -36,6 +36,7 @@ class EndToEndAcceptanceTests(unittest.TestCase):
     restart_service = fixture.AnalysisBrowserTests.restart_service
     submit = fixture.AnalysisBrowserTests.submit  # 夹具 setUp 用它铺底数
     switch_tab = fixture.AnalysisBrowserTests.switch_tab
+    back_to_review = fixture.AnalysisBrowserTests.back_to_review
 
     # ---------------------------------------------------------------- 夹具
 
@@ -374,7 +375,7 @@ class EndToEndAcceptanceTests(unittest.TestCase):
         # 页面上换一个更长的区间：销量按新数据重算。
         # 这一组已确认、草稿也暂存过：这趟落屏由门禁定（票 06 起就是结果屏），回确认屏再换区间。
         expect(self.page.get_by_role('heading', name='畅销品', exact=True)).to_be_visible()
-        self.page.get_by_role('button', name='返回修改同款分组').click()
+        self.back_to_review()
         self.page.get_by_role('button', name='重新选择日期').click()
         second_sid = self.dates(end='2026-09-21')
         self.assertNotEqual(second_sid, sid)
@@ -394,7 +395,7 @@ class EndToEndAcceptanceTests(unittest.TestCase):
                          first_sales)
         # 页面上看到的是复用后的已确认组（复用来的确认生效：门禁给结果屏，回确认屏看名单）。
         expect(self.page.get_by_role('heading', name='畅销品', exact=True)).to_be_visible()
-        self.page.get_by_role('button', name='返回修改同款分组').click()
+        self.back_to_review()
         expect(self.page.locator('#snapshotInfo')).to_contain_text('2 个商品')
         self.switch_tab('已确认')
         expect(self.page.locator('.group-choice')).to_have_count(1)

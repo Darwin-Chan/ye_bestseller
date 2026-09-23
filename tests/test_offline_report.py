@@ -194,7 +194,7 @@ class OfflineReportBrowserTests(unittest.TestCase):
         # 导出时浏览器停在结果屏：屏上默认只列有销量的组，翻到第 2 屏也不改报告的份量。
         expect(self.page.locator('#rankPageInfo')).to_have_text('第 1 / 1 屏 · 共 2 组')
         self.page.get_by_label('显示零销量组').check()
-        self.page.locator('.rank-pager').get_by_role('button', name='下一页').click()
+        self.page.get_by_role('button', name='畅销品下一页').click()
         expect(self.page.locator('#rankPageInfo')).to_have_text('第 2 / 2 屏 · 共 24 组')
         path = self.export()
         self.assertEqual(path.parent, self.out)
