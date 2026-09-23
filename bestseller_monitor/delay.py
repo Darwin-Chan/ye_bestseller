@@ -3,10 +3,9 @@ from __future__ import annotations
 
 import logging
 import random
-import time
 
 from .config import Config
-from . import stop_request
+from . import stop_request, waiting
 
 log = logging.getLogger(__name__)
 
@@ -21,17 +20,13 @@ class Humanizer:
         return random.uniform(rng[0], rng[1])
 
     def sleep(self, seconds: float) -> None:
-        """拟人化睡眠；按片问一次「该不该停」（ADR-0009）。
+        """拟人化睡眠；切片走等待原语，每片之前问一次「该不该停」（ADR-0009、ADR-0042）。
 
         长停顿 10–20 秒、批量休息 20–40 秒、deny 退避 30/60 秒本来会让协作停止
         白等到睡完，切片把响应时间压到一片以内。没装停止检查时照旧睡一整段。
         """
-        remaining = max(0.0, seconds)
-        while remaining > 0:
-            stop_request.check()
-            piece = min(stop_request.SLICE_SEC, remaining)
-            time.sleep(piece)
-            remaining -= piece
+        waiting.until(None, timeout_sec=max(0.0, seconds),
+                      poll_sec=stop_request.SLICE_SEC)
 
     def before_detail(self) -> None:
         self._pages_since_long += 1
