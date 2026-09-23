@@ -4,11 +4,15 @@
 「页面已加载」和「至少有一张卡片」两个条件旧页本身就满足。这里锁的行为是：
 翻页后用「商品卡片身份序列」判断列表是否真的变了；变了才继续读，始终没变就
 如实报列表失败（店铺留待续跑），而不是把旧页再读一遍当成新页。
+
+三个条件等待函数（`wait_until` / `wait_cards` / `wait_for_change`）迁到等待原语（ADR-0042）
+后另锁两件事：返回值与吞异常语义照旧（一次页面抖动只让等待继续），以及等待期间收到停止
+请求时 `StopRequested` 从等待里穿出。
 """
 import unittest
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import listing
+from bestseller_monitor import listing, stop_request
 from bestseller_monitor.listing import ListingLoadFailed
 from helpers import crawler_cfg
 
@@ -44,9 +48,17 @@ class IdentityTests(unittest.TestCase):
                 listing.wait_for_change(lambda: observe(), ("p1",), "第二页", 5.0))
 
     def test_wait_for_change_times_out_when_the_list_never_changes(self):
-        with patch.object(listing, "_POLL_SEC", 0.0):
-            self.assertFalse(
-                listing.wait_for_change(lambda: ("p1",), ("p1",), "第二页", 0.05))
+        with patch.object(listing, "_POLL_SEC", 0.0), \
+             self.assertLogs("bestseller_monitor", level="INFO") as logs:
+            changed = listing.wait_for_change(lambda: ("p1",), ("p1",), "第二页", 0.05)
+
+        output = "\n".join(logs.output)
+        self.assertFalse(changed)
+        self.assertIn("等待「第二页（列表身份始终未变）」超时(0s)，按当前状态继续。", output,
+                      "超时一行由等待原语记：「列表身份始终未变」并进 describe")
+        self.assertIn("bestseller_monitor.waiting", [record.name for record in logs.records],
+                      "那一行是等待原语记的，不是 listing 记的")
+        self.assertNotIn("超时(0s)：列表身份始终未变。", output, "旧特供句不再单独存在")
 
     def test_wait_for_change_lets_the_caller_continue_without_a_before_state(self):
         # 翻页前读不到列表身份：无从判断变化，放行由旧逻辑兜底，绝不因此误报失败。
@@ -54,6 +66,63 @@ class IdentityTests(unittest.TestCase):
             raise AssertionError("没有翻页前身份时不该轮询")
 
         self.assertTrue(listing.wait_for_change(observe, (), "第二页", 0.05))
+
+
+class WaitUntilTests(unittest.TestCase):
+    """条件等待的返回值、吞异常与超时一行（A04：迁移后语义不变，超时日志由原语记）。"""
+
+    def test_a_truthy_predicate_returns_true_right_away(self):
+        calls = []
+
+        def predicate():
+            calls.append(1)
+            return "卡片"     # 真值不是 True 本身：返回值仍是货真价实的 True
+
+        self.assertIs(listing.wait_until("商品卡片出现", predicate, 5.0, poll=0.0), True)
+        self.assertEqual(len(calls), 1, "条件已经满足，不该再轮询")
+
+    def test_predicate_jitter_only_delays_the_wait(self):
+        calls = []
+
+        def predicate():
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("页面抖了一下")
+            return True
+
+        self.assertIs(listing.wait_until("商品卡片出现", predicate, 5.0, poll=0.0), True)
+        self.assertEqual(len(calls), 2, "一次抖动只让等待继续，不终止")
+
+    def test_timeout_returns_false_with_the_shared_log_line(self):
+        with self.assertLogs("bestseller_monitor.waiting", level="INFO") as logs:
+            done = listing.wait_until("商品卡片出现", lambda: False, 0.05, poll=0.0)
+
+        self.assertIs(done, False)
+        self.assertIn("等待「商品卡片出现」超时(0s)，按当前状态继续。", "\n".join(logs.output))
+
+
+class StopDuringWaitTests(unittest.TestCase):
+    """A05：等待期间装上会抛的钩子，停止异常从等待里穿出（页面等待也是协作停止的检查点）。"""
+
+    def setUp(self):
+        self.addCleanup(stop_request.uninstall)
+
+    @staticmethod
+    def _stop_now():
+        raise stop_request.StopRequested("收到界面暂停请求")
+
+    def test_a_stop_request_breaks_out_of_wait_until(self):
+        stop_request.install(self._stop_now)
+
+        with self.assertRaises(stop_request.StopRequested):
+            listing.wait_until("商品卡片出现", lambda: False, 5.0, poll=0.05)
+
+    def test_a_stop_request_breaks_out_of_wait_for_change(self):
+        stop_request.install(self._stop_now)
+
+        with patch.object(listing, "_POLL_SEC", 0.0):
+            with self.assertRaises(stop_request.StopRequested):
+                listing.wait_for_change(lambda: ("p1",), ("p1",), "第二页", 5.0)
 
 
 class PrepareTests(unittest.TestCase):

@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import logging
 import re
-import time
 from pathlib import Path
 
+from . import waiting
 from .config import Config
 from .guard import intervention_kind, vtype, wait_for_resolution
 
@@ -57,17 +57,20 @@ WAIT_NEXT_SEC = 10.0      # 翻页/加载更多后等列表刷新
 
 
 def wait_until(describe: str, predicate, timeout_sec: float, poll: float = 0.4) -> bool:
-    """条件等待 + 上限兜底：条件满足返回 True；超时记日志并返回 False（不中断流程）。"""
-    deadline = time.time() + timeout_sec
-    while time.time() < deadline:
+    """条件等待 + 上限兜底：条件满足返回 True；超时记日志并返回 False（不中断流程）。
+
+    循环本身走等待原语（ADR-0042）：等待期间收到停止请求时 `StopRequested` 从这里穿出。
+    谓词异常仍在这里吞掉——一次页面抖动不该终止等待。
+    """
+
+    def probe() -> bool:
         try:
-            if predicate():
-                return True
+            return bool(predicate())
         except Exception:
-            pass
-        time.sleep(poll)
-    log.info("等待「%s」超时(%.0fs)，按当前状态继续。", describe, timeout_sec)
-    return False
+            return False
+
+    return bool(waiting.until(probe, timeout_sec=timeout_sec, poll_sec=poll,
+                              describe=describe))
 
 
 def wait_cards(page, min_count: int = 1, timeout_sec: float | None = None,
@@ -197,21 +200,23 @@ def wait_for_change(observe, before: tuple, describe: str, timeout_sec: float) -
 
     before 为空表示翻页前就没读到列表身份：无从判断变化，返回 True 放行，
     由调用方按旧逻辑（等卡片出现）兜底，避免把「读不到 DOM」误判成加载失败。
+
+    超时一行由等待原语按共用模板记（ADR-0042），「列表身份始终未变」并进 describe；
+    observe 的异常仍在这里吞掉，等待期间收到停止请求时 `StopRequested` 从这里穿出。
     """
     if not before:
         log.info("翻页前读不到列表身份，跳过「%s」的变化判断。", describe)
         return True
-    deadline = time.time() + timeout_sec
-    while time.time() < deadline:
+
+    def probe() -> bool:
         try:
             current = observe()
         except Exception:
             current = ()
-        if current and current != before:
-            return True
-        time.sleep(_POLL_SEC)
-    log.info("等待「%s」超时(%.0fs)：列表身份始终未变。", describe, timeout_sec)
-    return False
+        return bool(current and current != before)
+
+    return bool(waiting.until(probe, timeout_sec=timeout_sec, poll_sec=_POLL_SEC,
+                              describe=f"{describe}（列表身份始终未变）"))
 
 
 def wait_for_list_change(page, before: tuple, describe: str,
