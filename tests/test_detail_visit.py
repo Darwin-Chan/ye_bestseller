@@ -6,13 +6,36 @@ from unittest.mock import MagicMock, patch
 
 from playwright.sync_api import Error as PlaywrightError
 
-from bestseller_monitor import detail, detail_visit, guard
+from bestseller_monitor import detail, detail_visit, guard, stop_request, waiting
 from helpers import FakePage, GuardClock, crawler_cfg
 
 
 DETAIL_HTML = ('<script>{"skuInfoMap":{"红色":{"skuId":"red","name":"红色",'
                '"price":10,"canBookCount":3}}}</script>')
 PRODUCT_URL = "https://detail.1688.com/offer/11.html"
+
+
+class ScriptedClock:
+    """`waiting.time` 的替身：单调钟按剧本取值，`sleep` 不真等。
+
+    同 seam 上另有两份替身：test_waiting 的 `FakeClock`（虚拟钟只在睡眠时前进）与
+    helpers 的 `GuardClock`（读时即前进、还没有 `monotonic`，票 05 补）。窗口重置要看的
+    是「每个时刻钟走到哪」，前两份都表达不了，因此这里用剧本——每次读的值由用例写死，
+    读超了剧本就报错（轮询的读表次数变了，用例该跟着改）。
+    """
+
+    def __init__(self, moments):
+        self.moments = list(moments)
+        self.reads: list[float] = []
+
+    def monotonic(self) -> float:
+        if not self.moments:
+            raise AssertionError("钟的剧本走完了：轮询读表次数超出用例预期")
+        self.reads.append(self.moments.pop(0))
+        return self.reads[-1]
+
+    def sleep(self, seconds: float) -> None:
+        pass
 
 
 class DetailVisitTests(unittest.TestCase):
@@ -198,23 +221,90 @@ class DetailVisitTests(unittest.TestCase):
         self.assertEqual(page.content.call_count, 2)
 
     def test_late_intervention_resets_the_full_readiness_window(self):
+        """介入解决后重开的是**完整**新窗：原窗烧掉一半照旧，完整的那个窗才等得到（A08）。
+
+        钟按剧本走（每次读单调钟 = 一个时刻，`sleep` 不真等）：窗口一 t=0 开（到 10
+        为止）、t=1.5 睡过一片，第二轮探针撞上「滑块」；介入在 t=5 被 guard 解决，
+        原窗只剩一半——重开的新窗必须是**完整**的（到 15），t≥12.5 的那两轮才轮得到，
+        第四次读取（t=12.9 之后）才拿到可读的正文。重置若只续剩余额度（新窗到 10），
+        那次读取会走超时出口、拿到不可读的正文，本用例判红。
+        """
+        clock = ScriptedClock([0.0, 1.0, 1.5, 5.0, 12.0, 12.5, 12.8, 12.9])
         page = MagicMock()
         page.url = PRODUCT_URL
-        page.content.side_effect = ["<html>仍在渲染</html>",
-                                     "<html>仍在渲染</html>", DETAIL_HTML]
-        clock = iter([0.0, 1.0, 5.0, 12.0])
+        read_moments = []
+
+        def content():
+            read_moments.append(clock.reads[-1])
+            return DETAIL_HTML if len(read_moments) >= 4 else "<html>仍在渲染</html>"
+
+        page.content.side_effect = content
 
         with patch.object(detail_visit, "ready_detail_page", return_value=False), \
              patch.object(detail_visit, "intervention_kind",
-                          side_effect=[None, "滑块", None, None]), \
+                          side_effect=[None, "滑块", None, None, None]), \
              patch.object(detail_visit, "is_deny_url", return_value=False), \
-             patch.object(detail_visit.time, "time", side_effect=clock), \
-             patch.object(detail_visit.time, "sleep"):
+             patch.object(waiting, "time", clock):
             visit = self.begin(page)
             observation = visit.observe(PRODUCT_URL)
 
         self.assertTrue(observation.ok, "重置后的窗口内应继续等到商品页可读")
-        self.assertEqual(page.content.call_count, 3)
+        self.assertEqual(page.content.call_count, 4)
+        self.assertGreater(read_moments[-1], detail_visit.DETAIL_READY_TIMEOUT_SEC,
+                           "成功那次读取在原窗口(10s)之外：只有完整新窗等得到它")
+
+    def test_the_timeout_exit_observes_the_current_html(self):
+        """窗口耗尽的出口照旧：读一次当前 html 交 `observe_html`（A08 后半）。
+
+        页面始终不可读 → `until` 超时返回 `None` → 出口再读一次当前页面、按现状翻译。
+        窗口打小到 0.05 秒（test_listing 的先例），配合 `sleep` 打桩，用例不真等。
+        """
+        page = MagicMock()
+        page.url = PRODUCT_URL
+        page.content.return_value = "<html>仍在渲染</html>"
+
+        with patch.object(detail_visit, "DETAIL_READY_TIMEOUT_SEC", 0.05), \
+             patch.object(detail_visit, "ready_detail_page", return_value=False), \
+             patch.object(detail_visit, "intervention_kind", return_value=None), \
+             patch.object(detail_visit, "is_deny_url", return_value=False), \
+             patch.object(detail_visit.time, "sleep"):
+            visit = self.begin(page)
+            observation = visit.observe(PRODUCT_URL)
+
+        self.assertEqual(observation.kind, detail.FailureKind.PARSE,
+                         "出口把当前 html 交给 observe_html 翻译")
+        self.assertEqual(observation.raw_html, "<html>仍在渲染</html>")
+        self.assertGreaterEqual(page.content.call_count, 2, "探测过一轮之后，出口又读了一次")
+
+    def test_a_stop_request_during_the_readiness_wait_passes_through(self):
+        """等待期间收到停止请求：异常原样上抛，不落 read_failed（A09；先例 test_round_stop）。
+
+        停止落在「已经探测过一轮、还在等」的时刻：入口那个检查点放行，睡前那次把
+        StopRequested 抛出来。异常穿过 observe，而不是被翻译成一次读取失败——失败率
+        不为「没真的读完的那次」记账（ADR-0009；spec §5 的那处行为变化）。
+        """
+        page = MagicMock()
+        page.url = PRODUCT_URL
+        page.content.return_value = "<html>仍在渲染</html>"     # 一直不可读 → 一直在等
+        checks = []
+
+        def hook():
+            checks.append(1)
+            if len(checks) > 1:      # 入口放行；停在等待中间的那次检查点
+                raise stop_request.StopRequested("停")
+
+        with patch.object(detail_visit, "ready_detail_page", return_value=False), \
+             patch.object(detail_visit, "intervention_kind", return_value=None), \
+             patch.object(detail_visit, "is_deny_url", return_value=False), \
+             patch.object(detail_visit.time, "sleep"):
+            visit = self.begin(page)
+            stop_request.install(hook)
+            self.addCleanup(stop_request.uninstall)
+            with self.assertRaises(stop_request.StopRequested):
+                visit.observe(PRODUCT_URL)
+
+        self.assertEqual(len(checks), 2, "入口一次、睡前一次：停在等待中间")
+        self.assertEqual(page.content.call_count, 1, "被认领之前已经探测过一轮")
 
     def test_observe_is_a_single_use_capability(self):
         page = MagicMock()

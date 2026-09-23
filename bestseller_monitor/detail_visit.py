@@ -1,12 +1,14 @@
 """详情访问的共享 seam：取得、安顿并读取一次当前详情观测。"""
 from __future__ import annotations
 
-import time
+# 本模块自己已不再计时；留着这个 import 是因为用例仍经 `detail_visit.time` 打桩
+# `time.sleep`（模块对象是同一个，原语用的也是它）。
+import time  # noqa: F401
 from dataclasses import dataclass
 
 from playwright.sync_api import Error as PlaywrightError
 
-from . import detail
+from . import detail, waiting
 from .config import Config
 from .guard import (DenyTracker, intervention_kind, is_deny_url,
                     ready_detail_page)
@@ -58,13 +60,20 @@ class ReadyDetailVisit:
     _observed: bool = False
 
     def observe(self, product_url: str) -> detail.Observation | DeniedVisit:
-        """等待 guard 后的页面可读，再翻译当前 HTML；同一 capability 只能调用一次。"""
+        """等待 guard 后的页面可读，再翻译当前 HTML；同一 capability 只能调用一次。
+
+        等待走 `waiting.until`（ADR-0042）：探针每轮做「读地址 / 介入判定 / 读正文」
+        的全套，返回终值（观测或 deny 结果）或 `None`（还不可读，继续等）。人工介入
+        被 guard 解决后探针交回 `waiting.EXTEND`——本次窗口到此，外层重开一个完整
+        `DETAIL_READY_TIMEOUT_SEC` 新窗（重置不进原语，只在这里的外层循环里）。等待
+        期间收到停止请求时异常原样上抛：不落 `read_failed`，也不给「没真的读完的那次」
+        记账（ADR-0009；spec §5 的那处行为变化）。
+        """
         if self._observed:
             raise RuntimeError("ReadyDetailVisit.observe() 只能调用一次")
         self._observed = True
 
-        deadline = time.time() + DETAIL_READY_TIMEOUT_SEC
-        while True:
+        def probe():
             try:
                 denied = is_deny_url(self._page.url or "")
             except BROWSER_IO_ERRORS as exc:
@@ -87,15 +96,28 @@ class ReadyDetailVisit:
                 if guarded:
                     return DeniedVisit(_read_raw_html(self._page))
                 # 人工介入结束后，给当前页面一个完整的可读窗口。
-                deadline = time.time() + DETAIL_READY_TIMEOUT_SEC
-                continue
+                return waiting.EXTEND
 
             html = self._read_html()
             if isinstance(html, detail.Observation):
                 return html
-            if detail.readable(html) or time.time() >= deadline:
+            if detail.readable(html):
                 return detail.observe_html(html, product_url)
-            time.sleep(DETAIL_READY_POLL_SEC)
+            return None
+
+        while True:
+            outcome = waiting.until(probe, timeout_sec=DETAIL_READY_TIMEOUT_SEC,
+                                    poll_sec=DETAIL_READY_POLL_SEC,
+                                    describe="详情页可读")
+            if outcome is waiting.EXTEND:
+                continue
+            if outcome is not None:
+                return outcome
+            # 超时出口：读一次当前 html 按现状翻译（至多多读一次 content()）。
+            html = self._read_html()
+            if isinstance(html, detail.Observation):
+                return html
+            return detail.observe_html(html, product_url)
 
     def _guard(self) -> bool | detail.Observation:
         try:
