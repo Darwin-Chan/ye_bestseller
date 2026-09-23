@@ -7,6 +7,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from .analysis import READ_FAILURE_TEXT
+
 PAGE = Path(__file__).resolve().parent / "pages" / "bestseller-analysis.html"
 SAVE_ACTIONS = ('save', 'save_and_view', 'discard')
 MAX_REQUEST = 1024 * 1024  # 分组与保存操作的正文上限
@@ -95,7 +97,7 @@ def create_server(service, port=0):
                 return
             except (sqlite3.Error, OSError):
                 log.exception("分析读取失败")
-                self.reply({"error": "读取库存数据失败，请检查分析配置和数据库后重试"}, 503)
+                self.reply({"error": READ_FAILURE_TEXT}, 503)
 
         def _save_action(self, service, data):
             # 保存失败要有专属文案：页面据此保持「未保存」并允许重试。

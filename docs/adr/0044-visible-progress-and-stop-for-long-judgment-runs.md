@@ -93,9 +93,10 @@ F1 之下窗口与运行同生共死，"锁与工作同寿命"自然成立；最
 
 ## 落地（分票）
 
-- 票 01（服务端：异步受理、进度读数、停止标志）与票 02（页面：遮罩与轮询）归本线，
-  规格在 `.scratch/matching-progress/spec.md`，原型在
-  `docs/design/matching-progress.prototype.html`。
+- 票 01（看得见：异步受理、判断进度与匹配进度遮罩）与票 02（停得下：停止匹配与停止后的落态）
+  归本线，规格在 `.scratch/matching-progress/spec.md`，票面在
+  `.scratch/matching-progress/issues/`，原型在 `docs/design/matching-progress.prototype.html`。
+  决策 3（停止匹配）落在票 02，`wait_terminal` 的契约（决策 5）由票 01 先立、票 02 承接。
 - 票 03（关窗钩子、原生确认框、放锁时机）归另一个会话；本 ADR 只约束它"放锁排在
   `wait_terminal` 之后"。
 - 编号相邻的 ADR-0043 归另一个会话（分析运行与锁的那条），两条互相引用。

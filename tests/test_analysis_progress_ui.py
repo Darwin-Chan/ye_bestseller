@@ -20,6 +20,7 @@ class MatchingMaskTests(unittest.TestCase):
     setUp = fixture.AnalysisBrowserTests.setUp
     stop_server = fixture.AnalysisBrowserTests.stop_server
     submit = fixture.AnalysisBrowserTests.submit
+    submit_product = fixture.AnalysisBrowserTests.submit_product
     dates = fixture.AnalysisBrowserTests.dates
     seed = GroupEditingTests.seed
 
@@ -46,6 +47,7 @@ class MatchingMaskTests(unittest.TestCase):
     def test_mask_shows_phase_and_counts_then_closes_into_the_review_page(self):
         transport = self.model(pass_first=2)
         self.seed(4)
+        self.submit_product('99', '2026-09-07', 50, name='无图商品')   # 缺证据、不参与判断
         mask = self.enter()
         expect(mask).to_be_visible()
         expect(self.page.locator('#datePage')).to_be_hidden()
@@ -57,12 +59,25 @@ class MatchingMaskTests(unittest.TestCase):
         expect(mask.locator('#maskMain')).to_have_text('已完成 2 / 6 对')
         expect(mask.locator('#maskSub')).to_contain_text('可判 4 个商品')
         expect(mask.locator('#maskSub')).to_contain_text('命中缓存不花钱')
-        expect(mask.locator('#maskTime')).to_contain_text('预计还需约')
+        expect(mask.locator('#maskSub')).to_contain_text('另有 1 个商品缺证据不参与')
+        expect(mask.locator('#maskTime')).to_contain_text('已用')
+        expect(mask.locator('#maskTime')).to_contain_text('正在估算')   # 假模型是秒回的，样本不足
 
         transport.release.set()
         expect(mask).to_be_hidden()
         expect(self.page.locator('.group-choice', has_text='4 个商品')).to_be_visible()
         self.assertIn('analysis=', self.page.url)
+
+    def test_mask_time_says_when_judging_is_done(self):
+        """判完全部对数、还在装配时，时间行不该继续说「正在估算」（那是判断阶段的话）。"""
+        self.seed(4)
+        self.enter()
+        expect(self.page.locator('#snapshotInfo')).to_contain_text('日期区间')
+        self.assertEqual(self.page.evaluate("timeSuffix({todo: 6, judged: 6, eta_text: ''})"),
+                         '判断已完成，正在装配')
+        self.assertEqual(self.page.evaluate("timeSuffix({todo: 6, judged: 2, eta_text: ''})"), '正在估算…')
+        self.assertEqual(self.page.evaluate("timeSuffix({todo: 6, judged: 2, eta_text: '8 分钟'})"),
+                         '预计还需约 8 分钟')
 
     def test_mask_survives_escape_and_backdrop_until_the_run_ends(self):
         transport = self.model(pass_first=2)

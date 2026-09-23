@@ -33,9 +33,18 @@ DEFAULT_OUTPUT_DIR = "output"
 MACHINE_CONFIG_NAME = "config.toml"
 
 # 判断运行的五个阶段：次序就是程序真跑的次序（ADR-0044 的「阶段行」按它显示）。
-PHASES = ('冻结库存数据', '召回候选同款', '检查模型可用性', '逐对判断同款', '装配同款组')
-JUDGING_PHASE = 3                      # 「逐对判断同款」在第几步：预计时长从这一步起算
-_PHASE_INDEX = {PHASE_RECALL: 1, PHASE_VERIFY: 2, PHASE_JUDGE: JUDGING_PHASE, PHASE_ASSEMBLE: 4}
+# 阶段名只在 _PHASE_OF 里写一遍（matching 报它自己的四个标识），次序由它推出来。
+_PHASE_OF = {PHASE_RECALL: '召回候选同款', PHASE_VERIFY: '检查模型可用性',
+             PHASE_JUDGE: '逐对判断同款', PHASE_ASSEMBLE: '装配同款组'}
+PHASES = ('冻结库存数据', *_PHASE_OF.values())
+_PHASE_INDEX = {phase_id: PHASES.index(label) for phase_id, label in _PHASE_OF.items()}
+JUDGING_PHASE = _PHASE_INDEX[PHASE_JUDGE]   # 「逐对判断同款」在第几步：预计时长从这一步起算
+# 判断跑够这么久才给预计：一两条的样本次算出的是噪声（规格「头一分钟显示正在估算」）。
+ETA_MIN_SAMPLE_SEC = 60.0
+# 库存库与判断缓存读写失败（sqlite3/OSError）对页面说的话：HTTP 层与 job 失败态同源。
+# 分两句是因为动的是两个库：冻结阶段读库存库，之后的判断缓存与草稿库另有说法。
+READ_FAILURE_TEXT = '读取库存数据失败，请检查分析配置和数据库后重试'
+STORE_FAILURE_TEXT = '判断缓存或分析草稿读写失败，请检查分析配置与磁盘后重试'
 
 
 def _fmt_eta(seconds: float) -> str:
@@ -47,12 +56,12 @@ def _fmt_eta(seconds: float) -> str:
     return f'{hours} 小时 {rest} 分钟' if rest else f'{hours} 小时'
 
 
-def _failure_text(exc: BaseException) -> str:
-    """硬失败对页面说的话：域错误说原文，库与文件读写沿用它原有的那句。"""
+def _failure_text(exc: BaseException, storage_text: str) -> str:
+    """硬失败对页面说的话：域错误说原文，库与文件读写用调用方给的那句（在动哪个库谁知道）。"""
     if isinstance(exc, (ValueError, KeyError, TypeError)):
         return str(exc)
     if isinstance(exc, (sqlite3.Error, OSError)):
-        return '读取库存数据失败，请检查分析配置和数据库后重试'
+        return storage_text
     return '分析没能完成，请重试'
 
 
@@ -120,13 +129,19 @@ class _Progress:
         return payload
 
     def _eta_text(self) -> str:
-        """按本次实测速率估剩余时长；样本不足（还没判完一对）就不给，页面显示「正在估算」。"""
+        """按本次实测速率估剩余时长。
+
+        样本够才给（判断阶段跑满 ETA_MIN_SAMPLE_SEC 且至少判完一对）——一两条的样本
+        算出的是噪声；不足时给空串，页面显示「正在估算…」（规格「头一分钟显示正在估算」）。
+        """
         judged = self._fields['judged']
         remaining = self._fields['todo'] - judged
         if self._judging_started is None or judged <= 0 or remaining <= 0:
             return ''
         span = self._clock() - self._judging_started
-        return _fmt_eta(remaining * span / judged) if span > 0 else ''
+        if span < ETA_MIN_SAMPLE_SEC:
+            return ''
+        return _fmt_eta(remaining * span / judged)
 
 
 @dataclass(frozen=True)
@@ -296,9 +311,17 @@ class AnalysisService:
         return progress
 
     def _run_job(self, progress):
-        """后台跑完一次分析：冻结 → 套回人工决定 → 匹配 → 排序 → 冲突。"""
+        """后台跑完一次分析：冻结（读库存库）→ 套回人工决定 → 匹配排序（动判断缓存与草稿库）。
+
+        两段各自收失败：动的是两个不同的库，对页面说的话也不一样（规格要求
+        「就地显示真实原因」，缓存写不进去时说「读取库存数据失败」就是甩锅）。
+        """
         try:
             snapshot = self._freeze(progress.id, progress.start, progress.end)
+        except Exception as exc:  # noqa: BLE001 —— 失败原因要原样交给页面
+            log.exception('分析运行失败（冻结库存）')
+            return progress.fail(_failure_text(exc, READ_FAILURE_TEXT), exc)
+        try:
             # 「继续上次分析」读原快照；新日期区间走这里：重算销量后，把已保存的
             # 人工分组按商品版本套回来（票 09），不适用的留在待确认由人工处理。
             decisions = self.store.ledger()
@@ -311,8 +334,8 @@ class AnalysisService:
                 self._snapshots[snapshot["id"]] = snapshot
             progress.finish()
         except Exception as exc:  # noqa: BLE001 —— 失败原因要原样交给页面
-            log.exception('分析运行失败')
-            progress.fail(_failure_text(exc), exc)
+            log.exception('分析运行失败（判断与装配）')
+            progress.fail(_failure_text(exc, STORE_FAILURE_TEXT), exc)
 
     def _freeze(self, analysis_id, start, end):
         """冻结一次分析的输入：区间库存、商品证据版本与区间销量。"""

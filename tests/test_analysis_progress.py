@@ -51,6 +51,19 @@ class StagedTransport(ModelTransport):
         return super().__call__(request, timeout)
 
 
+class FakeClock:
+    """可控时钟：预计时长按「判断阶段跑了多久」算，用真钟就测不了。"""
+
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
 class ProgressSeamTests(unittest.TestCase):
     """服务缝：一次真实运行（假模型、真服务、真临时库）。"""
 
@@ -145,6 +158,34 @@ class ProgressSeamTests(unittest.TestCase):
         accepted = self.start('2026-10-01', '2026-10-02')
         final = self.wait_state(accepted['id'], states=('failed',))
         self.assertEqual(final['error'], '该日期区间没有可分析的库存，请重新选择日期')
+
+    def test_cache_failure_reports_the_store_not_the_inventory(self):
+        """判断缓存打不开：说缓存那句，不把锅甩给库存库（规格点名的场景）。"""
+        blocked = Path(self.tmp.name) / 'cache-as-directory'
+        blocked.mkdir()
+        self.service = AnalysisService(
+            AnalysisConfig(self.path, matching=MatchingConfig(blocked, mode='direct')),
+            running=lambda: False)
+        accepted = self.start()
+        final = self.wait_state(accepted['id'], states=('failed',))
+        self.assertEqual(final['error'], '判断缓存或分析草稿读写失败，请检查分析配置与磁盘后重试')
+
+    def test_eta_waits_for_enough_samples_then_follows_the_measured_rate(self):
+        """预计时长：头一分钟（样本不足）不给；给出来时按本次实测速率算。"""
+        clock = FakeClock()
+        self.service = AnalysisService(self.service.config, running=lambda: False, clock=clock)
+        accepted = self.start()
+        self.wait_for(accepted['id'], lambda r: r['judged'] >= 2)
+        self.assertEqual(self.service.job_state(accepted['id'])['eta_text'], '',
+                         '刚判完两对就不该给预计')
+        clock.advance(30)
+        self.assertEqual(self.service.job_state(accepted['id'])['eta_text'], '',
+                         '跑满半分钟仍算样本不足')
+        # 判断跑了 60 秒、判完 2 对、还剩 4 对：4 × 60/2 = 120 秒 → 2 分钟。
+        clock.advance(30)
+        self.assertEqual(self.service.job_state(accepted['id'])['eta_text'], '2 分钟')
+        self.transport.release.set()
+        self.wait_state(accepted['id'])
 
     def test_final_counts_match_the_usage_line(self):
         with self.assertLogs('bestseller_monitor.matching', level='INFO') as logs:

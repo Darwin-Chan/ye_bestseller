@@ -621,7 +621,7 @@ document.addEventListener('pointerover', tipOver);
 document.addEventListener('pointerout', tipOut);
 // ---- 匹配进度遮罩（票 01，ADR-0044）：长时判断的可见面，首次分析与重试共用同一块 ----
 const MASK_POLL_MS = 1000;
-let maskToken = 0, maskRetryMode = false;
+let maskToken = 0;
 const fmtDur = seconds => {
     const total = Math.max(0, Math.round(seconds || 0));
     if (total < 60) return `${total} 秒`;
@@ -633,20 +633,25 @@ function showMask() {
 }
 function renderProgress(reading) {
     showMask();
-    $('maskTitle').textContent = maskRetryMode ? '正在匹配同款（重试）' : '正在匹配同款';
+    $('maskTitle').textContent = '正在匹配同款';
     $('maskPhase').innerHTML = `第 ${reading.phase_index + 1} 步 / 共 ${reading.phases.length} 步：<b>${esc(reading.phases[reading.phase_index])}</b>`;
     $('maskSteps').innerHTML = reading.phases.map((name, index) =>
         `<li class="${index < reading.phase_index ? 'ok' : index === reading.phase_index ? 'cur' : ''}">`
         + `${index < reading.phase_index ? '✓ ' : ''}${esc(name)}</li>`).join('');
     const numbers = $('maskNumbers');
-    numbers.hidden = reading.products === 0;
+    numbers.hidden = reading.phase_index === 0;      // 冻结阶段还没数出商品与对数
     if (numbers.hidden) return;
     $('maskBar').style.width = reading.todo ? Math.round(reading.judged / reading.todo * 100) + '%' : '0%';
     $('maskMain').textContent = `已完成 ${reading.judged} / ${reading.todo} 对`;
     $('maskSub').textContent = `可判 ${reading.eligible} 个商品 · ${reading.cached_hits} 对命中缓存不花钱 · `
-        + `${reading.blocked} 对低于判断下限不送模型` + (reading.failed ? ` · 失败 ${reading.failed} 对` : '');
-    $('maskTime').textContent = `已用 ${fmtDur(reading.elapsed_sec)} · `
-        + (reading.eta_text ? `预计还需约 ${reading.eta_text}` : '正在估算…');
+        + `${reading.blocked} 对低于判断下限不送模型`
+        + (reading.missing_evidence ? ` · 另有 ${reading.missing_evidence} 个商品缺证据不参与` : '')
+        + (reading.failed ? ` · 失败 ${reading.failed} 对` : '');
+    $('maskTime').textContent = `已用 ${fmtDur(reading.elapsed_sec)} · ` + timeSuffix(reading);
+}
+function timeSuffix(reading) {
+    if (reading.todo > 0 && reading.judged >= reading.todo) return '判断已完成，正在装配';
+    return reading.eta_text ? `预计还需约 ${reading.eta_text}` : '正在估算…';
 }
 function failMask(reading) {
     showMask();
@@ -674,8 +679,7 @@ function preparePendingPage() {
     $('matchingStatus').textContent = '';
     syncStage();
 }
-function enterMask(id, start, end, retry = false) {
-    maskRetryMode = retry;
+function enterMask(id, start, end) {
     history.replaceState(null, '', '#analysis=' + id);
     preparePendingPage();
     $('maskError').hidden = true;
@@ -684,6 +688,12 @@ function enterMask(id, start, end, retry = false) {
     $('maskSteps').innerHTML = '';
     $('maskNumbers').hidden = true;
     pollMask(id);
+}
+function applyReading(id, reading) {
+    if (reading.state === 'failed') return failMask(reading);
+    if (reading.state === 'ready') return finishMask(id);
+    // 确认真在跑才盖遮罩：秒完的那一趟不闪一下（renderProgress 里 showMask）。
+    renderProgress(reading);
 }
 async function pollMask(id) {
     const token = ++maskToken;
@@ -694,10 +704,8 @@ async function pollMask(id) {
         } catch (reason) { /* 取数失败照常排下一次：轮询不因一次查询失败就停 */ }
         if (token !== maskToken) return;
         if (reading) {
-            if (reading.state === 'failed') return failMask(reading);
-            if (reading.state === 'ready') return finishMask(id);
-            // 确认真在跑才盖遮罩：秒完的那一趟不闪一下（renderProgress 里 showMask）。
-            renderProgress(reading);
+            if (reading.state !== 'matching') return applyReading(id, reading);   // 终态：接完就停
+            renderProgress(reading);                                              // 还在跑：更新遮罩
         }
         await new Promise(resolve => setTimeout(resolve, MASK_POLL_MS));
     }
@@ -723,7 +731,7 @@ $('maskBack').onclick = () => backToDates();
         const reading = await api('/api/progress?id=' + encodeURIComponent(id)).catch(() => null);
         if (reading && reading.state !== 'ready') {
             enterMask(id, reading.start, reading.end);
-            if (reading.state === 'failed') failMask(reading); else renderProgress(reading);
+            applyReading(id, reading);
             return;
         }
         show(await api('/api/analysis?id=' + encodeURIComponent(id)));
