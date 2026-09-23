@@ -91,14 +91,15 @@ class AnalysisUiAdjustmentTests(unittest.TestCase):
         self.assertEqual([tabs.nth(index).inner_text().split()[0] for index in range(3)],
                          ['待确认', '已确认', '全部'])
         expect(tabs.nth(0)).to_have_attribute('aria-selected', 'true')
-        expect(self.page.get_by_role('checkbox')).to_have_count(4)
+        # 勾选框只数分组列表里的（票 03 起筛选行也有勾选框）。
+        expect(self.page.locator('#products input[type=checkbox]')).to_have_count(4)
         expect(self.page.locator('#batchRow')).to_be_visible()
         expect(self.page.get_by_role('button', name='确认勾选组')).to_be_visible()
 
         self.switch_tab('全部')
         expect(self.page.locator('#batchRow')).to_be_hidden()
         expect(self.page.locator('#selectionCount')).to_be_hidden()
-        expect(self.page.get_by_role('checkbox')).to_have_count(0)
+        expect(self.page.locator('#products input[type=checkbox]')).to_have_count(0)
         expect(self.page.get_by_role('button', name='确认勾选组')).to_have_count(0)
         expect(self.page.get_by_role('button', name='确认当前筛选全部组')).to_have_count(0)
         expect(self.page.locator('.group-choice')).to_have_count(4)
@@ -113,7 +114,7 @@ class AnalysisUiAdjustmentTests(unittest.TestCase):
         expect(self.page.locator('.group-choice')).to_have_count(2)
         expect(self.page.get_by_role('button', name='撤回勾选组')).to_be_disabled()
         expect(self.page.get_by_role('button', name='撤回当前筛选全部组')).to_be_enabled()
-        self.page.get_by_role('checkbox').first.check()
+        self.page.locator('#products input[type=checkbox]').first.check()
         expect(self.page.locator('#selectionCount')).to_have_text('已勾选 1 组')
 
         self.page.get_by_role('button', name='撤回勾选组').click()
@@ -150,7 +151,7 @@ class AnalysisUiAdjustmentTests(unittest.TestCase):
 
         # 撤回侧：只有一行，且上一轮的第二行文案不留残文。
         self.switch_tab('已确认')
-        self.page.get_by_role('checkbox').first.check()
+        self.page.locator('#products input[type=checkbox]').first.check()
         self.page.get_by_role('button', name='撤回勾选组').click()
         dialog = self.page.get_by_role('dialog', name='撤回同款商品分组', exact=True)
         expect(dialog.locator('p').nth(0)).to_have_text('将撤回1个同款分组，包含1个商品。')

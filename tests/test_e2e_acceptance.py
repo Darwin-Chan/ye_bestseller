@@ -325,12 +325,12 @@ class EndToEndAcceptanceTests(unittest.TestCase):
         expect(self.page.locator('.group-choice')).to_have_count(20)
 
         # 跨页勾选：翻页后旧的勾选保留，批量确认覆盖两页选中的完整组。
-        self.page.get_by_role('checkbox').first.check()
+        self.page.locator('#products input[type=checkbox]').first.check()
         self.page.get_by_role('button', name='下一页', exact=True).click()
         expect(self.page.locator('#pageInfo')).to_contain_text('2')
-        self.page.get_by_role('checkbox').first.check()
+        self.page.locator('#products input[type=checkbox]').first.check()
         self.page.get_by_role('button', name='上一页', exact=True).click()
-        expect(self.page.get_by_role('checkbox').first).to_be_checked()
+        expect(self.page.locator('#products input[type=checkbox]').first).to_be_checked()
         self.page.get_by_role('button', name='确认勾选组').click()
         bulk = self.page.get_by_role('dialog', name='确认同款商品分组', exact=True)
         expect(bulk.locator('p').first).to_have_text('将确认2个同款分组，包含2个商品。')
