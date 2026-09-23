@@ -39,7 +39,8 @@ from bestseller_monitor.db import CST
 from bestseller_monitor.image_store import ImageStoreError
 from bestseller_monitor.matching import prepare_cache
 from helpers import crawler_cfg, group, insert_sku_image, ledger_of, member, store_weekly_plan
-from tests.git_repos import GitSandbox
+from tests import git_repos
+from tests.git_repos import GitSandbox, WorldTemplate, git
 
 WEEK = "2026-W38"
 DAYS = ("2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18",
@@ -153,11 +154,170 @@ def seed_coverage(conn: sqlite3.Connection, coverage, *, observed_at="10:00:00",
     conn.commit()
 
 
+def _machine_world_paths(kind: str, machine: str) -> dict[str, str]:
+    """一件「某台机器的世界」里三样东西的相对路径：裸远端、交换区里的克隆、旁路工作克隆。
+
+    名字与现搭时一模一样，`_world_template` 与 `ConsoleWorld` 都从这里取，免得两处各写一份。
+    """
+    if kind not in ("raw", "judged"):
+        raise ValueError(f"不认识的世界种类：{kind}")
+    suffix = "" if kind == "raw" else "-judged"
+    return {"remote": f"{kind}-{machine}.git",
+            "exchange": f"exchange/{kind}-{machine}",
+            "work": f"{machine}{suffix}-work"}
+
+
+_PLAN_PATHS = {"remote": "plan.git", "exchange": "exchange/plan", "work": "plan-work"}
+
+
+def _build_machine_world(site: GitSandbox, *, remote: str, exchange: str,
+                         work: str) -> list[str]:
+    """搭一台机器的一套 git 小世界：空裸远端 + 交换区里的克隆 + 旁路工作克隆。
+
+    三样东西的相对路径由调用方给（`_machine_world_paths`），远端真 init、克隆真 clone，
+    与用例里现搭时逐字节同形，只是搬进了模板根。远端是空的（未出生 main），克隆出来既
+    没有对象也没有 reflog，所以两个克隆逐字节相同——第二份直接用第一份的副本（纯文件
+    复制），省一次 clone 子进程，结果与再 clone 一次一样。
+    """
+    (site.tmp / exchange).parent.mkdir(parents=True, exist_ok=True)
+    bare = site.new_remote(remote)
+    site.clone(bare, exchange)
+    shutil.copytree(site.tmp / exchange, site.tmp / work)
+    return [remote, exchange, work]
+
+
+def _world_template(kind: str, machine: str) -> WorldTemplate:
+    """取（必要时搭一次）一件世界模板：`raw` / `judged` 各半，每件 = 一台机器的那一套。"""
+    names = _machine_world_paths(kind, machine)
+    return WorldTemplate.obtain(f"exchange-{kind}-{machine}",
+                                lambda site: _build_machine_world(site, **names))
+
+
+def _plan_template() -> WorldTemplate:
+    """取（必要时搭一次）计划库那一件模板：与一台机器的那套同形，只是不带机器名。
+
+    模板里是空裸库 + 未出生的克隆（与上机清单里的形状一致）；种子提交由用的用例自己走
+    正常发布路径（`seed`），所以「克隆出来还是未出生、pull 才把它落地」这一路照旧有覆盖。
+    """
+    return WorldTemplate.obtain("exchange-plan",
+                                lambda site: _build_machine_world(site, **_PLAN_PATHS))
+
+
+def _selftest_template() -> WorldTemplate:
+    """取（必要时搭一次）原语用例用的那件小模板（四处共用，只搭一次）。"""
+    return WorldTemplate.obtain(
+        "exchange-selftest", lambda site: _build_machine_world(
+            site, remote="raw-mt.git", exchange="exchange/raw-mt", work="mt-work"))
+
+
+class WorldTemplateTests(unittest.TestCase):
+    """「取世界」原语（`git_repos.WorldTemplate`）自己的小用例：票 01 的地基税改造架在它上面。
+
+    钉四件事：同名模板在一个进程里只搭一次；取世界只复制（一个 git 子进程都不起）、同一件
+    世界在一处只取一次；复制出来的副本互相独立、也碰不到模板；副本里的 git 是真的（远端还是
+    未出生分支的空裸库、发布走正常克隆推送、钩子照旧可装可触发）。
+    """
+
+    def test_a_template_is_built_once_per_process(self):
+        name = f"selftest-{uuid.uuid4().hex}"
+        built: list[Path] = []
+
+        def build(site):
+            built.append(site.tmp)
+            return []          # 这件只用来看「搭了几次」，不必有内容
+
+        first = WorldTemplate.obtain(name, build)
+        second = WorldTemplate.obtain(name, build)
+
+        self.assertIs(first, second)
+        self.assertEqual(built, [first.root], "同名模板在一个进程里只搭一次")
+
+    def test_taking_a_world_copies_and_never_runs_git(self):
+        box = GitSandbox(self, prefix="bestseller-take-quiet-")
+        template = _selftest_template()     # 先在补丁外取到：第一趟取要真搭模板（真跑 git）
+
+        # 取世界里混进一次 git 子进程就是地基税那半边复发：把样例台的 git 换成炸雷
+        with patch.object(git_repos, "git",
+                          side_effect=AssertionError("取世界不该起 git 子进程")):
+            template.take(box)                    # 复制 + 改写地址，都不许碰 git
+            with self.assertRaises(FileExistsError):
+                template.take(box)                # 同一处再取一次：报错，不覆盖
+
+        self.assertTrue((box.tmp / "exchange" / "raw-mt").is_dir(),
+                        "重复取报错之后，先前那份副本该还在")
+
+    def test_every_take_is_a_world_of_its_own(self):
+        template = _selftest_template()
+        box_a = GitSandbox(self, prefix="bestseller-take-a-")
+        box_b = GitSandbox(self, prefix="bestseller-take-b-")
+        template.take(box_a)
+        template.take(box_b)
+
+        # 副本里的克隆指着副本自己的裸库（配置文本里是转义写法，所以问 git 要地址）
+        origin = Path(box_a.must("remote", "get-url", "origin",
+                                 cwd=box_a.tmp / "exchange" / "raw-mt").strip())
+        self.assertEqual(origin, box_a.tmp / "raw-mt.git",
+                         "副本里的克隆该指着副本自己的裸库，不是模板的")
+        # 配置文本里也不该再有模板路径的残迹（模板根都建在 bestseller-template- 前缀下）
+        raw_config = (box_a.tmp / "exchange" / "raw-mt" / ".git"
+                      / "config").read_text(encoding="utf-8")
+        self.assertNotIn("bestseller-template-", raw_config)
+
+        # A 里推一个提交：A 自己拉得到；B 与模板都看不见
+        work = box_a.tmp / "mt-work"
+        box_a.write_files(work, {"f.txt": "a\n"})
+        box_a.must("add", "--", "f.txt", cwd=work)
+        box_a.must("commit", "-m", "a", cwd=work)
+        box_a.must("push", cwd=work)
+        box_a.must("pull", "--rebase", cwd=box_a.tmp / "exchange" / "raw-mt")
+        self.assertTrue((box_a.tmp / "exchange" / "raw-mt" / "f.txt").exists())
+        for name, bare in (("B", box_b.tmp / "raw-mt.git"),
+                           ("模板", template.root / "raw-mt.git")):
+            self.assertNotEqual(
+                git("--git-dir", str(bare), "rev-parse", "--verify", "main").returncode, 0,
+                f"{name} 的裸库看不见 A 的推送")
+
+    def test_a_copied_world_speaks_real_git(self):
+        box = GitSandbox(self, prefix="bestseller-take-git-")
+        _selftest_template().take(box)
+        bare = box.tmp / "raw-mt.git"
+        work = box.tmp / "mt-work"
+
+        # 远端还是未出生分支的空裸库：clone 出来 HEAD 指着 main、还没有提交
+        clone = box.clone(bare, "unborn-check")
+        self.assertEqual(git("symbolic-ref", "--short", "HEAD", cwd=clone).stdout.strip(),
+                         "main")
+        self.assertNotEqual(git("rev-parse", "--verify", "HEAD", cwd=clone).returncode, 0,
+                            "空裸库 clone 出来该是未出生的 main")
+
+        # 发布走正常路径：克隆里写、提交、推送，裸库里就有提交了
+        box.commit_push(work, {"f.txt": "x\n"}, message="publish")
+        self.assertEqual(git("--git-dir", str(bare), "rev-parse", "main").returncode, 0)
+
+        # 钩子照旧能装、能触发：pre-receive（服务端拒绝 = 只读档位的形态）
+        counter = box.tmp / "declined"
+        box.install_read_only_remote(bare, counter)
+        box.write_files(work, {"g.txt": "y\n"})
+        box.must("add", "--", "g.txt", cwd=work)
+        box.must("commit", "-m", "second", cwd=work)
+        self.assertNotEqual(git("push", cwd=work).returncode, 0)
+        self.assertTrue(counter.exists(), "pre-receive 钩子真的跑了")
+
+        # 客户端侧：pre-push 记一笔再拒绝
+        counter2 = box.tmp / "client-declined"
+        box.install_declining_hook(work, counter2)
+        self.assertNotEqual(git("push", cwd=work).returncode, 0)
+        self.assertTrue(counter2.exists(), "pre-push 钩子真的跑了")
+
+
 class ConsoleWorld:
     """一台机器跑交换台的小世界：三个 raw 库的裸远端 + 本机克隆 + 本机库 + 计划表。
 
     `publish()` 模拟别的机器发周包：经**另一个**克隆推送（交换区里那份要等交换台
     自己 pull 才到——与真实三机一致）。
+
+    三台机器那套世界每测试进程只搭一次（`_world_template`），这里复制取独立副本：
+    复制是纯文件操作，副本之间的推送互不可见（见 `git_repos.WorldTemplate`）。
     """
 
     def __init__(self, test: unittest.TestCase, *, machine_id="m1",
@@ -165,14 +325,13 @@ class ConsoleWorld:
         self.test = test
         self.box = GitSandbox(test, prefix="bestseller-exchange-")
         self.root = self.box.tmp / "exchange"
-        self.root.mkdir()
+        self.root.mkdir()                        # 交换区根：取模板之前就得在
         self.machine_id = machine_id
         self.role = role
         self.work: dict[str, Path] = {}          # 别的机器发布用的旁路克隆
         for machine in ("m1", "m2", "m3"):
-            remote = self.box.new_remote(f"raw-{machine}.git")
-            self.box.clone(remote, f"exchange/raw-{machine}")       # 交换区里的克隆
-            self.work[machine] = self.box.clone(remote, f"{machine}-work")
+            _world_template("raw", machine).take(self.box)     # 复制取副本（模板每进程搭一次）
+            self.work[machine] = self.box.tmp / _machine_world_paths("raw", machine)["work"]
         self.db_path = self.box.tmp / f"{machine_id}.db"
         self.conn = dbmod.open(self.db_path)
         test.addCleanup(self.conn.close)
@@ -237,13 +396,15 @@ class ConsoleWorld:
         """给这些机器建 judged-<机器>：裸库当远端 + 交换区里的克隆 + 一个旁路克隆。
 
         旁路克隆是「那台机器自己发布」用的（与 raw 那半的 `self.work` 同一个意思）：
-        交换区里那份要等交换台自己 pull 才到——与真实两机一致。
+        交换区里那份要等交换台自己 pull 才到——与真实两机一致。名单口径是「交换区里
+        实际存在的库」（`judgment_set.judged_repos`），所以按点名的机器一件一件取模板，
+        不多带一件。
         """
         for machine in machines or ("m1", "m2", "m3"):
-            remote = self.box.new_remote(f"judged-{machine}.git")
-            self.judged_remotes[machine] = remote
-            self.box.clone(remote, f"exchange/judged-{machine}")
-            self.judged_work[machine] = self.box.clone(remote, f"{machine}-judged-work")
+            _world_template("judged", machine).take(self.box)
+            names = _machine_world_paths("judged", machine)
+            self.judged_remotes[machine] = self.box.tmp / names["remote"]
+            self.judged_work[machine] = self.box.tmp / names["work"]
 
     def analysis_config(self, *, cache=None, store=None) -> Path:
         """写一份分析配置：判断缓存与人工决定账本指向本机的两个库（交换台从它读）。"""
@@ -900,9 +1061,10 @@ class ReadOnlyCredentialRunTests(unittest.TestCase):
         self.world = ConsoleWorld(self, machine_id="m4", role=ROLE_MERGE_ONLY)
         self.world.publish("m2", [("A02", day) for day in DAYS])
         self.world.publish("m3", [("A03", day) for day in DAYS])
-        plan_remote = self.world.box.new_remote("plan.git")
-        self.world.box.seed(plan_remote, {"machines.json": '["m1", "m2", "m3"]\n'})
-        self.world.box.clone(plan_remote, "exchange/plan")   # 纯汇总机不跑准备串：plan 靠拉取保鲜
+        _plan_template().take(self.world.box)   # 纯汇总机不跑准备串：plan 靠拉取保鲜
+        # 种子提交走正常发布路径；本机那份 plan 克隆取来时还没出生，等这一趟 pull 落地
+        self.world.box.seed(self.world.box.tmp / "plan.git",
+                            {"machines.json": '["m1", "m2", "m3"]\n'})
 
     def test_the_whole_run_never_writes_to_the_exchange(self):
         counters = self.world.make_read_only("raw-m1.git", "raw-m2.git", "raw-m3.git", "plan.git")
@@ -917,6 +1079,9 @@ class ReadOnlyCredentialRunTests(unittest.TestCase):
         report = self.world.report()
         self.assertIn("- 导出：本机是纯汇总机，跳过", report)
         self.assertIn("| raw-m2 | W38 | 17 | 17 | 0 | 0 | 0（0.0 MB） | 已导入 |", report)
+        # plan 那半也拉到了：本机那份克隆取来还是未出生的，这一趟 pull 把种子落进工作区
+        self.assertEqual((self.world.root / "plan" / "machines.json").read_text(
+            encoding="utf-8"), '["m1", "m2", "m3"]\n')
         for name, counter in counters.items():
             self.assertFalse(counter.exists(), f"{name} 被推过：只读档位下不该有写交换区的动作")
         self.assertFalse((self.world.root / "outbox").exists(), "导出跳过：连包都不该打")
@@ -1090,11 +1255,11 @@ class PlanRepoPullTests(unittest.TestCase):
         world = ConsoleWorld(self)
         world.plan(("A01", "m1", 3))
         world.crawls([("A01", day) for day in DAYS])
-        remote = world.box.new_remote("plan.git")
-        world.box.clone(remote, "exchange/plan")
-        work = world.box.clone(remote, "plan-work")
-        world.box.commit_push(work, {"machines.json": '["m1", "m2", "m3"]\n'},
-                              message="roster")
+        _plan_template().take(world.box)
+        # 裸库与克隆在模板里都是空的（未出生）；名册这一推是它的第一个提交，
+        # 交换区那份克隆靠这一趟 pull 才落地——与上机时的形状一致。
+        world.box.commit_push(world.box.tmp / "plan-work",
+                              {"machines.json": '["m1", "m2", "m3"]\n'}, message="roster")
 
         outcome = world.run()
 
