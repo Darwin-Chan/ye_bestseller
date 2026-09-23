@@ -96,6 +96,8 @@ STATUS_MODEL = '模型'                      # 判断来源：本次模型给出
 STATUS_LOW = '低把握，待人工核对'
 STATUS_NO_CANDIDATE = '未召回候选，保持独立'
 STATUS_BELOW_FLOOR = '候选低于判断下限，未判断'   # 召回全被下限挡下、又没进任何已判对（票 18）
+# 协作停止时没轮到的对（票 02）：它们是「没判过」，不是判否——记成可重试的失败，重试只补这些。
+STATUS_STOPPED = '已停止匹配，未判断'
 _JUDGED_STATUSES = frozenset({STATUS_PENDING, STATUS_CACHE, STATUS_MODEL, STATUS_LOW, STATUS_NO_CANDIDATE,
                               STATUS_BELOW_FLOOR})
 
@@ -806,10 +808,10 @@ class MatchingService:
         self.judge = ImageJudge(config)
         self._lock = threading.Lock()
 
-    def suggest(self, products, groups, excluded=(), reason='', progress=None):
+    def suggest(self, products, groups, excluded=(), reason='', progress=None, stop=None):
         """Single matching entry; confirmed groups and explicit exclusions take precedence."""
         with self._lock:
-            return self._suggest(products, groups, excluded, reason, progress)
+            return self._suggest(products, groups, excluded, reason, progress, stop)
 
     def refresh_candidates(self, products, groups, excluded=()):
         """Re-evaluate current group destinations using cached evidence, without regrouping."""
@@ -837,7 +839,7 @@ class MatchingService:
         finally:
             conn.close()
 
-    def _suggest(self, products, groups, excluded, reason='', progress=None):
+    def _suggest(self, products, groups, excluded, reason='', progress=None, stop=None):
         self.config.cache.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.config.cache)
         try:
@@ -888,6 +890,10 @@ class MatchingService:
 
             def compare(item):
                 pair, a, b = item
+                # 协作停止（票 02）：判断循环在每对之间认领一次。还没出发的对不再发请求，
+                # 记成可重试的失败；已经在途的那几个照常返回、照常入缓存（已判的会留下）。
+                if stop is not None and stop():
+                    return item, None, STATUS_STOPPED
                 try:
                     return item, self.judge.compare(a, b), None
                 except ModelFailure as exc:
@@ -921,20 +927,21 @@ class MatchingService:
                 for (pair, a, b), result, error in pool.map(compare, todo.values()):
                     if error:
                         errors[pair] = error
-                        continue
-                    store_judgment(pair, a, b, result)
-                    cached[pair] = (result, STATUS_MODEL, self.machine_id)
-                    pending += 1
-                    committed += 1
-                    # 页面上的判断进度按对走：每判完一对报一次（一次加锁，可以忽略不计）。
+                    else:
+                        store_judgment(pair, a, b, result)
+                        cached[pair] = (result, STATUS_MODEL, self.machine_id)
+                        pending += 1
+                        committed += 1
+                        if pending >= JUDGMENT_COMMIT_BATCH:
+                            conn.commit()
+                            pending = 0
+                            # 每批一行进度：进程中途死掉时，日志里也留得下跑到哪、花了多少。
+                            log.info('判断进度：新判 %d/%d 对 · 调用 %d 次 · 输入 %d 输出 %d tok · 供应商缓存命中 %d tok',
+                                     committed, len(todo), usage.calls, usage.prompt_tokens,
+                                     usage.completion_tokens, usage.cache_hit_tokens)
+                    # 页面上的判断进度按对走：每判完一对报一次（停下来的那些对也报，
+                    # 失败数才与收尾的「判断用量」对得上）。
                     _report(progress, judged=committed, failed=len(errors))
-                    if pending >= JUDGMENT_COMMIT_BATCH:
-                        conn.commit()
-                        pending = 0
-                        # 每批一行进度：进程中途死掉时，日志里也留得下跑到哪、花了多少。
-                        log.info('判断进度：新判 %d/%d 对 · 调用 %d 次 · 输入 %d 输出 %d tok · 供应商缓存命中 %d tok',
-                                 committed, len(todo), usage.calls, usage.prompt_tokens,
-                                 usage.completion_tokens, usage.cache_hit_tokens)
             if pending:
                 # 判断阶段收尾：余数批也落盘，后面的分组计算再久也不丢判断。
                 conn.commit()

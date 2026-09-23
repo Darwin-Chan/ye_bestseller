@@ -11,9 +11,9 @@ from unittest.mock import patch
 from playwright.sync_api import expect
 
 import test_analysis as fixture
+import test_group_editing as editing
 from bestseller_monitor.matching import MatchingConfig, MatchingService
 from test_analysis_progress import StagedTransport
-from test_group_editing import GroupEditingTests
 
 
 class MatchingMaskTests(unittest.TestCase):
@@ -22,7 +22,7 @@ class MatchingMaskTests(unittest.TestCase):
     submit = fixture.AnalysisBrowserTests.submit
     submit_product = fixture.AnalysisBrowserTests.submit_product
     dates = fixture.AnalysisBrowserTests.dates
-    seed = GroupEditingTests.seed
+    seed = editing.GroupEditingTests.seed
 
     def model(self, **options):
         """四件同图商品 + 假模型；`pass_first` 决定前几对判断放行（其余卡在闸门上等用例放行）。"""

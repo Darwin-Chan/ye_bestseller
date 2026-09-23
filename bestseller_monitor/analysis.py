@@ -47,6 +47,10 @@ READ_FAILURE_TEXT = '读取库存数据失败，请检查分析配置和数据�
 STORE_FAILURE_TEXT = '判断缓存或分析草稿读写失败，请检查分析配置与磁盘后重试'
 
 
+# 一次运行的终态：到这里就没有任何写入了（wait_terminal 的契约，ADR-0044）。
+TERMINAL_STATES = ('ready', 'failed')
+
+
 def _fmt_eta(seconds: float) -> str:
     """预计时长的说法：进整到分钟，最少说 1 分钟。"""
     minutes = max(1, round(seconds / 60))
@@ -69,22 +73,30 @@ class _Progress:
     """一次分析运行的进度读数：自己的锁，不占服务锁（页面轮询要读它，见 ADR-0044）。
 
     只有运行观测——不落库、不跨机（与「判断用量」同规）。`failure` 留着原始异常，
-    同步的 `start()` 要原样抛回给既有调用方。
+    同步的 `start()` 要原样抛回给既有调用方。停止标志也住在这里：请求停下只是置它，
+    判断循环在每对之间认领（票 02）。
     """
 
-    def __init__(self, analysis_id: str, start: str, end: str, clock=time.monotonic):
+    def __init__(self, analysis_id: str, start: str, end: str, clock=time.monotonic, *,
+                 phase_index: int = 0, retry: bool = False, stop_timeout: float = 30.0):
         self.id = analysis_id
         self.start, self.end = start, end
+        # 重试那次运行（票 02）：页面据此说「（重试）」，刷新接回也认得出它。
+        self.retry = retry
+        # 在途判断最多等多久：模型调用自己的超时，页面上的「最多 N 秒」照它说。
+        self.stop_timeout = stop_timeout
         self.failure = None
         self._clock = clock
         self._started = clock()
         self._judging_started = None
         self._state = 'matching'
         self._error = ''
+        self._stop = threading.Event()
         self._finished = threading.Event()
         self._lock = threading.Lock()
-        self._fields = {'phase_index': 0, 'products': 0, 'eligible': 0, 'missing_evidence': 0,
-                        'todo': 0, 'cached_hits': 0, 'blocked': 0, 'judged': 0, 'failed': 0}
+        self._fields = {'phase_index': phase_index, 'products': 0, 'eligible': 0,
+                        'missing_evidence': 0, 'todo': 0, 'cached_hits': 0, 'blocked': 0,
+                        'judged': 0, 'failed': 0}
 
     def update(self, **fields) -> None:
         with self._lock:
@@ -116,6 +128,27 @@ class _Progress:
             self.failure = exception
         self._finished.set()
 
+    def request_stop(self) -> bool:
+        """请求停下这次运行：置标志、状态转「正在停止」；收尾由运行自己走完（票 02）。
+
+        已经到终态的运行不再受理——它没有还剩的写入了，停止请求落空是实话。
+        """
+        with self._lock:
+            if self._state in TERMINAL_STATES:
+                return False
+            self._stop.set()
+            self._state = 'stopping'
+            return True
+
+    def is_terminal(self) -> bool:
+        """这次运行是否已经收尾（终态＝不再有任何写入，见 wait_terminal 的契约）。"""
+        with self._lock:
+            return self._state in TERMINAL_STATES
+
+    def stop_requested(self) -> bool:
+        """给匹配层用的回调：该不该停（判断循环在每对之间问一次）。"""
+        return self._stop.is_set()
+
     def wait(self, timeout) -> bool:
         return self._finished.wait(timeout)
 
@@ -125,7 +158,9 @@ class _Progress:
             payload.update(id=self.id, state=self._state, phases=list(PHASES),
                            start=self.start, end=self.end, error=self._error,
                            elapsed_sec=round(self._clock() - self._started, 1),
-                           eta_text=self._eta_text())
+                           eta_text=self._eta_text(), retry=self.retry,
+                           stop_requested=self._stop.is_set(),
+                           stop_timeout_sec=int(round(self.stop_timeout)))
         return payload
 
     def _eta_text(self) -> str:
@@ -271,21 +306,29 @@ class AnalysisService:
             raise ValueError("结束日期必须晚于开始日期")
         if self.running() and not acknowledged:
             return {"needs_confirmation": True}
-        progress = _Progress(uuid4().hex, start, end, self._clock)
-        with self._jobs_lock:
-            self._jobs[progress.id] = progress
-        threading.Thread(target=self._run_job, args=(progress,), daemon=True,
-                         name=f'analysis-{progress.id[:8]}').start()
-        return {"id": progress.id, "state": "matching"}
+        progress = _Progress(uuid4().hex, start, end, self._clock,
+                             stop_timeout=self._stop_timeout())
+        return self._claim(progress, self._run_job, 'analysis')
 
     def job_state(self, analysis_id):
         """这次运行到哪了：阶段、对数、时长、预计（样本不足不给）、失败原因。"""
         return self._job(analysis_id).snapshot()
 
+    def request_stop(self, analysis_id):
+        """请求停下这次运行（协作停止）：立刻返回读数，收尾由运行自己走完（票 02）。
+
+        停止请求不打断装配与排名（那一段改了会毁掉本次结果）；判断循环在每对之间认领它，
+        在途的那几个模型调用等它们自己回来（最多一个模型超时）。
+        """
+        progress = self._job(analysis_id)
+        progress.request_stop()
+        return progress.snapshot()
+
     def wait_terminal(self, analysis_id, timeout=None):
         """等这次运行到终态；返回即不再有任何写入——放锁要排在它之后（ADR-0044）。
 
-        票 02 起「终态」还包括被停止：停止标志与停止后的落态在那张票里。
+        被停止的运行也算走到终态：停止只是让判断提前收摊，余数批提交、装配、快照落内存
+        一件都不少（都排在 `_finished` 之前）。
         """
         progress = self._job(analysis_id)
         if not progress.wait(timeout):
@@ -310,6 +353,16 @@ class AnalysisService:
             raise ValueError('分析已不存在，请重新选择日期')
         return progress
 
+    def _stop_timeout(self):
+        """在途判断最多等多久：模型调用自己的超时（配置里可改，缺省 30 秒）。
+
+        caption 模式下逐对判断走视觉服务，两个超时里取大的那个才是实话。
+        """
+        matching = self.config.matching
+        if matching is None:
+            return 30.0
+        return max([matching.model.timeout] + ([matching.vision.timeout] if matching.vision else []))
+
     def _run_job(self, progress):
         """后台跑完一次分析：冻结（读库存库）→ 套回人工决定 → 匹配排序（动判断缓存与草稿库）。
 
@@ -319,23 +372,21 @@ class AnalysisService:
         try:
             snapshot = self._freeze(progress.id, progress.start, progress.end)
         except Exception as exc:  # noqa: BLE001 —— 失败原因要原样交给页面
-            log.exception('分析运行失败（冻结库存）')
-            return progress.fail(_failure_text(exc, READ_FAILURE_TEXT), exc)
+            return self._fail(progress, '冻结库存', exc, READ_FAILURE_TEXT)
         try:
             # 「继续上次分析」读原快照；新日期区间走这里：重算销量后，把已保存的
             # 人工分组按商品版本套回来（票 09），不适用的留在待确认由人工处理。
             decisions = self.store.ledger()
             reuse_decisions(snapshot, decisions)
             with self._lock:
-                self._match(snapshot, progress=progress.reporter())
+                self._match(snapshot, progress=progress.reporter(), stop=progress.stop_requested)
                 mark_information_changes(snapshot, recorded_versions(decisions))
                 rank_groups(snapshot)
                 self._apply_conflicts(snapshot)
                 self._snapshots[snapshot["id"]] = snapshot
             progress.finish()
         except Exception as exc:  # noqa: BLE001 —— 失败原因要原样交给页面
-            log.exception('分析运行失败（判断与装配）')
-            progress.fail(_failure_text(exc, STORE_FAILURE_TEXT), exc)
+            self._fail(progress, '判断与装配', exc, STORE_FAILURE_TEXT)
 
     def _freeze(self, analysis_id, start, end):
         """冻结一次分析的输入：区间库存、商品证据版本与区间销量。"""
@@ -395,11 +446,11 @@ class AnalysisService:
                 "frozen_at": utcnow(), "inventory": rows, "products": products,
                 "shops": shops, "dirty": False, "saved_at": None, "groups": []}
 
-    def _match(self, snapshot, reason='', progress=None):
+    def _match(self, snapshot, reason='', progress=None, stop=None):
         if self.matcher:
             snapshot['groups'] = self.matcher.suggest(snapshot['products'], snapshot['groups'],
                                                       snapshot.get('excluded', ()), reason=reason,
-                                                      progress=progress)
+                                                      progress=progress, stop=stop)
         else:
             for p in snapshot['products']:
                 p.update(origin='新商品', match_label='暂无匹配同款', candidate_groups=[],
@@ -407,7 +458,7 @@ class AnalysisService:
                          matching_source='')
         snapshot['matching'] = matching_summary(snapshot['products'])
 
-    def retry_matching(self, analysis_id):
+    def retry_matching(self, analysis_id, progress=None, stop=None):
         with self._lock:
             if analysis_id not in self._snapshots:
                 raise ValueError('分析已不存在')
@@ -415,7 +466,7 @@ class AnalysisService:
             # 信息变更是本次分析展示的事实（重开的草稿也带着它）：重试只重跑匹配，
             # 不把已经标出的变更刷回未标注。
             marked = {identity(p) for p in snapshot['products'] if p.get('origin') == ORIGIN_CHANGED}
-            self._match(snapshot, reason='重试')
+            self._match(snapshot, reason='重试', progress=progress, stop=stop)
             for p in snapshot['products']:
                 if identity(p) in marked:
                     p['origin'] = ORIGIN_CHANGED
@@ -423,6 +474,59 @@ class AnalysisService:
             attach_conflicts(snapshot)
             self._snapshots[analysis_id] = snapshot
             return copy.deepcopy(snapshot)
+
+    def retry_matching_job(self, analysis_id):
+        """受理一次「模型匹配同款」重试：立刻给读数，判断在后台跑（票 02，ADR-0044）。
+
+        与首次分析共用同一份读数、同一块遮罩：读数就按分析号记，页面照原样轮询、
+        刷新也照原样接回。重试不冻结库存（快照已冻结），阶段从「召回候选同款」起。
+        """
+        # 先挡一道：正在跑的那趟全程提着服务锁，第二道判定在 _claim 里（那次才是判定）。
+        if self._job_in_flight(analysis_id) is not None:
+            raise ValueError('这次分析还在运行中')
+        with self._lock:
+            snapshot = self._snapshots.get(analysis_id)
+            if snapshot is None:
+                raise ValueError('分析已不存在')
+            start, end = snapshot['start'], snapshot['end']
+        progress = _Progress(analysis_id, start, end, self._clock, phase_index=1, retry=True,
+                             stop_timeout=self._stop_timeout())
+        return self._claim(progress, self._run_retry, 'analysis-retry')
+
+    def _claim(self, progress, target, thread_prefix):
+        """受理念头：登记并起后台线程，同一份快照同时只允许一趟在跑。
+
+        判定与登记在同一把锁里：同一份快照跑两趟会互相盖写判断缓存与内存快照
+        （另一个标签页、另一次点击），而「先看有没有在跑、再去登记」中间有缝。
+        """
+        with self._jobs_lock:
+            running = self._jobs.get(progress.id)
+            if running is not None and not running.is_terminal():
+                raise ValueError('这次分析还在运行中')
+            self._jobs[progress.id] = progress
+        threading.Thread(target=target, args=(progress,), daemon=True,
+                         name=f'{thread_prefix}-{progress.id[:8]}').start()
+        return {"id": progress.id, "state": "matching"}
+
+    def _job_in_flight(self, analysis_id):
+        """这个分析号上还在跑（没到终态）的那一次运行；没有就回 None。"""
+        with self._jobs_lock:
+            progress = self._jobs.get(analysis_id)
+        return progress if progress is not None and not progress.is_terminal() else None
+
+    def _fail(self, progress, stage, exc, storage_text):
+        """失败收尾：日志留全栈，页面上说人话（_failure_text 按异常种类挑文案）。"""
+        log.exception('分析运行失败（%s）', stage)
+        progress.fail(_failure_text(exc, storage_text), exc)
+
+    def _run_retry(self, progress):
+        """后台跑完一次重试：动的是判断缓存与草稿库（重试不读库存库）。"""
+        try:
+            self.retry_matching(progress.id, progress=progress.reporter(),
+                                stop=progress.stop_requested)
+            progress.finish()
+        except Exception as exc:  # noqa: BLE001 —— 失败原因要原样交给页面
+            self._fail(progress, '重试判断', exc, STORE_FAILURE_TEXT)
 
     def get(self, analysis_id):
         with self._lock:

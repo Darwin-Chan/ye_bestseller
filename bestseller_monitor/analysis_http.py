@@ -80,7 +80,9 @@ def create_server(service, port=0):
                     if data.get('action') == 'withdraw_groups':
                         return self.reply(service.withdraw_groups(data['id'], data['groups']))
                     if data.get('action') == 'retry_matching':
-                        return self.reply(service.retry_matching(data['id']))
+                        return self.reply(service.retry_matching_job(data['id']))
+                    if data.get('action') == 'stop_matching':
+                        return self.reply(service.request_stop(data['id']))
                     if data.get('action') in ('move', 'remove'):
                         return self.reply(service.edit_group(data['id'], data['action'], data['group'],
                                                              data['member'], data.get('target')))
