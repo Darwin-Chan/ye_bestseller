@@ -23,6 +23,7 @@ from bestseller_monitor import db as dbmod
 from bestseller_monitor import export, merge, plan_step, rounds
 from bestseller_monitor.db import CST
 from bestseller_monitor.image_store import ImageStoreError, image_key
+from helpers import new_round, product_picture
 
 JPEG = b"jpeg-bytes-1"
 PNG = b"png-bytes-2"
@@ -39,14 +40,23 @@ SEEN_FIRST = "2026-09-01T00:00:00+00:00"
 _UNSET = object()
 
 
+def sku_image(sku_id="s1", *, observed_at=D16_0900, day=DAY, content_hash=H1, url=None,
+              image_error=None, source="专属图", shop_key="A01", offer_id="11"):
+    """一条 SKU 图流水行的九列（列序照本机表；`id` 不进包）。"""
+    return (shop_key, offer_id, sku_id, observed_at, day, url, content_hash, image_error,
+            source)
+
+
 def machine_world(claim_at, *, stock, product_name="商品一", inventory_name=_UNSET,
                   shop_name="店铺甲", sku_name="规格一", sku_id="s1", first_seen=SEEN_FIRST,
-                  extra=(), image=H1):
+                  extra=(), image=H1, sku_images=()):
     """一台机器对 (店铺 A01, 2026-09-16, 商品 11) 的一次采集，按各表行给出。
 
     `extra`：只有这台机器采到的商品，每项 (offer_id, stock)。
     `inventory_name`：库存行的 product_name 单独给（None 合法）——验"整行替换"用。
     `sku_id`：单规格商品用 `parse.DEFAULT_SKU_ID`（"default"）。
+    `sku_images`：这台机器的 SKU 图流水行，用 `sku_image(...)` 组（引用到的哈希自己要
+    进 `assets`，不然字节拉不回来——那正是「缺图」的情形）。
     """
     if inventory_name is _UNSET:
         inventory_name = product_name
@@ -70,12 +80,13 @@ def machine_world(claim_at, *, stock, product_name="商品一", inventory_name=_
                                   shop_name, f"商品{offer_id}", f"规格{offer_id}"))
         rows["versions"].append(("A01", offer_id, claim_at, DAY, f"商品{offer_id}", None,
                                  None, None))
+    rows["sku_images"] = list(sku_images)
     return rows
 
 
 def machine_source(path: pathlib.Path, *, shops=(), products=(), skus=(), inventory=(),
-                   versions=(), assets=()) -> None:
-    """一台机器的源库：直插六表（不走采集路径）。"""
+                   versions=(), assets=(), sku_images=()) -> None:
+    """一台机器的源库：直插交换集各表（不走采集路径）。"""
     conn = dbmod.open(path)
     conn.executemany("INSERT INTO shops(shop_key, shop_name, shop_url, first_seen_at, "
                      "last_seen_at) VALUES (?,?,?,?,?)", shops)
@@ -90,6 +101,9 @@ def machine_source(path: pathlib.Path, *, shops=(), products=(), skus=(), invent
     conn.executemany("INSERT INTO product_information_versions(shop_key, offer_id, observed_at, "
                      "observed_date, product_name, image_url, content_hash, image_error) "
                      "VALUES (?,?,?,?,?,?,?,?)", versions)
+    conn.executemany("INSERT INTO sku_image_versions(shop_key, offer_id, sku_id, observed_at, "
+                     "observed_date, image_url, content_hash, image_error, source) "
+                     "VALUES (?,?,?,?,?,?,?,?,?)", sku_images)
     conn.commit()
     conn.close()
 
@@ -110,7 +124,7 @@ def crawl_locally(conn: sqlite3.Connection, *, observed_at=D16_1000, stock=7,
 
 
 def dump(conn: sqlite3.Connection) -> dict:
-    """六表逐行快照（排序后）："任意顺序导入结果一致"就比这一份。"""
+    """交换集逐表逐行快照（排序后）："任意顺序导入结果一致"就比这一份。"""
     snapshot = {}
     for table in export.EXCHANGE_TABLES:
         cols = ", ".join(table.names)
@@ -625,8 +639,66 @@ class ProjectionTests(MergeCase):
         self.assertEqual(self.rows(conn, "SELECT * FROM import_packages"), [])
 
 
+def degrade_to_v1(package: pathlib.Path) -> pathlib.Path:
+    """把一个真包演成 v1 旧包：新表 DROP、元数据里的 `rows_` 键删掉。
+
+    照 ProjectionTests 那组兼容用例的改包手法（在包文件上动手、不改打包代码）——
+    上一版程序发的包长这样：没有 SKU 图流水，元数据里也没有它的行数键。
+    """
+    path = package.with_name(package.stem + "-v1.db")
+    shutil.copyfile(package, path)
+    sqlite_conn = sqlite3.connect(path)
+    sqlite_conn.execute("DROP TABLE sku_image_versions")
+    sqlite_conn.execute("DELETE FROM exchange_meta WHERE key='rows_sku_image_versions'")
+    sqlite_conn.commit()
+    sqlite_conn.close()
+    return path
+
+
+class LegacyPackageTests(MergeCase):
+    """验收 6：旧包（v1 格式）照收——SKU 图这半为无；老六表缺席仍当场报错。"""
+
+    def test_a_v1_package_without_the_new_table_or_its_meta_key_imports(self):
+        """旧包照收：其余各表逐行落库，导入计数如实（少的就是新表那半）。"""
+        package = self.package("m2", machine_world(D16_0900, stock=5, extra=[("33", 2)]))
+
+        conn = self.local()
+        result = self.import_(conn, degrade_to_v1(package))
+
+        self.assertFalse(result.failed, result.failure)
+        self.assertEqual(result.rows_total, 10, "六表九行 + 资产表一行（新表这半为无）")
+        self.assertEqual(result.rows_inserted, 9, "资产行走图片通道，不算「插入」")
+        self.assertEqual(
+            self.rows(conn, "SELECT offer_id, stock FROM inventory ORDER BY offer_id"),
+            [("11", 5), ("33", 2)], "旧包照收，各行齐全")
+        self.assertEqual(self.rows(conn, "SELECT 1 FROM sku_image_versions"), [])
+
+    def test_a_package_missing_one_of_the_old_six_tables_still_fails_loudly(self):
+        """老六表缺席仍是「那不是交换集里的包」：一表演一遍，整包当场报错、库不动。"""
+        empty = dbmod.connect(self.tmp / "empty-legacy.db")
+        self.addCleanup(empty.close)
+        for table in ("shops", "products", "skus", "inventory",
+                      "product_information_versions", "product_image_assets"):
+            package = self.package(f"m2-{table}", machine_world(D16_0900, stock=5))
+            sqlite_conn = sqlite3.connect(package)
+            sqlite_conn.execute(f"DROP TABLE {table}")
+            sqlite_conn.commit()
+            sqlite_conn.close()
+
+            conn = self.local(table)
+            result = self.import_(conn, package)
+
+            self.assertTrue(result.failed, table)
+            self.assertIn(f"包里没有 {table} 表", result.failure, table)
+            self.assertEqual(dump(conn), dump(empty), table)
+
+
 class ImageTests(MergeCase):
-    """验收 4：先拉图再插行；缺图照插、缺口如实。"""
+    """验收 4：先拉图再插行；缺图照插、缺口如实。
+
+    版本行与 SKU 图流水行的引用都走这一套：包里的资产表是两者的并集（导出侧），
+    所以这里不为新表加分支，只用用例把这条钉住。
+    """
 
     def test_images_are_pulled_before_any_row_lands(self):
         conn = self.local()
@@ -706,6 +778,279 @@ class ImageTests(MergeCase):
         self.assertFalse(result.failed, result.failure)
         self.assertEqual(result.images_missing, 1)
         self.assertIn("cos_bucket", result.images_note)
+
+    def test_a_ledger_only_image_is_pulled_before_any_ledger_row_lands(self):
+        """只在 SKU 图流水里出现的图（版本行不引用）也走「先拉图、再插行」。"""
+        conn = self.local()
+        store = FakeImageStore({KEY1: JPEG, KEY2: PNG})
+        seen = {}
+        original = store.fetch
+
+        def spy(key):
+            seen["ledger_rows_at_fetch"] = conn.execute(
+                "SELECT COUNT(*) FROM sku_image_versions").fetchone()[0]
+            return original(key)
+
+        store.fetch = spy
+        rows = machine_world(D16_0900, stock=5, sku_images=[
+            sku_image("s1", content_hash=H2, url="https://img.example/sku-2.png")])
+        rows["assets"].append((H2, "image/png", PNG))
+
+        result = self.import_(conn, self.package("m2", rows), store=store)
+
+        self.assertFalse(result.failed, result.failure)
+        self.assertEqual(seen["ledger_rows_at_fetch"], 0, "先拉图、再插行")
+        self.assertEqual(result.images_pulled, 2, "版本行那张与只在流水里的那张都拉了")
+        self.assertIn(KEY2, store.fetched)
+        self.assertEqual(
+            self.rows(conn, "SELECT mime, content FROM product_image_assets "
+                            "WHERE content_hash=?", (H2,)),
+            [("image/png", PNG)], "流水引用的字节落进本机资产池")
+        self.assertEqual(
+            self.rows(conn, "SELECT content_hash FROM sku_image_versions"), [(H2,)])
+
+    def test_a_ledger_image_already_local_is_not_fetched_again(self):
+        conn = self.local()
+        conn.executemany("INSERT INTO product_image_assets VALUES (?,?,?)",
+                         [(H1, "image/jpeg", JPEG), (H2, "image/png", PNG)])
+        conn.commit()
+        store = FakeImageStore({KEY1: JPEG, KEY2: PNG})
+        rows = machine_world(D16_0900, stock=5, sku_images=[
+            sku_image("s1", content_hash=H2, url="https://img.example/sku-2.png")])
+        rows["assets"].append((H2, "image/png", PNG))
+
+        result = self.import_(conn, self.package("m2", rows), store=store)
+
+        self.assertEqual((result.images_pulled, result.images_skipped), (0, 2))
+        self.assertEqual(store.fetched, [])
+        self.assertEqual(
+            self.rows(conn, "SELECT content_hash FROM sku_image_versions"), [(H2,)])
+
+    def test_ledger_bytes_that_do_not_match_the_hash_are_not_stored(self):
+        conn = self.local()
+        conn.execute("INSERT INTO product_image_assets VALUES (?,?,?)", (H1, "image/jpeg", JPEG))
+        conn.commit()
+        store = FakeImageStore({KEY2: b"corrupted-bytes"})
+        rows = machine_world(D16_0900, stock=5, sku_images=[
+            sku_image("s1", content_hash=H2, url="https://img.example/sku-2.png")])
+        rows["assets"].append((H2, "image/png", PNG))
+
+        result = self.import_(conn, self.package("m2", rows), store=store)
+
+        self.assertFalse(result.failed, result.failure)
+        self.assertEqual(result.images_missing, 1)
+        self.assertIn("对不上哈希", result.images_note)
+        self.assertEqual(
+            self.rows(conn, "SELECT 1 FROM product_image_assets WHERE content_hash=?", (H2,)),
+            [], "对不上内容寻址哈希的字节不落库")
+        self.assertEqual(
+            self.rows(conn, "SELECT content_hash FROM sku_image_versions"), [(H2,)],
+            "流水行照插：本机缺字节的行如实保留")
+
+    def test_missing_ledger_images_do_not_block_the_rows_and_are_counted(self):
+        conn = self.local()
+        conn.execute("INSERT INTO product_image_assets VALUES (?,?,?)", (H1, "image/jpeg", JPEG))
+        conn.commit()
+        rows = machine_world(D16_0900, stock=5, sku_images=[
+            sku_image("s1", content_hash=H2, url="https://img.example/sku-2.png")])
+        rows["assets"].append((H2, "image/png", PNG))
+
+        result = self.import_(conn, self.package("m2", rows), store=FakeImageStore())
+
+        self.assertFalse(result.failed, result.failure)
+        self.assertEqual(result.images_missing, 1)
+        self.assertIn("对象不存在", result.images_note)
+        self.assertEqual(
+            self.rows(conn, "SELECT offer_id, stock FROM inventory WHERE offer_id='11'"),
+            [("11", 5)], "缺图不挡导入：观测是既成事实")
+        self.assertEqual(
+            self.rows(conn, "SELECT content_hash FROM sku_image_versions"), [(H2,)])
+
+    def test_bytes_arriving_with_a_later_package_fill_the_earlier_rows(self):
+        """本机缺字节的行如实留着；对方补传的字节随下次收包到齐（行不用重写）。"""
+        conn = self.local()
+        first = self.import_(conn, self.package("m2", machine_world(
+            D16_0900, stock=5, sku_images=[sku_image()])), store=None)
+
+        self.assertFalse(first.failed, first.failure)
+        self.assertEqual(self.rows(conn, "SELECT 1 FROM product_image_assets"), [],
+                         "没配桶：这次没拉到字节（这半如实记缺）")
+
+        later = self.import_(conn, self.package("m3", machine_world(
+            D16_1000, stock=8, sku_images=[sku_image(observed_at=D16_1000)])),
+            store=FakeImageStore({KEY1: JPEG}))
+
+        self.assertEqual(later.images_pulled, 1, "补传的那张随这个包拉回来")
+        self.assertEqual(
+            self.rows(conn, "SELECT content FROM product_image_assets WHERE content_hash=?",
+                      (H1,)), [(JPEG,)])
+        self.assertEqual(
+            self.rows(conn, "SELECT content_hash FROM sku_image_versions "
+                            "ORDER BY observed_at"), [(H1,), (H1,)],
+            "先收的那行照旧，现在读得到字节了")
+
+
+class SkuImageMergeTests(MergeCase):
+    """验收 5：SKU 图流水按观测表一侧合并——逐行先查后写，无胜负裁决。"""
+
+    def test_ledger_rows_land_with_their_source_and_count_as_inserted(self):
+        """新表照收：来源三态原样落库，每条流水行各算一条插入。"""
+        conn = self.local()
+        rows = machine_world(D16_0900, stock=5, sku_images=[
+            sku_image("s1", content_hash=H1, url="https://img.example/sku-1.jpg"),
+            sku_image("s2", content_hash=H1, source="主图代填"),
+            sku_image("s3", content_hash=None, source="无图"),
+            sku_image("s4", content_hash=None, image_error="超时",
+                      url="https://img.example/sku-4.png"),
+        ])
+
+        result = self.import_(conn, self.package("m2", rows))
+
+        self.assertFalse(result.failed, result.failure)
+        self.assertEqual(result.rows_inserted, 9, "交换集五行 + 四条流水行")
+        self.assertEqual(
+            self.rows(conn, "SELECT sku_id, observed_at, content_hash, image_error, source "
+                            "FROM sku_image_versions ORDER BY sku_id"),
+            [("s1", D16_0900, H1, None, "专属图"),
+             ("s2", D16_0900, H1, None, "主图代填"),
+             ("s3", D16_0900, None, None, "无图"),
+             ("s4", D16_0900, None, "超时", "专属图")],
+            "行照包侧原样落：观测时刻、哈希、失败原因与来源三态都在")
+
+    def test_ledger_rows_of_two_machines_are_kept_side_by_side(self):
+        """各机观测天然互异：两台机器同一个商品的流水行都留着，没有胜负裁决。"""
+        conn = self.local()
+        self.import_(conn, self.package("m2", machine_world(
+            D16_0900, stock=5, sku_images=[sku_image()])))
+        self.import_(conn, self.package("m3", machine_world(
+            D16_1000, stock=8, sku_images=[
+                sku_image(observed_at=D16_1000, url="https://img.example/sku-2.png")])))
+
+        self.assertEqual(
+            self.rows(conn, "SELECT observed_at, image_url FROM sku_image_versions "
+                            "ORDER BY observed_at"),
+            [(D16_0900, None), (D16_1000, "https://img.example/sku-2.png")])
+
+    def test_a_ledger_row_that_already_landed_is_skipped_not_duplicated(self):
+        """同一个观测随另一个包又来一趟（换周交接那类）：只留一行。
+
+        本机去重索引没建起来（老库：UNIQUE 建不上被迁移跳过）也照样挡得住——
+        先查后写，不依赖索引在不在（版本表先例的同一课）。
+        """
+        conn = self.local()
+        conn.execute("DROP INDEX idx_sku_image_dedupe")
+        conn.commit()
+        rows = machine_world(D16_0900, stock=5, sku_images=[sku_image()])
+        self.import_(conn, self.package("m2", rows))
+
+        again = self.import_(conn, self.package(
+            "m3", rows, generated_at=dt.datetime(2026, 9, 22, 9, 0, tzinfo=CST)))
+
+        self.assertFalse(again.failed, again.failure)
+        self.assertEqual(
+            self.rows(conn, "SELECT COUNT(*) FROM sku_image_versions"), [(1,)],
+            "同键的流水行没有被重复插入")
+        self.assertEqual(again.rows_inserted, 0, "这一趟没有任何新行")
+
+    def test_ledger_rows_do_not_enter_the_claim_decision(self):
+        """claim 裁决仍只管库存与版本表：本机采得更晚时，包里的流水行照收，
+        冲突的败方计数与没带流水行时一模一样（流水行不算「保留的行」）。"""
+        conn = self.local("m1")
+        crawl_locally(conn, observed_at=D16_1000, stock=7)
+        rows = machine_world(D16_0900, stock=5, extra=[("33", 2)], sku_images=[
+            sku_image("s1"), sku_image("s2", url="https://img.example/sku-2.png")])
+
+        result = self.import_(conn, self.package("m2", rows), machine_id="m1")
+
+        self.assertEqual(
+            self.rows(conn, "SELECT winner_side, winner_machine, loser_machine, "
+                            "loser_rows_replaced, loser_rows_kept FROM import_conflicts"),
+            [("local", "m1", "m2", 1, 3)])
+        self.assertEqual(
+            self.rows(conn, "SELECT sku_id FROM sku_image_versions ORDER BY sku_id"),
+            [("s1",), ("s2",)], "流水行照收（不参与谁赢谁输）")
+        self.assertEqual(result.rows_inserted, 10,
+                         "本机库里只有库存与版本各一行（身份表还空着）：身份五行 + 包侧独有的"
+                         "库存一行 + 版本两行 + 流水两行，流水行照票面进这一份计数")
+
+
+class EndToEndTests(MergeCase):
+    """验收 6（端到端一条）：采集落库 → 导出 → 另一库汇总 → 两端一致；再演一遍旧包照收。"""
+
+    def collected_source(self) -> tuple[pathlib.Path, dict]:
+        """走采集写入路径造一份源库：三个 SKU，分别是专属图 / 主图代填 / 无图。"""
+        path = self.tmp / "collected.db"
+        conn = dbmod.open(path)
+        self.addCleanup(conn.close)
+        blue, main = product_picture("blue"), product_picture("red")
+        database = dbmod.Database(conn)
+        database.submit_inventory_snapshot(
+            round_id=new_round(database, "A01", run_date=DAY),
+            shop_key="A01", shop_url="https://a01.example/", shop_name="店铺甲",
+            offer_id="11", product_url="https://detail.1688.com/offer/11.html",
+            list_title="商品一", detail_title="商品一",
+            main_image_url="https://img.example/main.png", image_evidence=main,
+            collected_at="2026-09-16T10:00:00+08:00", attempt=1,
+            sku_rows=[
+                {"sku_id": "own", "sku_name": "蓝", "sku_stock": 3,
+                 "sku_image_evidence": {"url": "https://img.example/blue.png",
+                                        "source": dbmod.SKU_IMAGE_OWN, **blue}},
+                {"sku_id": "filled", "sku_name": "素色", "sku_stock": 2,
+                 "sku_image_evidence": {"url": None, "source": dbmod.SKU_IMAGE_FILLED}},
+                {"sku_id": "blank", "sku_name": "随机", "sku_stock": 1,
+                 "sku_image_evidence": {"url": None, "source": dbmod.SKU_IMAGE_NONE}},
+            ])
+        return path, {"blue": blue, "main": main}
+
+    def test_a_collected_week_round_trips_with_the_same_ledger_and_bytes(self):
+        source, pictures = self.collected_source()
+        package = self.tmp / "packages" / "2026-W38-m2.db"
+        export.build_package(source, package, week="2026-W38", machine_id="m2",
+                             crawl_in_progress=False,
+                             generated_at=dt.datetime(2026, 9, 21, 10, 30, tzinfo=CST))
+        store = FakeImageStore({
+            image_key(picture["hash"], picture["mime"]): picture["content"]
+            for picture in pictures.values()})
+        conn = self.local("m4")
+        source_conn = dbmod.open(source)
+        self.addCleanup(source_conn.close)
+        columns = ("shop_key, offer_id, sku_id, observed_at, observed_date, image_url, "
+                   "content_hash, image_error, source")
+
+        result = self.import_(conn, package, machine_id="m4", store=store)
+
+        self.assertFalse(result.failed, result.failure)
+        self.assertEqual(
+            self.rows(conn, f"SELECT {columns} FROM sku_image_versions ORDER BY sku_id"),
+            self.rows(source_conn, f"SELECT {columns} FROM sku_image_versions ORDER BY sku_id"),
+            "两端 SKU 图流水逐行一致")
+        self.assertEqual(
+            self.rows(conn, "SELECT sku_id, source FROM sku_image_versions ORDER BY sku_id"),
+            [("blank", "无图"), ("filled", "主图代填"), ("own", "专属图")],
+            "三种来源都到了：代填行与无图行是这条要钉住的形态")
+        referenced = [hash_ for hash_, in self.rows(
+            conn, "SELECT DISTINCT content_hash FROM sku_image_versions "
+                  "WHERE content_hash IS NOT NULL")]
+        self.assertEqual(len(referenced), 2, "专属图那张与代填的主图那张")
+        for content_hash in referenced:
+            self.assertEqual(
+                self.rows(conn, "SELECT mime, content FROM product_image_assets "
+                                "WHERE content_hash=?", (content_hash,)),
+                self.rows(source_conn, "SELECT mime, content FROM product_image_assets "
+                                       "WHERE content_hash=?", (content_hash,)),
+                "引用的字节在本机资产表里对得上")
+
+        as_v1 = degrade_to_v1(package)
+        other = self.local("m5")
+        legacy = self.import_(other, as_v1, machine_id="m5", store=store)
+
+        self.assertFalse(legacy.failed, legacy.failure)
+        self.assertEqual(self.rows(other, "SELECT 1 FROM sku_image_versions"), [],
+                         "同一个包演成旧包：照收，只是 SKU 图这半为无")
+        self.assertEqual(
+            self.rows(other, "SELECT offer_id, sku_id, stock FROM inventory ORDER BY sku_id"),
+            self.rows(conn, "SELECT offer_id, sku_id, stock FROM inventory ORDER BY sku_id"),
+            "其余各表与收新包那份逐行一致")
 
 
 class PackageFormTests(MergeCase):

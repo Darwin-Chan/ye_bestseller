@@ -224,6 +224,11 @@ EXCHANGE_TABLES: tuple[_PackageTable, ...] = (
 _PACKAGE_SCHEMA = ("\n".join(table.ddl for table in EXCHANGE_TABLES)
                    + f"\nCREATE TABLE {META_TABLE} (key TEXT PRIMARY KEY, value TEXT NOT NULL);\n")
 
+# 读包时**可以缺席**的表：v2 起新增的 SKU 图流水。缺席 = 上一版程序发的旧包，汇总侧照收
+# （那半为无）；元数据里的 `rows_<表名>` 键同理按 0 算。其余六表缺席仍是「不是交换集里的
+# 包」——当场报错。包格式的家在这里，`read_package_meta` 与 `merge` 读表共用这一份名单。
+OPTIONAL_TABLES = frozenset({"sku_image_versions"})
+
 
 def week_window(week: str) -> tuple[str, str]:
     """ISO 周编号（如 2026-W37）的北京日期窗口：周一与周日。
@@ -338,16 +343,29 @@ def all_packages(exchange_root: str | pathlib.Path) -> tuple[PackageRef, ...]:
 
 
 def read_package_meta(conn: sqlite3.Connection) -> dict:
-    """把 exchange_meta 折成调用方要的形状：机器、周、时刻、口径版本、是否在采、各表行数。"""
+    """把 exchange_meta 折成调用方要的形状：机器、周、时刻、口径版本、是否在采、各表行数。
+
+    `rows_<表名>` 里 v2 新增的表可以缺席（旧包没有那个键）：按 0 算——汇总侧据此照收；
+    其余六表缺键仍当场 KeyError，那不是这个包格式认识的一版（见 `OPTIONAL_TABLES`）。
+    """
     raw = {key: value for key, value in
            conn.execute(f"SELECT key, value FROM {META_TABLE}").fetchall()}
+    rows: dict[str, int] = {}
+    for table in EXCHANGE_TABLES:
+        key = f"rows_{table.name}"
+        if key in raw:
+            rows[table.name] = int(raw[key])
+        elif table.name in OPTIONAL_TABLES:
+            rows[table.name] = 0
+        else:
+            raise KeyError(key)
     return {
         "machine_id": raw["machine_id"],
         "week": raw["week"],
         "generated_at": raw["generated_at"],
         "format_version": raw["format_version"],
         "crawl_in_progress": raw["crawl_in_progress"] == "1",
-        "rows": {table.name: int(raw[f"rows_{table.name}"]) for table in EXCHANGE_TABLES},
+        "rows": rows,
     }
 
 

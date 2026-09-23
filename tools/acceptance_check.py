@@ -24,15 +24,15 @@
    验收可言。报告是本机视角的：这条核的是**跑工具这台**的那份周报；想要三台的
    报告都被核，就在三台各跑一次这个命令（或把别机的报告拷到对应交换区根的
    `报告/` 下再跑）。
-4. **任取两台：合并收敛一致**：拿到的库两两对照——交换集里承载取胜结果的五张表
-   逐表逐行比对（版本表除 `id`：它是本机 rowid，导入会重排，spec §9 的已知约束；
+4. **任取两台：合并收敛一致**：拿到的库两两对照——交换集里承载取胜结果的六张表
+   逐表逐行比对（两张流水表除 `id`：它是本机 rowid，导入会重排，spec §9 的已知约束；
    图片资产表与各机的账不参与，见 `_COMPARE_TABLES` 的注释）。数据逐行一致 ⇒
    同一份数据上分析确定性地产出同一份结果，这条不重跑分析——验收时人工在任两台
    各跑一次 `analyze.py` 对一眼即可。
 5. **纯汇总机冷启动重放**：`--merge-only` 的那台库里，幂等账要覆盖交换区里的
    全部历史包（「收进来的包」= 交换区全部）；交换集各表有数；图片按清单补齐——
-   版本行引用到的每个内容哈希，本机资产表里都得有字节（缺的列出来；若是源头
-   本机就没字节的（各机周报里有记录），人工确认后按缺图记账）。
+   版本行与 SKU 图流水行引用到的每个内容哈希，本机资产表里都得有字节（缺的列出来；
+   若是源头本机就没字节的（各机周报里有记录），人工确认后按缺图记账）。
 
 输入给不全的条目记「跳过」并在末尾写明缺什么；退出码 0 = 没有不过的（含跳过），
 1 = 有不过的，2 = 用法或输入错（比如 --week 非法、`编号=路径` 形态不对）。
@@ -280,16 +280,17 @@ def check_packages(exchange_root: pathlib.Path, week: str,
     return Criterion(title, PASS, tuple(lines))
 
 
-# 收敛对照的表集：交换集里承载「取胜结果」的五张。两张表故意不在这里——版本表的 `id`
-# 列（本机 rowid，导入会重排，spec §9 的已知约束）、图片资产表（行有无反映的是图片
-# 拉到没拉到，归口径五与各机周报的「缺图」记录看）。本机的账（取胜方账 / 幂等账 /
-# 冲突账）不参与对照：本机自己采的组不进取胜方账，两台的账本来就长得不一样。
+# 收敛对照的表集：交换集里承载「取胜结果」的六张。一张表故意不在这里——图片资产表
+# （行有无反映的是图片拉到没拉到，归口径五与各机周报的「缺图」记录看）。本机的账
+# （取胜方账 / 幂等账 / 冲突账）不参与对照：本机自己采的组不进取胜方账，两台的账本来
+# 就长得不一样。两张流水表的 `id` 列（本机 rowid，导入会重排，spec §9 的已知约束）排除。
 _COMPARE_TABLES = (
     ("shops", (), ("shop_key",)),
     ("products", (), ("offer_id",)),
     ("skus", (), ("offer_id", "sku_id")),
     ("inventory", (), ("shop_key", "date")),
     ("product_information_versions", ("id",), ("shop_key", "observed_date")),
+    ("sku_image_versions", ("id",), ("shop_key", "observed_date")),
 )
 
 
@@ -380,8 +381,8 @@ def _compare_pair(label_a: str, path_a: pathlib.Path, label_b: str,
 def check_convergence(dbs: Mapping[str, pathlib.Path]) -> Criterion:
     """口径四：任取两台，同一批包合并后的取胜结果一致。
 
-    `dbs` 是 标签 → 库文件路径 的映射，两两对照：交换集里承载取胜结果的五张表
-    逐表逐行比对（版本表除 `id`）。数据逐行一致 ⇒ 同一份数据上分析确定性地产出
+    `dbs` 是 标签 → 库文件路径 的映射，两两对照：交换集里承载取胜结果的六张表
+    逐表逐行比对（两张流水表除 `id`）。数据逐行一致 ⇒ 同一份数据上分析确定性地产出
     同一份结果。
     """
     title = "任取两台：合并收敛一致"
@@ -407,6 +408,8 @@ def check_convergence(dbs: Mapping[str, pathlib.Path]) -> Criterion:
 
 
 # 冷启动「各表有数」的两组：五张核心表必须非空；图片资产表（有字节的）只报数。
+# SKU 图流水不在里头：历史补齐阶段它本来就可能是空的（新表随这次升级才建出来），
+# 「各表有数」加它必假红——图片那半由下面「按清单补齐」核。
 _CORE_TABLES = ("shops", "products", "skus", "inventory", "product_information_versions")
 
 
@@ -414,9 +417,9 @@ def check_cold_start(db_path: pathlib.Path, exchange_root: pathlib.Path) -> Crit
     """口径五：纯汇总机冷启动重放。
 
     幂等账要覆盖交换区里的**全部历史包**（「收进来的包」= 交换区全部）；交换集各表
-    有数；图片按清单补齐——版本行引用到的每个内容哈希，本机资产表里都得有字节。
-    缺图的可能是源头本机就没有字节的那几张（各机周报里记着缺图），列出来人工确认，
-    这条先按不过算。
+    有数；图片按清单补齐——版本行与 SKU 图流水行引用到的每个内容哈希，本机资产表里
+    都得有字节。缺图的可能是源头本机就没有字节的那几张（各机周报里记着缺图），
+    列出来人工确认，这条先按不过算。
     """
     title = "纯汇总机冷启动重放"
     root = pathlib.Path(exchange_root)
@@ -434,7 +437,9 @@ def check_cold_start(db_path: pathlib.Path, exchange_root: pathlib.Path) -> Crit
         with_bytes = int(conn.execute(
             "SELECT COUNT(*) FROM product_image_assets WHERE content IS NOT NULL").fetchone()[0])
         referenced = {str(row["content_hash"]) for row in conn.execute(
-            "SELECT DISTINCT content_hash FROM product_information_versions "
+            "SELECT content_hash FROM product_information_versions "
+            "WHERE content_hash IS NOT NULL "
+            "UNION SELECT content_hash FROM sku_image_versions "
             "WHERE content_hash IS NOT NULL")}
         have = {str(row["content_hash"]) for row in conn.execute(
             "SELECT content_hash FROM product_image_assets WHERE content IS NOT NULL")}
@@ -472,7 +477,7 @@ def check_cold_start(db_path: pathlib.Path, exchange_root: pathlib.Path) -> Crit
         problems.append(f"交换集表 {table} 是空的：「各表有数」不过（重放没重放全，"
                         "或交换区里确实还没有数据）。")
     missing_images = sorted(referenced - have)
-    lines.append(f"图片：版本行引用 {len(referenced)} 个内容哈希，本机有字节 "
+    lines.append(f"图片：版本行与 SKU 图流水行引用 {len(referenced)} 个内容哈希，本机有字节 "
                  f"{len(referenced) - len(missing_images)} 个")
     if missing_images:
         shown = "、".join(hash[:12] for hash in missing_images[:5])

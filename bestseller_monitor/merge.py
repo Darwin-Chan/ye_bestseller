@@ -6,8 +6,10 @@
    里见过这个哈希就不做任何事；包被拉图、被合并都只发生一次。
 2. **先拉图、再插行**：包里引用的图片 key 在本机还缺字节的，先从图片库取回、落进本机
    资产表（图片是独立通道，这一步在导入事务之外、独立提交——合并事务回滚不回滚图片）。
-   取不到、没配桶、内容对不上哈希的都如实记缺，不挡导入（spec §9「仍缺的照插」）。
-3. **整包一个事务**：六表合并 + 三本账（幂等账 / 冲突账 / 取胜方账）一起生效，
+   取不到、没配桶、内容对不上哈希的都如实记缺，不挡导入（spec §9「仍缺的照插」）。包的
+   资产表是「版本行 ∪ SKU 图流水行」引用到的那些（导出侧并集），所以这一步不必为新表
+   加分支：先拉图自然覆盖新表的引用。
+3. **整包一个事务**：七表合并 + 三本账（幂等账 / 冲突账 / 取胜方账）一起生效，
    失败全回滚，重跑等价于首次导入。
 
 **观测表**（`inventory` / `product_information_versions`）——取胜单位是「一个 (日期, 店铺)
@@ -23,6 +25,11 @@
   行级并集会把两种粒度留在同一天，分析侧遇到同日混合形态直接报错（与 `_clear_other_granularity`
   同一条规则）。
 - **显式投影列**（spec §9）：包的列集与本地不必相同，读进来时缺列补 None、多列不读。
+
+**SKU 图流水**（`sku_image_versions`）——按观测表的做法落库、但不参与取胜裁决：逐行先查后写
+（键 = `db.SKU_IMAGE_DEDUPE_KEY` 的表达式，NULL 折叠），已存在即跳过，新行计入 inserted。
+各机观测天然互异，同键只可能是同一次观测的重复，没有哪个版本更值得留；它既不进取胜方账也
+不进冲突账（claim 裁决只管上面两张观测表）。包缺这张表就是 v1 旧包，这半为无、照收。
 
 **身份表**（`shops` / `products` / `skus`）——交换律合成：`first_seen_at` 取 MIN、
 `last_seen_at` 取 MAX；描述列按**最近一次观测**取胜——由该行的 `(last_seen_at, machine_id)`
@@ -55,17 +62,18 @@ import tempfile
 from collections.abc import Iterable, Iterator
 
 from bestseller_monitor import export
-from bestseller_monitor.db import VERSION_DEDUPE_KEY, utcnow
+from bestseller_monitor.db import SKU_IMAGE_DEDUPE_KEY, VERSION_DEDUPE_KEY, utcnow
 from bestseller_monitor.identity_key import identity_row_key
 from bestseller_monitor.image_store import ImageStore, ImageStoreError, image_key
 from bestseller_monitor.parse import DEFAULT_SKU_ID
 
 log = logging.getLogger(__name__)
 
-# 包内六表列集的唯一来源是 export 的包格式定义（DRY：不在这里再抄一份列名）。
+# 包内交换集各表列集的唯一来源是 export 的包格式定义（DRY：不在这里再抄一份列名）。
 _BY_NAME = {table.name: table for table in export.EXCHANGE_TABLES}
 
-# 观测表：表名 → 分组用的日期列。
+# 观测表：表名 → 分组用的日期列。claim 裁决只管这两张——SKU 图流水不进来（见模块
+# docstring：它按观测表一侧落库，但没有取胜方这回事）。
 _OBSERVATION_DATE = {
     "inventory": "date",
     "product_information_versions": "observed_date",
@@ -76,6 +84,11 @@ _OBSERVATION_DATE = {
 # observed_at 的派生值，也照取胜方整行落，口径不靠"本地旧值"兜底。
 _VERSION_MATCH = " AND ".join(f"{column}=?" for column in VERSION_DEDUPE_KEY)
 _VERSION_PAYLOAD = ("observed_date", "product_name", "image_url")
+
+# SKU 图流水同键的判别式：与版本表那条同源（db.SKU_IMAGE_DEDUPE_KEY 的表达式逐列绑定，
+# 含 NULL 折叠）。合并只用它「查」——同键的行在各机之间只可能是同一次观测的重复，
+# 没有取胜方，不需要替换哪几列的名单。
+_SKU_IMAGE_MATCH = " AND ".join(f"{column}=?" for column in SKU_IMAGE_DEDUPE_KEY)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -272,15 +285,19 @@ def _result_from_ledger(row: sqlite3.Row) -> ImportResult:
 # ---------- 读包（显式投影） ----------
 
 def _read_package_rows(pkg: sqlite3.Connection) -> dict[str, list[dict]]:
-    """按显式投影列读包内六表（spec §9：禁止 `SELECT *`）。
+    """按显式投影列读包内交换集各表（spec §9：禁止 `SELECT *`）。
 
     包缺少的列不读、下游按 None 落库（旧包少一列也能导）；多出来的列（`inventory.diff`
-    退役后的旧包）不读。包里没有交换集的某张表就当场报错——那不是交换集里的包。
+    退役后的旧包）不读。包里没有交换集的某张表就当场报错——那不是交换集里的包；
+    v2 新增的表例外：缺席 = 旧包，给空列表照收（SKU 图这半为无，见 `export.OPTIONAL_TABLES`）。
     """
     rows_by_table: dict[str, list[dict]] = {}
     for table in export.EXCHANGE_TABLES:
         present = {row[1] for row in pkg.execute(f'PRAGMA table_info("{table.name}")')}
         if not present:
+            if table.name in export.OPTIONAL_TABLES:
+                rows_by_table[table.name] = []
+                continue
             raise ValueError(f"包里没有 {table.name} 表")
         cols = [name for name in table.names if name in present]
         rows_by_table[table.name] = [
@@ -363,6 +380,7 @@ def _merge_all(conn: sqlite3.Connection, rows: dict[str, list[dict]], *, meta: d
     counts = _Counts()
     _merge_inventory(conn, rows["inventory"], groups, counts)
     _merge_versions(conn, rows["product_information_versions"], groups, counts)
+    _merge_sku_image_versions(conn, rows["sku_image_versions"], counts)
     for spec in _IDENTITY_TABLES:
         _merge_identity(conn, spec, rows[spec.table], pkg_machine, local_machine, counts)
     conflicts = _record_conflicts(conn, groups, sha, imported_at)
@@ -572,6 +590,33 @@ def _merge_versions(conn: sqlite3.Connection, rows: list[dict],
             counts.inserted += 1
             if group.winner != "package":
                 group.package_kept += 1
+
+
+def _merge_sku_image_versions(conn: sqlite3.Connection, rows: list[dict],
+                              counts: _Counts) -> None:
+    """SKU 图流水按观测表一侧合并：逐行先查后写，已存在即跳过（新行计入 inserted）。
+
+    不进取胜方账、不进冲突账——claim 裁决只管库存与版本表（`_OBSERVATION_DATE`）：流水行
+    按 (店铺, 商品, SKU, 时刻, 图片结果) 认身份，各机观测天然互异，同键只可能是同一次观测
+    的重复，没有哪个版本更值得留。同键的查找复用 db.SKU_IMAGE_DEDUPE_KEY 的表达式口径
+    （NULL 折叠），不依赖唯一索引在不在（老库上它可能没建起来——那种库上 INSERT OR IGNORE
+    挡不住重复，这里的先查后写才挡得住；版本表先例同一课）。
+    """
+    table = _BY_NAME["sku_image_versions"]
+    for row in rows:
+        key_params = (row.get("shop_key"), row.get("offer_id"), row.get("sku_id"),
+                      row.get("observed_at"), row.get("content_hash") or "",
+                      row.get("image_error") or "")
+        exists = conn.execute(
+            f"SELECT 1 FROM sku_image_versions WHERE {_SKU_IMAGE_MATCH}", key_params
+        ).fetchone() is not None
+        if exists:
+            continue
+        conn.execute(
+            f"INSERT INTO sku_image_versions({', '.join(table.names)}) "
+            f"VALUES ({', '.join('?' * len(table.names))})",
+            tuple(row.get(name) for name in table.names))
+        counts.inserted += 1
 
 
 def _merge_identity(conn: sqlite3.Connection, spec: _Identity, rows: list[dict],

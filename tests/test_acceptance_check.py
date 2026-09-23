@@ -23,6 +23,7 @@ from bestseller_monitor import db as dbmod
 from bestseller_monitor import export, merge, weekly_plan
 from bestseller_monitor.config import Shop
 from bestseller_monitor.image_store import ImageStoreError, image_key
+from helpers import insert_sku_image
 from tools import acceptance_check
 
 WEEK = "2026-W40"
@@ -476,6 +477,39 @@ class ConvergenceTests(unittest.TestCase):
         self.assertEqual(result.status, acceptance_check.FAIL)
         self.assertIn("列集不同", "\n".join(result.lines))
 
+    def test_a_diverged_sku_image_ledger_fails_and_is_named(self):
+        """SKU 图流水进对照：两台库里同一组行不一致就得点名。"""
+        _, own = self.world.publish_package("m2", (("A01", DAYS[0]),))
+        m2 = self.merged_db("m2", [], own=own)
+        m3 = self.merged_db("m3", [], own=own)
+        conn = dbmod.open(m3)
+        insert_sku_image(conn, day=DAYS[0], shop_key="A01", offer_id="A01-o1", sku_id="s1")
+        conn.close()
+
+        result = acceptance_check.check_convergence({"m2": m2, "m3": m3})
+
+        self.assertEqual(result.status, acceptance_check.FAIL)
+        text = "\n".join(result.lines)
+        self.assertIn("sku_image_versions", text)
+        self.assertIn("A01", text)
+
+    def test_the_same_ledger_rows_under_different_rowids_are_not_a_mismatch(self):
+        """流水行的 `id` 是本机 rowid（导入会重排，spec §9 的已知约束）：不参与比对。"""
+        _, own = self.world.publish_package("m2", (("A01", DAYS[0]),))
+        m2 = self.merged_db("m2", [], own=own)
+        m3 = self.merged_db("m3", [], own=own)
+        for name, rowid in ((m2, 1), (m3, 77)):
+            conn = dbmod.open(name)
+            insert_sku_image(conn, day=DAYS[0], shop_key="A01", offer_id="A01-o1", sku_id="s1")
+            conn.execute("UPDATE sku_image_versions SET id=?", (rowid,))
+            conn.commit()
+            conn.close()
+
+        result = acceptance_check.check_convergence({"m2": m2, "m3": m3})
+
+        self.assertEqual(result.status, acceptance_check.PASS, "\n".join(result.lines))
+        self.assertIn("sku_image_versions", "\n".join(result.lines), "小计行里报的是这张表")
+
     def test_fewer_than_two_dbs_skips(self):
         _, own = self.world.publish_package("m2", (("A01", DAYS[0]),))
         m2 = self.merged_db("m2", [], own=own)
@@ -517,9 +551,9 @@ class ColdStartTests(unittest.TestCase):
         return sorted(self.world.exchange.glob(
             f"raw-*/data/2026/W40-*{export.PACKAGE_SUFFIX}"))
 
-    def replayed_db(self, *, store=None, skip=()) -> Path:
+    def replayed_db(self, *, store=None, skip=(), name="m4") -> Path:
         """一份从交换区重放出来的新库；`skip` 里的包名不导入（模拟漏收）。"""
-        path = self.world.tmp / "m4.db"
+        path = self.world.tmp / f"{name}.db"
         conn = dbmod.open(path)
         for package in self.packages():
             if package.name in skip:
@@ -564,6 +598,33 @@ class ColdStartTests(unittest.TestCase):
         text = "\n".join(result.lines)
         self.assertIn("图", text)
         self.assertIn("缺图", text)
+
+    def test_an_image_that_only_the_ledger_references_counts_as_referenced(self):
+        """「图片按清单补齐」的引用集 = 版本行 ∪ SKU 图流水行：只在流水里引用的那张也算。"""
+        _, source = self.world.publish_package("m2", (("A01", DAYS[0]),))   # 版本行不带图
+        conn = dbmod.open(source)
+        conn.execute("INSERT OR IGNORE INTO product_image_assets(content_hash, mime, content) "
+                     "VALUES (?,?,?)", (self.image_hash, "image/jpeg", self.image_bytes))
+        insert_sku_image(conn, day=DAYS[0], shop_key="A01", offer_id="A01-o1", sku_id="s1",
+                         content_hash=self.image_hash)
+        conn.close()
+        self.world.package_from("m2", source)      # 重新打包：清单里带上这张
+
+        without_bytes = acceptance_check.check_cold_start(
+            self.replayed_db(store=FakeImageStore()), self.world.exchange)
+
+        self.assertEqual(without_bytes.status, acceptance_check.FAIL)
+        text = "\n".join(without_bytes.lines)
+        self.assertIn("引用 1 个内容哈希", text, "引用数如实：这张只被流水行引用")
+        self.assertIn("缺图", text)
+
+        with_bytes = acceptance_check.check_cold_start(
+            self.replayed_db(name="m4-with-bytes", store=FakeImageStore(
+                {image_key(self.image_hash, "image/jpeg"): self.image_bytes})),
+            self.world.exchange)
+
+        self.assertEqual(with_bytes.status, acceptance_check.PASS,
+                         "\n".join(with_bytes.lines))
 
     def test_an_empty_db_fails_the_table_counts(self):
         self.world.publish_package("m2", (("A01", DAYS[0]),))
