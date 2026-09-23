@@ -803,20 +803,44 @@ def pack_bundle(bundle_dir: Path) -> tuple[Path, dict]:
     return zip_path, manifest
 
 
+def _entry_name(info: zipfile.ZipInfo) -> str:
+    """包内条目的名字：没打 UTF-8 标记的按本地代码页还原。
+
+    工具自己打的包（`--pack`）名字带 UTF-8 标记，照收。没打标记的（资源管理器
+    「压缩为 zip」把中文按 GBK 写、PowerShell `Compress-Archive` 写 UTF-8 也忘标记）
+    zipfile 一律按 cp437 解出乱码。这类名字先按 cp437 还原回字节，再依次试 UTF-8 与
+    GBK；都解不出来就保持原样：宁可乱码，不动不认识的名字。`..` / 盘符这些安全检查
+    跑在还原后的名字上（落盘的是它）。不走 `ZipFile(metadata_encoding=...)`：那只认
+    一种编码，覆盖不了这两家。
+    """
+    if info.flag_bits & 0x800:
+        return info.filename
+    try:
+        raw = info.filename.encode("cp437")
+    except UnicodeEncodeError:
+        return info.filename
+    for encoding in ("utf-8", "gbk"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return info.filename
+
+
 def unpack_bundle(zip_path: Path, into: Path) -> tuple[Path, str]:
     """把收到的记录包解到 `<into>/<包名>/`，返回 (包目录, 给接收方看的摘要)。
 
     摘要 = REPORT.md 的「一、问题描述」那一段 + facts.json 的 missing/warnings——
-    接收的人（或 agent）先看这段就能决定往哪深挖。
+    接收的人（或 agent）先看这段就能决定往哪深挖。手压包的中文名见 `_entry_name`。
     """
     with zipfile.ZipFile(zip_path) as archive:
         infos = [info for info in archive.infolist() if info.filename.strip("/")]
-        roots = {info.filename.split("/")[0] for info in infos}
+        roots = {_entry_name(info).split("/")[0] for info in infos}
         if len(roots) != 1:
             raise ValueError(f"{zip_path.name} 不是一份记录包（顶层不是唯一目录）：{sorted(roots)[:3]}")
         bundle_name = roots.pop()
         for info in infos:
-            name = info.filename
+            name = _entry_name(info)
             if info.is_dir():
                 continue
             if Path(name).is_absolute() or re.match(r"^[A-Za-z]:", name) or ".." in Path(name).parts:

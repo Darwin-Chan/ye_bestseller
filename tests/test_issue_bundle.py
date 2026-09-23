@@ -391,6 +391,61 @@ class UnpackTests(unittest.TestCase):
                                             out_root=tmp / "issues", root=root, now=STAMP)
         return issue_bundle.pack_bundle(bundle)[0]
 
+    @staticmethod
+    def _hand_made_zip(tmp: Path, bundle_name: str, encoding: str = "gbk") -> Path:
+        """别的工具打的包的样子：名字按 `encoding` 写、不打 UTF-8 标记——资源管理器
+        「压缩为 zip」用 GBK，PowerShell `Compress-Archive` 用 UTF-8 却忘标记。"""
+        def encode_without_the_flag(info):
+            return info.filename.encode(encoding), info.flag_bits & ~0x800
+
+        zip_path = tmp / "手压的包.zip"
+        with mock.patch.object(zipfile.ZipInfo, "_encodeFilenameFlags",
+                               encode_without_the_flag):
+            with zipfile.ZipFile(zip_path, "w") as archive:
+                archive.writestr(f"{bundle_name}/REPORT.md",
+                                 "# 手压包自检\n\n## 一、问题描述（人填写）\n\n"
+                                 "**1. 现象**：手压的包解出来要能读。\n")
+                archive.writestr(f"{bundle_name}/facts.json", "{}")
+                archive.writestr(f"{bundle_name}/evidence/说明.txt", "证据\n")
+        return zip_path
+
+    def test_a_hand_made_zip_with_gbk_names_is_readable(self):
+        """没打 UTF-8 标记的包名要按本地代码页还原。
+
+        工具自己打的包（`--pack`）名字带 UTF-8 标记、照收；别的工具不爱标记——资源
+        管理器「压缩为 zip」按 GBK 写、PowerShell `Compress-Archive` 写 UTF-8 也不
+        标记——zipfile 读到这类名字会按 cp437 解成乱码。收包是人工通道，落到别的
+        机器上可能就是这么来的。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bundle_name = "2026-09-23-1139-m3-全量测试发现两处缺陷"
+            zip_path = self._hand_made_zip(tmp_path, bundle_name)
+
+            # 先钉住「包在磁盘上确实是乱码形态」：按标记读出来不等于原名。
+            with zipfile.ZipFile(zip_path) as archive:
+                self.assertNotEqual(archive.namelist()[0].split("/")[0], bundle_name)
+
+            bundle_dir, summary = issue_bundle.unpack_bundle(zip_path, tmp_path / "inbox")
+
+            self.assertEqual(bundle_dir.name, bundle_name)
+            self.assertTrue((bundle_dir / "REPORT.md").is_file())
+            self.assertTrue((bundle_dir / "evidence" / "说明.txt").is_file(),
+                            "包里每一条中文名都要还原，不只是顶层目录")
+            self.assertIn("一、问题描述", summary)
+
+    def test_a_hand_made_zip_with_unflagged_utf8_names_is_readable(self):
+        """不打标记但写 UTF-8 的（`Compress-Archive` 就这样）同样要还原。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bundle_name = "2026-09-23-1139-m3-压缩归档示例"
+            zip_path = self._hand_made_zip(tmp_path, bundle_name, encoding="utf-8")
+
+            bundle_dir, _ = issue_bundle.unpack_bundle(zip_path, tmp_path / "inbox")
+
+            self.assertEqual(bundle_dir.name, bundle_name)
+            self.assertTrue((bundle_dir / "evidence" / "说明.txt").is_file())
+
     def test_unpack_lands_under_the_inbox_and_summarizes(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
