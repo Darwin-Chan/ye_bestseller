@@ -1120,10 +1120,15 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         self.assertIsNone(self._row("pid", "crawler_process"), "身份行要清掉")
 
     def test_abort_without_a_usable_pid_only_writes_the_terminal_state(self):
-        """PID 已经不在了：只写终态，采集进程会在下一个检查点自己停下。"""
+        """PID 已经不在了：只写终态，采集进程会在下一个检查点自己停下。
+
+        「拿不到句柄」要打桩表达，不能指望某个假 PID 恰好空闲：任何 PID 都可能被别的
+        进程占着（2026-09-23，m1 就是这么红的——写死的 4321 被占，走进了身份不符的守卫）。
+        """
         self._running_crawler()
 
-        with patch.object(browser_proc, "terminate_process_tree") as kill:
+        with patch.object(browser_proc, "bind_process", return_value=None), \
+                patch.object(browser_proc, "terminate_process_tree") as kill:
             result = self.api.abort_run()
             self.clock.advance(20)
             self.api.get_start()
@@ -1136,7 +1141,8 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         """停不掉（拿不到可用 PID）时身份行要留着：下次还得知道是谁在跑。"""
         self._running_crawler()
 
-        with patch.object(browser_proc, "terminate_process_tree") as kill:
+        with patch.object(browser_proc, "bind_process", return_value=None), \
+                patch.object(browser_proc, "terminate_process_tree") as kill:
             self.api.abort_run()
             self.clock.advance(20)
             self.api.get_start()
@@ -1155,11 +1161,42 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         finally:
             conn.close()
 
-        with patch.object(browser_proc, "terminate_process_tree", return_value=True):
+        with patch.object(browser_proc, "bind_process", return_value=None), \
+                patch.object(browser_proc, "terminate_process_tree", return_value=True):
             result = self.api.abort_run()
 
         self.assertTrue(result["ok"])
         self.assertEqual(self._row("terminal_reason"), "COMPLETED")
+
+    def test_abort_refuses_when_the_pid_is_taken_by_another_process(self):
+        """身份行里的 PID 已被无关进程顶替：报「稍后重试」，绝不把可疑目标当自己人处置。
+
+        守卫在开窗之前发火（stop_request 的 bind），句柄当场还掉；但「先写终态」已经
+        完成——终态本身就是停止信号（ADR-0009），所以这一轮其实已被放弃，只是停止动作
+        没法编排。占用解除后重试即成功：够不着的是停止，不是中止。
+        """
+        rid = self._running_crawler()        # 身份行发布 created="crawler-proof"
+        impostor = browser_proc.ProcessCapability(4321, 91, "another-process-proof")
+
+        with patch.object(browser_proc, "bind_process", return_value=impostor), \
+                patch.object(browser_proc, "release_process_capability") as release, \
+                patch.object(browser_proc, "terminate_process_capability") as kill, \
+                patch.object(browser_proc, "terminate_process_tree") as kill_tree:
+            result = self.api.abort_run()
+            self.clock.advance(20)           # 窗口拨过去也不该有人被动手
+            self.api.get_start()
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["retryable"])
+        self.assertEqual(result["code"], "process_identity_mismatch")
+        self.assertIsNone(self.api._stop_watch.state, "守卫没放行，停止窗口根本没开")
+        release.assert_called_once_with(impostor)
+        kill.assert_not_called()
+        kill_tree.assert_not_called()
+        self.assertEqual(self._terminal_of(rid), "ABANDONED",
+                         "收尾先于守卫：终态就是停止信号")
+        self.assertEqual(self._row("pid", "crawler_process"), 4321,
+                         "身份行留着：拿不到可用目标时不能先清")
 
     def test_start_page_exposes_the_running_crawler_for_the_abort_entry(self):
         rid = self._running_crawler()
@@ -1181,7 +1218,10 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         self.api.round_id = old                 # 界面还记着已经完结的那一轮
         running = self._running_crawler()       # 别处正在跑的是另一轮
 
-        with patch.object(browser_proc, "terminate_process_tree", return_value=True):
+        # 这条盯的是「收尾哪一轮」；停止编排本身拿桩固定住——本机 PID 空间归谁占着
+        # 不归用例管（写死的 PID 可能真被占，2026-09-23 m1 已踩）。
+        with patch.object(browser_proc, "bind_process", return_value=None), \
+                patch.object(browser_proc, "terminate_process_tree", return_value=True):
             self.api.abort_run()
 
         self.assertNotEqual(running, old)

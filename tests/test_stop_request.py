@@ -210,6 +210,27 @@ class ProcessStopRuntimeTests(unittest.TestCase):
                                       browser_os_started=None)
         self.assertFalse(effect.ok, "对方拒绝关闭时如实上报，窗口据此进 cleanup_pending")
 
+    def test_a_pid_taken_by_another_process_is_refused_and_the_handle_returned(self):
+        """身份行记的创建证明与此刻同一 PID 上读到的不符：目标已被顶替，拒绝绑定。
+
+        PID 会复用，所以「能开句柄」不等于「就是那个进程」（ADR-0024 冻结的是身份，
+        不是 PID）。句柄当场还掉：不还就是漏一个句柄，还会让这个 PID 一直处在
+        「能开句柄」的状态里。
+        """
+        target = stop_request.StopTarget(4242, "2026-09-23T00:00:00",
+                                         process_os_started="crawler-proof")
+        impostor = browser_proc.ProcessCapability(4242, 91, "somebody-elses-proof")
+
+        with patch.object(browser_proc, "bind_process",
+                          return_value=impostor) as bind, \
+                patch.object(browser_proc, "release_process_capability") as release:
+            with self.assertRaises(RuntimeError) as caught:
+                stop_request.ProcessStopRuntime().bind(target)
+
+        self.assertEqual(str(caught.exception), "process_identity_mismatch")
+        bind.assert_called_once_with(4242)
+        release.assert_called_once_with(impostor)
+
     def test_the_only_injected_input_is_the_own_child(self):
         """调用方交事实，不交动作、也不交否决权。"""
         with self.assertRaises(TypeError):
