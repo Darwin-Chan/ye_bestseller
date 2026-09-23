@@ -1,9 +1,6 @@
 """详情访问的共享 seam：取得、安顿并读取一次当前详情观测。"""
 from __future__ import annotations
 
-# 本模块自己已不再计时；留着这个 import 是因为用例仍经 `detail_visit.time` 打桩
-# `time.sleep`（模块对象是同一个，原语用的也是它）。
-import time  # noqa: F401
 from dataclasses import dataclass
 
 from playwright.sync_api import Error as PlaywrightError

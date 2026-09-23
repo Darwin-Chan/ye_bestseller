@@ -281,6 +281,25 @@ class InterventionResolutionTests(unittest.TestCase):
         emit.assert_not_called()
         alarm.assert_not_called()
 
+    def test_a_signal_that_vanishes_inside_the_confirmation_window_is_ignored(self):
+        """窗口里自己解除的信号判误报早退：不刷新、不响铃、不发事件。
+
+        这段早退此前没有用例钉着——变异自证里把窗口改成不探测，全部用例仍绿
+        （票 05 的 M2 盲区）。判据打桩为「已解除」，钉的是接线本身：窗口探到真值
+        就早退，连刷新都不试；`resolved` 的读数次数兼钉「窗口确实探测过」。
+        """
+        page = FakePage(self.PRODUCT, body=self.LOGIN_WALL)
+        emit = MagicMock()
+
+        with patch.object(guard, "resolved", return_value=True) as resolved, \
+             patch.object(guard.sound, "play_alarm") as alarm:
+            guard.wait_for_resolution(page, 1, emit=emit, confirm_sec=2.0)
+
+        self.assertGreaterEqual(resolved.call_count, 1, "确认窗口确实探测过")
+        self.assertEqual(page.reloads, 0, "窗口内已解除，连刷新都不该试")
+        emit.assert_not_called()
+        alarm.assert_not_called()
+
     def test_the_ring_loop_is_asked_to_stop_every_round(self):
         """响铃循环每轮问一次「该不该停」，抛出即原样穿出（A11）。
 

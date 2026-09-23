@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 from playwright.sync_api import Error as PlaywrightError
 
 from bestseller_monitor import (browser_pw, click_listing, detail, detail_visit,
-                                listing, rounds, stop_request)
+                                listing, rounds, stop_request, waiting)
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import (Database, DayBoundaryReached, DetailBudgetExhausted,
                                    connect, utcnow)
@@ -124,7 +124,7 @@ class WalkTests(ClickListingTestCase):
             ],
         )
 
-        with patch.object(detail_visit.time, "sleep"):
+        with patch.object(waiting.time, "sleep"):
             self.crawl([[card]])
 
         self.assertEqual(self.event_names(), [
@@ -277,7 +277,7 @@ class DenyTests(ClickListingTestCase):
                 return opened
 
         card = LateDenyCard()
-        with patch.object(detail_visit.time, "sleep"):
+        with patch.object(waiting.time, "sleep"):
             result = self.walk(ScriptedListing([[card]]),
                                deny_tracker=guard.DenyTracker(600)).capture(card, "商品1")
 
@@ -319,7 +319,7 @@ class DenyTests(ClickListingTestCase):
                 return super().acquire()
 
         card = LateThenDeniedCard()
-        with patch.object(detail_visit.time, "sleep"):
+        with patch.object(waiting.time, "sleep"):
             result = self.walk(ScriptedListing([[card]]),
                                deny_tracker=guard.DenyTracker(600)).capture(card, "商品1")
 

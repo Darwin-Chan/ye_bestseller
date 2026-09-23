@@ -54,7 +54,7 @@ class DetailVisitTests(unittest.TestCase):
 
         with patch.object(detail_visit, "ready_detail_page", return_value=False), \
              patch.object(detail_visit, "intervention_kind", return_value=None), \
-             patch.object(detail_visit.time, "sleep"):
+             patch.object(waiting.time, "sleep"):
             visit = self.begin(page)
             observation = visit.observe(PRODUCT_URL)
 
@@ -212,7 +212,7 @@ class DetailVisitTests(unittest.TestCase):
              patch.object(detail_visit, "intervention_kind",
                           side_effect=[None, "滑块", None]), \
              patch.object(detail_visit, "is_deny_url", return_value=False), \
-             patch.object(detail_visit.time, "sleep"):
+             patch.object(waiting.time, "sleep"):
             visit = self.begin(page)
             observation = visit.observe(PRODUCT_URL)
 
@@ -267,7 +267,7 @@ class DetailVisitTests(unittest.TestCase):
              patch.object(detail_visit, "ready_detail_page", return_value=False), \
              patch.object(detail_visit, "intervention_kind", return_value=None), \
              patch.object(detail_visit, "is_deny_url", return_value=False), \
-             patch.object(detail_visit.time, "sleep"):
+             patch.object(waiting.time, "sleep"):
             visit = self.begin(page)
             observation = visit.observe(PRODUCT_URL)
 
@@ -296,7 +296,7 @@ class DetailVisitTests(unittest.TestCase):
         with patch.object(detail_visit, "ready_detail_page", return_value=False), \
              patch.object(detail_visit, "intervention_kind", return_value=None), \
              patch.object(detail_visit, "is_deny_url", return_value=False), \
-             patch.object(detail_visit.time, "sleep"):
+             patch.object(waiting.time, "sleep"):
             visit = self.begin(page)
             stop_request.install(hook)
             self.addCleanup(stop_request.uninstall)
