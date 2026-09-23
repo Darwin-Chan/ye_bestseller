@@ -911,27 +911,16 @@ class DbTests(unittest.TestCase):
         过期的失败行不被重试——当场拒绝，文案照主图「已有更新版本」的形状。"""
         rid = new_round(self.db)
         blue = product_picture('blue')
-        base = dict(
-            round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
-            offer_id="11", product_url="https://a/offer/11.html", list_title="商品",
-            detail_title="商品详情", main_image_url=None,
-        )
-        self.db.submit_inventory_snapshot(
-            **base, collected_at="2026-09-05T02:00:00+00:00", attempt=1,
-            sku_rows=[{"sku_id": "s1", "sku_name": "蓝", "sku_stock": 1,
-                       "sku_image_evidence": {"url": "https://img.example/blue",
-                                              "source": SKU_IMAGE_OWN, "error": "offline"}}],
-        )
+        failed = {"url": "https://img.example/blue", "source": SKU_IMAGE_OWN,
+                  "error": "offline"}
+        own = {"url": "https://img.example/blue", "source": SKU_IMAGE_OWN,
+               "hash": blue["hash"], "mime": blue["mime"], "content": blue["content"]}
+        self._submit_offer(rid, "2026-09-05T02:00:00+00:00", [
+            {"sku_id": "s1", "sku_name": "蓝", "sku_stock": 1, "sku_image_evidence": failed}])
         failed_id = self.conn.execute(
             "SELECT MAX(id) FROM sku_image_versions").fetchone()[0]
-        self.db.submit_inventory_snapshot(
-            **base, collected_at="2026-09-06T02:00:00+00:00", attempt=2,
-            sku_rows=[{"sku_id": "s1", "sku_name": "蓝", "sku_stock": 1,
-                       "sku_image_evidence": {"url": "https://img.example/blue",
-                                              "source": SKU_IMAGE_OWN,
-                                              "hash": blue["hash"], "mime": blue["mime"],
-                                              "content": blue["content"]}}],
-        )
+        self._submit_offer(rid, "2026-09-06T02:00:00+00:00", [
+            {"sku_id": "s1", "sku_name": "蓝", "sku_stock": 1, "sku_image_evidence": own}])
 
         with patch("bestseller_monitor.product_images.acquire", return_value=blue):
             with self.assertRaises(ValueError) as ctx:
@@ -942,18 +931,14 @@ class DbTests(unittest.TestCase):
 
     def test_retrying_the_latest_failed_sku_image_opens_a_version_at_retry_time(self):
         """重试成功是重试当下的新证据（票 03）：按重试时刻新开一行、字节进资产池、
-        来源仍是专属图；原失败行原样保留——不回填、不覆盖那次失败的事实。"""
+        来源仍是专属图；原失败行原样保留——不回填、不覆盖那次失败的事实。下载走的是
+        失败行里存的那个地址（替身只认它，换地址就记成失败）。"""
         rid = new_round(self.db)
         blue = product_picture('blue')
-        self.db.submit_inventory_snapshot(
-            round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
-            offer_id="11", product_url="https://a/offer/11.html", list_title="商品",
-            detail_title="商品详情", main_image_url=None,
-            collected_at="2026-09-05T02:00:00+00:00", attempt=1,
-            sku_rows=[{"sku_id": "s1", "sku_name": "蓝", "sku_stock": 1,
-                       "sku_image_evidence": {"url": "https://img.example/blue",
-                                              "source": SKU_IMAGE_OWN, "error": "offline"}}],
-        )
+        failed = {"url": "https://img.example/blue", "source": SKU_IMAGE_OWN,
+                  "error": "offline"}
+        self._submit_offer(rid, "2026-09-05T02:00:00+00:00", [
+            {"sku_id": "s1", "sku_name": "蓝", "sku_stock": 1, "sku_image_evidence": failed}])
         failed_id = self.conn.execute(
             "SELECT MAX(id) FROM sku_image_versions").fetchone()[0]
 
@@ -988,16 +973,11 @@ class DbTests(unittest.TestCase):
         库存不重抓、历史日期不回填、失败率的输入不变、不占详情重试账。"""
         rid = new_round(self.db)
         blue = product_picture('blue')
-        self.db.submit_inventory_snapshot(
-            round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
-            offer_id="11", product_url="https://a/offer/11.html", list_title="商品",
-            detail_title="商品详情", main_image_url=None,
-            collected_at="2026-09-05T02:00:00+00:00", attempt=1,
-            sku_rows=[{"sku_id": "s1", "sku_name": "蓝", "sku_stock": 7,
-                       "sku_image_evidence": {"url": "https://img.example/blue",
-                                              "source": SKU_IMAGE_OWN, "error": "offline"}}],
-        )
-        self.db.add_detail_opportunity(rid, "A", "identity-1")
+        self._submit_offer(rid, "2026-09-05T02:00:00+00:00", [
+            {"sku_id": "s1", "sku_name": "蓝", "sku_stock": 7,
+             "sku_image_evidence": {"url": "https://img.example/blue",
+                                    "source": SKU_IMAGE_OWN, "error": "offline"}}])
+        self.db.add_detail_opportunity(rid, "A01", "identity-1")
         failed_id = self.conn.execute(
             "SELECT MAX(id) FROM sku_image_versions").fetchone()[0]
         tables = ("inventory", "snapshots", "product_information_versions",
@@ -1024,14 +1004,9 @@ class DbTests(unittest.TestCase):
         """重试对象只能是失败行（票 03）：没失败过的行（这里是空图行）不重下——
         这条通道对着的永远是记账为失败的那些行。"""
         rid = new_round(self.db)
-        self.db.submit_inventory_snapshot(
-            round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
-            offer_id="11", product_url="https://a/offer/11.html", list_title="商品",
-            detail_title="商品详情", main_image_url=None,
-            collected_at="2026-09-05T02:00:00+00:00", attempt=1,
-            sku_rows=[{"sku_id": "s1", "sku_name": "随机", "sku_stock": 1,
-                       "sku_image_evidence": {"url": None, "source": SKU_IMAGE_NONE}}],
-        )
+        self._submit_offer(rid, "2026-09-05T02:00:00+00:00", [
+            {"sku_id": "s1", "sku_name": "随机", "sku_stock": 1,
+             "sku_image_evidence": {"url": None, "source": SKU_IMAGE_NONE}}])
         row_id = self.conn.execute(
             "SELECT MAX(id) FROM sku_image_versions").fetchone()[0]
 
@@ -1046,15 +1021,10 @@ class DbTests(unittest.TestCase):
         （SKU_IMAGE_DEDUPE_INDEX）——那次观测已在案，结果指回已有那一行。连败两次的
         重试如实记成失败行：不补库存、不改原失败行。"""
         rid = new_round(self.db)
-        self.db.submit_inventory_snapshot(
-            round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
-            offer_id="11", product_url="https://a/offer/11.html", list_title="商品",
-            detail_title="商品详情", main_image_url=None,
-            collected_at="2026-09-05T02:00:00+00:00", attempt=1,
-            sku_rows=[{"sku_id": "s1", "sku_name": "蓝", "sku_stock": 1,
-                       "sku_image_evidence": {"url": "https://img.example/blue",
-                                              "source": SKU_IMAGE_OWN, "error": "offline"}}],
-        )
+        failed = {"url": "https://img.example/blue", "source": SKU_IMAGE_OWN,
+                  "error": "offline"}
+        self._submit_offer(rid, "2026-09-05T02:00:00+00:00", [
+            {"sku_id": "s1", "sku_name": "蓝", "sku_stock": 1, "sku_image_evidence": failed}])
         failed_id = self.conn.execute(
             "SELECT MAX(id) FROM sku_image_versions").fetchone()[0]
 
