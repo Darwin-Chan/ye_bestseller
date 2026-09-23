@@ -31,6 +31,7 @@ class MatchingStopTests(unittest.TestCase):
         self.seed(4)
         mask = self.enter()
         expect(mask.locator('#maskMain')).to_have_text('已完成 2 / 6 对')
+        expect(mask.locator('#maskStopNote')).to_be_hidden()   # 还没停：这两句先不说
         mask.get_by_role('button', name='停止匹配').click()
         return mask, transport
 
@@ -42,7 +43,11 @@ class MatchingStopTests(unittest.TestCase):
         expect(mask.locator('#maskPhase')).to_contain_text('已判的会留下')
         expect(mask.locator('#maskStop')).to_be_disabled()
         expect(mask.locator('#maskMain')).to_have_text('已完成 2 / 6 对')     # 数字停在被点那一刻
+        # 停止态的两句实话：停下后怎么落，以及两个入口同一态、窗口留到收尾完（票 03 那半）。
         expect(mask.locator('#maskStopNote')).to_be_visible()
+        expect(mask.locator('#maskStopNote')).to_contain_text('没判断的对记为「失败」')
+        expect(mask.locator('#maskStopNote')).to_contain_text('进的都是这一态')
+        expect(mask.locator('#maskStopNote')).to_contain_text('收尾完成前窗口不消失')
         expect(mask.locator('.mask-steps li.cur')).to_have_text('逐对判断同款')
 
         transport.release.set()                    # 在途的两对收尾：这遮罩才关

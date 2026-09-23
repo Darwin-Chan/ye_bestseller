@@ -100,3 +100,14 @@ F1 之下窗口与运行同生共死，"锁与工作同寿命"自然成立；最
 - 票 03（关窗钩子、原生确认框、放锁时机）归另一个会话；本 ADR 只约束它"放锁排在
   `wait_terminal` 之后"。
 - 编号相邻的 ADR-0043 归另一个会话（分析运行与锁的那条），两条互相引用。
+
+2026-09-23 三票全部落地、全部在 main：票 01（异步受理、判断进度与遮罩）`5880c61` ＋ 双轴审查
+整改 `4c6e60c`；票 02（停止匹配、停止后的落态、重试复用同一块遮罩）`34d8fc6`——`wait_terminal`
+返回即不再有任何写入的契约由 `tests/test_stop_matching.py` 钉住；票 03（`analyze.py` 的 closing
+钩子、原生确认框、收尾完成才关窗放锁）`27e4899`。票 01/02 与页面遮罩那一半由本线实施，票 03 与
+ADR-0043 由「同款匹配调用量与耗时估算」会话实施，两边靠 `request_stop`／读数 `state=stopping`／
+`wait_terminal` 的硬语义对接（`AnalysisService.in_flight_job()` 是关窗那层的发现读，落在票 02 的
+文件里）。验收与实测记录见本线工单 `.scratch/matching-progress/` 与证据日志
+`.scratch/logs/tickets/matching-progress/`（都不进版本库）：票 02 的提交树在隔离副本跑全量
+**1271 项通过**；票 03 的验收由该会话自认，记录见 `issues/03` 的 Comments。挂账：真实 DeepSeek
+模型的端到端验收仍未执行（`docs/ops/畅销品分析验收记录.md` 里已标）。
