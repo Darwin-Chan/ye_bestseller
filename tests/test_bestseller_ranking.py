@@ -119,8 +119,16 @@ class RankingBrowserTests(unittest.TestCase):
         if end != '2026-09-14':
             self.page.get_by_role('button', name='继续', exact=True).click()  # 非全量抓取日提醒
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
-        expect(self.page.get_by_role('heading', name='确认同款')).to_be_visible()
+        # 票 01/02 起这一屏先出骨架、长判断时遮罩盖在上面：光等「确认同款」标题可见不够——
+        # 骨架一出它就可见，而那一刻快照还没落进服务。等快照信息填上，这一趟运行才真结束，
+        # 调用方的 service.get(sid) 才拿得到。
+        expect(self.page.locator('#snapshotInfo')).to_contain_text('日期区间')
         return self.page.url.split('analysis=')[1]
+
+    def back_to_review(self):
+        """结果屏回确认屏（票 06）：两屏互斥显示，要接着改分组先回这一屏。"""
+        self.page.get_by_role('button', name='返回修改同款分组').click()
+        expect(self.page.locator('#reviewPage')).to_be_visible()
 
     def save_and_show_results(self):
         """确认全部组后进结果页：保存门禁落地后由「保存分组并查看畅销品」把守（票 08），按钮在就先保存。"""
@@ -133,7 +141,8 @@ class RankingBrowserTests(unittest.TestCase):
         self.switch_tab('已确认')
         if self.page.get_by_role('button', name='保存分组并查看畅销品').count():
             self.page.get_by_role('button', name='保存分组并查看畅销品').click()
-        expect(self.page.get_by_role('heading', name='初步畅销品')).to_be_visible()
+        # 票 06 起结果屏独立成节、屏内标题去掉「初步」：存完停在结果屏。
+        expect(self.page.get_by_role('heading', name='畅销品', exact=True)).to_be_visible()
 
     def test_ranking_orders_group_totals_with_representative_and_zero_sales_toggle(self):
         # A40：排名行给整组总销量、代表取本区间最高销量成员；零销量组默认隐藏可勾选。
@@ -161,19 +170,23 @@ class RankingBrowserTests(unittest.TestCase):
         expect(rows.nth(1).locator('summary')).to_contain_text('杯子4')
         expect(rows.nth(1).locator('summary .number')).to_have_text('0 销量')
         # A40：换区间后最高贡献者变化，代表名称跟着换；保存过的人工关系按版本复用。
+        self.back_to_review()
         self.page.get_by_role('button', name='重新选择日期').click()
         self.page.get_by_label('结束日期', exact=True).fill('2026-09-08')
         self.page.get_by_role('button', name='继续', exact=True).click()  # 周二不是全量抓取日
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
-        expect(self.page.get_by_role('heading', name='确认同款')).to_be_visible()
+        # 上一段保存过的确认按版本复用：组已确认、快照不脏，落屏门禁（票 06）直接给结果屏，
+        # 这一次不用再保存。等新区间填上再判——骨架期间这一屏还是上一份快照的内容。
+        expect(self.page.locator('#snapshotInfo')).to_contain_text('2026-09-07 — 2026-09-08')
+        row = self.page.locator('#ranking > details').first
+        expect(row.locator('summary .product-title b')).to_have_text('杯子')
+        expect(row.locator('summary .number')).to_have_text('60 销量')
+        # 复用也发生在确认屏上：回那里看组还在、状态是已确认。
+        self.back_to_review()
         # 复用来的组已确认，默认的「待确认」页签是空的：切到「全部」看这个组。
         self.switch_tab('全部')
         expect(self.page.locator('#groupDetail h3')).to_have_text('G1 · 3 个商品')
         expect(self.page.locator('#groupDetail .group-status')).to_have_text('已确认')
-        self.save_and_show_results()
-        row = self.page.locator('#ranking > details').first
-        expect(row.locator('summary .product-title b')).to_have_text('杯子')
-        expect(row.locator('summary .number')).to_have_text('60 销量')
 
     def test_group_tree_expands_skus_with_hovers_and_per_chart_legends(self):
         # A07/A08/A41/A43：组内树、展开全部与单 SKU 展开、三种图例、hover 原文。
