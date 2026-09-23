@@ -780,6 +780,24 @@ def update_candidates(products, groups, positive, excluded):
 JUDGMENT_COMMIT_BATCH = 25
 
 
+# 判断运行的阶段标识：只报自己这四步（页面上的阶段名与次序由 analysis.PHASES 持有）。
+# 形状与顺序是 ADR-0044 定的：召回 → 检查模型可用性 → 逐对判断 → 装配。
+PHASE_RECALL = 'recall'
+PHASE_VERIFY = 'verify'
+PHASE_JUDGE = 'judge'
+PHASE_ASSEMBLE = 'assemble'
+
+
+def _report(progress, **fields):
+    """往进度回调报一次；没有回调（命令行直调、纯匹配用例）就什么都不做。
+
+    回调由调用方注入（analysis 侧把它折进一次运行的读数），matching 不认识它的形状——
+    升级老缓存与消费走同一口径那种事这里不做，见 ADR-0044。
+    """
+    if progress is not None:
+        progress(fields)
+
+
 class MatchingService:
     def __init__(self, config, machine_id=''):
         self.config = config
@@ -788,10 +806,10 @@ class MatchingService:
         self.judge = ImageJudge(config)
         self._lock = threading.Lock()
 
-    def suggest(self, products, groups, excluded=(), reason=''):
+    def suggest(self, products, groups, excluded=(), reason='', progress=None):
         """Single matching entry; confirmed groups and explicit exclusions take precedence."""
         with self._lock:
-            return self._suggest(products, groups, excluded, reason)
+            return self._suggest(products, groups, excluded, reason, progress)
 
     def refresh_candidates(self, products, groups, excluded=()):
         """Re-evaluate current group destinations using cached evidence, without regrouping."""
@@ -819,7 +837,7 @@ class MatchingService:
         finally:
             conn.close()
 
-    def _suggest(self, products, groups, excluded, reason=''):
+    def _suggest(self, products, groups, excluded, reason='', progress=None):
         self.config.cache.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.config.cache)
         try:
@@ -837,6 +855,9 @@ class MatchingService:
                 p['matching_source'] = ''          # 这条结论来自哪台机器（票 07）：判出来再定
                 if p.get('information_complete'):
                     eligible.append(p)
+            # 阶段与商品面读数在这一刻就能定下来（判断下限与缓存命中的对数要等召回跑完）。
+            _report(progress, phase=PHASE_RECALL, products=len(products), eligible=len(eligible),
+                    missing_evidence=len(products) - len(eligible))
             cached, todo, errors = {}, {}, {}
             pair_members = {}
             # 判断预算下限（票 18）：召回照旧（上限 candidates 只管召回数），下限只管判不判。
@@ -862,6 +883,8 @@ class MatchingService:
             if blocked:
                 # 收尾行的「召回 N 对」按全部召回对计；这一行给出其中没判的那部分。
                 log.info('低于判断下限挡下 %d 对（分数＜%d，未交模型判断，保持未判）', len(blocked), floor)
+            _report(progress, todo=len(todo), blocked=len(blocked),
+                    cached_hits=sum(1 for _, source, _ in cached.values() if source == STATUS_CACHE))
 
             def compare(item):
                 pair, a, b = item
@@ -881,6 +904,7 @@ class MatchingService:
                                   member['image_hash'], member['image_data'], member['origin']))
 
             if todo:
+                _report(progress, phase=PHASE_VERIFY)
                 try:
                     self.judge.verify()
                 except ModelFailure as exc:
@@ -889,6 +913,8 @@ class MatchingService:
             # 判断按批提交（票 01）：一次分析约两千次模型调用，整批一个事务时中途退出
             # （关窗、结束进程）会把跑完的判断整体回滚（2026-09-22 实测）。已提交的批留在
             # 库里、当前批整批回滚，重跑只补未判的——缓存命中不花模型调用。
+            if todo:
+                _report(progress, phase=PHASE_JUDGE, todo=len(todo))
             pending = 0
             committed = 0
             with ThreadPoolExecutor(max_workers=self.config.concurrency) as pool:
@@ -900,6 +926,8 @@ class MatchingService:
                     cached[pair] = (result, STATUS_MODEL, self.machine_id)
                     pending += 1
                     committed += 1
+                    # 页面上的判断进度按对走：每判完一对报一次（一次加锁，可以忽略不计）。
+                    _report(progress, judged=committed, failed=len(errors))
                     if pending >= JUDGMENT_COMMIT_BATCH:
                         conn.commit()
                         pending = 0
@@ -947,6 +975,7 @@ class MatchingService:
             by_id = {identity(p): p for p in products}
             # 已判的正负两种边一次读全（票 19）：装配在判断之后、一次运行一次。
             positive_edges, negative_edges = _judged_edges(conn, local)
+            _report(progress, phase=PHASE_ASSEMBLE)
             started = time.monotonic()
             output = assemble_groups(products, groups, positive_edges, negative_edges, excluded)
             log.info('装配完成：耗时 %.2f 秒 · %d 组（≥2 件 %d 组 · 最大 %d 件）',

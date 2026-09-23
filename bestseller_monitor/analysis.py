@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import copy
 import base64
+import logging
 import sqlite3
 import threading
+import time
 import tomllib
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -16,16 +18,115 @@ from . import crawler_identity
 from .analysis_store import DraftStore, SIDE_EXCLUSION, SIDE_STANDALONE, source_of
 from .config import machine_id_of
 from .db import utcnow
-from .matching import (MATCH_DISABLED, MatchingConfig, MatchingService, ModelConfig, ORIGIN_CHANGED,
+from .matching import (MATCH_DISABLED, PHASE_ASSEMBLE, PHASE_JUDGE, PHASE_RECALL, PHASE_VERIFY,
+                       MatchingConfig, MatchingService, ModelConfig, ORIGIN_CHANGED,
                        STATUS_DISABLED, identity, matching_summary, offer_of, state_of_status,
                        summarize_group, version)
 from .report import report_name, write_report
+
+log = logging.getLogger(__name__)
 
 DEFAULT_DRAFT_FILE = "analysis-drafts.sqlite"
 DEFAULT_OUTPUT_DIR = "output"
 # 机器编号的权威文件（与 analysis.toml 同在 config/ 下，ADR-0034）：分析工具没有身份，
 # 判断与决定的来源列要写本机编号，只从它借读 [machine] machine_id 这一个键。
 MACHINE_CONFIG_NAME = "config.toml"
+
+# 判断运行的五个阶段：次序就是程序真跑的次序（ADR-0044 的「阶段行」按它显示）。
+PHASES = ('冻结库存数据', '召回候选同款', '检查模型可用性', '逐对判断同款', '装配同款组')
+JUDGING_PHASE = 3                      # 「逐对判断同款」在第几步：预计时长从这一步起算
+_PHASE_INDEX = {PHASE_RECALL: 1, PHASE_VERIFY: 2, PHASE_JUDGE: JUDGING_PHASE, PHASE_ASSEMBLE: 4}
+
+
+def _fmt_eta(seconds: float) -> str:
+    """预计时长的说法：进整到分钟，最少说 1 分钟。"""
+    minutes = max(1, round(seconds / 60))
+    if minutes < 60:
+        return f'{minutes} 分钟'
+    hours, rest = divmod(minutes, 60)
+    return f'{hours} 小时 {rest} 分钟' if rest else f'{hours} 小时'
+
+
+def _failure_text(exc: BaseException) -> str:
+    """硬失败对页面说的话：域错误说原文，库与文件读写沿用它原有的那句。"""
+    if isinstance(exc, (ValueError, KeyError, TypeError)):
+        return str(exc)
+    if isinstance(exc, (sqlite3.Error, OSError)):
+        return '读取库存数据失败，请检查分析配置和数据库后重试'
+    return '分析没能完成，请重试'
+
+
+class _Progress:
+    """一次分析运行的进度读数：自己的锁，不占服务锁（页面轮询要读它，见 ADR-0044）。
+
+    只有运行观测——不落库、不跨机（与「判断用量」同规）。`failure` 留着原始异常，
+    同步的 `start()` 要原样抛回给既有调用方。
+    """
+
+    def __init__(self, analysis_id: str, start: str, end: str, clock=time.monotonic):
+        self.id = analysis_id
+        self.start, self.end = start, end
+        self.failure = None
+        self._clock = clock
+        self._started = clock()
+        self._judging_started = None
+        self._state = 'matching'
+        self._error = ''
+        self._finished = threading.Event()
+        self._lock = threading.Lock()
+        self._fields = {'phase_index': 0, 'products': 0, 'eligible': 0, 'missing_evidence': 0,
+                        'todo': 0, 'cached_hits': 0, 'blocked': 0, 'judged': 0, 'failed': 0}
+
+    def update(self, **fields) -> None:
+        with self._lock:
+            index = fields.pop('phase_index', None)
+            if index is not None:
+                self._fields['phase_index'] = index
+                if index == JUDGING_PHASE and self._judging_started is None:
+                    self._judging_started = self._clock()
+            self._fields.update(fields)
+
+    def reporter(self):
+        """给匹配层用的回调：认它报的阶段标识，其余字段原样收下。"""
+        def report(fields):
+            index = _PHASE_INDEX.get(fields.pop('phase', None))
+            if index is not None:
+                fields['phase_index'] = index
+            self.update(**fields)
+        return report
+
+    def finish(self) -> None:
+        with self._lock:
+            self._state = 'ready'
+        self._finished.set()
+
+    def fail(self, message: str, exception: BaseException) -> None:
+        with self._lock:
+            self._state = 'failed'
+            self._error = message
+            self.failure = exception
+        self._finished.set()
+
+    def wait(self, timeout) -> bool:
+        return self._finished.wait(timeout)
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            payload = dict(self._fields)
+            payload.update(id=self.id, state=self._state, phases=list(PHASES),
+                           start=self.start, end=self.end, error=self._error,
+                           elapsed_sec=round(self._clock() - self._started, 1),
+                           eta_text=self._eta_text())
+        return payload
+
+    def _eta_text(self) -> str:
+        """按本次实测速率估剩余时长；样本不足（还没判完一对）就不给，页面显示「正在估算」。"""
+        judged = self._fields['judged']
+        remaining = self._fields['todo'] - judged
+        if self._judging_started is None or judged <= 0 or remaining <= 0:
+            return ''
+        span = self._clock() - self._judging_started
+        return _fmt_eta(remaining * span / judged) if span > 0 else ''
 
 
 @dataclass(frozen=True)
@@ -95,10 +196,15 @@ class AnalysisConfig:
 
 
 class AnalysisService:
-    def __init__(self, config: AnalysisConfig, *, running=None):
+    def __init__(self, config: AnalysisConfig, *, running=None, clock=time.monotonic):
         self.config = config
         self.running = running or crawler_identity.is_running
+        self._clock = clock
         self._snapshots = {}
+        # 运行中的分析（进度读数）按分析号记着：页面靠它轮询，也靠它刷新接回（票 01）。
+        # 与快照同一寿命，服务重启后自然清空（页面按号取不到就回日期页）。
+        self._jobs = {}
+        self._jobs_lock = threading.Lock()
         self._lock = threading.Lock()
         self.matcher = MatchingService(config.matching, config.machine) if config.matching and config.matching.mode != 'disabled' else None
 
@@ -140,11 +246,76 @@ class AnalysisService:
                   FROM scope LEFT JOIN counts USING(shop_key) ORDER BY scope.shop_key
             """, (day,))]
 
-    def start(self, start, end, acknowledged=False):
+    def start_job(self, start, end, acknowledged=False):
+        """受理一次分析：立刻给分析号，冻结与判断在后台跑（进度用 job_state 读）。
+
+        同步只做两件便宜事：日期顺序、以及「有采集在跑要先确认」；其余全进后台，
+        失败如实落在 job_state 里、由页面就地报错（ADR-0044，票 01）。
+        """
         if date.fromisoformat(start) >= date.fromisoformat(end):
             raise ValueError("结束日期必须晚于开始日期")
         if self.running() and not acknowledged:
             return {"needs_confirmation": True}
+        progress = _Progress(uuid4().hex, start, end, self._clock)
+        with self._jobs_lock:
+            self._jobs[progress.id] = progress
+        threading.Thread(target=self._run_job, args=(progress,), daemon=True,
+                         name=f'analysis-{progress.id[:8]}').start()
+        return {"id": progress.id, "state": "matching"}
+
+    def job_state(self, analysis_id):
+        """这次运行到哪了：阶段、对数、时长、预计（样本不足不给）、失败原因。"""
+        return self._job(analysis_id).snapshot()
+
+    def wait_terminal(self, analysis_id, timeout=None):
+        """等这次运行到终态；返回即不再有任何写入——放锁要排在它之后（ADR-0044）。
+
+        票 02 起「终态」还包括被停止：停止标志与停止后的落态在那张票里。
+        """
+        progress = self._job(analysis_id)
+        if not progress.wait(timeout):
+            raise TimeoutError('分析还在运行')
+        return progress.snapshot()
+
+    def start(self, start, end, acknowledged=False):
+        """同步跑完一次分析（既有调用方与测试的入口）：失败原样抛回给调用方。"""
+        accepted = self.start_job(start, end, acknowledged)
+        if accepted.get('needs_confirmation'):
+            return accepted
+        progress = self._job(accepted['id'])
+        progress.wait(None)
+        if progress.failure is not None:
+            raise progress.failure
+        return self.get(accepted['id'])
+
+    def _job(self, analysis_id):
+        with self._jobs_lock:
+            progress = self._jobs.get(analysis_id)
+        if progress is None:
+            raise ValueError('分析已不存在，请重新选择日期')
+        return progress
+
+    def _run_job(self, progress):
+        """后台跑完一次分析：冻结 → 套回人工决定 → 匹配 → 排序 → 冲突。"""
+        try:
+            snapshot = self._freeze(progress.id, progress.start, progress.end)
+            # 「继续上次分析」读原快照；新日期区间走这里：重算销量后，把已保存的
+            # 人工分组按商品版本套回来（票 09），不适用的留在待确认由人工处理。
+            decisions = self.store.ledger()
+            reuse_decisions(snapshot, decisions)
+            with self._lock:
+                self._match(snapshot, progress=progress.reporter())
+                mark_information_changes(snapshot, recorded_versions(decisions))
+                rank_groups(snapshot)
+                self._apply_conflicts(snapshot)
+                self._snapshots[snapshot["id"]] = snapshot
+            progress.finish()
+        except Exception as exc:  # noqa: BLE001 —— 失败原因要原样交给页面
+            log.exception('分析运行失败')
+            progress.fail(_failure_text(exc), exc)
+
+    def _freeze(self, analysis_id, start, end):
+        """冻结一次分析的输入：区间库存、商品证据版本与区间销量。"""
         with self._read() as conn:
             # 入选商品只由区间内真实库存决定。其所有历史行同时冻结，供
             # 区间外基准、SKU 身份和后续规格有效段计算使用。
@@ -197,25 +368,15 @@ class AnalysisService:
             key = (product["shop_key"], product["offer_id"])
             result = calculations.get(key, {"sales": 0, "points": [], "skus": []})
             product.update(result)
-        snapshot = {"id": uuid4().hex, "start": start, "end": end,
-                    "frozen_at": utcnow(), "inventory": rows, "products": products,
-                    "shops": shops, "dirty": False, "saved_at": None, "groups": []}
-        # 「继续上次分析」读原快照；新日期区间走这里：重算销量后，把已保存的
-        # 人工分组按商品版本套回来（票 09），不适用的留在待确认由人工处理。
-        decisions = self.store.ledger()
-        reuse_decisions(snapshot, decisions)
-        with self._lock:
-            self._match(snapshot)
-            mark_information_changes(snapshot, recorded_versions(decisions))
-            rank_groups(snapshot)
-            self._apply_conflicts(snapshot)
-            self._snapshots[snapshot["id"]] = snapshot
-        return copy.deepcopy(snapshot)
+        return {"id": analysis_id, "start": start, "end": end,
+                "frozen_at": utcnow(), "inventory": rows, "products": products,
+                "shops": shops, "dirty": False, "saved_at": None, "groups": []}
 
-    def _match(self, snapshot, reason=''):
+    def _match(self, snapshot, reason='', progress=None):
         if self.matcher:
             snapshot['groups'] = self.matcher.suggest(snapshot['products'], snapshot['groups'],
-                                                      snapshot.get('excluded', ()), reason=reason)
+                                                      snapshot.get('excluded', ()), reason=reason,
+                                                      progress=progress)
         else:
             for p in snapshot['products']:
                 p.update(origin='新商品', match_label='暂无匹配同款', candidate_groups=[],
