@@ -320,6 +320,35 @@ class DbTests(unittest.TestCase):
             )
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM products").fetchone()[0], 0)
 
+    def test_submit_inventory_snapshot_rejects_malformed_image_evidence_before_transaction(self):
+        """图证据不是带来源的字典：在事务前当场拒绝（同其它入参校验），不落到「写库时被
+        NOT NULL 打回、整单库存回滚」那条路上——图是附加证据，坏证据不该带走一次观测。"""
+        rid = new_round(self.db)
+        self._add_shop(rid)
+        base = dict(
+            round_id=rid, shop_key="A01", shop_url="https://a.example/", shop_name="店铺A",
+            offer_id="111", product_url="https://detail.1688.com/offer/111.html",
+            list_title="榜单标题", detail_title="详情标题", main_image_url=None,
+            sku_rows=[{"sku_id": "red", "sku_name": "红色", "sku_price": 10, "sku_stock": 10,
+                       "sku_image_evidence": {"url": None}}],
+            collected_at="2026-09-04T02:00:00+00:00", attempt=1,
+        )
+        with self.assertRaisesRegex(ValueError, "SKU 图证据必须带来源"):
+            self.db.submit_inventory_snapshot(**base)
+        base["sku_rows"] = [{"sku_id": "red", "sku_name": "红色", "sku_price": 10,
+                             "sku_stock": 10, "sku_image_evidence": ["不是字典"]}]
+        with self.assertRaisesRegex(ValueError, "SKU 图证据必须带来源"):
+            self.db.submit_inventory_snapshot(**base)
+        base["sku_rows"] = [{"sku_id": "red", "sku_name": "红色", "sku_price": 10,
+                             "sku_stock": 10,
+                             "sku_image_evidence": {"url": "https://img/x", "source": SKU_IMAGE_OWN,
+                                                    "content": b"bytes"}}]
+        with self.assertRaisesRegex(ValueError, "带字节时必须带哈希与图片类型"):
+            self.db.submit_inventory_snapshot(**base)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM sku_image_versions").fetchone()[0], 0)
+
     def test_submit_inventory_snapshot_rejects_blank_product_url_before_transaction(self):
         rid = new_round(self.db)
         self._add_shop(rid)

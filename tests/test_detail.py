@@ -12,7 +12,7 @@ from bestseller_monitor import dedupe, detail, rounds
 from bestseller_monitor.db import (Database, DayBoundaryReached, SKU_IMAGE_FILLED,
                                    SKU_IMAGE_NONE, SKU_IMAGE_OWN, connect, cst_date, utcnow)
 from frozen_clock import FROZEN_DATE, FROZEN_NOW, frozen_clock
-from helpers import crawler_cfg, new_round
+from helpers import crawler_cfg, new_round, product_picture
 
 
 class DetailTestCase(unittest.TestCase):
@@ -136,14 +136,6 @@ class ImageEvidenceTests(DetailTestCase):
 class SkuImageLedgerTests(DetailTestCase):
     """SKU 图随观测落库（票 02）：每个 SKU 每次观测一行，来源三态在库里可断言。"""
 
-    def png(self, color):
-        """一张单色 PNG 的字节。"""
-        import io
-        from PIL import Image
-        stream = io.BytesIO()
-        Image.new('RGB', (2, 2), color).save(stream, format='PNG')
-        return stream.getvalue()
-
     def serving(self, bodies):
         """把图片通道的传输打桩成「按地址发预置字节」的字典（与主图那条同一个入口）。"""
         import io
@@ -155,7 +147,8 @@ class SkuImageLedgerTests(DetailTestCase):
 
     def test_every_sku_gets_a_ledger_row_with_its_source(self):
         import hashlib
-        red_bytes, main_bytes = self.png('red'), self.png('green')
+        red_bytes, main_bytes = (product_picture('red')['content'],
+                                 product_picture('green')['content'])
         observation = detail.Observation(payload={
             "product_name": "商品11",
             "main_image_url": "https://img.example/main.png",
@@ -211,7 +204,8 @@ class SkuImageLedgerTests(DetailTestCase):
         )
         observation = detail.observe_html(html, "https://detail.1688.com/offer/11.html")
 
-        red_bytes, main_bytes = self.png('red'), self.png('green')
+        red_bytes, main_bytes = (product_picture('red')['content'],
+                                 product_picture('green')['content'])
         with self.serving({"https://img.example/red.png": red_bytes,
                            "https://img.example/main.png": main_bytes}):
             result = self.capture(self.target(), self.observe(observation))
@@ -258,6 +252,19 @@ class SkuImageLedgerTests(DetailTestCase):
         self.assertEqual(row["source"], SKU_IMAGE_NONE)
         self.assertIsNone(row["content_hash"])
         self.assertIsNone(row["image_error"], "代填不成不是这个 SKU 自己的失败")
+
+    def test_the_ledger_shares_the_sku_id_the_snapshot_row_got(self):
+        """载荷行没有 sku_id 时（单规格默认行/文本兜底行）：流水行与快照行是同一条规范化
+        记录上的同一个兜底编号——编号只算一次，两边不会各算各的。"""
+        observation = self.payload()
+
+        result = self.capture(self.target(), self.observe(observation))
+
+        self.assertEqual(result.outcome, detail.Outcome.SUBMITTED)
+        snapshot = self.rows("SELECT sku_id FROM snapshots WHERE page_status='成功'")[0]
+        ledger = self.rows("SELECT sku_id, source FROM sku_image_versions")[0]
+        self.assertEqual(ledger["sku_id"], snapshot["sku_id"])
+        self.assertEqual(ledger["source"], SKU_IMAGE_NONE, "主图也没地址 → 无图行")
 
 
 class SameDaySkipTests(DetailTestCase):

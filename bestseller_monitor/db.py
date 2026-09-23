@@ -1443,6 +1443,14 @@ class Database:
             if sku_id in seen_sku_ids:
                 raise ValueError(f"成功快照包含重复 SKU 编号：{sku_id}")
             seen_sku_ids.add(sku_id)
+            # 图证据在事务前校验：坏证据要在这里当场报错，不能落进写库阶段把整单打回
+            # （流水行 source 非空、带字节的行哈希与类型齐备，都是写路径的硬条件）。
+            sku_image = sku.get("sku_image_evidence")
+            if sku_image is not None:
+                if not isinstance(sku_image, dict) or not str(sku_image.get("source") or "").strip():
+                    raise ValueError("SKU 图证据必须带来源")
+                if "content" in sku_image and not (sku_image.get("hash") and sku_image.get("mime")):
+                    raise ValueError("SKU 图证据带字节时必须带哈希与图片类型")
             normalized.append({
                 "round_id": round_id,
                 "shop_key": shop_key,
@@ -1458,7 +1466,7 @@ class Database:
                 "collected_at": collected_at,
                 "page_status": "成功",
                 "attempt": attempt,
-                "sku_image_evidence": sku.get("sku_image_evidence"),
+                "sku_image_evidence": sku_image,
             })
 
         try:
