@@ -226,18 +226,24 @@ class AnalysisBrowserTests(unittest.TestCase):
 
     def test_invalid_empty_and_failed_reads_can_retry_without_partial_analysis(self):
         self.page.get_by_role("button", name="下一步、进入同款确认").click()
-        expect(self.page.get_by_role("alert")).to_contain_text("结束日期必须晚于开始日期")
+        # 日期顺序仍是同步校验：留在日期页顶的红条里（票 01 没动这一段）。
+        expect(self.page.locator("#error")).to_contain_text("结束日期必须晚于开始日期")
         self.page.get_by_label("开始日期", exact=True).fill("2025-09-01")
         self.page.get_by_label("结束日期", exact=True).fill("2025-09-08")
         self.page.get_by_role("button", name="下一步、进入同款确认").click()
-        expect(self.page.get_by_role("alert")).to_contain_text("没有可分析的库存")
-        expect(self.page.get_by_role("heading", name="选择销量计算区间")).to_be_visible()
+        # 票 01：硬失败就地落在遮罩里，不再回日期页顶报红（ADR-0044）。
+        expect(self.page.locator("#maskError")).to_contain_text("没有可分析的库存")
+        expect(self.page.locator("#reviewPage")).to_be_visible()
+        expect(self.page.locator("#error")).to_be_hidden()
+        self.page.locator("#maskBack").click()
         self.service.config = AnalysisConfig(Path(self.tmp.name)/"missing.db")
         self.dates()
         self.page.get_by_role("button", name="下一步、进入同款确认").click()
-        expect(self.page.get_by_role("alert")).to_contain_text("读取库存数据失败")
+        expect(self.page.locator("#maskError")).to_contain_text("读取库存数据失败")
+        self.page.locator("#maskBack").click()
         self.service.config = AnalysisConfig(self.path)
         self.page.get_by_role("button", name="下一步、进入同款确认").click()
+        expect(self.page.locator("#snapshotInfo")).to_contain_text("日期区间")
         expect(self.page.get_by_role("heading", name="确认同款")).to_be_visible()
 
     def test_weekday_configuration_and_paused_round(self):

@@ -25,6 +25,24 @@
 .step.done .dot{background:var(--grn);border-color:var(--grn);color:#fff}
 .step.done .lbl{color:var(--grn)}
 .step.done::after{background:var(--grn)}
+/* 匹配进度遮罩：长时判断期间的可见面（ADR-0044）；样式与 docs/design/matching-progress.prototype.html 同源。 */
+#matchMask{border:0;border-radius:12px;width:min(680px,92vw);max-width:680px;max-height:92vh;overflow:auto;padding:26px 28px}
+#matchMask::backdrop{background:rgba(15,23,42,.45)}
+#matchMask h2{margin:0 0 2px;font-size:20px}
+#matchMask .phase{font-size:13px;color:var(--mut);margin:0 0 14px}
+#matchMask .phase b{color:var(--pri)}
+.mask-steps{display:flex;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--mut);margin:0 0 18px;padding:0;list-style:none}
+.mask-steps li{padding:3px 10px;border:1px solid var(--line);border-radius:999px;background:#f8fafc}
+.mask-steps li.ok{border-color:var(--grn);color:var(--grn)}
+.mask-steps li.cur{border-color:var(--pri);color:var(--pri);font-weight:600;background:#eff6ff}
+.pbar{height:10px;border-radius:999px;background:#eef2f7;overflow:hidden;margin:0 0 8px}
+.pfill{height:100%;background:var(--pri);width:0}
+#matchMask .big{font-size:16px;font-weight:650;margin:0 0 4px}
+#matchMask .sub{font-size:13px;color:var(--mut);margin:0}
+#matchMask .warn{margin:18px 0 0;padding:12px 14px;border:1px solid #fde68a;background:#fffbeb;border-radius:8px;font-size:13px}
+#matchMask .acts{display:flex;align-items:center;gap:12px;margin-top:18px}
+#matchMask .acts .spacer{flex:1}
+.skeleton{height:38px;border-radius:6px;background:linear-gradient(90deg,#eef2f7,#f6f8fb,#eef2f7);margin:8px 0}
 </style>
 <header><h1>1688 畅销品监控 · 销量分析</h1><span>选择日期 · 固定库存 · 核对商品</span></header>
 <main><div class="tabs">
@@ -46,6 +64,13 @@
 <dialog id="addDialog" class="modal" aria-label="组内新增商品"><h2>组内新增商品</h2><label>搜索商品 <input id="addQuery" aria-label="搜索商品" placeholder="商品名称、编号或店铺" oninput="addPage=0;renderAddResults()"></label><p id="addCount" class="muted"></p><div id="addResults" class="modal-body"></div><footer class="modal-footer modal-actions"><button id="addPrev" onclick="addPage--;renderAddResults()">上一页</button><button id="addNext" onclick="addPage++;renderAddResults()">下一页</button><span class="spacer"></span><button onclick="$('addDialog').close()">取消</button></footer></dialog>
 <dialog id="removeDialog" class="modal" aria-label="移除商品"><h2>移除商品</h2><p>1. 移除商品后，会记住它与当前组其他商品的排除关系。
 2. 当前商品被移除后，将重新匹配至其他待确认组。</p><div class="modal-actions"><span class="spacer"></span><button onclick="$('removeDialog').close()">取消</button><button id="removeOK" data-mutation onclick="removeMember()">确认移除</button></div></dialog>
+<dialog id="matchMask" aria-label="匹配进度"><h2 id="maskTitle">正在匹配同款</h2><p class="phase" id="maskPhase"></p>
+<ul class="mask-steps" id="maskSteps"></ul>
+<div id="maskNumbers" hidden><div class="pbar"><div class="pfill" id="maskBar"></div></div><p class="big" id="maskMain"></p><p class="sub" id="maskSub"></p><p class="sub" id="maskTime"></p></div>
+<div id="maskError" class="error" role="alert" hidden></div>
+<p class="warn">匹配期间程序只做这一件事，完成后自动回到本页。<br><b>请勿关闭窗口。</b>已判断的会保存，重新开始会接着算，不会重复花钱；但这一趟的分析结果会没。</p>
+<div class="acts" id="maskActions" hidden><button id="maskRetry" class="primary">重试</button><button id="maskBack">返回重选日期</button></div>
+</dialog>
 <script>
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, character => ({
@@ -529,7 +554,7 @@ async function begin(acknowledged = false) {
         if (data.needs_confirmation) {
             notice('当前存在运行中的库存抓取程序，为避免数据变化，将锁定当前数据生成后续分析', () => begin(true));
         } else {
-            show(data);
+            enterMask(data.id, start, end);
         }
     } catch (reason) {
         error(reason);
@@ -540,6 +565,7 @@ async function begin(acknowledged = false) {
 }
 $('begin').onclick = () => begin();
 function backToDates() {
+    closeMask();
     history.replaceState(null, '', location.pathname);
     $('reviewPage').hidden = true;
     $('datePage').hidden = false;
@@ -593,12 +619,114 @@ function tipOver(event) {
 function tipOut() {$('tip').hidden=true;}
 document.addEventListener('pointerover', tipOver);
 document.addEventListener('pointerout', tipOut);
+// ---- 匹配进度遮罩（票 01，ADR-0044）：长时判断的可见面，首次分析与重试共用同一块 ----
+const MASK_POLL_MS = 1000;
+let maskToken = 0, maskRetryMode = false;
+const fmtDur = seconds => {
+    const total = Math.max(0, Math.round(seconds || 0));
+    if (total < 60) return `${total} 秒`;
+    const minutes = Math.floor(total / 60);
+    return minutes < 60 ? `${minutes} 分 ${total % 60} 秒` : `${Math.floor(minutes / 60)} 时 ${minutes % 60} 分`;
+};
+function showMask() {
+    if (!$('matchMask').open) $('matchMask').showModal();
+}
+function renderProgress(reading) {
+    showMask();
+    $('maskTitle').textContent = maskRetryMode ? '正在匹配同款（重试）' : '正在匹配同款';
+    $('maskPhase').innerHTML = `第 ${reading.phase_index + 1} 步 / 共 ${reading.phases.length} 步：<b>${esc(reading.phases[reading.phase_index])}</b>`;
+    $('maskSteps').innerHTML = reading.phases.map((name, index) =>
+        `<li class="${index < reading.phase_index ? 'ok' : index === reading.phase_index ? 'cur' : ''}">`
+        + `${index < reading.phase_index ? '✓ ' : ''}${esc(name)}</li>`).join('');
+    const numbers = $('maskNumbers');
+    numbers.hidden = reading.products === 0;
+    if (numbers.hidden) return;
+    $('maskBar').style.width = reading.todo ? Math.round(reading.judged / reading.todo * 100) + '%' : '0%';
+    $('maskMain').textContent = `已完成 ${reading.judged} / ${reading.todo} 对`;
+    $('maskSub').textContent = `可判 ${reading.eligible} 个商品 · ${reading.cached_hits} 对命中缓存不花钱 · `
+        + `${reading.blocked} 对低于判断下限不送模型` + (reading.failed ? ` · 失败 ${reading.failed} 对` : '');
+    $('maskTime').textContent = `已用 ${fmtDur(reading.elapsed_sec)} · `
+        + (reading.eta_text ? `预计还需约 ${reading.eta_text}` : '正在估算…');
+}
+function failMask(reading) {
+    showMask();
+    $('maskTitle').textContent = '匹配没能完成';
+    $('maskPhase').textContent = `日期区间 ${reading.start} — ${reading.end} · 已用 ${fmtDur(reading.elapsed_sec)}`;
+    $('maskSteps').innerHTML = '';
+    $('maskNumbers').hidden = true;
+    $('maskError').textContent = reading.error || '分析没能完成，请重试';
+    $('maskError').hidden = false;
+    $('maskActions').hidden = false;
+}
+function closeMask() {
+    maskToken += 1;                 // 在途的那一轮轮询就此停手
+    if ($('matchMask').open) $('matchMask').close();
+}
+function preparePendingPage() {
+    currentSnapshot = null;
+    $('datePage').hidden = true;
+    $('resumeBox').hidden = true;
+    $('reviewPage').hidden = false;
+    $('results').hidden = true;
+    $('snapshotInfo').innerHTML = '<p class="muted">正在冻结库存数据…</p>';
+    $('products').innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
+    $('groupDetail').innerHTML = '<p class="muted">等待本次分析的商品与同款组…</p>';
+    $('matchingStatus').textContent = '';
+    syncStage();
+}
+function enterMask(id, start, end, retry = false) {
+    maskRetryMode = retry;
+    history.replaceState(null, '', '#analysis=' + id);
+    preparePendingPage();
+    $('maskError').hidden = true;
+    $('maskActions').hidden = true;
+    $('maskPhase').textContent = `日期区间 ${start} — ${end}`;
+    $('maskSteps').innerHTML = '';
+    $('maskNumbers').hidden = true;
+    pollMask(id);
+}
+async function pollMask(id) {
+    const token = ++maskToken;
+    while (token === maskToken) {
+        let reading = null;
+        try {
+            reading = await api('/api/progress?id=' + encodeURIComponent(id));
+        } catch (reason) { /* 取数失败照常排下一次：轮询不因一次查询失败就停 */ }
+        if (token !== maskToken) return;
+        if (reading) {
+            if (reading.state === 'failed') return failMask(reading);
+            if (reading.state === 'ready') return finishMask(id);
+            // 确认真在跑才盖遮罩：秒完的那一趟不闪一下（renderProgress 里 showMask）。
+            renderProgress(reading);
+        }
+        await new Promise(resolve => setTimeout(resolve, MASK_POLL_MS));
+    }
+}
+async function finishMask(id) {
+    try {
+        const snapshot = await api('/api/analysis?id=' + encodeURIComponent(id));
+        closeMask();
+        show(snapshot);
+    } catch (reason) { error(reason); }
+}
+// Esc 与点背景都不关：匹配期间程序只做这一件事（ADR-0044）。
+$('matchMask').addEventListener('cancel', event => event.preventDefault());
+$('maskRetry').onclick = () => begin(true);
+$('maskBack').onclick = () => backToDates();
 (async () => {
     try {
         await getSettings();
         await refreshDraftOffer();
         const id = new URLSearchParams(location.hash.slice(1)).get('analysis');
-        if (id) show(await api('/api/analysis?id=' + encodeURIComponent(id)));
+        if (!id) return;
+        // 按分析号接回：跑着就继续显示遮罩，跑完走原路，认不出就把界面交回原有报错路径。
+        const reading = await api('/api/progress?id=' + encodeURIComponent(id)).catch(() => null);
+        if (reading && reading.state !== 'ready') {
+            enterMask(id, reading.start, reading.end);
+            if (reading.state === 'failed') failMask(reading); else renderProgress(reading);
+            return;
+        }
+        show(await api('/api/analysis?id=' + encodeURIComponent(id)));
     } catch (reason) {
         error(reason);
     }

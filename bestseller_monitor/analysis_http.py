@@ -56,6 +56,8 @@ def create_server(service, port=0):
                             return self.reply({"error": "读取分析草稿失败，请检查分析配置和数据库后重试"}, 503)
                     if route.path == "/api/analysis":
                         return self.reply(service.get(query["id"][0]))
+                    if route.path == "/api/progress":
+                        return self.reply(service.job_state(query["id"][0]))
                 elif self.command == "POST" and route.path in ("/api/analysis", "/api/report"):
                     expected = f"http://127.0.0.1:{self.server.server_port}"
                     if self.headers.get("Origin") != expected:
@@ -84,7 +86,7 @@ def create_server(service, port=0):
                         raise ValueError('不支持的分组操作')
                     if "group" in data:
                         return self.reply(service.confirm(data["id"], data["group"]))
-                    return self.reply(service.start(data["start"], data["end"], data.get("acknowledged") is True))
+                    return self.reply(service.start_job(data["start"], data["end"], data.get("acknowledged") is True))
                 self.reply({"error": "未找到该页面或操作"}, 404)
             except (ValueError, KeyError, TypeError) as exc:
                 self.reply({"error": str(exc)}, 400)
