@@ -263,13 +263,15 @@ function sourceIcon(p) {
 }
 async function openCurrentSource(event, offer) {
     event.preventDefault(); event.stopPropagation();
-    const tab=window.open('about:blank','_blank');
-    if(tab)tab.opener=null;
     try {
         const data=await api('/api/source?offer='+encodeURIComponent(offer));
         if(!/^https?:\/\//i.test(data.url||''))throw new Error('暂无商品源地址');
-        if(tab)tab.location=data.url;
-    } catch(e) {if(tab)tab.close();error(e);}
+        // 取到真地址再发新窗口请求：pywebview 把新窗口请求转交系统默认浏览器（句柄拿不到，也不必拿）。
+        // 不得先开 about:blank 再填地址——Windows 没有 about: 处理程序，会弹「获取打开此'about'链接的应用」，
+        // 且空窗句柄在 WebView2 下拿不到，真地址永远打不开。
+        const tab=window.open(data.url,'_blank');
+        if(tab)tab.opener=null;
+    } catch(e) {error(e);}
 }
 async function refreshSourceLinks() {
     await Promise.allSettled([...document.querySelectorAll('[data-source-offer]')].map(async node=>{
