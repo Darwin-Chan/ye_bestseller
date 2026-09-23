@@ -127,7 +127,7 @@ def _close_confirm_text(reading: dict) -> str:
     if remaining > 0:
         line = f"正在匹配同款：已完成 {reading['judged']}/{reading['todo']} 对"
         line += (f"，预计还需约 {reading['eta_text']}。" if reading['eta_text']
-                 else "，预计时长还在估算。")
+                 else "，预计时长正在估算。")
     else:
         line = f"正在匹配同款：当前在「{reading['phases'][reading['phase_index']]}」。"
     return (line + "\n\n"
@@ -155,6 +155,12 @@ def _confirm_close(text: str) -> bool:
     return answer == _IDOK
 
 
+def _stop_and_wait(service, analysis_id: str) -> None:
+    """请求停下这次运行、等它彻底停写——放锁排在这一对之后（ADR-0044 决策 5 的硬语义）。"""
+    service.request_stop(analysis_id)
+    service.wait_terminal(analysis_id)
+
+
 def _install_close_guard(window, service) -> None:
     """关窗钩子：匹配在跑先拦、确认后等收尾、收尾完自己关窗（票 03，ADR-0044 决策 4）。
 
@@ -164,30 +170,40 @@ def _install_close_guard(window, service) -> None:
     而不是整窗假死。收尾完成后 `window.destroy()` 自己走一遍 closing，这次的关由
     `allow_close` 放行。
     """
-    state = {'tearing_down': False, 'allow_close': False}
+    tearing_down = False
+    allow_close = False
+    confirming = False
 
     def finish_stop_then_close(analysis_id):
+        nonlocal tearing_down, allow_close
         try:
-            service.request_stop(analysis_id)
-            service.wait_terminal(analysis_id)
+            _stop_and_wait(service, analysis_id)
         except Exception:  # noqa: BLE001 —— 等不到终态就不能关窗走人：放锁要排在收尾之后
             log.exception("关窗收尾没能等到这次运行停下，窗口保持打开")
-            state['tearing_down'] = False     # 回到可拦截：再点 × 还能重来
+            tearing_down = False              # 回到可拦截：再点 × 还能重来
             return
-        state['allow_close'] = True
+        allow_close = True
         window.destroy()
 
     def on_closing():
-        if state['allow_close']:
+        nonlocal tearing_down, confirming
+        if allow_close:
             return True                       # 收尾完了，这次关闭是我们自己的
-        if state['tearing_down']:
-            return False                      # 收尾进行中：再点 × 也不理会
+        if tearing_down or confirming:
+            # 收尾进行中，或确认框还开着（原生框的嵌套消息泵会把窗口的消息放进来：
+            # 框在时再点 × 会重入这里）——都只是吞掉这次点击
+            return False
         job = service.in_flight_job()
         if job is None:
             return True                       # 没有匹配在跑：关窗与从前一样
-        if not _confirm_close(_close_confirm_text(job)):
+        confirming = True
+        try:
+            answer = _confirm_close(_close_confirm_text(job))
+        finally:
+            confirming = False
+        if not answer:
             return False                      # 「取消」：吞掉这次关闭，匹配照常
-        state['tearing_down'] = True
+        tearing_down = True
         threading.Thread(target=finish_stop_then_close, args=(job['id'],), daemon=True,
                          name='analysis-close-teardown').start()
         return False                          # 先吞一次；收尾完成后由 destroy 真关
@@ -207,8 +223,7 @@ def _stop_slipped_in_runs(service) -> None:
         job = service.in_flight_job()
         if job is None:
             return
-        service.request_stop(job['id'])
-        service.wait_terminal(job['id'])
+        _stop_and_wait(service, job['id'])
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:

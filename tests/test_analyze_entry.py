@@ -111,12 +111,11 @@ class CloseableWindow:
             self.closed.set()
 
 
-def reading(analysis_id='a1', *, phase_index=3, judged=120, todo=317, eta_text='8 分钟',
-            stop_timeout_sec=30) -> dict:
+def reading(analysis_id='a1', *, phase_index=3, judged=120, todo=317, eta_text='8 分钟') -> dict:
     """一趟在跑的运行的读数（真 `job_state` 的那些键里关窗那一层用得上的）。"""
     return {'id': analysis_id, 'state': 'matching', 'phases': list(PHASES),
             'phase_index': phase_index, 'judged': judged, 'todo': todo,
-            'eta_text': eta_text, 'stop_timeout_sec': stop_timeout_sec}
+            'eta_text': eta_text}
 
 
 class FakeRun:
@@ -139,6 +138,7 @@ class FakeAnalysis:
         self._race = race_after_first_look   # 关窗检查放行之后才登记进来的那趟（夹缝）
         self._looks = 0
         self.stopped, self.waited = [], []
+        self.calls = []                      # 收尾里的次序：先请求停下、再等它停完
 
     def in_flight_job(self):
         self._looks += 1
@@ -152,9 +152,11 @@ class FakeAnalysis:
 
     def request_stop(self, analysis_id):
         self.stopped.append(analysis_id)
+        self.calls.append(('stop', analysis_id))
 
     def wait_terminal(self, analysis_id, timeout=None):
         self.waited.append(analysis_id)
+        self.calls.append(('wait', analysis_id))
         run = next(run for run in self._runs if run.analysis_id == analysis_id)
         run.finished.wait(timeout)
         return dict(run.reading)
@@ -352,7 +354,8 @@ class CloseWindowTests(unittest.TestCase):
 
         self.assertTrue(self.window.click_close(), '确认之后这次点击仍被吞：关窗改由收尾完成时执行')
         self.wait_for(lambda: service.waited, '收尾进入 wait_terminal')
-        self.assertEqual(service.stopped, ['a1'], '「关闭并停止」走与「停止匹配」同一个停止入口')
+        self.assertEqual(service.calls, [('stop', 'a1'), ('wait', 'a1')],
+                         '「关闭并停止」走与「停止匹配」同一个停止入口，先请求停下再等它停完')
         text = confirm.call_args.args[0]
         self.assertIn('正在匹配同款：已完成 120/317 对，预计还需约 8 分钟。', text)
         self.assertIn('但这一趟的分析结果会没。', text)
@@ -371,6 +374,33 @@ class CloseWindowTests(unittest.TestCase):
         self.assertTrue(self.window.closed.is_set(), '收尾之后窗口才关')
         self.assertEqual(probe_second_instance(self.lock_name), 'ACQUIRED',
                          '放锁排在 wait_terminal 之后')
+
+    def test_a_second_x_while_the_confirm_box_is_up_does_not_stack_boxes(self):
+        """原生框的嵌套消息泵会把窗口的消息放进来：框还开着时再点 × 会重入钩子。
+
+        那一刻只吞掉点击、不再弹第二个框（假 `click_close` 在确认回调里同步重入，
+        与真机上 GUI 线程被 MessageBox 的泵带着走同形）。
+        """
+        run = FakeRun()
+        service = FakeAnalysis([run])
+        confirm = self.enterContext(patch.object(analyze, "_confirm_close"))
+        swallowed = []
+
+        def answer(_text):
+            swallowed.append(self.window.click_close())   # 框还开着：用户又点了一次 ×
+            return True
+
+        confirm.side_effect = answer
+        thread, result = self.run_analysis_window(service)
+
+        self.assertTrue(self.window.click_close())
+        self.assertEqual(swallowed, [True], '重入的那次点击被吞掉，窗口不关')
+        self.assertEqual(confirm.call_count, 1, '确认框只弹了一次')
+        self.wait_for(lambda: service.waited, '收尾照常走起来')
+        run.finished.set()
+        thread.join(10)
+        self.assertEqual(result, {'code': 0})
+        self.assertTrue(self.window.closed.is_set())
 
     def test_a_run_slipping_in_while_closing_is_still_stopped_before_the_lock_is_released(self):
         """夹缝里抢进来的运行（点 × 的同一瞬页面才发出开始分析）：窗口可以关，锁要等它停。
@@ -409,7 +439,7 @@ class CloseConfirmTextTests(unittest.TestCase):
 
     def test_no_eta_yet_says_it_is_still_estimating(self):
         text = analyze._close_confirm_text(reading(eta_text=''))
-        self.assertIn('已完成 120/317 对，预计时长还在估算。', text)
+        self.assertIn('已完成 120/317 对，预计时长正在估算。', text)
 
     def test_before_the_judging_phase_names_the_phase_instead_of_counts(self):
         text = analyze._close_confirm_text(reading(phase_index=0, judged=0, todo=0))
@@ -424,6 +454,23 @@ class CloseConfirmTextTests(unittest.TestCase):
                 patch.object(ctypes.windll.user32, 'MessageBoxW') as box:
             self.assertTrue(analyze._confirm_close('文案（自动化场合没人可点）'))
         box.assert_not_called()
+
+    @unittest.skipUnless(os.name == 'nt', '原生框只在 Windows 上')
+    def test_box_answers_map_to_the_two_exits(self):
+        """确定（IDOK）＝关闭并停止；取消（IDCANCEL）＝不关；框弹不出来也按不关算。"""
+        with patch.dict(os.environ, {'BESTSELLER_NO_DIALOG': '0'}):
+            with patch.object(ctypes.windll.user32, 'MessageBoxW', return_value=1) as box:
+                self.assertTrue(analyze._confirm_close('文案'))
+            with patch.object(ctypes.windll.user32, 'MessageBoxW', return_value=2):
+                self.assertFalse(analyze._confirm_close('文案'), '「取消」＝不关')
+            with patch.object(ctypes.windll.user32, 'MessageBoxW',
+                              side_effect=OSError('弹不出来')):
+                self.assertFalse(analyze._confirm_close('文案'), '没问成就别关')
+
+        self.assertEqual(box.call_args.args[2], '1688 畅销品监控 · 销量分析（正在匹配）')
+        flags = box.call_args.args[3]
+        self.assertTrue(flags & analyze._MB_OKCANCEL, '两个出口：确定／取消')
+        self.assertTrue(flags & analyze._MB_DEFBUTTON2, '缺省焦点给「取消」')
 
 
 if __name__ == "__main__":
