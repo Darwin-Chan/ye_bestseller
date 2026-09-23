@@ -272,10 +272,10 @@ async function openCurrentSource(event, offer) {
     try {
         const data=await api('/api/source?offer='+encodeURIComponent(offer));
         if(!/^https?:\/\//i.test(data.url||''))throw new Error('暂无商品源地址');
-        // 取到真地址再发新窗口请求：pywebview 把新窗口请求转交系统默认浏览器（句柄拿不到，也不必拿）。
-        // 不得先开 about:blank 再填地址——Windows 没有 about: 处理程序，会弹「获取打开此'about'链接的应用」，
-        // 且空窗句柄在 WebView2 下拿不到，真地址永远打不开。
-        const tab=window.open(data.url,'_blank');
+        // 取到真地址再发新窗口请求：pywebview 把新窗口请求转交系统默认浏览器，真地址必须在这一步交出去。
+        // 不得先开 about:blank 再填地址——WebView2 下拿到的是空代理（填了地址也不生效），而 about:blank
+        // 会被原样交给系统（Windows 没有 about: 处理程序，弹「获取打开此'about'链接的应用」）。
+        const tab=window.open(data.url,'_blank');   // 普通浏览器里才会给出真句柄：顺手掐掉 opener
         if(tab)tab.opener=null;
     } catch(e) {error(e);}
 }
