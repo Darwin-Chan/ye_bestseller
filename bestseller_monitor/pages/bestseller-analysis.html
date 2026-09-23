@@ -207,6 +207,7 @@ function matchesProduct(p){
 }
 // 左列次序由服务端给（票 05：组内商品数降序 → 并列销量降序 → 稳定），这里照单取组、
 // 不排序；筛选命中仍整组展示。结果屏名次与导出报告另用 snapshot.ranking，不受这份次序影响。
+// 每个出口都带这一份；真缺了才退回组集合次序——顺序会差，但左列不至于空掉。
 function filteredGroups(){
     const byId=new Map(currentSnapshot.groups.map(g=>[g.id,g]));
     const order=currentSnapshot.review_order||currentSnapshot.groups.map(g=>g.id);

@@ -14,10 +14,16 @@ import unittest
 from pathlib import Path
 
 import test_analysis as fixture
+import test_group_editing as editing
 from playwright.sync_api import expect
 from bestseller_monitor.analysis import AnalysisConfig, AnalysisService, rank_groups
 from bestseller_monitor.db import Database, connect
 from helpers import submit_offer
+
+
+# 商品在哪一组：组编辑用例里已有一份查找，别再造一份。
+# 用例用它按规则自算期望次序，不抄服务端给的那份。
+group_of = editing.GroupEditingTests.group_for
 
 
 def product(shop, offer, sales):
@@ -27,11 +33,6 @@ def product(shop, offer, sales):
 def group(id, *members):
     return {'id': id, 'confirmed': False,
             'members': [{'shop_key': m['shop_key'], 'offer_id': m['offer_id']} for m in members]}
-
-
-def group_of(snapshot, offer):
-    """商品在哪一组：用例按规则自算期望次序，不抄服务端给的那份。"""
-    return next(g for g in snapshot['groups'] if any(m['offer_id'] == offer for m in g['members']))
 
 
 def member_of(snapshot, offer):

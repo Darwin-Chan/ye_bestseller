@@ -717,7 +717,8 @@ class AnalysisService:
             # 状态不动的动作也算——它表达的正是「就按本机的决定办」。
             self._resolve_conflicts(
                 snapshot, {identity(m) for group in groups for m in group['members']})
-            # 确认屏次序与排名同更新时机（票 05）：确认本身不改成员数与销量，照算一遍。
+            # 确认屏次序与排名同更新时机（票 05）：确认／撤回不动成员数与销量，这里次序其实
+            # 不变，照算一遍是把「同一时机」落在明处，规则将来改了不用另找落点。
             order_review_groups(snapshot)
             return copy.deepcopy(snapshot)
 
@@ -904,7 +905,8 @@ def order_review_groups(snapshot: dict) -> None:
     不自行排序；页签、搜索、筛选与 20 组/页分页都作用在它上面。
 
     次序只由快照数据决定，排序是稳定的（并列保持 `groups` 里的相对次序），同一份数据
-    重算两次结果一致。老草稿没有这一份：读回时补算。
+    重算两次结果一致。老草稿没有这一份：读回时补算。组销量由 `summarize_group` 保证在场，
+    读回的老草稿万一缺这个键就按 0 排（同键内仍稳定），不因为一个缺键开不了。
     """
     snapshot['review_order'] = [group['id'] for group in sorted(
         snapshot['groups'], key=lambda group: (-len(group['members']), -group.get('sales', 0)))]
