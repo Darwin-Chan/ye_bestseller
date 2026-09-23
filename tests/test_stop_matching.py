@@ -173,6 +173,24 @@ class StopSeamTests(unittest.TestCase):
         self.assertEqual(len(snapshot['groups']), 1)
         self.assertEqual(snapshot['matching']['reasons'], [])
 
+    def test_in_flight_job_names_the_running_run_and_none_once_it_is_terminal(self):
+        """关窗那一层的发现读（票 03）：现在谁在跑；没有运行在跑就回 None。
+
+        关窗钩子靠它决定拦不拦、拦下来等谁——它给的读数与页面轮询读的是同一份。
+        """
+        self.assertIsNone(self.service.in_flight_job(), '还没开始：没有运行在跑')
+
+        analysis_id = self.judging_stopped()
+        reading = self.service.in_flight_job()
+        self.assertEqual(reading['id'], analysis_id)
+        self.assertEqual(reading['state'], 'matching')
+        self.assertEqual((reading['judged'], reading['todo']), (2, 6))
+
+        self.service.request_stop(analysis_id)
+        self.transport.release.set()
+        self.wait_state(analysis_id)
+        self.assertIsNone(self.service.in_flight_job(), '收尾之后：没有运行在跑了')
+
     def test_stop_request_after_the_run_finished_is_ignored(self):
         self.transport.release.set()
         analysis_id = self.start()['id']

@@ -508,6 +508,15 @@ class AnalysisService:
                          name=f'{thread_prefix}-{progress.id[:8]}').start()
         return {"id": progress.id, "state": "matching"}
 
+    def in_flight_job(self):
+        """现在还在跑的那次运行（读数）；没有就回 None——关窗那一层用它决定拦不拦（票 03）。
+
+        至多一趟：页面在遮罩期间发起不了第二趟，窗口也只有一页（ADR-0044 决策 4）。
+        """
+        with self._jobs_lock:
+            progress = next((p for p in self._jobs.values() if not p.is_terminal()), None)
+        return progress.snapshot() if progress is not None else None
+
     def _job_in_flight(self, analysis_id):
         """这个分析号上还在跑（没到终态）的那一次运行；没有就回 None。"""
         with self._jobs_lock:

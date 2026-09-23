@@ -1,13 +1,19 @@
-"""分析入口（analyze.py）：运行互斥、劝退与提示路径（票 14）。
+"""分析入口（analyze.py）：运行互斥、劝退、提示路径（票 14）与关窗＝真的停下（票 03）。
 
 同一台机器同一时刻至多一次分析运行——窗口与 `--serve` 共用一把 `ANALYSIS_LOCK`；
 抢不到就落日志、前置已有窗口、弹中文提示、退出 0（让分析壳保持安静，照 ADR-0008）。
+匹配在跑时关窗先弹原生确认框，「关闭并停止」等这次运行彻底停写（`wait_terminal`
+返回）才关窗、才放锁（ADR-0044 决策 4/5）。
 真实锁的用例自起一把内核对象：名字按用例隔离，不跟本机真实运行的分析抢同一把
 （与 tests/helpers.py 的 isolated_locks 同规）。
 """
+import ctypes
 import io
+import os
 import subprocess
 import sys
+import threading
+import time
 import unittest
 import uuid
 from contextlib import redirect_stdout
@@ -17,6 +23,7 @@ from unittest.mock import MagicMock, patch
 
 import analyze
 from bestseller_monitor import single_instance
+from bestseller_monitor.analysis import PHASES
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -47,6 +54,110 @@ def unique_lock_name() -> str:
 
 def fake_webview() -> SimpleNamespace:
     return SimpleNamespace(create_window=MagicMock(), start=MagicMock())
+
+
+# ---- 关窗那一层的假件（票 03）：形状照真 pywebview 的 winforms 平台 ----
+# 真语义（webview/platforms/winforms.py 的 on_closing 与 webview/event.py 的 Event）：
+# closing 处理器同步跑，任一个返回 False 就 args.Cancel＝True（这次关闭被吞）；
+# window.destroy() 走 Form.Close()，同样再过一次 closing。
+
+
+def probe_second_instance(lock_name: str) -> str:
+    """另一个进程抢同一把锁——第二个分析实例要做的事。'ACQUIRED' 或 'REFUSED'。"""
+    code = ("import sys; sys.path.insert(0, %r); "
+            "from bestseller_monitor import single_instance as s; "
+            "print('ACQUIRED' if s.acquire(%r) else 'REFUSED')" % (str(ROOT), lock_name))
+    done = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True)
+    return done.stdout.strip()
+
+
+def windowed_webview(window) -> SimpleNamespace:
+    """假 webview：start() 像真的一样开到窗口关上（消息循环随窗口关闭而结束）。"""
+    return SimpleNamespace(create_window=MagicMock(return_value=window),
+                           start=MagicMock(side_effect=window.closed.wait))
+
+
+class FakeClosingEvent:
+    """假 closing 事件：处理器同步跑，返回 False＝吞掉这次关闭（与真 Event 同规）。"""
+
+    def __init__(self):
+        self.handlers = []
+
+    def __iadd__(self, handler):
+        self.handlers.append(handler)
+        return self
+
+    def set(self):
+        return any(handler() is False for handler in list(self.handlers))
+
+
+class CloseableWindow:
+    """假窗口：点 × 与 destroy() 都会过一次 closing，被吞掉就关不上。"""
+
+    def __init__(self):
+        self.events = SimpleNamespace(closing=FakeClosingEvent())
+        self.closed = threading.Event()
+
+    def click_close(self) -> bool:
+        """点窗口的 ×：走一次 closing。返回这次点击是否被吞掉（没吞＝真的关）。"""
+        if self.events.closing.set():
+            return True
+        self.closed.set()
+        return False
+
+    def destroy(self) -> None:
+        """window.destroy()：真 pywebview 走 Close()，同样再过一次 closing。"""
+        if not self.events.closing.set():
+            self.closed.set()
+
+
+def reading(analysis_id='a1', *, phase_index=3, judged=120, todo=317, eta_text='8 分钟',
+            stop_timeout_sec=30) -> dict:
+    """一趟在跑的运行的读数（真 `job_state` 的那些键里关窗那一层用得上的）。"""
+    return {'id': analysis_id, 'state': 'matching', 'phases': list(PHASES),
+            'phase_index': phase_index, 'judged': judged, 'todo': todo,
+            'eta_text': eta_text, 'stop_timeout_sec': stop_timeout_sec}
+
+
+class FakeRun:
+    """一趟在跑的运行：读数由用例给，终态由用例放行（`wait_terminal` 等它）。"""
+
+    def __init__(self, analysis_id='a1', **fields):
+        self.analysis_id = analysis_id
+        self.reading = reading(analysis_id, **fields)
+        self.finished = threading.Event()
+
+    def done(self) -> bool:
+        return self.finished.is_set()
+
+
+class FakeAnalysis:
+    """关窗那一层要的三件（票 03 的接口）：谁在跑、请求停下、等它停完。"""
+
+    def __init__(self, runs=(), *, race_after_first_look=None):
+        self._runs = list(runs)
+        self._race = race_after_first_look   # 关窗检查放行之后才登记进来的那趟（夹缝）
+        self._looks = 0
+        self.stopped, self.waited = [], []
+
+    def in_flight_job(self):
+        self._looks += 1
+        if self._looks > 1 and self._race is not None:
+            self._runs.append(self._race)
+            self._race = None
+        for run in self._runs:
+            if not run.done():
+                return dict(run.reading)
+        return None
+
+    def request_stop(self, analysis_id):
+        self.stopped.append(analysis_id)
+
+    def wait_terminal(self, analysis_id, timeout=None):
+        self.waited.append(analysis_id)
+        run = next(run for run in self._runs if run.analysis_id == analysis_id)
+        run.finished.wait(timeout)
+        return dict(run.reading)
 
 
 class AnalysisMutexTests(unittest.TestCase):
@@ -161,6 +272,158 @@ class LoggingEncodingTests(unittest.TestCase):
 
         self.assertEqual(done.returncode, 0, done.stderr[-400:])
         self.assertIn("中文编码", done.stderr.decode("utf-8"))
+
+
+class CloseWindowTests(unittest.TestCase):
+    """关窗＝真的停下（票 03，ADR-0044 决策 4/5）：确认框、等收尾、放锁排在最后。
+
+    缝在 analyze.py：假服务（谁在跑／请求停下／等它停完）、假窗口（closing 同真
+    pywebview：返回 False 吞掉关闭）、假 webview（start() 开到窗口关上）。真锁
+    （每例一把自己的名字）＋子进程探针，钉住"收尾期间第二个实例必被拒"。
+    """
+
+    def setUp(self):
+        self.window = CloseableWindow()
+        self.webview = windowed_webview(self.window)
+        self.lock_name = unique_lock_name()
+
+    def wait_for(self, predicate, what, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.01)
+        self.fail(f'等不到：{what}')
+
+    def run_analysis_window(self, service):
+        """在后台线程里跑一次窗口模式的 main()：真锁、假服务、假 webview。"""
+        self.enterContext(patch.object(single_instance, "ANALYSIS_LOCK", self.lock_name))
+        self.enterContext(patch.object(analyze, "AnalysisService", return_value=service))
+        self.enterContext(patch.object(analyze, "create_server", return_value=FakeServer()))
+        self.enterContext(patch.dict(sys.modules, {"webview": self.webview}))
+        result = {}
+        thread = threading.Thread(target=lambda: result.update(code=analyze.main([])), daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        self.wait_for(lambda: self.window.events.closing.handlers, '关窗钩子挂上')
+        return thread, result
+
+    def test_closing_without_a_run_still_exits_quietly(self):
+        """没有匹配在跑：无确认框、窗口直接关、退出 0、锁照常释放（票 03 第 6 条）。"""
+        confirm = self.enterContext(patch.object(analyze, "_confirm_close", return_value=True))
+        thread, result = self.run_analysis_window(FakeAnalysis())
+
+        self.assertFalse(self.window.click_close(), '没有运行在跑：这次点击不该被吞')
+        thread.join(10)
+        self.assertEqual(result, {'code': 0})
+        confirm.assert_not_called()
+        self.assertEqual(probe_second_instance(self.lock_name), 'ACQUIRED',
+                         '进程退出之后锁要回到系统手里')
+
+    def test_cancel_keeps_matching_and_the_window(self):
+        """点 × 选「取消」：关闭被吞、运行照跑；跑完再点 × 就直接关（不再弹框）。"""
+        run = FakeRun()
+        service = FakeAnalysis([run])
+        confirm = self.enterContext(patch.object(analyze, "_confirm_close", return_value=False))
+        thread, result = self.run_analysis_window(service)
+
+        self.assertTrue(self.window.click_close(), '「取消」＝吞掉这次关闭')
+        self.assertEqual(service.stopped, [], '取消不该请求停止')
+        self.assertFalse(self.window.closed.is_set(), '窗口还在')
+        self.assertNotIn('code', result, '进程还没退出')
+        confirm.assert_called_once()
+
+        run.finished.set()               # 运行自己跑完，回到没有匹配在跑的样子
+        self.assertFalse(self.window.click_close(), '这次没有运行在跑了：不再拦')
+        thread.join(10)
+        self.assertEqual(result, {'code': 0})
+        confirm.assert_called_once()
+
+    def test_close_and_stop_waits_for_teardown_before_the_lock_is_released(self):
+        """「关闭并停止」：停在收尾里——窗口不关、锁不放；收尾之后才一起走。
+
+        复现脚本（.scratch/mutex-diag/repro_lock_short_window.py）转正的那条：关窗后
+        半秒第二个实例就能拿锁是现状 RED；现在探针必须被拒，而且拒到这次运行停写为止。
+        """
+        run = FakeRun()
+        service = FakeAnalysis([run])
+        confirm = self.enterContext(patch.object(analyze, "_confirm_close", return_value=True))
+        thread, result = self.run_analysis_window(service)
+
+        self.assertTrue(self.window.click_close(), '确认之后这次点击仍被吞：关窗改由收尾完成时执行')
+        self.wait_for(lambda: service.waited, '收尾进入 wait_terminal')
+        self.assertEqual(service.stopped, ['a1'], '「关闭并停止」走与「停止匹配」同一个停止入口')
+        text = confirm.call_args.args[0]
+        self.assertIn('正在匹配同款：已完成 120/317 对，预计还需约 8 分钟。', text)
+        self.assertIn('但这一趟的分析结果会没。', text)
+        self.assertFalse(self.window.closed.is_set(), '收尾完成前窗口不消失')
+        self.assertNotIn('code', result, '收尾没完，进程不退出')
+        self.assertEqual(probe_second_instance(self.lock_name), 'REFUSED',
+                         '收尾期间第二个实例探同一把锁必被拒')
+
+        # 收尾期间再点 ×：不再弹第二个框，也不改变什么
+        self.assertTrue(self.window.click_close(), '收尾进行中的点击照旧被吞')
+        confirm.assert_called_once()
+
+        run.finished.set()               # 在途判断收完，这次运行到终态
+        thread.join(10)
+        self.assertEqual(result, {'code': 0}, '收尾之后才退出 0')
+        self.assertTrue(self.window.closed.is_set(), '收尾之后窗口才关')
+        self.assertEqual(probe_second_instance(self.lock_name), 'ACQUIRED',
+                         '放锁排在 wait_terminal 之后')
+
+    def test_a_run_slipping_in_while_closing_is_still_stopped_before_the_lock_is_released(self):
+        """夹缝里抢进来的运行（点 × 的同一瞬页面才发出开始分析）：窗口可以关，锁要等它停。
+
+        关窗检查那一刻还没有运行——确认框都不弹；等它登记进来时窗口已在关。兜底把它
+        停下、等它停写，进程才退出：放锁永远排在最后一次写入之后。
+        """
+        racing = FakeRun('late')
+        service = FakeAnalysis([], race_after_first_look=racing)
+        confirm = self.enterContext(patch.object(analyze, "_confirm_close", return_value=True))
+        thread, result = self.run_analysis_window(service)
+
+        self.assertFalse(self.window.click_close(), '那一刻没有运行在跑：这次点击不被吞')
+        confirm.assert_not_called()
+        self.wait_for(lambda: service.waited, '兜底把抢进来的运行等起来')
+        self.assertEqual(service.stopped, ['late'])
+        self.assertNotIn('code', result, '运行没停完，进程不退出')
+        self.assertEqual(probe_second_instance(self.lock_name), 'REFUSED',
+                         '兜底期间第二个实例同样进不来')
+
+        racing.finished.set()
+        thread.join(10)
+        self.assertEqual(result, {'code': 0})
+        self.assertEqual(probe_second_instance(self.lock_name), 'ACQUIRED')
+
+
+class CloseConfirmTextTests(unittest.TestCase):
+    """关窗确认框的文案：两段照原型「关窗确认」抄，只加了按钮图例（MB_OKCANCEL 的按钮是系统标签）。"""
+
+    def test_judging_text_counts_pairs_and_the_eta_from_the_prototype(self):
+        text = analyze._close_confirm_text(reading())
+        self.assertIn('正在匹配同款：已完成 120/317 对，预计还需约 8 分钟。', text)
+        self.assertIn('关闭会停在这里：已判断的会保存，重新开始会接着算，不会重复花钱；'
+                      '但这一趟的分析结果会没。', text)
+        self.assertIn('按「确定」＝关闭并停止匹配；按「取消」＝继续匹配。', text)
+
+    def test_no_eta_yet_says_it_is_still_estimating(self):
+        text = analyze._close_confirm_text(reading(eta_text=''))
+        self.assertIn('已完成 120/317 对，预计时长还在估算。', text)
+
+    def test_before_the_judging_phase_names_the_phase_instead_of_counts(self):
+        text = analyze._close_confirm_text(reading(phase_index=0, judged=0, todo=0))
+        self.assertIn('正在匹配同款：当前在「冻结库存数据」。', text)
+
+    def test_after_the_last_pair_is_judged_names_the_assembly_phase(self):
+        text = analyze._close_confirm_text(reading(phase_index=4, judged=317, todo=317))
+        self.assertIn('正在匹配同款：当前在「装配同款组」。', text)
+
+    def test_no_dialog_convention_closes_and_stops_without_a_box(self):
+        with patch.dict(os.environ, {'BESTSELLER_NO_DIALOG': '1'}), \
+                patch.object(ctypes.windll.user32, 'MessageBoxW') as box:
+            self.assertTrue(analyze._confirm_close('文案（自动化场合没人可点）'))
+        box.assert_not_called()
 
 
 if __name__ == "__main__":
