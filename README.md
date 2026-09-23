@@ -36,6 +36,7 @@
 | 找库、日志、报告、截图 | 「数据落在哪」一节 |
 | 重建壳 / 出壳的发布包 | 「打包与运行形态」一节 |
 | 机器上出了问题：记录并打包，交给 Claude 排查 | 双击 `tools\issue_bundle.cmd`；规范在 [docs/ops/问题记录与打包.md](docs/ops/问题记录与打包.md) |
+| 收尾／验收跑全量测试 | 分段运行器 [tools/run_full_suite.py](tools/run_full_suite.py)；约定见 [AGENTS.md](AGENTS.md)「收尾」一节 |
 | 找某个文档 | 「文档地图」一节 |
 
 ## 安装与上机
@@ -436,7 +437,7 @@ HTML 存进 `paths.raw_page_dir/round_<轮次>/`，并在数据库与日志里�
 | [docs/history/](docs/history/) | 实现进展的历史快照 | 只作考古，别当现状 |
 | [docs/out-of-scope/](docs/out-of-scope/) | 明确不做的事（含理由） | 想「加个功能」之前先查 |
 | `.scratch/` | 工单、spec、证据日志、工具输出（不进代码仓） | 本机开发会话内部 |
-| [tests/](tests/) | 测试（`python -m unittest discover -s tests`） | 改代码后 |
+| [tests/](tests/) | 测试（日常 `python -m unittest discover -s tests`；收尾分段全量 `python tools/run_full_suite.py`，见 [AGENTS.md](AGENTS.md)「收尾」一节） | 改代码后、收尾时 |
 
 ## 免责声明
 

@@ -29,6 +29,27 @@
 - **别的机器的记录包**：解压到 `.scratch/inbox/<包名>/` 再读；怎么记录、怎么读见
   `docs/ops/问题记录与打包.md`。
 
+## 收尾：分段跑全量测试（2026-09-24 起）
+
+implement 类流程收尾要跑一次全量（「single test files regularly, the full test suite once at
+the end」）。全量改为**分段跑**：6 个长尾文件各自一个进程、其余文件一次 discover，串行；
+分段只改执行编排、不改用例集合——段并集等于全量，运行器每次自动对账（段计数和 == 加载
+口径总数，不等即非零退出）。
+
+```bash
+python tools/run_full_suite.py
+```
+
+- 跑法沿用既有惯例：隔离副本（目录名 `bestseller`、补 `config/*.toml` 与 `shops.csv`）里
+  从仓库根运行；日志落 `--log-dir`（默认 `.scratch/logs/full-suite/<时间戳>/`），验收记录
+  抄 `summary.txt` 里的「合计 / 对账 / 结论」行，逐段日志与它同目录。
+- 重段名单在 `tools/run_full_suite.py` 的 `HEAVY_MODULES`。刷新方法：全量加 `--durations 0`
+  把逐用例耗时按模块聚合、从大到小取。依据、实测与合规对账见
+  `.scratch/test-suite-segmentation/`（不进版本库）。
+- 「只跑长脚本就收尾」不算收尾；收尾那一趟也不要加 `-f`（本机有已知假红，提前停会让
+  这一趟失去收尾效力）。
+- 日常开发不跑全量：单文件 `-p`、单个用例 `-k`，快速反馈加 `-f`；全量只在收尾跑一次。
+
 ## Agent skills
 
 ### Issue tracker
