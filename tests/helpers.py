@@ -201,10 +201,12 @@ def insert_inventory_rows(conn, rows) -> None:
 
 
 class GuardClock:
-    """`guard.time` 的替身：每次读时间往前走一步，`sleep` 不真睡。
+    """`guard.time` 与 `waiting.time` 的替身：每次读时间往前走一步，`sleep` 不真睡。
 
     `guard` 的等待循环按真实秒数要跑分钟级（`human_pause_minutes`），而用例要判的只是
-    「有没有界」。走一步顶一环，圈数一样、用例快得多。
+    「有没有界」。走一步顶一环，圈数一样、用例快得多。同一个实例同时挂两个模块：等待的
+    上限由原语经 `waiting.time.monotonic` 读，而 `guard` 自己的时间读数——deny 剪枝、
+    响铃起止、刷新后的 1.5 秒暂停——还在原处；只挂 `waiting` 那一处的话，那 1.5 秒会真睡。
     """
 
     def __init__(self, step: float = 1.0):
@@ -212,6 +214,10 @@ class GuardClock:
         self.now = 0.0
 
     def time(self) -> float:
+        self.now += self.step
+        return self.now
+
+    def monotonic(self) -> float:
         self.now += self.step
         return self.now
 

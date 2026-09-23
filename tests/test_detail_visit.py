@@ -19,7 +19,7 @@ class ScriptedClock:
     """`waiting.time` 的替身：单调钟按剧本取值，`sleep` 不真等。
 
     同 seam 上另有两份替身：test_waiting 的 `FakeClock`（虚拟钟只在睡眠时前进）与
-    helpers 的 `GuardClock`（读时即前进、还没有 `monotonic`，票 05 补）。窗口重置要看的
+    helpers 的 `GuardClock`（读时即前进，`time`/`monotonic` 共用一份计数）。窗口重置要看的
     是「每个时刻钟走到哪」，前两份都表达不了，因此这里用剧本——每次读的值由用例写死，
     读超了剧本就报错（轮询的读表次数变了，用例该跟着改）。
     """
@@ -330,7 +330,8 @@ class DetailVisitTests(unittest.TestCase):
         self.assertIsInstance(visit, detail_visit.ReadyDetailVisit)
 
         page.become_wall("请登录后查看商品详情")   # 弹窗打开之后才出现的登录墙
-        with patch.object(guard, "time", GuardClock(step=10.0)), \
+        clock = GuardClock(step=10.0)
+        with patch.object(guard, "time", clock), patch.object(waiting, "time", clock), \
              patch.object(guard.sound, "play_alarm"):
             with self.assertRaises(guard.InterventionTimeout):
                 self.assert_returns_within(lambda: visit.observe(PRODUCT_URL), 3.0,

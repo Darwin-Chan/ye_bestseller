@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 
 from . import sound
-from . import stop_request
+from . import waiting
 from .config import Config
 
 log = logging.getLogger(__name__)
@@ -242,18 +242,15 @@ def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | 
                         confirm_sec: float = 2.0) -> None:
     """需要人工介入时：先过确认窗口过滤瞬时报错信号，再持续响铃直到解决。
 
-    每一轮都问一次「该不该停」（ADR-0009）：这时用户最可能去按界面上的暂停，
-    而最长可等 human_pause_minutes 分钟，不打断就会把停止拖成十分钟。
+    两段等待都走 `waiting.until`：每一轮都问一次「该不该停」（ADR-0009）——这时用户最
+    可能去按界面上的暂停，而最长可等 human_pause_minutes 分钟，不打断就会把停止拖成十分钟。
+    取消钩子由原语默认接上（与睡眠分片同一个判据），本模块不再手写检查点。
     """
     vtype_name = verification_type or "slider"
     # 确认窗口：短暂出现又自行消失的信号（如 tmd/x5sec 上报）不算真正的人工介入
-    confirm_deadline = time.time() + max(0.0, confirm_sec)
-    while time.time() < confirm_deadline:
-        stop_request.check()
-        if resolved(page):
-            log.debug("人工介入信号瞬时就消失，判定为误报，忽略")
-            return
-        time.sleep(0.3)
+    if waiting.until(lambda: resolved(page), timeout_sec=confirm_sec, poll_sec=0.3):
+        log.debug("人工介入信号瞬时就消失，判定为误报，忽略")
+        return
     # 超过确认窗口仍未解决 => 确认为真正需要人工介入
     # 先尝试一次刷新：反爬拦截页/瞬时 block 常可通过刷新解除，刷新后恢复则不响铃
     try:
@@ -269,16 +266,14 @@ def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | 
         emit("verification_appear", kind="verification", verification_type=vtype_name,
              note=f"type={vtype_name}")
     appear_ts = time.time()
-    deadline = time.time() + minutes * 60
-    while True:
-        stop_request.check()
-        if resolved(page):
-            if emit:
-                emit("verification_solved", kind="verification", verification_type=vtype_name,
-                     note=f"resolution_seconds={time.time() - appear_ts:.1f}")
-            log.info("人工介入已解决，停止响铃，继续。")
-            return
-        if time.time() > deadline:
-            raise InterventionTimeout("人工介入超时")
+
+    def ring() -> None:
         sound.play_alarm(count=1)   # 每次约 1 秒，循环播放
-        time.sleep(3)
+
+    if waiting.until(lambda: resolved(page), timeout_sec=minutes * 60, poll_sec=3,
+                     on_wait=ring) is None:
+        raise InterventionTimeout("人工介入超时")
+    if emit:
+        emit("verification_solved", kind="verification", verification_type=vtype_name,
+             note=f"resolution_seconds={time.time() - appear_ts:.1f}")
+    log.info("人工介入已解决，停止响铃，继续。")

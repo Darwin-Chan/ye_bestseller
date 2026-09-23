@@ -19,14 +19,10 @@ class AnalysisUiAdjustmentTests(unittest.TestCase):
     switch_tab = fixture.GroupEditingTests.switch_tab
 
     def review(self):
-        """选好日期、进入确认同款页，返回分析编号。
-
-        票 01 起确认同款页先出骨架、长判断时遮罩盖在上面；这里等快照信息落定，
-        也就是这一趟运行已经结束、页面已经填好。
-        """
+        """选好日期、进入确认同款页，返回分析编号。"""
         self.dates()
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
-        expect(self.page.locator('#snapshotInfo')).to_contain_text('日期区间')
+        expect(self.page.get_by_role('heading', name='确认同款')).to_be_visible()
         return self.page.url.split('analysis=')[1]
 
     def confirm_first(self, times=1):

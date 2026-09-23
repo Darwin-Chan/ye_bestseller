@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import guard
+from bestseller_monitor import guard, stop_request, waiting
 from bestseller_monitor.guard import (
     DenyTracker,
     InterventionTimeout,
@@ -255,7 +255,8 @@ class InterventionResolutionTests(unittest.TestCase):
         page = FakePage(self.PRODUCT, body=self.LOGIN_WALL)   # 刷新也救不回来
         emit = MagicMock()
 
-        with patch.object(guard, "time", GuardClock(step=1.0)), \
+        clock = GuardClock(step=1.0)
+        with patch.object(guard, "time", clock), patch.object(waiting, "time", clock), \
              patch.object(guard.sound, "play_alarm") as alarm, \
              self.assertRaises(InterventionTimeout):
             guard.wait_for_resolution(page, 1, emit=emit,
@@ -271,13 +272,69 @@ class InterventionResolutionTests(unittest.TestCase):
         page = FakePage(self.PRODUCT, body=self.LOGIN_WALL, body_after_reload="")
         emit = MagicMock()
 
-        with patch.object(guard, "time", GuardClock(step=1.0)), \
+        clock = GuardClock(step=1.0)
+        with patch.object(guard, "time", clock), patch.object(waiting, "time", clock), \
              patch.object(guard.sound, "play_alarm") as alarm:
             guard.wait_for_resolution(page, 0, emit=emit, confirm_sec=2.0)
 
         self.assertEqual(page.reloads, 1)
         emit.assert_not_called()
         alarm.assert_not_called()
+
+    def test_the_ring_loop_is_asked_to_stop_every_round(self):
+        """响铃循环每轮问一次「该不该停」，抛出即原样穿出（A11）。
+
+        这段检查此前没有任何用例钉着。确认窗口取 0（零窗口既不探测也不问取消），数到的
+        三次就都是响铃循环自己的检查点：入口放行 → 第一轮探测、响铃、睡下 → 第二轮睡前
+        抛出。停在等待中间，而不是等满上限走成 InterventionTimeout。
+        """
+        page = FakePage(self.PRODUCT, body=self.LOGIN_WALL)   # 刷新也救不回来
+        clock = GuardClock(step=1.0)
+        checks = []
+
+        def hook():
+            checks.append(1)
+            if len(checks) > 2:      # 入口与第一轮睡前放行；停在第二轮睡前那次
+                raise stop_request.StopRequested("停")
+
+        with patch.object(guard, "time", clock), patch.object(waiting, "time", clock), \
+             patch.object(guard.sound, "play_alarm") as alarm:
+            stop_request.install(hook)
+            self.addCleanup(stop_request.uninstall)
+            with self.assertRaises(stop_request.StopRequested):
+                guard.wait_for_resolution(page, 1, confirm_sec=0)
+
+        self.assertEqual(len(checks), 3, "入口一次、每轮睡前一次：停在第二轮")
+        self.assertEqual(alarm.call_count, 1, "抛出之前已经完整响过一轮")
+        self.assertEqual(page.reloads, 1, "确认窗口之后照旧刷新一次才进响铃循环")
+
+    def test_the_ring_loop_reports_the_resolution_before_returning(self):
+        """解决路径：停止响铃，先发 `verification_solved` 再返回（A10 的事件面）。
+
+        这一段今天零断言，而本票正好把它挪到了 `until` 之后。铃响过一轮之后「人工解决」：
+        页面在下一轮探针变可读，事件带上 resolution_seconds，函数正常返回——不是等满上限
+        走成 InterventionTimeout（那条由上面「正文信号活过确认窗口」的用例钉着）。
+        """
+        page = FakePage(self.PRODUCT, body=self.LOGIN_WALL)   # 刷新也救不回来
+        emit = MagicMock()
+        clock = GuardClock(step=1.0)
+
+        def solve_after_ringing(count=1):
+            """铃响过一轮，人工把页面解决了——下一轮探针就该看到已解除。"""
+            page.solve()
+
+        with patch.object(guard, "time", clock), patch.object(waiting, "time", clock), \
+             patch.object(guard.sound, "play_alarm", side_effect=solve_after_ringing) as alarm:
+            guard.wait_for_resolution(page, 1, emit=emit, verification_type="login",
+                                      confirm_sec=0)
+
+        self.assertEqual(alarm.call_count, 1, "响过一轮之后页面才被解决")
+        self.assertEqual([call.args[0] for call in emit.call_args_list],
+                         ["verification_appear", "verification_solved"],
+                         "先报出现、再报解决")
+        solved = emit.call_args_list[-1].kwargs
+        self.assertEqual(solved["verification_type"], "login")
+        self.assertRegex(solved["note"], r"^resolution_seconds=\d+\.\d$")
 
     def test_the_settling_entry_only_reports_a_page_once_the_signal_is_gone(self):
         """`ready_detail_page` 说「页面可用」之后，判据不能再认得这个页面上的信号。
@@ -289,7 +346,8 @@ class InterventionResolutionTests(unittest.TestCase):
         page = FakePage(self.PRODUCT, body=self.LOGIN_WALL, body_after_reload="")
         cfg = crawler_cfg(intervention_confirmation_sec=2.0)
 
-        with patch.object(guard, "time", GuardClock(step=1.0)), \
+        clock = GuardClock(step=1.0)
+        with patch.object(guard, "time", clock), patch.object(waiting, "time", clock), \
              patch.object(guard.sound, "play_alarm"):
             denied = ready_detail_page(page, cfg)
 
