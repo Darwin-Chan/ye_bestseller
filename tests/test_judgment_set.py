@@ -6,7 +6,8 @@
   ——临时缓存库与临时账本库进、包文件出，不碰 git；视觉描述行按规格「预置缓存行」直接
   写进库。
 - **发布与收取**：`judgment_set.publish` / `collect`——真 git（本地裸库当远端、克隆当机器，
-  `tests/git_repos` 的样例台）、真缓存库、真账本库、真导入账。
+  `tests/git_repos` 的样例台）、真缓存库、真账本库、真导入账。世界（裸库 + 交换区克隆）
+  每测试进程只搭一次模板、用例复制取独立副本（同 `test_exchange`，见 `_world_template`）。
 - **人工决定的并入与冲突账**（票 04）：`collect` 的整条路 + `analysis_store.DraftStore`
   的账本口（`write` / `ledger` / `merge_incoming` / `conflicts`），外加真
   `AnalysisService` 的确认与保存把账本写出来。
@@ -40,7 +41,7 @@ from bestseller_monitor.judgment_set import (FORMAT_VERSION, META_TABLE, PACKAGE
 from bestseller_monitor.matching import (STATUS_CACHE, STATUS_MODEL, MatchingConfig,
                                          MatchingService, ModelConfig, identity, prepare_cache,
                                          version)
-from tests.git_repos import GitSandbox
+from tests.git_repos import GitSandbox, WorldTemplate
 from helpers import group, ledger_of, member, submit_offer
 from test_exchange import FakeImageStore
 from test_matching import ModelTransport, product, singles
@@ -62,6 +63,52 @@ STAMP_ISO = STAMP.isoformat(timespec="seconds")
 DAY = "2026-09-14"
 START, END = "2026-09-14", "2026-09-15"          # 分析区间（start 必须早于 end）
 WEEK = "2026-W38"
+
+
+def _world_paths(repo: str) -> dict[str, str]:
+    """交换区里某个库的「一台机器的世界」三件东西的相对路径：裸远端、交换区里的克隆、旁路工作克隆。
+
+    远端与交换区克隆沿用现搭时的名字（`judged-<机器>.git` / `exchange/judged-<机器>`）；旁路克隆
+    （别的机器自己发布用）是模板带来的第三件，统一叫 `<库名>-work`。三种路径模板与用例都从这里取。
+    """
+    return {"remote": f"{repo}.git", "exchange": f"exchange/{repo}", "work": f"{repo}-work"}
+
+
+def _build_world(site: GitSandbox, *, remote: str, exchange: str, work: str) -> list[str]:
+    """搭一个库的一套 git 小世界：空裸远端 + 交换区里的克隆 + 旁路工作克隆（那台机器自己发布用）。
+
+    三样东西的相对路径由调用方给（`_world_paths`），远端真 init、克隆真 clone——形状就是生产里的
+    那个（空裸库 + 未出生克隆），与 `test_exchange` 的 builder 同形。远端是空的（未出生 main），
+    克隆出来既没有对象也没有 reflog，所以两个克隆逐字节相同——第二份直接用第一份的副本（纯文件
+    复制），省一次 clone 子进程。
+    """
+    (site.tmp / exchange).parent.mkdir(parents=True, exist_ok=True)
+    bare = site.new_remote(remote)
+    site.clone(bare, exchange)
+    shutil.copytree(site.tmp / exchange, site.tmp / work)
+    return [remote, exchange, work]
+
+
+def _world_template(repo: str) -> WorldTemplate:
+    """取（必要时搭一次）一个库的世界模板：`judged-m1` / `raw-m1` 各一件，每测试进程只搭一次。
+
+    判断集的世界正是「空裸库 + 未出生克隆」的合契约形状（见 `git_repos.WorldTemplate` 的文档），
+    不用动原语本体。模板名带 `judgment-` 前缀是本文件的标识别，与 test_exchange 的 `exchange-*`
+    不撞（缓存按名字走、整个测试进程共用）。
+    """
+    names = _world_paths(repo)
+    return WorldTemplate.obtain(f"judgment-{repo}",
+                                lambda site: _build_world(site, **names))
+
+
+def _take_world(box: GitSandbox, repo: str) -> dict[str, Path]:
+    """给这个沙盒取一份（复制）`repo` 的独立世界，返回三件的绝对路径。
+
+    同一沙盒里同一个库只取一次（`take` 的目标已存在就报错）；模板已在本进程搭过时取世界不起
+    git 子进程——第一趟取要先真搭模板（真跑 git），那是每进程一次的成本。
+    """
+    _world_template(repo).take(box)
+    return {key: box.tmp / rel for key, rel in _world_paths(repo).items()}
 
 
 class JudgmentSetCase(unittest.TestCase):
@@ -242,9 +289,9 @@ class PublishTests(JudgmentSetCase):
         self.box = GitSandbox(self, prefix="bestseller-judged-")
         self.exchange = self.box.tmp / "exchange"
         self.exchange.mkdir()
-        self.remote = self.box.new_remote("judged-m4.git")
-        self.repo = self.exchange / "judged-m4"
-        self.box.must("clone", str(self.remote), str(self.repo))
+        world = _take_world(self.box, "judged-m4")
+        self.remote = world["remote"]
+        self.repo = world["exchange"]
 
     def publish(self, **kwargs):
         kwargs.setdefault("machine_id", "m4")
@@ -386,9 +433,7 @@ class CollectTests(JudgmentSetCase):
 
     def publish_from(self, machine, *, cache=None, store=None, products=("red", "blue"), same=True):
         """另一台机器判一批商品并发布：真仓库（裸库当远端 + 一个克隆）、真打包。"""
-        remote = self.box.new_remote(f"judged-{machine}.git")
-        repo = self.exchange / f"judged-{machine}"
-        self.box.must("clone", str(remote), str(repo))
+        _take_world(self.box, f"judged-{machine}")
         cache = cache or (self.root / f"{machine}-cache.sqlite")
         store = store or (self.root / f"{machine}-drafts.sqlite")
         self.transport.decisions[("月牙杯", "月牙杯")] = same
@@ -490,8 +535,7 @@ class CollectTests(JudgmentSetCase):
         relay = self.root / "m2-cache.sqlite"
         relay_store = self.root / "m2-drafts.sqlite"
         collect(self.exchange, "m2", relay, relay_store)        # m2 先收下 m1 那份
-        remote = self.box.new_remote("judged-m2.git")
-        self.box.must("clone", str(remote), str(self.exchange / "judged-m2"))
+        _take_world(self.box, "judged-m2")
         republished = publish(self.exchange, "m2", relay, relay_store, now=STAMP)
         self.assertTrue(republished.published, republished.failure)
 
@@ -529,8 +573,7 @@ class CollectTests(JudgmentSetCase):
                          sorted(sorted(m["offer_id"] for m in g["members"]) for g in groups_a))
 
     def test_a_source_that_has_not_published_anything_is_a_readable_note(self):
-        remote = self.box.new_remote("judged-m2.git")
-        self.box.must("clone", str(remote), str(self.exchange / "judged-m2"))
+        _take_world(self.box, "judged-m2")       # 库建好、clone 下来，但还没发布过
 
         outcome = self.collect()
 
@@ -564,8 +607,7 @@ class CollectTests(JudgmentSetCase):
 
     def test_a_broken_source_does_not_stop_the_others(self):
         self.publish_from("m1")
-        broken = self.exchange / "judged-m2"
-        self.box.must("clone", str(self.box.new_remote("judged-m2.git")), str(broken))
+        broken = _take_world(self.box, "judged-m2")["exchange"]
         self.box.must("remote", "set-url", "origin", str(self.box.tmp / "gone.git"), cwd=broken)
 
         outcome = self.collect()
@@ -580,10 +622,9 @@ class CollectTests(JudgmentSetCase):
                              "坏的那家不挡别家：m1 的判断照常收进来")
 
     def test_a_corrupt_package_leaves_the_cache_untouched(self):
-        remote = self.box.new_remote("judged-m1.git")
-        work = self.box.clone(remote, "work-m1")
+        work = _take_world(self.box, "judged-m1")["work"]
         self.box.commit_push(work, {PACKAGE_REL: b"not a package at all"})
-        self.box.must("clone", str(remote), str(self.exchange / "judged-m1"))
+        # 坏包经旁路克隆落到远端；交换区那份克隆还是未出生的，collect 这一趟 pull 才拉下 main
 
         outcome = self.collect()
 
@@ -628,8 +669,7 @@ class ChannelIndependenceTests(JudgmentSetCase):
         watched = [collection_db, exchange / "raw-m1", exchange / "plan", exchange / "outbox"]
         before = self.fingerprint(watched)
 
-        remote = box.new_remote("judged-m1.git")
-        box.must("clone", str(remote), str(exchange / "judged-m1"))
+        _take_world(box, "judged-m1")
         # 另一台机器（m1）判一件并发布；本机（m4）收取——两件都只该动判断集那半。
         other = self.root / "m1-cache.sqlite"
         other_store = self.root / "m1-drafts.sqlite"
@@ -649,8 +689,7 @@ class ChannelIndependenceTests(JudgmentSetCase):
         exchange = box.tmp / "exchange"
         exchange.mkdir()
         for repo in ("judged-m4", "raw-m1"):
-            remote = box.new_remote(f"{repo}.git")
-            box.must("clone", str(remote), str(exchange / repo))
+            _take_world(box, repo)
         self.judge_products(machine_id="m4")
         published = publish(exchange, "m4", self.cache, self.store, now=STAMP)
         self.assertTrue(published.published, published.failure)
@@ -698,8 +737,7 @@ class DecisionCarryCase(JudgmentSetCase):
         self.exchange = self.box.tmp / "exchange"
         self.exchange.mkdir()
         for machine in ("m1", "m2", "m4"):
-            remote = self.box.new_remote(f"judged-{machine}.git")
-            self.box.must("clone", str(remote), str(self.exchange / f"judged-{machine}"))
+            _take_world(self.box, f"judged-{machine}")
 
     def publish_from(self, machine, cache, store):
         result = publish(self.exchange, machine, cache, store, now=STAMP)
