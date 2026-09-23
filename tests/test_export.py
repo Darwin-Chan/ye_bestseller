@@ -31,6 +31,8 @@ from helpers import crawler_cfg, isolated_locks
 # 期望值因此也是字面量——不跟实现共算式。
 H1 = "ab" + "1" * 62          # W37 那张图（jpeg）
 H2 = "cd" + "2" * 62          # W38 那张图（png）
+H3 = "ef" + "3" * 62          # 只在 SKU 图流水里出现的图（png）
+H4 = "12" + "4" * 62          # 谁也没引用的那张（jpeg）
 
 
 class FakeImageStore:
@@ -96,6 +98,18 @@ def build_source_db(path: pathlib.Path) -> sqlite3.Connection:
     return conn
 
 
+def add_sku_image(conn: sqlite3.Connection, day: str, *, shop_key="A01", offer_id="11",
+                  sku_id="s1", content_hash=None, image_error=None, source="专属图",
+                  url=None) -> None:
+    """直插一条 SKU 图流水行（不走采集路径）；观测时刻取当天 10:00。"""
+    conn.execute(
+        "INSERT INTO sku_image_versions(shop_key, offer_id, sku_id, observed_at, "
+        "observed_date, image_url, content_hash, image_error, source) VALUES (?,?,?,?,?,?,?,?,?)",
+        (shop_key, offer_id, sku_id, f"{day}T10:00:00+08:00", day, url, content_hash,
+         image_error, source))
+    conn.commit()
+
+
 class PackageBuildTests(unittest.TestCase):
     """接缝 1：交出来的包文件本身。"""
 
@@ -125,7 +139,7 @@ class PackageBuildTests(unittest.TestCase):
         self.assertEqual(
             tables,
             {"shops", "products", "skus", "inventory", "product_information_versions",
-             "product_image_assets", "exchange_meta"})
+             "sku_image_versions", "product_image_assets", "exchange_meta"})
         self.assertEqual(
             [tuple(r) for r in conn.execute(
                 "SELECT shop_key, offer_id, sku_id, date FROM inventory")],
@@ -151,6 +165,33 @@ class PackageBuildTests(unittest.TestCase):
             "PRAGMA table_info(product_image_assets)")}
         self.assertEqual(columns, {"content_hash", "mime"})
 
+    def test_the_sku_image_ledger_carries_the_week_slice_only(self):
+        """SKU 图流水与版本行同规：本周窗口的行进包，别的周不进；`id` 不进包。
+
+        失败行与无图行照带（失败原因是观测事实），来源三态原样过去。
+        """
+        add_sku_image(self.conn, "2026-09-09", content_hash=H1,
+                      url="https://img.example/sku-1.jpg")
+        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s2",
+                      content_hash=H2, url="https://img.example/sku-2.png")
+        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s3",
+                      image_error="超时", url="https://img.example/sku-3.png")
+        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s4",
+                      source="无图")
+        conn = self.build("2026-W37")
+
+        self.assertEqual(
+            [row[1] for row in conn.execute("PRAGMA table_info(sku_image_versions)")],
+            ["shop_key", "offer_id", "sku_id", "observed_at", "observed_date", "image_url",
+             "content_hash", "image_error", "source"],
+            "包的列集照本机表的名（id 是本机 rowid，不进包）")
+        self.assertEqual(
+            [tuple(row) for row in conn.execute("SELECT * FROM sku_image_versions")],
+            [("A01", "11", "s1", "2026-09-09T10:00:00+08:00", "2026-09-09",
+              "https://img.example/sku-1.jpg", H1, None, "专属图")])
+        self.assertEqual(
+            export.read_package_meta(conn)["rows"]["sku_image_versions"], 1)
+
     def test_package_metadata_names_the_machine_the_week_and_the_counts(self):
         """元数据表：机器、周、生成时刻、各表行数、口径版本、导出时是否在采。"""
         conn = self.build("2026-W37")
@@ -163,13 +204,37 @@ class PackageBuildTests(unittest.TestCase):
         self.assertIs(meta["crawl_in_progress"], False)
         self.assertEqual(meta["rows"]["inventory"], 1)
         self.assertEqual(meta["rows"]["product_information_versions"], 1)
+        self.assertEqual(meta["rows"]["sku_image_versions"], 0)
         self.assertEqual(meta["rows"]["product_image_assets"], 1)
         self.assertEqual(meta["rows"]["shops"], 1)
         self.assertEqual(meta["rows"]["products"], 1)
         self.assertEqual(meta["rows"]["skus"], 1)
 
+    def test_package_assets_are_the_union_of_versions_and_the_ledger(self):
+        """资产行 = 本周版本行引用的 ∪ 本周 SKU 图流水引用的；没被引用的不进包。"""
+        self.conn.executemany(
+            "INSERT INTO product_image_assets(content_hash, mime, content) VALUES (?,?,?)",
+            [(H3, "image/png", b"png-bytes-3"), (H4, "image/jpeg", b"jpeg-bytes-4")])
+        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s2",
+                      content_hash=H3, url="https://img.example/sku-3.png")
+        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s3",
+                      content_hash=H2, source="主图代填")          # 与版本行同一张：并集去重
+        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s4",
+                      source="无图")
+        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s5",
+                      image_error="超时", url="https://img.example/sku-5.png")
+        add_sku_image(self.conn, "2026-09-09", content_hash=H1)    # 上一周：不进这个包
+
+        conn = self.build("2026-W38")
+
+        self.assertEqual(
+            [tuple(row) for row in conn.execute(
+                "SELECT content_hash, mime FROM product_image_assets ORDER BY content_hash")],
+            [(H2, "image/png"), (H3, "image/png")],
+            "版本行那张（H2）与只在流水里的那张（H3）；无图/失败行没有哈希，上一周的不进")
+
     def test_a_silent_week_exports_empty_tables_not_other_weeks(self):
-        """没有任何一周数据的周窗口：六张表都空，但结构齐全。"""
+        """没有任何一周数据的周窗口：七张表都空，但结构齐全。"""
         conn = self.build("2026-W36")
 
         self.assertEqual(
@@ -177,6 +242,12 @@ class PackageBuildTests(unittest.TestCase):
         self.assertEqual(
             conn.execute("SELECT COUNT(*) FROM product_image_assets").fetchone()[0], 0)
         self.assertEqual(export.read_package_meta(conn)["rows"]["inventory"], 0)
+
+    def test_the_package_says_v2_in_its_metadata(self):
+        """口径版本进了一位（v2）：SKU 图流水与资产并集是这个格式的一部分。"""
+        conn = self.build("2026-W37")
+
+        self.assertEqual(export.read_package_meta(conn)["format_version"], "v2")
 
     def test_crawl_in_progress_is_recorded_as_given(self):
         export.build_package(
@@ -284,6 +355,31 @@ class ExportRunTests(unittest.TestCase):
                 "SELECT date FROM inventory ORDER BY date")],
             ["2026-09-16", "2026-09-17"])
 
+    def test_a_package_from_the_previous_format_version_is_republished(self):
+        """远端那份是上一版程序发的（六表、没有 SKU 图流水）：新程序读不成它的摘要，同数据也重发。"""
+        self.export("2026-W38")
+        clone = self.exchange / "raw-m1"
+        rel = "data/2026/W38-m1.db.gz"
+        path = self.box.tmp / "as-v1.db"
+        path.write_bytes(gzip.decompress((clone / rel).read_bytes()))
+        conn = sqlite3.connect(path)
+        conn.execute("DROP TABLE sku_image_versions")
+        conn.execute("DELETE FROM exchange_meta WHERE key='rows_sku_image_versions'")
+        conn.execute("UPDATE exchange_meta SET value='v1' WHERE key='format_version'")
+        conn.commit()
+        conn.close()
+        self.box.commit_push(clone, {rel: gzip.compress(path.read_bytes(), mtime=0)},
+                             message="上一版程序发的包")
+        before = int(self.box.must("rev-list", "--count", "main", cwd=self.remote).strip())
+
+        result = self.export("2026-W38")
+
+        self.assertTrue(result.published, result.failure)
+        self.assertFalse(result.unchanged, "上一版格式的包认不出：同数据也要重发")
+        self.assertEqual(self.commits(), before + 1, "重发正是多的那一笔")
+        self.assertEqual(export.read_package_meta(self.read_published())["format_version"],
+                         "v2")
+
     def test_a_backfilled_week_lands_in_its_own_directory_file(self):
         result = self.export("2026-W37")
 
@@ -365,9 +461,21 @@ class ExportRunTests(unittest.TestCase):
         self.assertFalse(idle.crawl_in_progress)
 
     def test_manifest_lists_exactly_the_keys_the_package_references(self):
-        """清单恰等于包引用的 key 集：W38 那份只引用 W38 那张图，多一个少一个都不行。"""
+        """清单恰等于包引用的 key 集：版本行引用的 ∪ SKU 图流水引用的，多一个少一个都不行。
+
+        W38 多一张只在流水里的图（H3），流水里代填主图那张（H2）与版本行同一张、只算一个 key。
+        """
+        self.conn.execute(
+            "INSERT INTO product_image_assets(content_hash, mime, content) VALUES (?,?,?)",
+            (H3, "image/png", b"png-bytes-3"))
+        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s2",
+                      content_hash=H3, url="https://img.example/sku-3.png")
+        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s3",
+                      content_hash=H2, source="主图代填")
+        add_sku_image(self.conn, "2026-09-09", content_hash=H1)
         self.export("2026-W38")
         key2 = f"img/cd/{H2}.png"
+        key3 = f"img/ef/{H3}.png"
 
         check = self.box.clone(self.remote, "manifest-w38")
         raw = gzip.decompress(
@@ -375,7 +483,7 @@ class ExportRunTests(unittest.TestCase):
         manifest = json.loads(raw.decode("utf-8"))
 
         self.assertEqual(manifest["package"], "W38-m1.db.gz")
-        self.assertEqual(manifest["keys"], [key2])
+        self.assertEqual(manifest["keys"], [key2, key3])
 
         self.export("2026-W37")
         check37 = self.box.clone(self.remote, "manifest-w37")
@@ -400,6 +508,41 @@ class ExportRunTests(unittest.TestCase):
         self.assertEqual((second.images.uploaded, second.images.skipped), (0, 1),
                          "已经传过的 key 不再传")
         self.assertEqual(second.images.uploaded_bytes, 0)
+
+    def test_a_ledger_only_image_uploads_once_and_backfills_after_a_failed_run(self):
+        """只在 SKU 图流水里出现的图：只传新增；同内容重跑补上上次没传成的那张。"""
+        class Flaky(FakeImageStore):
+            def __init__(self):
+                super().__init__()
+                self.refuse = True
+
+            def upload(self, key: str, data: bytes) -> None:
+                if self.refuse:
+                    raise ImageStoreError("COS 503：稍后再试")
+                super().upload(key, data)
+
+        self.conn.execute(
+            "INSERT INTO product_image_assets(content_hash, mime, content) VALUES (?,?,?)",
+            (H3, "image/png", b"png-bytes-3"))
+        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s2",
+                      content_hash=H3, url="https://img.example/sku-3.png")
+        store = Flaky()
+
+        first = self.export("2026-W38", store=store)
+
+        self.assertTrue(first.published, "包照发；图片这趟没传成")
+        self.assertIn("503", first.images.failure)
+        self.assertEqual(store.uploaded, {})
+
+        store.refuse = False
+        second = self.export("2026-W38", store=store)
+
+        self.assertTrue(second.unchanged, "同内容重跑：没有新提交")
+        self.assertEqual(store.uploaded,
+                         {f"img/cd/{H2}.png": b"png-bytes-2",
+                          f"img/ef/{H3}.png": b"png-bytes-3"},
+                         "上次没传上去的这次补上（版本行那张与流水那张都补）")
+        self.assertEqual(second.images.skipped, 0)
 
     def test_keys_already_in_the_bucket_do_not_disturb_the_judgement(self):
         self.store = FakeImageStore(existing=["img/zz/other-machine.jpg"])

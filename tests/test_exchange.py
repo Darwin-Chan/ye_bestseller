@@ -374,7 +374,7 @@ class CleanRunTests(unittest.TestCase):
         self.assertNotIn("## 五、冲突", report)     # 干净场景不出现冲突节（样例的同形）
         self.assertIn("W38-m1.db.gz", report)
         self.assertIn("- 本机负责：A01", report)
-        self.assertIn("- 行数：inventory 7 · products 1 · skus 1 · 版本 7", report)
+        self.assertIn("- 行数：inventory 7 · products 1 · skus 1 · 版本 7 · SKU 图 0", report)
         self.assertIn("| raw-m2 | W38 | 17 | 17 | 0 | 0 | 0（0.0 MB） | 已导入 |", report)
         self.assertIn("| raw-m3 | W38 | 17 | 17 | 0 | 0 | 0（0.0 MB） | 已导入 |", report)
         self.assertIn("1. 没有待办：本周干净", report)
@@ -395,6 +395,71 @@ class CleanRunTests(unittest.TestCase):
             "SELECT machine_id, week FROM import_packages ORDER BY machine_id").fetchall()
         self.assertEqual([tuple(r) for r in packages], [("m2", WEEK), ("m3", WEEK)])
         self.assertEqual(len(outcome.imports), 2)
+
+
+class SkuImageLedgerCase(unittest.TestCase):
+    """SKU 图这半的共用夹具：一趟干净世界 + 往本机库里直插 SKU 图流水行。"""
+
+    def setUp(self):
+        self.world = ConsoleWorld(self)
+        self.world.plan(("A01", "m1", 3), ("A02", "m2", 3), ("A03", "m3", 3))
+        self.world.crawls([("A01", day) for day in DAYS])
+        self.world.publish("m2", [("A02", day) for day in DAYS])
+        self.world.publish("m3", [("A03", day) for day in DAYS])
+
+    def add_sku_image(self, day, *, content_hash=None, image_error=None,
+                      source="专属图") -> None:
+        """直插一条 A01 那件商品的 SKU 图流水行；给了哈希就连字节一起进资产池。"""
+        if content_hash is not None:
+            self.world.conn.execute(
+                "INSERT OR IGNORE INTO product_image_assets(content_hash, mime, content) "
+                "VALUES (?,?,?)", (content_hash, "image/jpeg", b"sku-jpeg-bytes"))
+        self.world.conn.execute(
+            "INSERT INTO sku_image_versions(shop_key, offer_id, sku_id, observed_at, "
+            "observed_date, image_url, content_hash, image_error, source) "
+            "VALUES ('A01','A01-o1','s1',?,?,?,?,?,?)",
+            (f"{day}T10:00:00+08:00", day, "https://img.example/sku.jpg", content_hash,
+             image_error, source))
+        self.world.conn.commit()
+
+
+class SkuImageReportTests(SkuImageLedgerCase):
+    """周报带 SKU 图：行数一行纳入流水计数，失败的进待办——空图与代填不是失败。"""
+
+    def test_the_report_counts_the_ledger_rows(self):
+        self.add_sku_image(DAYS[0], content_hash=IMG_HASH)
+        self.add_sku_image(DAYS[1], source="无图")
+
+        outcome = self.world.run()
+
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(outcome.export.rows["sku_image_versions"], 2)
+        self.assertIn("- 行数：inventory 7 · products 1 · skus 1 · 版本 7 · SKU 图 2",
+                      self.world.report())
+
+    def test_failed_sku_images_go_to_the_todo_with_the_retry_entry(self):
+        self.add_sku_image(DAYS[0], content_hash=IMG_HASH, source="主图代填")
+        self.add_sku_image(DAYS[1], source="无图")
+        self.add_sku_image(DAYS[2], image_error="超时")
+
+        outcome = self.world.run()
+
+        self.assertEqual(outcome.exit_code, 0)
+        todo = todo_of(self.world.report())
+        self.assertIn("1 条 SKU 图下载失败", todo)
+        self.assertIn("python -m bestseller_monitor.product_images", todo)
+        self.assertIn("--retry-sku-image", todo, "待办点到重试命令的 SKU 图入口（票 03 的形状）")
+
+    def test_empty_and_filled_sku_images_are_not_failures(self):
+        self.add_sku_image(DAYS[0], content_hash=IMG_HASH, source="主图代填")
+        self.add_sku_image(DAYS[1], source="无图")
+
+        outcome = self.world.run()
+
+        self.assertEqual(outcome.exit_code, 0)
+        report = self.world.report()
+        self.assertIn("1. 没有待办：本周干净", report)
+        self.assertNotIn("SKU 图下载失败", report)
 
 
 class SecondRunTests(unittest.TestCase):

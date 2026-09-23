@@ -4,13 +4,13 @@
 
 - 一个 SQLite 文件（提交前压成 `.db.gz`），落在 `raw-<机器>` 的
   `data/<年>/<周>-<机器>.db.gz`（如 `data/2026/W38-m1.db.gz`）。
-- 包内 = 交换集六表 + 一张元数据表 `exchange_meta`。列集**显式**列出、不 `SELECT *`
+- 包内 = 交换集七表 + 一张元数据表 `exchange_meta`。列集**显式**列出、不 `SELECT *`
   （包与本地库的列可以不同；汇总侧同样按显式投影读）。
 - **周窗口**：包是「这一周的切片」——`inventory` 按 `date`、`product_information_versions`
-  按 `observed_date` 取窗口内（北京日期，ISO 周周一至周日）；`product_image_assets` 只收
-  被本周版本行引用的（只带元数据，字节不进包，spec §3）；身份表（`shops`/`products`/`skus`）
-  收本周观测碰到的那些行。每周一片，全部周包的并集 = 全量——补历史（W36/W37）与冷启动重放
-  都靠这一条。
+  与 `sku_image_versions` 按 `observed_date` 取窗口内（北京日期，ISO 周周一至周日）；
+  `product_image_assets` 只收被本周版本行或本周 SKU 图流水行引用的（只带元数据，字节不进包，
+  spec §3）；身份表（`shops`/`products`/`skus`）收本周观测碰到的那些行。每周一片，全部周包的
+  并集 = 全量——补历史（W36/W37）与冷启动重放都靠这一条。
 - **只发「自己那份」**（票据 10 的报告口径逼出来的第一条，spec §9 的交换集不含来源列）：
   观测表按 (店铺, 日期) 组过滤——组归取胜 claim 的机器（`merge_claims`，票据 09），本机采的
   组照发、账说归别人的不发；身份表按 `merge_seen` 的最近写者同理。不滤的话，导进来的行会
@@ -26,7 +26,7 @@
 **一致性快照**：源库只读打开、单个 `BEGIN` 事务里把所有行读完（WAL 下不锁正在跑的
 采集，也看不见任何未提交的半截事务），再往包库里写。源库自始至终只读，export 不改本机库。
 
-**同周重跑不产生多余提交**：拿新包的**内容摘要**（`package_digest`，六表逐行的规范摘要，
+**同周重跑不产生多余提交**：拿新包的**内容摘要**（`package_digest`，七表逐行的规范摘要，
 不含生成时刻这类每次都会变的东西）与 raw 库里已发布那份比——比的是 **HEAD 里那份**
 （远端的事实），工作区里躺着的残迹不算数；一样就不写文件、不提交，只把推送再试一次
 （上次推失败留下的那笔在这里补上，真的是空的推送是个空动作）。
@@ -61,8 +61,8 @@ from bestseller_monitor.weekly_plan import iso_week_label, week_monday
 from bestseller_monitor.weekly_plan import week_window as plan_week_window
 
 # 导出程序口径版本：包格式（表、列、筛选口径）变化时进一位——发布侧据此重发，
-# 汇总侧据此认出旧包。
-EXPORT_FORMAT_VERSION = "v1"
+# 汇总侧据此认出旧包。v2 = 加 SKU 图流水（`sku_image_versions`）与资产并集。
+EXPORT_FORMAT_VERSION = "v2"
 
 META_TABLE = "exchange_meta"
 PACKAGE_SUFFIX = ".db.gz"
@@ -192,14 +192,31 @@ EXCHANGE_TABLES: tuple[_PackageTable, ...] = (
         owned=_owned_observed("product_information_versions", "observed_date"),
     ),
     _PackageTable(
+        "sku_image_versions",
+        (("shop_key", "TEXT NOT NULL"), ("offer_id", "TEXT NOT NULL"),
+         ("sku_id", "TEXT NOT NULL"), ("observed_at", "TEXT NOT NULL"),
+         ("observed_date", "TEXT NOT NULL"), ("image_url", "TEXT"),
+         ("content_hash", "TEXT"), ("image_error", "TEXT"), ("source", "TEXT NOT NULL")),
+        slice_sql="SELECT {cols} FROM sku_image_versions "
+                  "WHERE observed_date BETWEEN :start AND :end "
+                  "AND {owned} ORDER BY {cols}",
+        owned=_owned_observed("sku_image_versions", "observed_date"),
+    ),
+    # 资产行 = 「本周版本行 ∪ 本周 SKU 图流水行」引用到的哈希（spec §3）。两个 arm 各带
+    # 自己的身份过滤（`{owned}` 里点名的表各不相同，替换成哪一张都要跟着换），这里两段
+    # 都写实、不用占位符——共用一个 `{owned}` 会把过滤条件指着错表。
+    _PackageTable(
         "product_image_assets",
         (("content_hash", "TEXT"), ("mime", "TEXT NOT NULL")),
         primary_key=("content_hash",),
         slice_sql="SELECT {cols} FROM product_image_assets WHERE content_hash IN ("
                   "SELECT content_hash FROM product_information_versions "
                   "WHERE observed_date BETWEEN :start AND :end AND content_hash IS NOT NULL "
-                  "AND {owned}) ORDER BY {cols}",
-        owned=_owned_observed("product_information_versions", "observed_date"),
+                  f"AND {_owned_observed('product_information_versions', 'observed_date')} "
+                  "UNION SELECT content_hash FROM sku_image_versions "
+                  "WHERE observed_date BETWEEN :start AND :end AND content_hash IS NOT NULL "
+                  f"AND {_owned_observed('sku_image_versions', 'observed_date')}"
+                  ") ORDER BY {cols}",
     ),
 )
 
@@ -403,7 +420,7 @@ def _meta_rows(*, week: str, machine_id: str, crawl_in_progress: bool,
 
 
 def package_digest(conn: sqlite3.Connection) -> str:
-    """包的内容摘要：六表逐行的规范摘要，+ 口径版本与机器/周。
+    """包的内容摘要：七表逐行的规范摘要，+ 口径版本与机器/周。
 
     不含生成时刻、是否在采这类每次都可能变的东西——「同周无新数据重跑」靠它判。
     行序按列排序（重跑与跨机器都可复现），与 SQLite 文件的物理布局无关。
@@ -453,14 +470,25 @@ class ImageRef:
 def package_image_keys(conn: sqlite3.Connection) -> tuple[ImageRef, ...]:
     """包引用的图片，按 key 排序。
 
-    引用 = 包内资产表的行。包里的资产表恰好收「本周版本行引用到的那些」（见取数 SQL），
-    所以清单恰等于包引用的 key 集；mime 也在资产表里，key 的扩展名由它定。
+    引用 = 包内资产表的行。包里的资产表恰好收「本周版本行 ∪ 本周 SKU 图流水行引用到的
+    那些」（见取数 SQL），所以清单恰等于包引用的 key 集；mime 也在资产表里，key 的
+    扩展名由它定。
     """
     return tuple(sorted(
         (ImageRef(image_key(content_hash, mime), content_hash)
          for content_hash, mime in
          conn.execute("SELECT content_hash, mime FROM product_image_assets")),
         key=lambda ref: ref.key))
+
+
+def failed_sku_images(conn: sqlite3.Connection) -> int:
+    """包内失败的 SKU 图流水行数（`image_error` 非空）——空图与代填不是失败。
+
+    数的就是包内那批行 = 本周窗口里归本机那份（「本机取胜 claim」的组过滤已经落在
+    取数 SQL 里，这里不重写一遍）。周报的待办拿它点名重试对象。
+    """
+    return conn.execute(
+        "SELECT COUNT(*) FROM sku_image_versions WHERE image_error IS NOT NULL").fetchone()[0]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -491,6 +519,7 @@ class ExportResult:
     package_size: int                    # 包（.db.gz）的字节大小
     published: bool                      # 这次跑完包在远端上（同内容重跑的空推确认也算）
     unchanged: bool                      # 与已发布那份同内容：没有新提交
+    sku_image_failures: int = 0          # 包里下载失败的 SKU 图流水行数（待办点名重试对象）
     commit: str | None = None            # 包在远端的提交（短哈希）；没发成时是 None
     failure: str | None = None           # 没做成事时的原因（拉不动 / 推不动）
     images: ImageUploadResult | None = None    # 没发成事的那两条路上是 None（图片这趟没做）
@@ -608,6 +637,7 @@ class _BuiltPackage:
     rows: dict[str, int]
     digest: str
     images: tuple[ImageRef, ...]
+    sku_image_failures: int
 
 
 def _build(source: pathlib.Path, outbox: pathlib.Path, package_rel: str, *,
@@ -624,13 +654,15 @@ def _build(source: pathlib.Path, outbox: pathlib.Path, package_rel: str, *,
         rows = read_package_meta(conn)["rows"]
         digest = package_digest(conn)
         images = package_image_keys(conn)
+        sku_image_failures = failed_sku_images(conn)
     finally:
         conn.close()
     package_gz = pack_gzip(package_path.read_bytes())
     (outbox / f"{base}.db.gz").write_bytes(package_gz)
     return _BuiltPackage(base=base, package_gz=package_gz,
                          manifest_gz=_manifest_bytes(package_name, images),
-                         rows=rows, digest=digest, images=images)
+                         rows=rows, digest=digest, images=images,
+                         sku_image_failures=sku_image_failures)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -702,7 +734,8 @@ def export(cfg, *, week: str | None = None, store: ImageStore | None = None) -> 
     result = dict(week=week, machine_id=machine_id, package_rel=package_rel,
                   manifest_rel=manifest_rel, rows=built.rows,
                   crawl_in_progress=crawl_in_progress,
-                  package_size=len(built.package_gz))
+                  package_size=len(built.package_gz),
+                  sku_image_failures=built.sku_image_failures)
     if not (raw_dir / ".git").exists():
         return ExportResult(**result, published=False, unchanged=False, failure=(
             f"raw 库还没 clone 到 {raw_dir}：按上机清单第 9 步 clone 本机那条 raw 库"

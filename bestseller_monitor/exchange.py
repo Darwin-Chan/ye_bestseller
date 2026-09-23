@@ -870,6 +870,12 @@ def _todo(*, machine_id, week, plan_of_shop, gaps, conflicts, missing, pulls, ex
             items.append("导出没成功（见第一节）：修好通道后重跑一次")
         elif export_result.images is not None and export_result.images.failure is not None:
             items.append("图片通道这趟没传成（见第一节）：通道恢复后重跑一次导出就能补上")
+        if export_result.sku_image_failures:
+            # 空图与代填不是失败（`export.failed_sku_images` 的口径），这里只点失败的行。
+            items.append(f"本周有 {export_result.sku_image_failures} 条 SKU 图下载失败"
+                         "（见第一节）：用 SKU 图重试命令按最新失败行补回来"
+                         "（`python -m bestseller_monitor.product_images "
+                         "--retry-sku-image <流水行编号>`），库存数据不动")
     for result in imported.values():
         if result.failed:
             items.append(f"{result.package} 没导成（见第二节）：修好后重跑一次"
@@ -1110,9 +1116,10 @@ def _publish_section(outcome: RunOutcome) -> list[str]:
                    f"raw-{result.machine_id} @ {result.commit}")
     out.append("- 本机负责：" + _self_shops_text(outcome))
     rows = result.rows
-    out.append("- 行数：inventory {:,} · products {:,} · skus {:,} · 版本 {:,}".format(
-        rows.get("inventory", 0), rows.get("products", 0), rows.get("skus", 0),
-        rows.get("product_information_versions", 0)))
+    out.append("- 行数：inventory {:,} · products {:,} · skus {:,} · 版本 {:,} · SKU 图 {:,}"
+               .format(rows.get("inventory", 0), rows.get("products", 0),
+                       rows.get("skus", 0), rows.get("product_information_versions", 0),
+                       rows.get("sku_image_versions", 0)))
     out.append("- 图片：" + _images_text(result.images))
     return out + [""]
 
