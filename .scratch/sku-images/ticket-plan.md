@@ -59,4 +59,7 @@ Approval: 设计已确认（2026-09-23 grill-with-docs 两轮问答 Q1–Q7 收�
   `.scratch/logs/tickets/sku-images/06/full-suite/`）；trunk 随后落到 `a3f0e32`（世界模板试点，
   只动 `test_exchange` 夹具、+4 项用例），在 `a3f0e32`＋本票改动上再跑一趟 **`合计 1370 项
   （预期 1370，计数对账一致），总耗时 744.0s，段结果 7/7 段 OK，结论 OK`**（日志
-  `.scratch/logs/tickets/sku-images/06/on-a3f0e32/`）。判断项与留笔见票 06 Comments。
+  `.scratch/logs/tickets/sku-images/06/on-a3f0e32/`）。两轴审查（固定点 `a3f0e32...9c0c78a`）
+  后一处整改：§8 新半句「承载取胜结果的六张表」改「参与收敛对照的六张表」（与 §6 新写的
+  「不参与取胜裁决」相抵）；只动文档措辞、不进测试面，两趟全量照旧有效。硬违规一条（跟踪
+  `.scratch/` 与 README 文档地图相抵）与其余留笔见票 06 Comments。
