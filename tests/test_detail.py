@@ -9,8 +9,9 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from bestseller_monitor import dedupe, detail, rounds
-from bestseller_monitor.db import Database, DayBoundaryReached, connect, cst_date, utcnow
-from frozen_clock import frozen_clock
+from bestseller_monitor.db import (Database, DayBoundaryReached, SKU_IMAGE_FILLED,
+                                   SKU_IMAGE_NONE, SKU_IMAGE_OWN, connect, cst_date, utcnow)
+from frozen_clock import FROZEN_DATE, FROZEN_NOW, frozen_clock
 from helpers import crawler_cfg, new_round
 
 
@@ -94,6 +95,8 @@ class ImageEvidenceTests(DetailTestCase):
         from http.client import IncompleteRead
         observation = self.payload()
         observation.payload['main_image_url'] = 'https://image.example/item.png'
+        observation.payload['rows'][0].update(sku_id='s1',
+                                              sku_image_url='https://image.example/sku.png')
         with patch('bestseller_monitor.product_images.urlopen', side_effect=IncompleteRead(b'partial')):
             result = self.capture(self.target(), self.observe(observation))
         self.assertEqual(result.outcome, detail.Outcome.SUBMITTED)
@@ -101,6 +104,15 @@ class ImageEvidenceTests(DetailTestCase):
         self.assertIsNone(version['content_hash'])
         self.assertIn('IncompleteRead', version['image_error'])
         self.assertEqual(len(self.snapshots('成功')), 1)
+        # SKU 图的失败同样只进流水行：不记失败快照、不占详情重试账、不挡库存。
+        sku_image = self.rows('SELECT * FROM sku_image_versions')[0]
+        self.assertEqual(sku_image['source'], SKU_IMAGE_OWN,
+                         "页面给了地址就是它自己的图，下载败也不拿主图代填")
+        self.assertIsNone(sku_image['content_hash'])
+        self.assertIn('IncompleteRead', sku_image['image_error'])
+        self.assertEqual(self.snapshots('失败'), [])
+        self.assertEqual(self.db.detail_attempts_used(self.round_id, 'A01', '11'), 1,
+                         "图失败不占详情重试账")
 
     def test_shared_capture_retries_image_and_persists_asset(self):
         import io
@@ -119,6 +131,133 @@ class ImageEvidenceTests(DetailTestCase):
         self.assertIsNotNone(version['content_hash'])
         self.assertIsNone(version['image_error'])
         self.assertEqual(self.rows('SELECT content FROM product_image_assets')[0]['content'], stream.getvalue())
+
+
+class SkuImageLedgerTests(DetailTestCase):
+    """SKU 图随观测落库（票 02）：每个 SKU 每次观测一行，来源三态在库里可断言。"""
+
+    def png(self, color):
+        """一张单色 PNG 的字节。"""
+        import io
+        from PIL import Image
+        stream = io.BytesIO()
+        Image.new('RGB', (2, 2), color).save(stream, format='PNG')
+        return stream.getvalue()
+
+    def serving(self, bodies):
+        """把图片通道的传输打桩成「按地址发预置字节」的字典（与主图那条同一个入口）。"""
+        import io
+
+        def fetch(request, timeout=None):
+            return io.BytesIO(bodies[request.full_url])
+
+        return patch('bestseller_monitor.product_images.urlopen', side_effect=fetch)
+
+    def test_every_sku_gets_a_ledger_row_with_its_source(self):
+        import hashlib
+        red_bytes, main_bytes = self.png('red'), self.png('green')
+        observation = detail.Observation(payload={
+            "product_name": "商品11",
+            "main_image_url": "https://img.example/main.png",
+            "rows": [
+                {"sku_id": "s-red", "sku_name": "红色", "sku_stock": 3,
+                 "sku_image_url": "https://img.example/red.png"},
+                {"sku_id": "s-plain", "sku_name": "随机不挑色", "sku_stock": 4,
+                 "sku_image_url": None},
+            ],
+        })
+
+        with self.serving({"https://img.example/main.png": main_bytes,
+                           "https://img.example/red.png": red_bytes}):
+            result = self.capture(self.target(), self.observe(observation))
+
+        self.assertEqual(result.outcome, detail.Outcome.SUBMITTED)
+        ledger = {row["sku_id"]: row for row in self.rows(
+            "SELECT * FROM sku_image_versions WHERE shop_key='A01' AND offer_id='11'")}
+        self.assertEqual(set(ledger), {"s-red", "s-plain"}, "每个 SKU 一行")
+        own = ledger["s-red"]
+        self.assertEqual(own["source"], SKU_IMAGE_OWN)
+        self.assertEqual(own["image_url"], "https://img.example/red.png")
+        self.assertEqual(own["content_hash"], hashlib.sha256(red_bytes).hexdigest())
+        self.assertIsNone(own["image_error"])
+        self.assertEqual(own["observed_at"], FROZEN_NOW)
+        self.assertEqual(own["observed_date"], FROZEN_DATE)
+        filled = ledger["s-plain"]
+        self.assertEqual(filled["source"], SKU_IMAGE_FILLED)
+        self.assertIsNone(filled["image_url"])
+        self.assertEqual(filled["content_hash"], hashlib.sha256(main_bytes).hexdigest(),
+                         "空图用当次主图的字节代填")
+        assets = {row["content_hash"] for row in self.rows(
+            "SELECT content_hash FROM product_image_assets")}
+        self.assertEqual(assets,
+                         {hashlib.sha256(main_bytes).hexdigest(),
+                          hashlib.sha256(red_bytes).hexdigest()},
+                         "专属图字节也进同一个内容寻址池")
+
+    def test_a_real_page_flows_into_the_ledger(self):
+        """从真 HTML 走一遍（票 01 的载荷键直连下载）：配图的值记专属图，没配图的值用
+        当次商品主图代填——解析与落库之间没有第二套口径。"""
+        import hashlib
+        html = (
+            '<script>var x={"imageList":[{"fullPathImageURI":"https://img.example/main.png"}],'
+            '"skuProps":['
+            '{"prop":"颜色","value":[{"imageUrl":"https://img.example/red.png","name":"红色#A1#"},'
+            '{"name":"颜色随机#A2#"}]}],'
+            '"skuInfoMap":{'
+            '"红色#A1#":{"skuId":1,"discountPrice":"1","canBookCount":5,'
+            '"specAttrs":"红色#A1#"},'
+            '"颜色随机#A2#":{"skuId":2,"discountPrice":"1","canBookCount":5,'
+            '"specAttrs":"颜色随机#A2#"}}};</script>'
+        )
+        observation = detail.observe_html(html, "https://detail.1688.com/offer/11.html")
+
+        red_bytes, main_bytes = self.png('red'), self.png('green')
+        with self.serving({"https://img.example/red.png": red_bytes,
+                           "https://img.example/main.png": main_bytes}):
+            result = self.capture(self.target(), self.observe(observation))
+
+        self.assertEqual(result.outcome, detail.Outcome.SUBMITTED)
+        ledger = {row["sku_id"]: row for row in self.rows("SELECT * FROM sku_image_versions")}
+        self.assertEqual(set(ledger), {"1", "2"})
+        self.assertEqual(ledger["1"]["source"], SKU_IMAGE_OWN)
+        self.assertEqual(ledger["1"]["image_url"], "https://img.example/red.png")
+        self.assertEqual(ledger["1"]["content_hash"], hashlib.sha256(red_bytes).hexdigest())
+        self.assertEqual(ledger["2"]["source"], SKU_IMAGE_FILLED)
+        self.assertEqual(ledger["2"]["content_hash"], hashlib.sha256(main_bytes).hexdigest())
+
+    def test_a_missing_main_image_leaves_an_empty_sku_row_without_an_image(self):
+        """当次主图没地址 → 无图行：哈希空、无失败原因（空图不是失败）。"""
+        observation = detail.Observation(payload={
+            "product_name": "商品11",
+            "main_image_url": None,
+            "rows": [{"sku_id": "s-plain", "sku_name": "随机不挑色", "sku_stock": 4,
+                      "sku_image_url": None}]})
+
+        result = self.capture(self.target(), self.observe(observation))
+
+        self.assertEqual(result.outcome, detail.Outcome.SUBMITTED)
+        row = self.rows("SELECT * FROM sku_image_versions")[0]
+        self.assertEqual(row["source"], SKU_IMAGE_NONE)
+        self.assertIsNone(row["content_hash"])
+        self.assertIsNone(row["image_error"])
+        self.assertEqual(len(self.snapshots("成功")), 1, "无图不挡库存提交")
+
+    def test_a_failed_main_image_download_also_leaves_the_row_without_an_image(self):
+        """当次主图有地址但下载败 → 同样是无图行（不借旧观测的图）。"""
+        observation = detail.Observation(payload={
+            "product_name": "商品11",
+            "main_image_url": "https://img.example/main.png",
+            "rows": [{"sku_id": "s-plain", "sku_name": "随机不挑色", "sku_stock": 4,
+                      "sku_image_url": None}]})
+
+        with patch('bestseller_monitor.product_images.urlopen', side_effect=OSError('offline')):
+            result = self.capture(self.target(), self.observe(observation))
+
+        self.assertEqual(result.outcome, detail.Outcome.SUBMITTED)
+        row = self.rows("SELECT * FROM sku_image_versions")[0]
+        self.assertEqual(row["source"], SKU_IMAGE_NONE)
+        self.assertIsNone(row["content_hash"])
+        self.assertIsNone(row["image_error"], "代填不成不是这个 SKU 自己的失败")
 
 
 class SameDaySkipTests(DetailTestCase):

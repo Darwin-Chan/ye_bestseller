@@ -8,7 +8,8 @@ from pathlib import Path
 
 from . import dedupe, rounds
 from .config import Config
-from .db import Database, cst_date, utcnow
+from .db import (SKU_IMAGE_FILLED, SKU_IMAGE_NONE, SKU_IMAGE_OWN, Database, cst_date,
+                 utcnow)
 from .parse import (extract_main_image, extract_skus_from_html, extract_title,
                     is_single_spec_offer)
 
@@ -247,6 +248,7 @@ def _capture_attempts(db: Database, cfg: Config, human, round_id: int, target: D
 
         from .product_images import acquire
         image_evidence = acquire(payload.get('main_image_url'))
+        _attach_sku_image_evidence(payload["rows"], image_evidence, acquire)
         db.submit_inventory_snapshot(
             round_id=round_id,
             shop_key=target.shop_key,
@@ -268,6 +270,31 @@ def _capture_attempts(db: Database, cfg: Config, human, round_id: int, target: D
                  target.shop_key, offer_id, len(payload["rows"]), attempt)
         return CaptureResult(Outcome.SUBMITTED, offer_id, sku_count=len(payload["rows"]))
     return CaptureResult(Outcome.FAILED, offer_id)
+
+
+def _attach_sku_image_evidence(rows: list[dict], main_image: dict, acquire) -> None:
+    """给每个 SKU 行挂上这次观测的图证据（来源三态见 `db.SKU_IMAGE_*`）。
+
+    图地址来自票 01 的载荷（`row["sku_image_url"]`，None = 页面没配图）。空图不是失败：
+    用当次观测的商品主图代填；当次主图也缺（没地址或下载败）就记无图行。
+    有地址但下载/校验败是失败行：如实记因、不代填、不借相邻观测的图——图失败不进失败
+    快照、不占详情重试账，只随流水行落库，不挡这次库存提交。
+    """
+    for row in rows:
+        url = str(row.get("sku_image_url") or "").strip()
+        if url:
+            image = acquire(url)
+            if "content" in image:
+                row["sku_image_evidence"] = {"url": url, "source": SKU_IMAGE_OWN,
+                                             "hash": image["hash"], "mime": image["mime"],
+                                             "content": image["content"]}
+            else:
+                row["sku_image_evidence"] = {"url": url, "source": SKU_IMAGE_OWN,
+                                             "error": image.get("error")}
+        elif "content" in main_image:
+            row["sku_image_evidence"] = {"url": None, "source": SKU_IMAGE_FILLED}
+        else:
+            row["sku_image_evidence"] = {"url": None, "source": SKU_IMAGE_NONE}
 
 
 def _failure_note(cfg: Config, round_id: int, offer_id: str,

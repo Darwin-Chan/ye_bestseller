@@ -27,6 +27,17 @@ CREATE TABLE IF NOT EXISTS product_information_versions (
 );
 CREATE INDEX IF NOT EXISTS idx_product_information_date
 ON product_information_versions(shop_key, offer_id, observed_date, observed_at);
+-- SKU 图流水（SKU 图线 spec §2/§3）：每次成功观测每个 SKU 一行（含空图与失败），字节复用
+-- product_image_assets 池（内容寻址，同图不重复存）。观测表口径与版本行同规——观测时刻
+-- UTC + 北京日期；观测事实写定就不回头改，下一观测自会有新行。来源三态见 SKU_IMAGE_*。
+CREATE TABLE IF NOT EXISTS sku_image_versions (
+    id INTEGER PRIMARY KEY, shop_key TEXT NOT NULL, offer_id TEXT NOT NULL,
+    sku_id TEXT NOT NULL, observed_at TEXT NOT NULL, observed_date TEXT NOT NULL,
+    image_url TEXT, content_hash TEXT REFERENCES product_image_assets(content_hash),
+    image_error TEXT, source TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sku_image_date
+ON sku_image_versions(shop_key, offer_id, sku_id, observed_date, observed_at);
 CREATE TABLE IF NOT EXISTS rounds (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT NOT NULL,
@@ -309,6 +320,19 @@ ROUND_TALLY_INDEX = "idx_snapshots_round_counts"
 VERSION_DEDUPE_KEY = ("shop_key", "offer_id", "observed_at",
                       "COALESCE(content_hash,'')", "COALESCE(image_error,'')")
 VERSION_DEDUPE_INDEX = "idx_product_information_dedupe"
+
+# SKU 图来源三态（`sku_image_versions.source`）：每行必居其一，库里可断言。空图（页面
+# 没给这个 SKU 配图）不是失败，用当次观测的商品主图代填；有地址但下载/校验败才算失败行。
+SKU_IMAGE_OWN = "专属图"
+SKU_IMAGE_FILLED = "主图代填"
+SKU_IMAGE_NONE = "无图"
+
+# SKU 图流水的去重键：照版本表的写法加 sku_id（一次观测 = 店铺、商品、SKU、时刻、图片
+# 结果）。NULL 折叠同理——无图行两列都是 NULL，不折进表达式就漏掉它们。索引由迁移建、
+# 不写进 SCHEMA，理由与版本表那条相同（见 _sku_image_dedupe_index）。
+SKU_IMAGE_DEDUPE_KEY = ("shop_key", "offer_id", "sku_id", "observed_at",
+                        "COALESCE(content_hash,'')", "COALESCE(image_error,'')")
+SKU_IMAGE_DEDUPE_INDEX = "idx_sku_image_dedupe"
 
 # 过程页刷新的两条索引：逐店 deny 计数、逐店时间跨度（名字要与上面 SCHEMA 里的
 # 两条 CREATE INDEX 一致，tests/test_db.py 有用例守着）。
@@ -682,6 +706,32 @@ def _version_dedupe_index(conn: sqlite3.Connection, out: _ReportBuilder) -> bool
     return True
 
 
+def _sku_image_dedupe_index(conn: sqlite3.Connection, out: _ReportBuilder) -> bool:
+    """迁移：给 SKU 图流水建去重索引（老库第一次开连接时建一次）。
+
+    与版本表那条同款：建不动就跳过（流水表真有重复键时 UNIQUE 建不上），下次开库再试——
+    一次迁移不该把库卡在打不开的状态。老库的表由 SCHEMA 在这次开库里补上，建索引接在它后面。
+    """
+    columns = {row[1] for row in
+               conn.execute('PRAGMA table_info("sku_image_versions")').fetchall()}
+    if not {"shop_key", "offer_id", "sku_id", "observed_at",
+            "content_hash", "image_error"} <= columns:
+        return False
+    if _has_index(conn, SKU_IMAGE_DEDUPE_INDEX):
+        return False
+    try:
+        conn.execute(
+            f"CREATE UNIQUE INDEX {SKU_IMAGE_DEDUPE_INDEX} ON sku_image_versions"
+            f"({', '.join(SKU_IMAGE_DEDUPE_KEY)})"
+        )
+    except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
+        log.warning("SKU 图去重索引建不上，本次跳过（下次开库再试）：%s", exc)
+        return False
+    out.created_indexes.append(SKU_IMAGE_DEDUPE_INDEX)
+    log.info("SKU 图去重索引迁移：建立 %s", SKU_IMAGE_DEDUPE_INDEX)
+    return True
+
+
 _MIGRATIONS: tuple[_Migration, ...] = (
     _Migration("drop_shops_active", _drop_shops_active),
     _Migration("skus_primary_key_on_sku_id", _skus_primary_key_on_sku_id),
@@ -700,6 +750,7 @@ _MIGRATIONS: tuple[_Migration, ...] = (
     _Migration("snapshot_success_index", _snapshot_success_index),
     _Migration("round_tally_index", _round_tally_index),
     _Migration("version_dedupe_index", _version_dedupe_index),
+    _Migration("sku_image_dedupe_index", _sku_image_dedupe_index),
     _add_column("crawler_process", "process_os_started", "TEXT"),
     _add_column("crawler_process", "browser_state", "TEXT NOT NULL DEFAULT 'UNKNOWN'"),
     _add_column("crawler_process", "browser_port", "INTEGER"),
@@ -1407,6 +1458,7 @@ class Database:
                 "collected_at": collected_at,
                 "page_status": "成功",
                 "attempt": attempt,
+                "sku_image_evidence": sku.get("sku_image_evidence"),
             })
 
         try:
@@ -1425,6 +1477,8 @@ class Database:
                 if 'content' in image:
                     self.conn.execute('INSERT OR IGNORE INTO product_image_assets VALUES (?, ?, ?)',
                                       (image['hash'], image['mime'], image['content']))
+            self._write_sku_image_versions(normalized, collected_at,
+                                           fill_hash=image.get('hash'))
             # 同一秒里的同一次观测只留一条（VERSION_DEDUPE_INDEX）：重复提交不整单回滚。
             self.conn.execute(
                 'INSERT OR IGNORE INTO product_information_versions '
@@ -1457,6 +1511,40 @@ class Database:
         except Exception:
             self.conn.rollback()
             raise
+
+    def _write_sku_image_versions(self, rows: list[dict], collected_at: str, *,
+                                  fill_hash: str | None) -> None:
+        """把每个 SKU 这次观测的图证据写成流水行（含空图与失败）；没带证据的行不写。
+
+        字节先入内容寻址池（同哈希不重复存），行再落流水——流水行的哈希必须指向池里
+        有的字节（外键）。同一秒里的重复提交按去重键折叠，不整单回滚（INSERT OR IGNORE）。
+
+        代填行的哈希以 `fill_hash`（这次真正落池的主图）为准：主图这次没落池（没地址或
+        校验没过）就没有可代填的字节，那一行如实记成无图。
+        """
+        day = cst_date(collected_at)
+        ledger = []
+        for row in rows:
+            evidence = row.get("sku_image_evidence")
+            if not evidence:
+                continue
+            if "content" in evidence:
+                self.conn.execute('INSERT OR IGNORE INTO product_image_assets VALUES (?, ?, ?)',
+                                  (evidence['hash'], evidence['mime'], evidence['content']))
+            source = evidence.get("source")
+            content_hash, error = evidence.get("hash"), evidence.get("error")
+            if source == SKU_IMAGE_FILLED:
+                content_hash, error = fill_hash, None
+                if content_hash is None:
+                    source = SKU_IMAGE_NONE
+            ledger.append((row["shop_key"], row["offer_id"], row["sku_id"], collected_at, day,
+                           evidence.get("url"), content_hash, error, source))
+        if not ledger:
+            return
+        self.conn.executemany(
+            'INSERT OR IGNORE INTO sku_image_versions (shop_key,offer_id,sku_id,observed_at,'
+            'observed_date,image_url,content_hash,image_error,source) VALUES (?,?,?,?,?,?,?,?,?)',
+            ledger)
 
     def _clear_other_granularity(self, round_id: int, shop_key: str, offer_id: str,
                                  day: str, *, offer_level: bool) -> None:

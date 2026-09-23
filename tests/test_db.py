@@ -9,6 +9,10 @@ from bestseller_monitor.db import (
     EVENT_REFRESH_INDEXES,
     ROUND_TALLY_INDEX,
     SCHEMA,
+    SKU_IMAGE_DEDUPE_INDEX,
+    SKU_IMAGE_FILLED,
+    SKU_IMAGE_NONE,
+    SKU_IMAGE_OWN,
     SNAPSHOT_SUCCESS_INDEX,
     ShopTally,
     VERSION_DEDUPE_INDEX,
@@ -16,7 +20,7 @@ from bestseller_monitor.db import (
     cst_date,
 )
 from bestseller_monitor import db
-from helpers import new_round
+from helpers import new_round, product_picture
 from bestseller_monitor.parse import DEFAULT_SKU_ID, DEFAULT_SKU_NAME
 
 
@@ -795,6 +799,84 @@ class DbTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(inventory["stock"], 180, "库存照常被后一次观测覆盖")
 
+    def test_submit_twice_in_the_same_second_keeps_one_sku_image_row_per_sku(self):
+        """SKU 图流水照版本行的折叠方式去重（票 02）：同一秒、同一图片结果的重复提交
+        每 SKU 只留一行；无图行两列都是 NULL，靠去重键里的 COALESCE 折成一条。"""
+        rid = new_round(self.db)
+        blue, main = product_picture('blue'), product_picture('red')
+        rows = [
+            {"sku_id": "own", "sku_name": "蓝", "sku_stock": 1,
+             "sku_image_evidence": {"url": "https://img.example/blue", "source": SKU_IMAGE_OWN,
+                                    "hash": blue["hash"], "mime": blue["mime"],
+                                    "content": blue["content"]}},
+            {"sku_id": "filled", "sku_name": "素色", "sku_stock": 1,
+             "sku_image_evidence": {"url": None, "source": SKU_IMAGE_FILLED}},
+            {"sku_id": "blank", "sku_name": "随机", "sku_stock": 1,
+             "sku_image_evidence": {"url": None, "source": SKU_IMAGE_NONE}},
+        ]
+        base = dict(
+            round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
+            offer_id="11", product_url="https://a/offer/11.html", list_title="商品",
+            detail_title="商品详情", main_image_url="https://img.example/main",
+            collected_at="2026-09-05T02:00:00+00:00", attempt=1, image_evidence=main,
+        )
+        self.db.submit_inventory_snapshot(**base, sku_rows=rows)
+        self.db.submit_inventory_snapshot(**{**base, "attempt": 2}, sku_rows=rows)
+
+        ledger = {row["sku_id"]: row for row in self.conn.execute(
+            "SELECT * FROM sku_image_versions WHERE shop_key='A' AND offer_id='11'")}
+        self.assertEqual(set(ledger), {"own", "filled", "blank"},
+                         "重复提交每 SKU 折叠成一行")
+        self.assertEqual(ledger["own"]["content_hash"], blue["hash"])
+        self.assertEqual(ledger["own"]["observed_date"], "2026-09-05")
+        self.assertEqual(ledger["filled"]["content_hash"], main["hash"],
+                         "代填行的哈希就是当次真正落池的主图")
+        self.assertIsNone(ledger["blank"]["content_hash"])
+        self.assertIsNone(ledger["blank"]["image_error"])
+        assets = {row[0] for row in
+                  self.conn.execute("SELECT content_hash FROM product_image_assets")}
+        self.assertEqual(assets, {main["hash"], blue["hash"]}, "同哈希不重复存")
+
+    def test_a_fill_whose_main_image_did_not_reach_the_pool_is_recorded_as_no_image(self):
+        """代填认的是真正落池的主图：这次主图校验没过（调用方给了坏内容）就没有可代填的
+        字节，那一行如实记成无图——流水行的哈希必须指向池里有的字节（外键），
+        且这一点绝不把库存提交整单带回去。"""
+        rid = new_round(self.db)
+        self.db.submit_inventory_snapshot(
+            round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
+            offer_id="11", product_url="https://a/offer/11.html", list_title="商品",
+            detail_title="商品详情", main_image_url="https://img.example/main",
+            sku_rows=[{"sku_id": "s1", "sku_name": "素色", "sku_stock": 1,
+                       "sku_image_evidence": {"url": None, "source": SKU_IMAGE_FILLED}}],
+            collected_at="2026-09-05T02:00:00+00:00", attempt=1,
+            image_evidence={"content": b"not an image"},
+        )
+
+        row = self.conn.execute("SELECT * FROM sku_image_versions").fetchone()
+        self.assertEqual(row["source"], SKU_IMAGE_NONE)
+        self.assertIsNone(row["content_hash"])
+        self.assertIsNone(row["image_error"])
+        version = self.conn.execute(
+            "SELECT * FROM product_information_versions").fetchone()
+        self.assertIsNotNone(version["image_error"], "主图这次没落池的事实记在主图版本行上")
+        stock = self.conn.execute(
+            "SELECT stock FROM inventory WHERE shop_key='A' AND offer_id='11'").fetchone()
+        self.assertEqual(stock["stock"], 1, "库存照常提交")
+
+    def test_rows_without_image_evidence_write_no_ledger_row(self):
+        """没带图证据的提交不写流水：流水记的是采集的图片观测，没观测过就不编造行
+        （只有采集路径才逐 SKU 带证据）。"""
+        rid = new_round(self.db)
+        self.db.submit_inventory_snapshot(
+            round_id=rid, shop_key="A", shop_url="https://a.example/", shop_name="店铺A",
+            offer_id="11", product_url="https://a/offer/11.html", list_title="商品",
+            detail_title="商品详情", main_image_url=None,
+            sku_rows=[{"sku_id": "s1", "sku_name": "S", "sku_stock": 1}],
+            collected_at="2026-09-05T02:00:00+00:00", attempt=1,
+        )
+        count = self.conn.execute("SELECT COUNT(*) FROM sku_image_versions").fetchone()[0]
+        self.assertEqual(count, 0)
+
     def test_event_log_append_only_and_interval_per_channel(self):
         rid = new_round(self.db)
         self.db.append_event(rid, "list_load", shop_key="A01", phase="listing")
@@ -1146,8 +1228,9 @@ class SnapshotDedupeMigrationTests(unittest.TestCase):
                                  "缺索引的老库要靠这次去重才建得起唯一索引")
                 self.assertEqual(
                     report.created_indexes,
-                    (SNAPSHOT_SUCCESS_INDEX, ROUND_TALLY_INDEX, VERSION_DEDUPE_INDEX),
-                    "去重建起唯一索引之后，本轮计数的覆盖索引与版本表去重索引也一并补上")
+                    (SNAPSHOT_SUCCESS_INDEX, ROUND_TALLY_INDEX, VERSION_DEDUPE_INDEX,
+                     SKU_IMAGE_DEDUPE_INDEX),
+                    "去重建起唯一索引之后，本轮计数的覆盖索引、版本表与 SKU 图去重索引也一并补上")
                 self.assertIn("snapshot_success_index", report.applied)
                 self.assertEqual(conn.execute(
                     "SELECT COUNT(*) FROM snapshots WHERE round_id=1 AND sku_id='red'"
@@ -1181,8 +1264,9 @@ class SnapshotDedupeMigrationTests(unittest.TestCase):
                 self.assertEqual(report.deduped_snapshot_rows, 0)
                 self.assertEqual(
                     report.created_indexes,
-                    (SNAPSHOT_SUCCESS_INDEX, ROUND_TALLY_INDEX, VERSION_DEDUPE_INDEX),
-                    "新库也在这次开库里建起本轮计数的覆盖索引与版本表去重索引")
+                    (SNAPSHOT_SUCCESS_INDEX, ROUND_TALLY_INDEX, VERSION_DEDUPE_INDEX,
+                     SKU_IMAGE_DEDUPE_INDEX),
+                    "新库也在这次开库里建起本轮计数的覆盖索引、版本表与 SKU 图去重索引")
             finally:
                 conn.close()
 
@@ -1376,6 +1460,71 @@ class InventoryDiffRetirementTests(unittest.TestCase):
                     )
                 self.assertEqual(str(ctx.exception),
                                  "table inventory has no column named diff")
+            finally:
+                conn.close()
+
+
+class SkuImageLedgerMigrationTests(unittest.TestCase):
+    """票 02：SKU 图流水走既有「连接即迁移」——老库开库自动获得空表与去重索引，
+    不需要任何手工动作；索引建不动（老库已有重复键）就跳过，库照开、下次再试。"""
+
+    @staticmethod
+    def _open_with_report(path: Path):
+        conn = db.open(path)
+        return conn, db.migrate(conn)
+
+    @staticmethod
+    def _library_without_the_ledger(tmp: str) -> Path:
+        """造一个本线之前的老库：建表（不跑迁移）后把流水表删掉，当作它从未存在过。"""
+        path = Path(tmp) / "legacy-no-ledger.db"
+        raw = sqlite3.connect(path)
+        raw.executescript(SCHEMA)
+        raw.execute("DROP TABLE sku_image_versions")
+        raw.commit()
+        raw.close()
+        return path
+
+    def test_an_old_library_gains_the_ledger_table_and_its_index_on_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn, report = self._open_with_report(self._library_without_the_ledger(tmp))
+            try:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM sku_image_versions").fetchone()[0]
+                self.assertEqual(count, 0, "老库开库自动获得空表")
+                self.assertIn("sku_image_dedupe_index", report.applied)
+                self.assertIn(SKU_IMAGE_DEDUPE_INDEX, report.created_indexes)
+                indexes = {row[1] for row in
+                           conn.execute('PRAGMA index_list("sku_image_versions")')}
+                self.assertIn(SKU_IMAGE_DEDUPE_INDEX, indexes)
+            finally:
+                conn.close()
+
+    def test_a_legacy_library_with_duplicate_ledger_keys_still_opens(self):
+        """老库流水表若已有重复键（正是本票之前没有索引时的形态），UNIQUE 建不上：
+        跳过并告警，库照开、行数据不动——一次迁移不该把库卡在打不开的状态。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy-dup-ledger.db"
+            raw = sqlite3.connect(path)
+            raw.executescript(SCHEMA)
+            raw.executemany(
+                "INSERT INTO sku_image_versions(shop_key, offer_id, sku_id, observed_at, "
+                "observed_date, image_url, content_hash, image_error, source) "
+                "VALUES ('A', '11', 's1', '2026-09-05T02:00:00+00:00', '2026-09-05', "
+                "NULL, NULL, NULL, ?)",
+                [(SKU_IMAGE_NONE,), (SKU_IMAGE_NONE,)],
+            )
+            raw.commit()
+            raw.close()
+
+            conn, report = self._open_with_report(path)
+            try:
+                self.assertNotIn("sku_image_dedupe_index", report.applied)
+                indexes = {row[1] for row in
+                           conn.execute('PRAGMA index_list("sku_image_versions")')}
+                self.assertNotIn(SKU_IMAGE_DEDUPE_INDEX, indexes, "建不上就跳过，重开再试")
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM sku_image_versions").fetchone()[0]
+                self.assertEqual(count, 2, "跳过只意味着不建索引，行数据不动")
             finally:
                 conn.close()
 
