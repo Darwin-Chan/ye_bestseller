@@ -44,6 +44,17 @@
 #matchMask .acts{display:flex;align-items:center;gap:12px;margin-top:18px}
 #matchMask .acts .spacer{flex:1}
 .skeleton{height:38px;border-radius:6px;background:linear-gradient(90deg,#eef2f7,#f6f8fb,#eef2f7);margin:8px 0}
+/* 确认屏两栏各自定高、内部滚动（票 04）：--col-h 由页面按视口算（见 fitReviewColumns），
+   分页行留在左列底部、不随列表滚走。窄屏（≤800px）与 .review-layout 的单栏降级同一个断点，
+   这里整段不生效，回到整页一条滚动。 */
+.review-side{display:flex;flex-direction:column;min-width:0}
+.review-pager{flex-shrink:0;margin:8px 0 0}
+@media(min-width:801px){
+.review-side,#groupDetail{max-height:var(--col-h,70vh)}
+.review-side #products{min-height:0;flex:1 1 auto;overflow-y:auto}
+/* 滚动锚定会在右列滚回顶部之后又把位置拉回旧处（换组的重画就是一次内容替换），关掉它。 */
+#groupDetail{overflow-y:auto;overflow-anchor:none}
+}
 </style>
 <header><h1>1688 畅销品监控 · 销量分析</h1><span>选择日期 · 固定库存 · 核对商品</span></header>
 <main><div class="tabs">
@@ -56,7 +67,7 @@
 <section><label>开始日期 <input id="start" type="date"></label><h3>当日真实抓取</h3><div id="startCoverage">请选择日期</div></section>
 <section><label>结束日期 <input id="end" type="date"></label><h3>当日真实抓取</h3><div id="endCoverage">请选择日期</div></section></div>
 <p><button id="begin" class="primary">下一步、进入同款确认</button></p></section>
-<section id="reviewPage" class="panel" hidden><div class="bar"><h2>确认同款</h2><button id="back">重新选择日期</button></div><div id="snapshotInfo"></div><p class="muted">建议分组均待人工确认；低把握判断保留缓存，需人工核对。</p><div class="bar match-bar"><span id="matchControl" title=""><button id="runMatching" onclick="runMatching()">模型匹配同款</button></span><span id="matchingStatus" role="status"></span></div><div class="review-layout"><nav id="products" aria-label="同款分组列表"></nav><article id="groupDetail"></article></div><section id="results" class="panel" hidden><h2>初步畅销品</h2><div id="ranking"></div><div class="bar export-bar"><button id="exportReport">导出 HTML 报告</button><span id="exportStatus" role="status"></span></div></section><div class="bar"><button id="prev">上一页</button><span id="pageInfo"></span><button id="next">下一页</button></div><div class="bar save-bar"><span id="saveStatus" role="status"></span><button id="saveDraft" data-mutation>暂时保存</button><button id="saveAndView" class="primary" data-mutation disabled>保存分组并查看畅销品</button></div></section>
+<section id="reviewPage" class="panel" hidden><div class="bar"><h2>确认同款</h2><button id="back">重新选择日期</button></div><div id="snapshotInfo"></div><p class="muted">建议分组均待人工确认；低把握判断保留缓存，需人工核对。</p><div class="bar match-bar"><span id="matchControl" title=""><button id="runMatching" onclick="runMatching()">模型匹配同款</button></span><span id="matchingStatus" role="status"></span></div><div class="review-layout"><div class="review-side"><nav id="products" aria-label="同款分组列表"></nav><div class="bar review-pager"><button id="prev">上一页</button><span id="pageInfo"></span><button id="next">下一页</button></div></div><article id="groupDetail"></article></div><section id="results" class="panel" hidden><h2>初步畅销品</h2><div id="ranking"></div><div class="bar export-bar"><button id="exportReport">导出 HTML 报告</button><span id="exportStatus" role="status"></span></div></section><div class="bar save-bar"><span id="saveStatus" role="status"></span><button id="saveDraft" data-mutation>暂时保存</button><button id="saveAndView" class="primary" data-mutation disabled>保存分组并查看畅销品</button></div></section>
 </main><dialog id="bulkDialog" class="modal" aria-label="确认同款商品分组"><h2>确认同款商品分组</h2><p id="bulkScope"></p><p id="bulkMultiple"></p><div class="modal-actions"><span class="spacer"></span><button onclick="$('bulkDialog').close()">取消</button><button id="bulkOK" data-mutation onclick="confirmBulk()">确认</button></div></dialog>
 <div id="tip" class="tip" hidden></div>
 <dialog id="notice"><p id="noticeText"></p><div class="modal-actions"><span class="spacer"></span><button id="noticeCancel" hidden>取消</button><button id="noticeOK">继续</button></div></dialog>
@@ -150,7 +161,7 @@ async function coverage(which) {
 for (const which of ['start', 'end']) {
     $(which).addEventListener('change', () => { clearError(); coverage(which); });
 }
-let currentSnapshot=null, productPage=0, selectedGroup=null;
+let currentSnapshot=null, productPage=0, selectedGroup=null, renderedGroup=null;
 let compareProduct=null, candidateTarget=null, removalProduct=null, addPage=0, editBusy=false;
 let reviewTab='pending', checkedGroups=new Set(), bulkTargets=[];
 // 本次点击“模型匹配同款”的结果：只属于这一次点击，换组／切页签／下一次匹配时清掉（票 17）。
@@ -251,7 +262,7 @@ function syncStage(){
 }
 function show(snapshot) {
     currentSnapshot=snapshot;
-    productPage=0; selectedGroup=null;reviewTab='pending';checkedGroups.clear();showZeroGroups=false;matchResult=null;
+    productPage=0; selectedGroup=null;renderedGroup=null;reviewTab='pending';checkedGroups.clear();showZeroGroups=false;matchResult=null;
     $('reviewQuery').value='';
     for(const box of filterBoxes())box.checked=false;
     $('start').value=snapshot.start;
@@ -298,6 +309,7 @@ async function refreshSourceLinks() {
     }));
 }
 window.addEventListener('focus', refreshSourceLinks);
+window.addEventListener('resize', fitReviewColumns);
 function groupProducts(group) {
     return group.members.map(m=>productsByKey.get(productKey(m)));
 }
@@ -326,6 +338,8 @@ function renderProducts() {
     $('products').innerHTML=visible.map(g=>`<div class="group-row">${reviewTab==='all'?'':`<input type="checkbox" aria-label="勾选 ${esc(g.id)}" data-group="${esc(g.id)}" ${checkedGroups.has(g.id)?'checked':''} onchange="checkGroup(this.dataset.group,this.checked)">`}<button class="group-choice" aria-pressed="${g.id===selectedGroup}" data-group="${esc(g.id)}" onclick="selectGroup(this.dataset.group)"><b>${esc(g.id)} · ${g.members.length} 个商品</b><small>${esc(groupProducts(g)[0].product_name)} · 销量 ${g.sales}</small><small>状态：${groupConfirmed(g)?'已确认':'待确认'}${groupConflicted(g)?'（有冲突）':''}</small></button></div>`).join('');
     const group=groupsById.get(selectedGroup);
     $('groupDetail').innerHTML=group?`<div class="bar"><h3>${esc(group.id)} · ${group.members.length} 个商品</h3><div class="group-actions">${groupActions(group)}<button onclick="openAdd()">组内新增商品</button></div></div><p>同款组销量 <b>${group.sales}</b> · <span class="group-status">${groupConfirmed(group)?'已确认':'待确认'}${groupSource(group)}</span></p>${groupConflicted(group)?`<aside class="conflict"><b>冲突</b>${group.conflicts.map(note=>`<p>${esc(note)}</p>`).join('')}</aside>`:''}${groupProducts(group).map(p=>memberCard(p,true)).join('')}`:'暂无符合条件的分组';
+    // 换组后右列回顶（票 04）：重画前它滚到哪儿都不作数，内容已经是新组的了。
+    if(selectedGroup!==renderedGroup){$('groupDetail').scrollTop=0;renderedGroup=selectedGroup;}
     $('dirtyStatus').textContent=snapshot.dirty?'未保存':'';
     updateSaveGate();
     renderMatching();
@@ -345,6 +359,37 @@ function renderProducts() {
     syncStage();
     if (!$('results').hidden) renderRanking();
     refreshSourceLinks();
+    fitReviewColumns();
+}
+// ---- 两栏定高（票 04）：高度按视口算，结果写在 --col-h 上；窄屏由样式表整段不启用。 ----
+const REVIEW_MIN_HEIGHT=240;                // 两栏的下限：再矮就没法用了，宁可整页能滚一点
+const REVIEW_BOTTOM_ROOM=8;                 // 视口下沿留一点余量，别贴着窗底
+function belowReviewColumns(layout) {
+    // 两栏之下（文档流里）还占掉多少高度：先数它后面的兄弟（保存行、结果区），
+    // 再沿祖先往上补每一层的下内边距与下外边距（面板、main 都算上），数到 body 为止。
+    let height=0;
+    for(let walk=layout;walk&&walk!==document.body;walk=walk.parentElement){
+        const style=getComputedStyle(walk);
+        height+=parseFloat(style.marginBottom)||0;
+        if(walk.parentElement)height+=parseFloat(getComputedStyle(walk.parentElement).paddingBottom)||0;
+        for(let node=walk.nextElementSibling;node;node=node.nextElementSibling){
+            if(node.hidden||!node.offsetHeight)continue;
+            const sibling=getComputedStyle(node);
+            height+=(parseFloat(sibling.marginTop)||0)+node.offsetHeight+(parseFloat(sibling.marginBottom)||0);
+        }
+    }
+    return height;
+}
+function fitReviewColumns() {
+    const layout=document.querySelector('.review-layout');
+    if(!layout||$('reviewPage').hidden)return;                  // 屏没显示时量不到
+    if($('groupDetail').getBoundingClientRect().top>$('products').getBoundingClientRect().top+1){
+        layout.style.removeProperty('--col-h');                 // 样式表已经把它俩堆成一栏（窄屏）：不定高
+        return;
+    }
+    const top=layout.getBoundingClientRect().top+window.scrollY; // 两栏在文档里的起点，与滚动位置无关
+    const room=window.innerHeight-top-belowReviewColumns(layout)-REVIEW_BOTTOM_ROOM;
+    layout.style.setProperty('--col-h',Math.max(REVIEW_MIN_HEIGHT,Math.round(room))+'px');
 }
 function openCompare(index, expanded) {
     compareProduct=index; candidateTarget=null;
