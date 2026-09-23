@@ -1,0 +1,763 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <title>架构审查 · bestseller（采集 / 交换台 / 壳与工具） · 2026-09-23</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+    </script>
+    <style>
+      .seam { border-style: dashed; }
+      .mod { border: 1px solid #cbd5e1; border-radius: 0.375rem; background: #fff; padding: 0.4rem 0.6rem; }
+      .mod-deep { background: linear-gradient(135deg, #0f172a, #1e293b); color: #e2e8f0; border-radius: 0.5rem; padding: 0.75rem 0.9rem; }
+      .mod-deep .mod { background: #1e293b; border-color: #334155; color: #cbd5e1; }
+      .chip { display: inline-block; border: 1px solid #cbd5e1; border-radius: 9999px; padding: 0.1rem 0.55rem; font-size: 0.7rem; background: #fff; }
+      .leaktxt { color: #dc2626; }
+      .leakbox { border-color: #dc2626 !important; }
+      .lbl { font-size: 0.65rem; letter-spacing: 0.12em; text-transform: uppercase; color: #64748b; }
+      pre.mermaid { background: transparent; }
+    </style>
+  </head>
+  <body class="bg-stone-50 text-slate-900 font-sans">
+    <main class="max-w-5xl mx-auto px-6 py-12 space-y-14">
+
+      <!-- ======================= HEADER ======================= -->
+      <header class="border-b border-slate-300 pb-8">
+        <p class="text-xs uppercase tracking-[0.25em] text-slate-500">Architecture review / 1688 畅销品监控 · bestseller</p>
+        <h1 class="font-serif text-4xl mt-3">采集 · 界面 · 交换台 · 壳与工具</h1>
+        <p class="mt-3 text-slate-600">2026-09-23 · HEAD <span class="font-mono">d41c867</span> · 按你的要求，<strong>销量分析程序不在本次范围</strong>。</p>
+
+        <div class="mt-6 grid md:grid-cols-2 gap-4 text-sm">
+          <div class="mod">
+            <p class="lbl">扫描范围（4 个切片，并行走到 file:line）</p>
+            <ul class="mt-2 space-y-1 text-slate-700">
+              <li>采集引擎：<span class="font-mono text-xs">pipeline / rounds / detail / detail_visit / click_listing / listing / guard / pacing / browser_proc / browser_pw / stop_request / config</span>，含 <span class="font-mono text-xs">db.py</span>（1.8k 行、17 个 module 引用）</li>
+              <li>界面：<span class="font-mono text-xs">gui.py</span>、<span class="font-mono text-xs">views.py</span>、<span class="font-mono text-xs">pages/ui_live.html</span></li>
+              <li>交换台：<span class="font-mono text-xs">exchange / export / merge / plan_step / weekly_plan / shops_sync / git_channel / cos_store / judgment_set / report</span></li>
+              <li>壳与工具：<span class="font-mono text-xs">shells/</span>、<span class="font-mono text-xs">tools/</span>（约 30 个）</li>
+            </ul>
+          </div>
+          <div class="mod">
+            <p class="lbl">对照与纪律</p>
+            <ul class="mt-2 space-y-1 text-slate-700">
+              <li>领域词按 <span class="font-mono text-xs">CONTEXT.md</span>；架构词按 codebase-design（module / interface / depth / seam / adapter / leverage / locality）</li>
+              <li>ADR 全 41 条；与 ADR 冲突的候选在卡里点名</li>
+              <li>最近三份审查（09-18 / 09-19 / 09-20）与挂起决定（ADR-0027 候选 05–07）<strong>不重报</strong></li>
+              <li>工作区多会话共用：在途改动（browser_proc / stop_request / db 的 m2·m3 修复线）按现状看，不计入候选</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="mt-4 flex flex-wrap gap-3 text-xs text-slate-600 items-center">
+          <span class="lbl">图例</span>
+          <span class="chip">实线框 = module</span>
+          <span class="chip" style="border-style:dashed">虚线 = seam</span>
+          <span class="chip leaktxt leakbox">红 = 泄漏 / 分叉</span>
+          <span class="chip" style="background:#1e293b;color:#e2e8f0">深色 = deep module</span>
+          <span class="ml-auto">8 Strong · 8 Worth exploring · 1 附注</span>
+        </div>
+      </header>
+
+      <!-- ======================= CANDIDATES ======================= -->
+      <section class="space-y-12">
+
+        <!-- ============ E1 等待原语 ============ -->
+        <article id="wait-primitive" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div class="flex items-start justify-between gap-4">
+            <h2 class="font-serif text-2xl">四个「等页面」循环收成一个等待原语：条件、上限、取消有一个家</h2>
+            <span class="shrink-0 rounded-full bg-emerald-100 text-emerald-800 text-xs font-semibold px-3 py-1">Strong</span>
+          </div>
+          <p class="mt-2 font-mono text-xs text-slate-500">bestseller_monitor/listing.py:59-70,195-214,73-81 · detail_visit.py:66-98 · browser_pw.py:123-131 · guard.py:250-284 · delay.py:23-34 · stop_request.py:358-359</p>
+
+          <div class="grid md:grid-cols-2 gap-4 mt-5">
+            <div>
+              <p class="lbl mb-2">Before · 四个循环，取消只长在睡眠这一支</p>
+              <div class="space-y-2 text-sm">
+                <div class="mod">listing.wait_until / wait_cards <span class="text-slate-400">10–18s，无取消</span></div>
+                <div class="mod">detail_visit.observe 可读轮询 <span class="text-slate-400">10s，无取消</span></div>
+                <div class="mod">browser_pw 等调试端口 <span class="text-slate-400">25s，无取消</span></div>
+                <div class="mod">guard wait_for_resolution / delay 分片 <span class="text-slate-400">有 stop_request.check()</span></div>
+                <p class="leaktxt text-xs mt-1">页面等待单次 10–45 秒 &gt; 协作停止 8 秒窗口 →「暂停」在页面等待里几乎必然落成强制停止。</p>
+              </div>
+            </div>
+            <div>
+              <p class="lbl mb-2">After · 一个原语管四件事</p>
+              <div class="mod-deep text-sm">
+                <p class="font-semibold">等待原语：条件 · 上限 · 轮询间隔 · 取消钩子</p>
+                <div class="mt-2 space-y-1 opacity-60">
+                  <div class="mod">listing 的两支循环</div>
+                  <div class="mod">detail_visit 的可读轮询</div>
+                  <div class="mod">browser_pw 的端口等待</div>
+                  <div class="mod">guard / delay 的等待</div>
+                </div>
+                <p class="mt-2 text-xs">取消钩子 → <span class="font-mono">stop_request.check()</span>（与睡眠分片同一判据）</p>
+              </div>
+            </div>
+          </div>
+
+          <p class="mt-4 text-slate-700"><strong>问题</strong>：一笔「等页面」的知识（条件、上限、轮询、能不能被打断）在四个 module 各写一份，停止请求只在睡眠那一支被认领。</p>
+          <p class="mt-1 text-slate-700"><strong>解法</strong>：一个等待原语，四处循环都走它；取消钩子默认接已有的 <span class="font-mono text-xs">stop_request.check()</span>。</p>
+          <ul class="mt-3 flex flex-wrap gap-2 text-xs">
+            <li class="chip">locality：等多久、能否中断收一处</li>
+            <li class="chip">leverage：4 循环 + 5 个 wait_cards 调用点</li>
+            <li class="chip">测试：patch time.sleep → 注入轮询与取消</li>
+            <li class="chip">暂停在页面等待内可被认领</li>
+          </ul>
+          <p class="mt-3 font-mono text-xs text-slate-500">证据：stop_request.check() 全仓仅 3 个调用点（delay.py:31、guard.py:252/274）；listing / detail_visit / browser_pw / click_listing 零 import stop_request；约 10 处测试靠 patch time.sleep（test_detail_visit.py:34…）。</p>
+          <div class="mt-3 rounded-md bg-slate-100 border-l-4 border-slate-400 px-3 py-2 text-xs text-slate-600">ADR：无冲突。ADR-0009 / 0038 只承诺了长睡眠的切片——本条把同一条承诺补到页面等待上。</div>
+        </article>
+
+        <!-- ============ X1 包发布原语 ============ -->
+        <article id="package-publish" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div class="flex items-start justify-between gap-4">
+            <h2 class="font-serif text-2xl">包的发布原语只有一个实现：比摘要 → 写 → 提交 → 推 → 退回</h2>
+            <span class="shrink-0 rounded-full bg-emerald-100 text-emerald-800 text-xs font-semibold px-3 py-1">Strong</span>
+          </div>
+          <p class="mt-2 font-mono text-xs text-slate-500">export.py:405-423,644-675 · judgment_set.py:76-100,244-261,319-385 · plan_step.py:493-546 · shops_sync.py:119-161</p>
+
+          <div class="grid md:grid-cols-2 gap-4 mt-5">
+            <div>
+              <p class="lbl mb-2">Before · 同一条流，四份代码，已经漂了</p>
+              <div class="grid grid-cols-2 gap-2 text-xs">
+                <div class="mod"><p class="font-semibold">export 周包</p><p>比摘要→写→提交→推</p><p class="leaktxt">同内容仍补推一次</p></div>
+                <div class="mod"><p class="font-semibold">judgment_set</p><p>比摘要→写→提交→推</p><p class="leaktxt">同内容不推</p></div>
+                <div class="mod"><p class="font-semibold">plan_step 计划</p><p>比摘要→写→提交→推</p><p class="leaktxt">推败后重读远端</p></div>
+                <div class="mod"><p class="font-semibold">shops_sync 清单</p><p>比摘要→写→提交→推</p><p class="leaktxt">退回时不 clean</p></div>
+              </div>
+              <p class="leaktxt text-xs mt-2">内容摘要口径两份逐行同构（export.py:405-423 / judgment_set.py:244-261），靠注释与 FORMAT_VERSION 维持一致。</p>
+            </div>
+            <div>
+              <p class="lbl mb-2">After · 一个 module，差异走参数</p>
+              <div class="mod-deep text-sm">
+                <p class="font-semibold">包 = 表集 + 内容摘要 + gzip + git 发布/收取</p>
+                <div class="mt-2 flex flex-wrap gap-1 text-xs">
+                  <span class="chip">push_when_unchanged</span>
+                  <span class="chip">on_push_rejected</span>
+                </div>
+                <p class="mt-2 text-xs opacity-80">export / judgment_set / merge / plan_step / shops_sync 都经它。</p>
+              </div>
+            </div>
+          </div>
+
+          <p class="mt-4 text-slate-700"><strong>问题</strong>：同一个操作在四个 module 各写一遍、且已经各自漂移（export 与 judgment_set 是同一操作的相反决定，两处 docstring 各写一段解释为什么不同）。</p>
+          <p class="mt-1 text-slate-700"><strong>解法</strong>：把「包」收进一个 module，差异用参数表达而不是两份代码。</p>
+          <ul class="mt-3 flex flex-wrap gap-2 text-xs">
+            <li class="chip">locality：摘要口径 2 份 → 1 份</li>
+            <li class="chip">leverage：改一处修好两条通道</li>
+            <li class="chip">测试：两条通道的幂等用例合一</li>
+          </ul>
+          <div class="mt-3 rounded-md bg-slate-100 border-l-4 border-slate-400 px-3 py-2 text-xs text-slate-600">ADR：无冲突。ADR-0039 决策 2 说判断集「与周包同规」——本条把「同规」从注释变成代码。</div>
+        </article>
+
+        <!-- ============ X2 找包/读包 ============ -->
+        <article id="package-read" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div class="flex items-start justify-between gap-4">
+            <h2 class="font-serif text-2xl">交换区的「找包 / 读包切片」唯一入口：删掉私有解包</h2>
+            <span class="shrink-0 rounded-full bg-emerald-100 text-emerald-800 text-xs font-semibold px-3 py-1">Strong</span>
+          </div>
+          <p class="mt-2 font-mono text-xs text-slate-500">plan_step.py:620-672 · export.py:239,274 · merge.py:175-186 · exchange.py:292,363,395 · judgment_set.py:458-472</p>
+
+          <div class="grid md:grid-cols-2 gap-4 mt-5">
+            <div>
+              <p class="lbl mb-2">Before · 同一件事两种临时文件策略</p>
+              <div class="mod leakbox text-xs">
+                <p class="font-semibold">plan_step 缺口扫描（自造）</p>
+                <p class="font-mono">mkstemp → gzip.open → sqlite3.connect</p>
+                <p class="font-mono">glob 自己的 _PACKAGE_WEEK + PACKAGE_SUFFIX</p>
+              </div>
+              <p class="text-center text-slate-400 text-xs my-1">↕ 同一取数 SQL</p>
+              <div class="mod text-xs">
+                <p class="font-semibold">现成的公开入口</p>
+                <p class="font-mono">export.all_packages · merge.package_shop_days（走 open_package 只读 URI）</p>
+              </div>
+              <p class="leaktxt text-xs mt-2">「哪些文件算包」的判定两份 → 同一个交换区会给出两个答案。</p>
+            </div>
+            <div>
+              <p class="lbl mb-2">After</p>
+              <div class="mod-deep text-sm">
+                <p>缺口扫描只负责「扫」</p>
+                <p class="mt-2 text-xs">找包 → <span class="font-mono">export.all_packages</span></p>
+                <p class="text-xs">读覆盖 → <span class="font-mono">merge.package_shop_days</span></p>
+              </div>
+            </div>
+          </div>
+
+          <p class="mt-4 text-slate-700"><strong>问题</strong>：<span class="font-mono text-xs">plan_step._package_pairs</span> 整段重写了「解压到临时文件、只读查询」的私有实现，而同一能力以公开入口已经存在。</p>
+          <p class="mt-1 text-slate-700"><strong>解法</strong>：删掉两个私有函数，缺口扫描改调既有入口。</p>
+          <ul class="mt-3 flex flex-wrap gap-2 text-xs">
+            <li class="chip">locality：包名判定 2 处 → 1 处</li>
+            <li class="chip">leverage：改文件名规则，扫描与汇总同跟</li>
+            <li class="chip">测试：缺口用例喂 PackageRef，不必造包文件</li>
+          </ul>
+        </article>
+
+        <!-- ============ X3 结局形状 ============ -->
+        <article id="action-outcome" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div class="flex items-start justify-between gap-4">
+            <h2 class="font-serif text-2xl">七个动作共同的结局形状：退出码、摘要、报告从它长出来</h2>
+            <span class="shrink-0 rounded-full bg-emerald-100 text-emerald-800 text-xs font-semibold px-3 py-1">Strong</span>
+          </div>
+          <p class="mt-2 font-mono text-xs text-slate-500">exchange.py:576-599,641-660,762-814,833-894,1096-1219</p>
+
+          <div class="grid md:grid-cols-2 gap-4 mt-5">
+            <div>
+              <p class="lbl mb-2">Before · 三种翻译，各自读私有结果</p>
+              <div class="rounded-lg border border-slate-200 bg-white p-3">
+<pre class="mermaid">
+flowchart TB
+  A1[export] --> R1[ExportResult]
+  A2[publish] --> R2[PublishResult]
+  A3[collect] --> R3[CollectOutcome]
+  A4[merge/pull] --> R4[ImportResult]
+  R1 --> T["exit_code<br/>soft 布尔式 12 行 8 子句"]
+  R2 --> T
+  R3 --> T
+  R4 --> T
+  R1 --> S[summary 五域阶梯]
+  R3 --> S
+  R1 --> P["报告六节 + todo<br/>各带 None 分支"]
+  R4 --> P
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class T leak
+</pre>
+              </div>
+            </div>
+            <div>
+              <p class="lbl mb-2">After · 一张表派生三处</p>
+              <div class="rounded-lg border border-slate-200 bg-white p-3">
+<pre class="mermaid">
+flowchart TB
+  A["七个动作"] --> O["结局：干净 / 要看一眼 / 没做成<br/>＋原因 ＋计数 ＋这趟做了没"]
+  O --> E[exit_code]
+  O --> S[summary]
+  O --> P["报告六节 / todo"]
+  classDef deep fill:#0f172a,color:#e2e8f0,stroke:#0f172a;
+  class O deep
+</pre>
+              </div>
+            </div>
+          </div>
+
+          <p class="mt-4 text-slate-700"><strong>问题</strong>：七个动作各交一种私有结果类型，退出码、摘要、报告三处各自把它翻成自己的话；「退出码口径在哪」的答案是「在 _assemble 的中段加总」。</p>
+          <p class="mt-1 text-slate-700"><strong>解法</strong>：定义一个动作结局，七个动作各返回它，exit_code / summary / 报告 / todo 全从它派生。</p>
+          <ul class="mt-3 flex flex-wrap gap-2 text-xs">
+            <li class="chip">locality：退出码判定收一处</li>
+            <li class="chip">leverage：加第八个动作只写动作本身</li>
+            <li class="chip">测试：三值映射可对纯函数断言</li>
+          </ul>
+          <p class="mt-3 font-mono text-xs text-slate-500">证据：<span class="text-slate-700">exchange.py:584-587</span> 把七件事压进一个布尔式；_summary 与 _todo 都是 7+ 参数、各只被调用一次；退出码今天只在端到端用例里验（test_exchange.py:775、:829），且必须真跑 git。</p>
+        </article>
+
+        <!-- ============ E2 准备运行态 ============ -->
+        <article id="prep-owner" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div class="flex items-start justify-between gap-4">
+            <h2 class="font-serif text-2xl">开轮前准备的运行态收成一个持有者</h2>
+            <span class="shrink-0 rounded-full bg-emerald-100 text-emerald-800 text-xs font-semibold px-3 py-1">Strong</span>
+          </div>
+          <p class="mt-2 font-mono text-xs text-slate-500">gui.py:147-154,216-323,751-752 · views.py:42-47,300-329 · tests/test_gui.py:210-221,291-311,862-909</p>
+
+          <div class="grid md:grid-cols-2 gap-4 mt-5">
+            <div>
+              <p class="lbl mb-2">Before · 4 个私有字段 + 5 个入口</p>
+              <div class="mod text-xs">
+                <p class="font-mono">Api._prep / _prep_confirming / _prep_started_at / _prep_settled</p>
+                <p class="font-mono">prepare() · retry_prepare() · _settle() · confirming_now() · prepare_running()</p>
+              </div>
+              <div class="mt-2 space-y-1 text-xs">
+                <p class="leaktxt">30 秒预算读裸 time.time()（:229,:265）——注入的 _now 与 stop_clock 都够不着</p>
+                <p class="leaktxt">「一次只跑一个」的守卫只长在 retry_prepare（:302-304），prepare() 没有</p>
+                <p class="leaktxt">用例只能写私有字段：<span class="font-mono">api._prep_confirming = True; api._prep_started_at = …</span></p>
+              </div>
+            </div>
+            <div>
+              <p class="lbl mb-2">After</p>
+              <div class="mod-deep text-sm">
+                <p class="font-semibold">PrepRun：start() · retry() · wait(s) · state →</p>
+                <p class="mt-1 text-xs">一个 frozen 值（在跑 / 预算起点 / 落定 / 结局），预算时钟从入参来</p>
+              </div>
+              <div class="mt-2 text-xs space-y-1">
+                <p>Api 只剩两行接线；main() 与 UiState 读同一个值</p>
+                <p>测试：构造入参说「已等 31 秒」，不再写私有字段</p>
+              </div>
+            </div>
+          </div>
+
+          <p class="mt-4 text-slate-700"><strong>问题</strong>：一次准备的运行态散在 4 个私有字段与 5 个入口上，窗口只能读私有事件、用例只能写私有字段、闸门守卫只长在一个入口上。</p>
+          <p class="mt-1 text-slate-700"><strong>解法</strong>：收成一个持有者，<span class="font-mono text-xs">Api</span> 与 <span class="font-mono text-xs">main()</span> 都只读它的状态值。</p>
+          <ul class="mt-3 flex flex-wrap gap-2 text-xs">
+            <li class="chip">locality：4 字段 + 5 入口 → 1 值 + 3 动作</li>
+            <li class="chip">leverage：窗口等待 / 三处分岔 / 闸门 / 重试守卫同一份</li>
+            <li class="chip">测试：构造入参替代写私有字段</li>
+          </ul>
+          <div class="mt-3 rounded-md bg-slate-100 border-l-4 border-slate-400 px-3 py-2 text-xs text-slate-600">ADR：与 ADR-0035 无冲突（它定行为不定形状）；手法沿用 ADR-0016 治停止窗口的先例。注意保住 ADR-0011 已否决的一条：新持有者不自己开连接，接调用方给的 open_conn。不碰 ADR-0027 挂起的 07（那是采集入口的轮次时刻）。</div>
+        </article>
+
+        <!-- ============ T1 工具列表页装配 ============ -->
+        <article id="tool-page" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div class="flex items-start justify-between gap-4">
+            <h2 class="font-serif text-2xl">工具的列表页装配收回 listing 的现成入口</h2>
+            <span class="shrink-0 rounded-full bg-emerald-100 text-emerald-800 text-xs font-semibold px-3 py-1">Strong</span>
+          </div>
+          <p class="mt-2 font-mono text-xs text-slate-500">tools/diag_card_urls.py:48-57 · diag_verify_state.py:41-51 · diag_offer_id_presolve.py:142-164 · sync_list_titles.py:45-85 · diag_card_selector.py:40-45 · 正主：listing.py:229-277、click_listing.py:422-443</p>
+
+          <div class="grid md:grid-cols-2 gap-4 mt-5">
+            <div>
+              <p class="lbl mb-2">Before · 生产一份 + 工具五份固定 sleep</p>
+              <div class="space-y-1 text-xs">
+                <div class="mod">生产 <span class="font-mono">listing.prepare</span> · <span class="font-mono">scroll_cards_until_stable</span> · 条件等待 3.0s · 翻页比对列表身份</div>
+                <div class="mod leakbox"><span class="font-mono">sync_list_titles</span> · sleep 1.2 · 翻页只 sleep(2)</div>
+                <div class="mod leakbox"><span class="font-mono">diag_offer_id_presolve</span> · sleep 1.2</div>
+                <div class="mod leakbox"><span class="font-mono">diag_card_urls / diag_verify_state</span> · sleep 1.0（两段逐字相同）</div>
+                <div class="mod leakbox"><span class="font-mono">diag_card_selector</span> · sleep 1.0、wheel 5000</div>
+              </div>
+              <p class="leaktxt text-xs mt-2">等待值漂移（1.0/1.2 vs 3.0）、翻页不比对列表身份；工具经 browser_pw 的私有别名取生产名。</p>
+            </div>
+            <div>
+              <p class="lbl mb-2">After · 工具只观察与打印</p>
+              <div class="mod-deep text-sm">
+                <p>装配一律调生产入口：</p>
+                <p class="mt-1 font-mono text-xs">listing.prepare(page, url, cfg, human)</p>
+                <p class="font-mono text-xs">click_listing.scroll_cards_until_stable(page)</p>
+                <p class="font-mono text-xs">listing.advance(page, human, cfg)</p>
+              </div>
+              <p class="mt-2 text-xs">新增「装配指纹」用例：goto + mouse.wheel + locator 同段出现即红。</p>
+            </div>
+          </div>
+
+          <p class="mt-4 text-slate-700"><strong>问题</strong>：同一件「把列表页准备好」（排序、懒加载、翻页）生产有一份带条件等待与人工介入的实现，工具里有五份固定 sleep 的副本。</p>
+          <p class="mt-1 text-slate-700"><strong>解法</strong>：工具只做观察与打印，装配一律调生产入口。</p>
+          <ul class="mt-3 flex flex-wrap gap-2 text-xs">
+            <li class="chip">locality：等排序/懒加载/翻页判据 5 处 → 1 处</li>
+            <li class="chip">leverage：生产 + 4 个工具一次兑现</li>
+            <li class="chip">测试：装配指纹可扫结构</li>
+          </ul>
+          <div class="mt-3 rounded-md bg-slate-100 border-l-4 border-slate-400 px-3 py-2 text-xs text-slate-600">与 09-20 候选 02 的边界：那条管「点击」（click_card 的三个等待、同页跳转）；本条管点之前/之后的装配（排序、滚轮、翻页）——两份不同的副本、不同的漂移面，可合并一次落地。ADR-0019 只排除了把等待收进会话层，没排除与生产页面原语共用一份。</div>
+        </article>
+
+        <!-- ============ T2 编码契约 ============ -->
+        <article id="encoding" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div class="flex items-start justify-between gap-4">
+            <h2 class="font-serif text-2xl">python 子进程的文本编码契约要有家</h2>
+            <span class="shrink-0 rounded-full bg-emerald-100 text-emerald-800 text-xs font-semibold px-3 py-1">Strong</span>
+          </div>
+          <p class="mt-2 font-mono text-xs text-slate-500">shells/launcher_core.py:253-265 · analyze.py:48（唯一自己钉的） · gui.py / run.py / exchange.py 没有 · tools/release_shells.py:59-62、issue_bundle.py:181-182、diag_stop_request.py:101,128、diag_edge_cleanup.py:29-37,92,113 · logs/gui_launcher.log:6-7、logs/exchange_launcher.log:5</p>
+
+          <div class="grid md:grid-cols-2 gap-4 mt-5">
+            <div>
+              <p class="lbl mb-2">Before · 两端各自决定（实机已如此）</p>
+              <div class="rounded-lg border border-slate-200 bg-white p-3">
+<pre class="mermaid">
+sequenceDiagram
+  participant P as python 子进程
+  participant S as 壳 launcher_core
+  P->>S: stderr 字节（GBK：D6D0 CEC4…）
+  Note over S: 按 UTF-8 解码 errors=replace
+  S->>S: 弹窗与日志写出 U+FFFD
+</pre>
+              </div>
+              <p class="leaktxt text-xs mt-2 font-mono">logs\gui_launcher.log:6-7 → IS-52 后面全是 �；壳自己写的中文正常——坏的是子进程那几行。</p>
+            </div>
+            <div>
+              <p class="lbl mb-2">After · 契约收进唯一的共同 import 点</p>
+              <div class="rounded-lg border border-slate-200 bg-white p-3">
+<pre class="mermaid">
+sequenceDiagram
+  participant P as 子进程（PYTHONIOENCODING=utf-8）
+  participant S as 壳（同一常量解码）
+  P->>S: stderr 字节（UTF-8）
+  S->>S: 中文照原样
+</pre>
+              </div>
+              <p class="text-xs mt-2">三只壳、issue_bundle、两个诊断脚本、向导一次兑现。</p>
+            </div>
+          </div>
+
+          <p class="mt-4 text-slate-700"><strong>问题</strong>：「子进程按什么编码写、谁按什么编码读」没有一处定义，读方与写方各自决定，于是失败弹窗与启动器日志里的中文成 U+FFFD。</p>
+          <p class="mt-1 text-slate-700"><strong>解法</strong>：契约收进 <span class="font-mono text-xs">launcher_core</span>（exe 与 tools 都能 import 的落点）：spawn 时给 <span class="font-mono text-xs">PYTHONIOENCODING</span>，读方一律按同一常量解码。</p>
+          <ul class="mt-3 flex flex-wrap gap-2 text-xs">
+            <li class="chip">locality：编码抉择 6 个 spawn 点 → 1 处</li>
+            <li class="chip">leverage：三只壳 + 工具一次兑现</li>
+            <li class="chip">测试：起真子进程打中文、断言读回</li>
+          </ul>
+          <p class="mt-3 text-xs text-slate-500">症状 09-21 已记过一笔（分析入口在票 14 各自修了一处；<span class="font-mono">release_shells.py</span> 未提交的改动也在各修一处）——本条要的是契约的家，不是再修一处。</p>
+        </article>
+
+        <!-- ============ T3 工具走生产读口 ============ -->
+        <article id="tool-reads" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div class="flex items-start justify-between gap-4">
+            <h2 class="font-serif text-2xl">诊断/对账工具走生产读口，不再自写 SQL 判据</h2>
+            <span class="shrink-0 rounded-full bg-emerald-100 text-emerald-800 text-xs font-semibold px-3 py-1">Strong</span>
+          </div>
+          <p class="mt-2 font-mono text-xs text-slate-500">tools/issue_bundle.py:57-104 · tools/check_orphans.py:26-33 · tools/acceptance_check.py:180-196,287-293,409,430-440 · 生产读口：crawler_identity.py:63-89、stop_request.py:44-69、db.py:762-768、export.py:143-200</p>
+
+          <div class="grid md:grid-cols-2 gap-4 mt-5">
+            <div>
+              <p class="lbl mb-2">Before · 三处自写判据</p>
+              <div class="space-y-2 text-xs">
+                <div class="mod leakbox"><p class="font-semibold">issue_bundle「采集身份」</p><p class="font-mono">SELECT * FROM crawler_process WHERE id=1</p><p class="leaktxt">被强杀留下的身份行 → 记录包里成了「有任务在跑」</p></div>
+                <div class="mod leakbox"><p class="font-semibold">check_orphans</p><p>孤儿谓词逐行副本 vs 生产 _ORPHAN_TALLY_SQL</p></div>
+                <div class="mod leakbox"><p class="font-semibold">acceptance_check</p><p>交换集表集与排除规则的第二份声明 vs export.EXCHANGE_TABLES</p></div>
+              </div>
+            </div>
+            <div>
+              <p class="lbl mb-2">After · 报告给判定，不给原始行</p>
+              <div class="mod-deep text-sm">
+                <p class="font-mono text-xs">crawler_identity.is_running() / registered()</p>
+                <p class="font-mono text-xs mt-1">stop_request.targets()</p>
+                <p class="font-mono text-xs mt-1">Database.round_tally() 的孤儿口径</p>
+                <p class="font-mono text-xs mt-1">export.EXCHANGE_TABLES</p>
+              </div>
+              <p class="mt-2 text-xs">反面对照（既有做法）：summary.py、replay_groups.py、bench_refresh.py 都已走生产读口。</p>
+            </div>
+          </div>
+
+          <p class="mt-4 text-slate-700"><strong>问题</strong>：生产里「现在算不算有采集进程在跑」只有一处判据（还要看会话锁），<span class="font-mono text-xs">issue_bundle</span> 用一行原始行回答——三机排障都以这份记录包为依据，判定错误会被放大。</p>
+          <p class="mt-1 text-slate-700"><strong>解法</strong>：这几栏改调生产纯读入口，报告给判定而不是原始行。</p>
+          <ul class="mt-3 flex flex-wrap gap-2 text-xs">
+            <li class="chip">locality：谁在跑只由 crawler_identity 回答</li>
+            <li class="chip">leverage：三台机器的记录包都判对</li>
+            <li class="chip">测试：DbStateTests 加一行假数据</li>
+          </ul>
+          <div class="mt-3 rounded-md bg-amber-50 border-l-4 border-amber-400 px-3 py-2 text-xs text-amber-900">与 ADR-0021 / CONTEXT「判据只有一处」及 ADR-0017（孤儿计数一处）在同一件事上不一致——本条是把它变回事实。</div>
+        </article>
+
+        <!-- ============ E3 事务 seam ============ -->
+        <article id="tx-seam" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div class="flex items-start justify-between gap-4">
+            <h2 class="font-serif text-2xl">数据层补上「组合」那一面：写方法在显式事务里不自己 commit</h2>
+            <span class="shrink-0 rounded-full bg-amber-100 text-amber-800 text-xs font-semibold px-3 py-1">Worth exploring</span>
+          </div>
+          <p class="mt-2 font-mono text-xs text-slate-500">db.py（24 处公开方法各自 commit） · stop_request.py:493,612-616（手写 CAS） · rounds.py:134-305（10 处手写 SQL） · pipeline.py:383 · 对照 db.py:993-1004、1075-1086</p>
+
+          <div class="grid md:grid-cols-2 gap-4 mt-5">
+            <div>
+              <p class="lbl mb-2">Before · 一条语句一步，要组合只能绕开</p>
+              <div class="mod text-xs">
+                <p class="font-mono">Database：一次调用 = 一次事务</p>
+                <p class="mt-1">要几步同一个事务的调用方：</p>
+                <p class="leaktxt font-mono">stop_request._delete_target_in_transaction —— 手写两条 CAS DELETE</p>
+                <p class="leaktxt font-mono">rounds.* —— 读改写全在 module 里手写 SQL</p>
+              </div>
+              <p class="leaktxt text-xs mt-2">同一条 compare-and-delete 两份写法（db.py:1000 vs stop_request.py:613 逐字同构）。</p>
+            </div>
+            <div>
+              <p class="lbl mb-2">After</p>
+              <div class="mod-deep text-sm">
+                <p class="font-mono">with db.transaction():</p>
+                <p class="mt-1 text-xs">显式事务里方法不自己 commit；强制序列、迟到收尾、轮次读改写都用数据层已有的词汇写完。</p>
+              </div>
+            </div>
+          </div>
+
+          <p class="mt-4 text-slate-700"><strong>问题</strong>：写方法各自提交，任何需要多条写落在同一事务里的调用方只能绕开 interface 手写 SQL，物理列名因此多出第四处。</p>
+          <p class="mt-1 text-slate-700"><strong>解法</strong>：给数据层一个事务 seam。</p>
+          <ul class="mt-3 flex flex-wrap gap-2 text-xs">
+            <li class="chip">locality：同一条 CAS 一份写法</li>
+            <li class="chip">depth：interface 从「一条语句一步」扩成可组合</li>
+            <li class="chip">leverage：强制停止 / 轮次收尾 / 快照提交共享</li>
+          </ul>
+          <div class="mt-3 rounded-md bg-slate-100 border-l-4 border-slate-400 px-3 py-2 text-xs text-slate-600">与 09-20 判过的「db.py 该按组拆 module」不同：不搬家，只补 interface 缺的那一面；也与挂起候选 05（账本存储原语）不同。</div>
+        </article>
+
+        <!-- ============ E4 图片证据 ============ -->
+        <article id="image-evidence" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div class="flex items-start justify-between gap-4">
+            <h2 class="font-serif text-2xl">图片证据从一张裸 dict 收成值对象</h2>
+            <span class="shrink-0 rounded-full bg-amber-100 text-amber-800 text-xs font-semibold px-3 py-1">Worth exploring</span>
+          </div>
+          <p class="mt-2 font-mono text-xs text-slate-500">product_images.py:11-45 · detail.py:248-249 · db.py:1418-1427,1486-1499 · image_store.py:29-35</p>
+
+          <div class="grid md:grid-cols-2 gap-4 mt-5">
+            <div>
+              <p class="lbl mb-2">Before · 键由一处发明、三处重新解释</p>
+              <div class="space-y-1 text-xs">
+                <div class="mod"><span class="font-mono">product_images.acquire → {'content','mime','hash'} | {'error'}</span></div>
+                <p class="text-center text-slate-400">↓</p>
+                <div class="mod leakbox"><span class="font-mono">db.py</span>：<span class="font-mono">'content' in image</span> 判三次（:1419,:1425,:1497）、再跑一遍 <span class="font-mono">evidence()</span> 校验；<span class="font-mono">db.py:1486</span> 自己 <span class="font-mono">acquire()</span>——数据层拉网络</div>
+                <p class="text-center text-slate-400">↓</p>
+                <div class="mod"><span class="font-mono">image_store.image_key</span> 再读 dict 的 mime</div>
+              </div>
+              <p class="leaktxt text-xs mt-2">同一张图解码两遍（detail.py:249 与 db.py:1422 各一次 PIL verify+load+sha256）。</p>
+            </div>
+            <div>
+              <p class="lbl mb-2">After</p>
+              <div class="mod-deep text-sm">
+                <p class="font-semibold">ImageEvidence（只有 product_images 能造）</p>
+                <p class="mt-1 text-xs">取回 → 校验 → 哈希 → key 推法全在一处；db 只管存。</p>
+              </div>
+            </div>
+          </div>
+
+          <p class="mt-4 text-slate-700"><strong>问题</strong>：同一张图的证据是一条裸 dict，「这张图到底拿到没有」这个判据在 db 里出现三次，数据层还持有拉网络那条路。</p>
+          <p class="mt-1 text-slate-700"><strong>解法</strong>：一个值对象，把取回、校验、哈希与 key 的推法收在一处。</p>
+          <ul class="mt-3 flex flex-wrap gap-2 text-xs">
+            <li class="chip">locality：形状 + 校验 + key 同处一室</li>
+            <li class="chip">depth：散判据变成一个方法</li>
+            <li class="chip">顺带消掉二次解码</li>
+          </ul>
+        </article>
+
+        <!-- ============ E5 已处理判据 ============ -->
+        <article id="handled-predicate" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div class="flex items-start justify-between gap-4">
+            <h2 class="font-serif text-2xl">「这个商品本轮算处理过了吗」只有一个家</h2>
+            <span class="shrink-0 rounded-full bg-amber-100 text-amber-800 text-xs font-semibold px-3 py-1">Worth exploring</span>
+          </div>
+          <p class="mt-2 font-mono text-xs text-slate-500">db.py:739-741（常量） · db.py:1208（pending_offers 内联） · db.py:1610（mark_skipped 内联） · db.py:1564-1571 · 消费方 pipeline.py:189,468、detail.py:221、click_listing.py:147</p>
+
+          <div class="grid md:grid-cols-2 gap-4 mt-5">
+            <div>
+              <p class="lbl mb-2">Before · 同一条谓词三处</p>
+              <div class="space-y-1 text-xs">
+                <div class="mod"><p class="font-mono">:739 _TALLY_HANDLED_WHEN = "s.page_status IN ('成功','跳过')"</p><p class="text-slate-500">ADR-0017 立的常量</p></div>
+                <div class="mod leakbox"><p class="font-mono">:1208 补采选择 —— 内联同一句</p></div>
+                <div class="mod leakbox"><p class="font-mono">:1610 跳过写入 —— 内联同一句</p></div>
+              </div>
+              <p class="leaktxt text-xs mt-2">三份今天同值，改一处静默分叉——分叉只在「本轮计数」与「实际补采」之间现形。</p>
+            </div>
+            <div>
+              <p class="lbl mb-2">After</p>
+              <div class="mod-deep text-sm">
+                <p>判据只留一份；补采选择与跳过写入都拼它。</p>
+                <p class="mt-1 text-xs">补采那侧的「已处理」从此与计数同源。</p>
+              </div>
+            </div>
+          </div>
+
+          <p class="mt-4 text-slate-700"><strong>问题</strong>：同一条领域判据在同一个文件里写三遍，且落在采集路径上（补采选择、跳过写入），不只在统计里。</p>
+          <p class="mt-1 text-slate-700"><strong>解法</strong>：判据只留一份，两处都拼它。</p>
+          <ul class="mt-3 flex flex-wrap gap-2 text-xs">
+            <li class="chip">locality：「已处理」定义一处</li>
+            <li class="chip">leverage：计数 / 补采 / 写入一次兑现</li>
+          </ul>
+          <div class="mt-3 rounded-md bg-slate-100 border-l-4 border-slate-400 px-3 py-2 text-xs text-slate-600">无 ADR 冲突——是兑现 ADR-0017 自己写的「判据只定义一次」（上次收口只到 module 常量为止）。</div>
+        </article>
+
+        <!-- ============ U1 页面契约 ============ -->
+        <article id="page-contract" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div class="flex items-start justify-between gap-4">
+            <h2 class="font-serif text-2xl">页面契约的形状与文案各留了一份复本</h2>
+            <span class="shrink-0 rounded-full bg-amber-100 text-amber-800 text-xs font-semibold px-3 py-1">Worth exploring</span>
+          </div>
+          <p class="mt-2 font-mono text-xs text-slate-500">views.py:64-90,346-359,461-480,517-535 · pages/ui_live.html:273-293,432-440 · tests/test_ui_live.py 五份手写 mock · tools/_shot_live.py:11-50</p>
+
+          <div class="grid md:grid-cols-2 gap-4 mt-5">
+            <div>
+              <p class="lbl mb-2">Before · 生产者一份，复本六份</p>
+              <div class="space-y-1 text-xs">
+                <div class="mod">views 的三个 <span class="font-mono">*_view()</span> 出 dict（键即契约）</div>
+                <div class="mod leakbox">5 份手写 mock：test_ui_live ×4 + _shot_live <span class="leaktxt">（已漂：产出 views 从不产出的键，没有东西会报错）</span></div>
+                <div class="mod leakbox">ui_live.html 自带第二份 <span class="font-mono">fmtDur / stoppingText</span>（停止窗口四相翻中文）</div>
+              </div>
+              <p class="leaktxt text-xs mt-2">两个键全仓零读者、5 个键页面从不读，每次刷新还白算两次。</p>
+            </div>
+            <div>
+              <p class="lbl mb-2">After</p>
+              <div class="mod-deep text-sm">
+                <p>views 的输出是唯一权威：文案随 dict 一起出，页面只贴。</p>
+                <p class="mt-1 text-xs">页面用例与截图工具的桥从真实 views 输出生成。</p>
+              </div>
+            </div>
+          </div>
+
+          <p class="mt-4 text-slate-700"><strong>问题</strong>：views 的 dict 是页面契约，但形状没有一处持有——mock 各抄一份并已开始漂移，停止窗口的文案留在页面里。</p>
+          <p class="mt-1 text-slate-700"><strong>解法</strong>：views 的输出成为唯一权威，mock 由真实输出生成。</p>
+          <ul class="mt-3 flex flex-wrap gap-2 text-xs">
+            <li class="chip">locality：契约一处、文案一处</li>
+            <li class="chip">leverage：5 份 mock → 1 份生成</li>
+            <li class="chip">测试：文案可在 test_views 断言</li>
+          </ul>
+          <div class="mt-3 rounded-md bg-amber-50 border-l-4 border-amber-400 px-3 py-2 text-xs text-amber-900">兑现 ADR-0011（文案下移、gui 无格式化 helper）与 ADR-0024（稳定状态码由 views 翻中文）两句——今天页面是自己的 helper。代价：test_ui_live 要用真输出需建 fixture 库（helpers 里有现成手法）。</div>
+        </article>
+
+        <!-- ============ U2 已抓时长 ============ -->
+        <article id="elapsed" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div class="flex items-start justify-between gap-4">
+            <h2 class="font-serif text-2xl">已抓时长的段计时收成一个持有者（它现在会记错）</h2>
+            <span class="shrink-0 rounded-full bg-amber-100 text-amber-800 text-xs font-semibold px-3 py-1">Worth exploring</span>
+          </div>
+          <p class="mt-2 font-mono text-xs text-slate-500">gui.py:158-161,176-180,441-445,484-487,502-505 · views.py:38,469,508-511 · tests/test_gui.py:427-441 vs tests/test_views.py:408-414</p>
+
+          <div class="grid md:grid-cols-2 gap-4 mt-5">
+            <div>
+              <p class="lbl mb-2">Before · 4 个写点、1 处结账</p>
+              <div class="mod text-xs">
+                <p class="font-mono">_elapsed_base / _run_start_ts</p>
+                <p>start_run 归零 · resume 记起 · pause 结账 · _current_elapsed 现算</p>
+              </div>
+              <div class="mt-2 space-y-1 text-xs">
+                <p class="leaktxt">非暂停的退出（崩溃 / 强杀 / 命令行那轮结束）没有结账 → save 时已计段被丢，界面从 0 起</p>
+                <p class="leaktxt">结果页把它当「总耗时」印（views.py:508-511）</p>
+                <p class="leaktxt">直读 time.time()——界面里第三个时钟</p>
+              </div>
+            </div>
+            <div>
+              <p class="lbl mb-2">After</p>
+              <div class="mod-deep text-sm">
+                <p>段计时值：<span class="font-mono">start() / credit() / value()</span>，时钟从入参来</p>
+                <p class="mt-1 text-xs">三个控制入口与折 UiState 都走它；start_ts 随之消失。</p>
+              </div>
+              <p class="mt-2 text-xs">测试两侧对称：构造入参说「已抓 125 秒」，不再 mock 私有方法。</p>
+            </div>
+          </div>
+
+          <p class="mt-4 text-slate-700"><strong>问题</strong>：跨暂停累加的分段计时写点 4 处、结账只 1 处，非暂停的退出没有落点——续跑时已计段被丢掉，而这个数会以「总耗时」的身份出现在人眼前。</p>
+          <p class="mt-1 text-slate-700"><strong>解法</strong>：收成一个持有者，时钟从入参来。</p>
+          <ul class="mt-3 flex flex-wrap gap-2 text-xs">
+            <li class="chip">locality：4 字段 4 写 → 1 处</li>
+            <li class="chip">leverage：开始/继续/暂停/折状态同一处</li>
+            <li class="chip">测试：构造入参替代 mock 私有方法</li>
+          </ul>
+          <p class="mt-3 text-xs text-slate-500">前三次审查报的是「界面会话账没有所有者」（09-20 判「没证明出可观察的错」）；本条的新证据是「它确实记错」＋两侧深浅不对称（views 侧能直接说事实、gui 侧只能探）。修前先定：数界面观察到的段，还是轮次的跨度。</p>
+        </article>
+
+        <!-- ============ X4 周计划持有者 ============ -->
+        <article id="plan-owner" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div class="flex items-start justify-between gap-4">
+            <h2 class="font-serif text-2xl">周计划该有唯一持有者：读口不该住在「一次准备」里</h2>
+            <span class="shrink-0 rounded-full bg-amber-100 text-amber-800 text-xs font-semibold px-3 py-1">Worth exploring</span>
+          </div>
+          <p class="mt-2 font-mono text-xs text-slate-500">weekly_plan.py:45-93,192-259,285+ · plan_step.py:719-799,187-198（stored_plan，9 行） · db.py:205,845-851,909-934 · 调用方：exchange.py:337,546、pipeline.py:172、gui.py:336、run.py:130</p>
+
+          <div class="grid md:grid-cols-2 gap-4 mt-5">
+            <div>
+              <p class="lbl mb-2">Before · 一个概念拆三层</p>
+              <div class="space-y-1 text-xs">
+                <div class="mod">weekly_plan：生成 / 发布 / 渲染</div>
+                <div class="mod leakbox">plan_step（799 行）：落库 / 读口 / 偏离 / 缺口 —— 唯一读口 <span class="font-mono">stored_plan</span> 只有 9 行，埋在这里</div>
+                <div class="mod">db：行形状</div>
+              </div>
+              <p class="leaktxt text-xs mt-2">交换台与采集线要拿「本周归本机的店」，得 import 一个为开轮前准备而存在的 module。</p>
+            </div>
+            <div>
+              <p class="lbl mb-2">After</p>
+              <div class="mod-deep text-sm">
+                <p>计划（含读口与行形状）并进 <span class="font-mono">weekly_plan</span></p>
+                <p class="mt-1 text-xs">plan_step 退成「跑一趟准备」的编排；四个调用方不再依赖准备串。</p>
+              </div>
+            </div>
+          </div>
+
+          <p class="mt-4 text-slate-700"><strong>问题</strong>：「本机份额」这半个概念的读口住在一个 799 行、为准备而生的编排文件里。</p>
+          <p class="mt-1 text-slate-700"><strong>解法</strong>：读口与行形状并进 weekly_plan，plan_step 只留编排。</p>
+          <ul class="mt-3 flex flex-wrap gap-2 text-xs">
+            <li class="chip">locality：本机份额算法就近</li>
+            <li class="chip">leverage：4 个调用方不再依赖准备串</li>
+            <li class="chip">测试：1028 行的 test_plan_step 可拆</li>
+          </ul>
+          <div class="mt-3 rounded-md bg-slate-100 border-l-4 border-slate-400 px-3 py-2 text-xs text-slate-600">ADR-0035 定的是闸门语义，不是文件归属——无冲突。</div>
+        </article>
+
+        <!-- ============ X5 判断集路径 ============ -->
+        <article id="judgment-paths" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div class="flex items-start justify-between gap-4">
+            <h2 class="font-serif text-2xl">判断集对 analysis.toml 的读法应与分析侧同源</h2>
+            <span class="shrink-0 rounded-full bg-amber-100 text-amber-800 text-xs font-semibold px-3 py-1">Worth exploring</span>
+          </div>
+          <p class="mt-2 font-mono text-xs text-slate-500">exchange.py:169-206 · analysis.py:24,56-92 · judgment_set.py:71 · 护栏：tests/test_exchange.py:526-546</p>
+
+          <div class="grid md:grid-cols-2 gap-4 mt-5">
+            <div>
+              <p class="lbl mb-2">Before · 两个实现 + 一条护栏</p>
+              <div class="space-y-1 text-xs">
+                <div class="mod"><span class="font-mono">analysis.AnalysisConfig.from_file</span>：相对配置目录、缺省匹配缓存名</div>
+                <div class="mod leakbox"><span class="font-mono">exchange.py:169-206</span>：同一口径的第二份实现</div>
+                <div class="mod leakbox"><span class="font-mono">judgment_set.py:71</span>：缺省文件名第三处写死</div>
+              </div>
+              <p class="leaktxt text-xs mt-2">护栏用例（AnalysisPathDefaultsTests）的存在本身就是两处知识会分叉的证据。</p>
+            </div>
+            <div>
+              <p class="lbl mb-2">After</p>
+              <div class="mod-deep text-sm">
+                <p>分析侧交出只读这两个键的窄接口（<span class="font-mono">read_judgment_paths()</span>），交换台调它。</p>
+                <p class="mt-1 text-xs">「不整份加载分析配置」这条边界照样成立。</p>
+              </div>
+            </div>
+          </div>
+
+          <p class="mt-4 text-slate-700"><strong>问题</strong>：「analysis.toml 里哪两个键、相对谁、缺省叫什么」有两个实现，靠一条专门的护栏用例盯着它们不漂。</p>
+          <p class="mt-1 text-slate-700"><strong>解法</strong>：分析侧交出窄接口，交换台调它。</p>
+          <ul class="mt-3 flex flex-wrap gap-2 text-xs">
+            <li class="chip">locality：缺省名三处 → 一处</li>
+            <li class="chip">leverage：collect/publish 不可能指错文件</li>
+            <li class="chip">测试：护栏可退役或退化成一行断言</li>
+          </ul>
+        </article>
+
+        <!-- ============ D4 壳参数守卫 ============ -->
+        <article id="launcher-spec" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div class="flex items-start justify-between gap-4">
+            <h2 class="font-serif text-2xl">壳的参数守卫进 LauncherSpec，名单只留一份</h2>
+            <span class="shrink-0 rounded-full bg-amber-100 text-amber-800 text-xs font-semibold px-3 py-1">Worth exploring</span>
+          </div>
+          <p class="mt-2 font-mono text-xs text-slate-500">shells/exchange_launcher.py:31-62 · shells/analysis_launcher.py:34-65 · shells/launcher_core.py:301-305 · tools/build_exe.py:24,66-70 vs 三处 project_modules=</p>
+
+          <div class="grid md:grid-cols-2 gap-4 mt-5">
+            <div>
+              <p class="lbl mb-2">Before · 守卫逐字两份，名单两种粒度</p>
+              <div class="space-y-1 text-xs">
+                <div class="mod"><span class="font-mono">exchange_launcher</span> 与 <span class="font-mono">analysis_launcher</span>：<span class="font-mono">_unknown_args</span> 28 行逐字同，只差 <span class="font-mono">--window</span> 与三行文案</div>
+                <div class="mod leakbox">core 自己解析 <span class="font-mono">--check</span>，薄入口 <span class="font-mono">KNOWN_ARGS</span> 再声明一次——没有任何测试断言两者相容</div>
+                <div class="mod leakbox">「夹带项目代码」两份名单：壳侧 <span class="font-mono">("bestseller_monitor","gui")</span> vs 构建侧四种 + 前缀规则</div>
+              </div>
+            </div>
+            <div>
+              <p class="lbl mb-2">After</p>
+              <div class="mod-deep text-sm">
+                <p>参数面变成 spec 的数据：<span class="font-mono">own_args</span> + <span class="font-mono">refuse_hint</span>，拒绝由 core 统一做</p>
+                <p class="mt-1 text-xs">壳只上报发现的模块名，「夹带」判定唯一家在 build_exe。</p>
+              </div>
+            </div>
+          </div>
+
+          <p class="mt-4 text-slate-700"><strong>问题</strong>：「这只壳认得哪些词、拒绝时说什么」实现了两遍，core 的开关在薄入口再声明一次；两款名单粒度不同、无人检查一致。</p>
+          <p class="mt-1 text-slate-700"><strong>解法</strong>：参数面变成 spec 数据，模块名单唯一家在 build_exe。</p>
+          <ul class="mt-3 flex flex-wrap gap-2 text-xs">
+            <li class="chip">locality：新增壳 / 开关一处</li>
+            <li class="chip">leverage：三只壳共用</li>
+            <li class="chip">测试：两个 launcher 测试类并成一组</li>
+          </ul>
+          <div class="mt-3 rounded-md bg-slate-100 border-l-4 border-slate-400 px-3 py-2 text-xs text-slate-600">这一片整体是深的：core 的根推导 / 找 python / 弹窗策略三只壳共用、有测试钉住，采集壳无守卫也是自洽的（gui.py 零 argparse）。只有上面两处是浅边。</div>
+        </article>
+
+      </section>
+
+      <!-- ======================= 看过但不列入 ======================= -->
+      <section id="appendix" class="rounded-xl border border-slate-200 bg-slate-100 p-6">
+        <h2 class="font-serif text-2xl">看过但不列入</h2>
+        <div class="mt-4 grid md:grid-cols-2 gap-6 text-sm text-slate-700">
+          <div>
+            <p class="lbl">核过、不构成深化候选</p>
+            <ul class="mt-2 space-y-1 list-disc list-inside">
+              <li><span class="font-mono text-xs">stop_request.targets_me</span>：零生产调用，5 条测试养着；<span class="font-mono text-xs">browser_proc.listen_port_owner</span>：只剩诊断工具在用</li>
+              <li>两张原页存档规则各一份（只 locality，不够一条）；<span class="font-mono text-xs">crawl_store_by_click</span> 是 9 参数透传；<span class="font-mono text-xs">_pending_detail_offers</span> 的分组是死的一般性</li>
+              <li>卡片位置（页号）两个所有者——后果有界（duplicate 短路）；两份同算法卡片 JS（09-19 已判 sub-Strong，无新后果）；<span class="font-mono text-xs">cfg</span> 48 字段袋子（与 09-19 同账）</li>
+              <li>交换台报告节号三处推导（Speculative，属「结局形状」的渲染侧，单独提不划算）</li>
+              <li>「本机 python 在哪」四个家——<span class="font-mono text-xs">.cmd/.sh</span> 引导层没有 python 可 import，结构上难共用代码</li>
+            </ul>
+          </div>
+          <div>
+            <p class="lbl">重报纪律（本轮未重报的）</p>
+            <ul class="mt-2 space-y-1 list-disc list-inside">
+              <li>ADR-0027 挂起的候选 05–07（详情机会账本存储原语 / 榜单完成事实 / 时间注入）</li>
+              <li>09-20 仍开放的三条：<span class="font-mono text-xs">ReadFailedVisit</span> 两条路两种后果、诊断工具抄点击语义、停止窗口 rebind 用 <span class="font-mono text-xs">hasattr</span> 探</li>
+              <li>09-18/19/20 过滤清单里的同区域项（界面会话账「没有所有者」、每入口记得 tick、views 裸 SQL、两个页面各拼进度……）——U2 只就「记错」这一新证据说话</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- ======================= 先做 ======================= -->
+      <section id="top-recommendation">
+        <div class="rounded-xl border-2 border-slate-800 bg-white p-8">
+          <p class="lbl">先做</p>
+          <h2 class="font-serif text-3xl mt-1"><a class="underline decoration-slate-300 hover:decoration-slate-800" href="#wait-primitive">等待原语：等页面这件事收成一个 module</a></h2>
+          <p class="mt-3 text-slate-700">四个循环收成一处，取消钩子接上已有的 <span class="font-mono text-xs">stop_request.check()</span>——它直接兑现这条线最近的投入（协作停止 8 秒窗口），改动集中、无 ADR 冲突，leverage 最大：4 个循环 + 5 个 <span class="font-mono text-xs">wait_cards</span> 调用点一次兑现，约 10 处「patch time.sleep」的测试面同时换成注入轮询与取消钩子。</p>
+        </div>
+      </section>
+
+    </main>
+  </body>
+</html>
