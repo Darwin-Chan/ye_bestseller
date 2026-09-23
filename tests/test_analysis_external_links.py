@@ -102,6 +102,9 @@ class ExternalSourceLinkTests(unittest.TestCase):
         self.review()
         self.spy_new_windows()
 
+        # 先选中不含「杯子乙」的那一组：组内新增商品的搜索结果只给不在当前组里的商品，
+        # 而默认选中的是左列第一组（票 05 起按组内商品数/销量排，这里轮到「杯子乙」）。
+        self.page.locator('.group-choice').filter(has_text='杯子 ·').click()
         self.page.get_by_role('button', name='组内新增商品').click()
         self.page.get_by_role('textbox', name='搜索商品').fill('杯子乙')
         item = self.page.locator('#addResults .search-item').filter(has_text='杯子乙')
