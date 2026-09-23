@@ -2,6 +2,7 @@
 
 浏览器用例走真实页面与本地接口，只替换模型与图片网络（沿用分组编辑夹具）。
 """
+import re
 import unittest
 
 from playwright.sync_api import expect
@@ -75,7 +76,7 @@ class StageLegendTests(unittest.TestCase):
         expect(self.page.get_by_role('heading', name='确认同款')).to_be_visible()
         # 图例没有借 data-tab 混进页签：页签仍是票 15 的三个，选中仍停在「待确认」。
         self.assertEqual(self.page.get_by_role('tab').count(), 3)
-        expect(self.page.get_by_role('tab', name='待确认', exact=True)).to_have_attribute('aria-selected', 'true')
+        expect(self.page.get_by_role('tab', name=re.compile('^待确认'))).to_have_attribute('aria-selected', 'true')
         self.switch_tab('全部')
         self.assert_stages('确认同款', {'选择区间'})
 

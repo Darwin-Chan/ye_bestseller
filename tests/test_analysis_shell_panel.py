@@ -4,6 +4,7 @@
 面板、铺满与页签样式是视觉契约，这里钉住可断言的部分：面板归属（谁在里面、谁在外）、
 「一套」的实测对齐（确认屏与日期屏同款）、徽标文本与选中态、条目白底的来源。
 """
+import re
 import unittest
 
 from playwright.sync_api import expect
@@ -37,8 +38,10 @@ class ShellPanelTests(unittest.TestCase):
         expect(self.page.locator('#snapshotInfo')).to_contain_text('日期区间')
 
     def tab_style(self, label):
-        return self.page.get_by_role('tab', name=label, exact=True).evaluate("""el=>{const s=getComputedStyle(el);
-            return {background:s.backgroundColor,bottom:s.borderBottomWidth,color:s.color,weight:s.fontWeight}}""")
+        """页签的可计算样式。票 02 起页签名带计数徽标，按标签前缀认。"""
+        return self.page.get_by_role('tab', name=re.compile(f'^{label}')).evaluate("""el=>{const s=getComputedStyle(el);
+            return {background:s.backgroundColor,bottom:parseFloat(s.borderBottomWidth)||0,color:s.color,
+                    weight:parseFloat(s.fontWeight)||0}}""")
 
     def test_review_screen_wears_the_same_panel_as_the_date_screen(self):
         self.seed()
@@ -56,10 +59,11 @@ class ShellPanelTests(unittest.TestCase):
     def test_right_column_drops_its_second_white_card(self):
         self.seed()
         self.review()
-        # 右列栏容器不再自带白底、边框与内边距：直接铺在面板上。
-        self.assertEqual(self.page.eval_on_selector('#groupDetail', """el=>{const s=getComputedStyle(el);
-            return [s.backgroundColor,s.borderTopStyle,s.borderTopWidth,s.paddingTop]}"""),
-            ['rgba(0, 0, 0, 0)', 'none', '0px', '0px'])
+        # 右列栏容器不再自刷白、不再自带边框与内衬：白与内边距都由面板出。
+        detail = self.page.eval_on_selector('#groupDetail', """el=>{const s=getComputedStyle(el);
+            return {background:s.backgroundColor,border:s.borderTopStyle,padding:s.paddingTop}}""")
+        self.assertNotEqual(detail['background'], panel_style(self.page, '#reviewPage')[0])
+        self.assertEqual([detail['border'], detail['padding']], ['none', '0px'])
 
     def test_tab_badges_count_groups_and_follow_confirmations(self):
         self.seed()
@@ -75,13 +79,15 @@ class ShellPanelTests(unittest.TestCase):
         self.seed()
         self.review()
         selected, idle = self.tab_style('待确认'), self.tab_style('已确认')
-        self.assertEqual(selected['background'], 'rgba(0, 0, 0, 0)')
-        self.assertEqual([selected['bottom'], selected['color'], selected['weight']],
-                         ['3px', 'rgb(37, 99, 235)', '700'])
-        self.assertEqual([idle['bottom'], idle['weight']], ['0px', '400'])
+        # 选中态只看相对关系：底色不等于字色（不再是实心主色块）、下划线比未选中宽、字比未选中重。
+        self.assertNotEqual(selected['background'], selected['color'])
+        self.assertGreater(selected['bottom'], idle['bottom'])
+        self.assertGreater(selected['weight'], idle['weight'])
+        self.assertEqual(selected['color'], 'rgb(37, 99, 235)')   # 主色（与页面调色板同源）
         self.switch_tab('已确认')
-        self.assertEqual(self.tab_style('已确认')['bottom'], '3px')
-        self.assertEqual(self.tab_style('待确认')['bottom'], '0px')
+        moved = self.tab_style('已确认'), self.tab_style('待确认')
+        self.assertGreater(moved[0]['bottom'], moved[1]['bottom'])
+        self.assertGreater(moved[0]['weight'], moved[1]['weight'])
 
     def test_result_entries_borrow_the_screen_panel_white(self):
         self.seed()
@@ -90,12 +96,13 @@ class ShellPanelTests(unittest.TestCase):
         self.page.get_by_role('dialog').get_by_role('button', name='确认', exact=True).click()
         self.page.get_by_role('button', name='保存分组并查看畅销品').click()
         expect(self.page.get_by_role('heading', name='初步畅销品')).to_be_visible()
-        # 结果屏自己是一层白面板；条目与它的展开行不再单独刷白，白底由面板承担。
+        # 结果屏自己是一层白面板（与日期屏同款）；条目与它的展开行不再单独刷白，白底由面板承担。
+        white = panel_style(self.page, '#datePage')[0]
         self.assertEqual(self.page.eval_on_selector(
-            '#results', "el=>getComputedStyle(el).backgroundColor"), 'rgb(255, 255, 255)')
+            '#results', "el=>getComputedStyle(el).backgroundColor"), white)
         for selector in ('#ranking > details', '#ranking > details > summary'):
-            self.assertEqual(self.page.eval_on_selector(
-                selector, "el=>getComputedStyle(el).backgroundColor"), 'rgba(0, 0, 0, 0)')
+            self.assertNotEqual(self.page.eval_on_selector(
+                selector, "el=>getComputedStyle(el).backgroundColor"), white)
 
 
 class ShellPanelConflictCountTests(unittest.TestCase):

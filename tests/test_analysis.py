@@ -80,8 +80,11 @@ class AnalysisBrowserTests(unittest.TestCase):
         self.page.locator(".group-choice", has_text=text).first.click()
 
     def switch_tab(self, label):
-        """切到确认页签。「全部」页签下确认状态变化不把组移出列表，方便连着操作同一组。"""
-        self.page.get_by_role('tab', name=label, exact=True).click()
+        """切到确认页签。「全部」页签下确认状态变化不把组移出列表，方便连着操作同一组。
+
+        票 02 起页签名带计数徽标（「待确认 4」），按标签前缀认。
+        """
+        self.page.get_by_role('tab', name=re.compile(f'^{label}')).click()
 
     def submit_product(self, offer, day, stock, *, name, color=None):
         submit_offer(self.db, offer, day, stock, name=name, color=color)
