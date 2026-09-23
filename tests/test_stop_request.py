@@ -229,3 +229,37 @@ class ProcessStopRuntimeTests(unittest.TestCase):
         self.assertFalse(effect.ok)
         self.assertEqual(effect.code, "terminate_failed")
         self.assertTrue(effect.retryable, "留在核验里重试，而不是报成功收口")
+
+    def test_release_never_hands_a_process_double_to_ctypes(self):
+        """子进程替身（MagicMock 什么属性都有，包括 handle）不得进 ctypes。
+
+        崩过一次：判据曾是 hasattr(capability, "handle")，对 mock 恒真；ctypes 参数转换
+        去摸 mock 属性时无限递归，Python 3.12/3.13 栈溢出杀掉整个测试进程。
+        observe/terminate 都先认 poll，release 现在与它们对齐。
+        """
+        target = stop_request.StopTarget(4242, "2026-09-23T00:00:00")
+        bound = stop_request.BoundTarget(target, MagicMock())
+
+        with patch.object(browser_proc, "release_process_capability") as release:
+            stop_request.ProcessStopRuntime().release(bound)
+
+        release.assert_not_called()
+
+    def test_release_hands_the_bound_capability_to_the_os(self):
+        target = stop_request.StopTarget(4242, "2026-09-23T00:00:00")
+        capability = browser_proc.ProcessCapability(4242, 91, "proof")
+        bound = stop_request.BoundTarget(target, capability)
+
+        with patch.object(browser_proc, "release_process_capability") as release:
+            stop_request.ProcessStopRuntime().release(bound)
+
+        release.assert_called_once_with(capability)
+
+    def test_release_without_a_bound_handle_is_quiet(self):
+        target = stop_request.StopTarget(4242, "2026-09-23T00:00:00")
+        bound = stop_request.BoundTarget(target, None)
+
+        with patch.object(browser_proc, "release_process_capability") as release:
+            stop_request.ProcessStopRuntime().release(bound)
+
+        release.assert_not_called()

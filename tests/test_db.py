@@ -1033,9 +1033,10 @@ class DbTests(unittest.TestCase):
 class EventIndexTests(unittest.TestCase):
     """事件表要有为过程页刷新建的索引（IS-38）。
 
-    一次刷新里逐店的 deny 计数与时间跨度约占九成：这两条原先各扫一遍本轮全部事件
-    （12 店就是 12 遍）。WAL 库 30 万行实测：一次刷新 0.80 秒 → 0.09 秒；代价是事件
-    写入（采集热路径）2000 条 17.1 → 20.1 毫秒。
+    一次刷新里逐店的 deny 计数与时间跨度原先各扫一遍本轮全部事件（12 店就是 12 遍）。
+    WAL 库 30 万行实测：一次刷新 0.80 秒 → 0.117 秒；次日 55a51ce 把计数口径统一到
+    round_tally 后刷新整体约 0.5 秒（大头是 tally，不是这两条索引）。代价是事件写入
+    （采集热路径）2000 条 17.1 → 20.1 毫秒。
     """
 
     DENY_SQL = ("SELECT COUNT(*) FROM event_log WHERE round_id=? AND shop_key=? "

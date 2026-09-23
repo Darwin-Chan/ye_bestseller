@@ -2,7 +2,7 @@ import os
 import socket
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from bestseller_monitor import browser_proc
 
@@ -134,6 +134,45 @@ class ProcessLookupTests(unittest.TestCase):
                 self.skipTest("netstat 在本环境不可用")
             self.assertEqual(owner, os.getpid())
         self.assertIsNone(browser_proc.listen_port_owner(port))
+
+    def test_netstat_gbk_output_is_parsed_regardless_of_interpreter_encoding(self):
+        """netstat 的文本按 OEM 码页输出（中文 Windows 是 GBK），不能拿解释器默认编码去猜。
+
+        崩过一次：UTF-8 模式（PYTHONUTF8=1；Python 3.15 起是默认）下 text=True 用 UTF-8
+        解 GBK，读取线程抛 UnicodeDecodeError，stdout 静默变 None。
+        """
+        sample = ("\r\n活动连接\r\n\r\n  协议  本地地址          外部地址        状态           PID\r\n"
+                  "  TCP    127.0.0.1:50123        0.0.0.0:0              LISTENING       4242\r\n"
+                  "  TCP    127.0.0.1:50124        0.0.0.0:0              ESTABLISHED     4243\r\n")
+        done = SimpleNamespace(returncode=0, stdout=sample.encode("gbk"))
+        with patch.object(browser_proc.subprocess, "run", return_value=done):
+            self.assertEqual(browser_proc.listen_port_owner(50123), 4242)
+
+    def test_unreadable_netstat_output_is_reported_as_unavailable(self):
+        """解码失败时 subprocess 会把 stdout 留成 None：那时要当「查不到」，不是崩。"""
+        done = SimpleNamespace(returncode=0, stdout=None)
+        with patch.object(browser_proc.subprocess, "run", return_value=done):
+            self.assertIsNone(browser_proc.listen_port_owner(50123))
+
+
+class ReleaseCapabilityTests(unittest.TestCase):
+    """释放句柄只碰真能力句柄：别的对象绝不进 ctypes。
+
+    崩过一次：测试把 MagicMock 当句柄喂进来，ctypes 转换去摸 mock 属性时无限递归，
+    Python 3.12/3.13 直接栈溢出杀掉测试进程（3.14 只把它变成可捕获的 RecursionError）。
+    """
+
+    def test_a_non_capability_never_reaches_ctypes(self):
+        with patch.object(browser_proc, "ctypes") as ct:
+            browser_proc.release_process_capability(MagicMock())
+        ct.windll.kernel32.CloseHandle.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "ctypes 能力句柄是 Windows 机制")
+    def test_a_real_capability_is_closed(self):
+        capability = browser_proc.ProcessCapability(6104, 97, "proof")
+        with patch.object(browser_proc, "ctypes") as ct:
+            browser_proc.release_process_capability(capability)
+        ct.windll.kernel32.CloseHandle.assert_called_once_with(97)
 
 
 if __name__ == "__main__":

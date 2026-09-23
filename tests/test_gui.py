@@ -1242,16 +1242,24 @@ class GuiRefreshCostTests(unittest.TestCase):
     """IS-38：界面每 2 秒刷新一次，刷新路径不能付「随库增长」的全表成本。
 
     合成 12 家店的大盘库，走真实 cfg + 真实 `_open_conn`（整表去重就在 connect() 里），
-    断言两件事：这次刷新没有整表语句，且耗时不至于离谱。更大规模的耗时复现在
-    `tools/bench_refresh.py`（默认 30 万行，可 `--rows-per-shop` 继续放大）。
+    断言分两层：
 
-    耗时上界只是护栏，不是性能目标：这台机器、30 万行、WAL 库上一次刷新实测约 0.09 秒
-    （补事件索引之前是 0.80 秒），所以 1 秒的界有十倍余量。
+    - 结构层（承重）：这次刷新没有整表语句、开库没有任何一段迁移需要动手。
+    - 耗时段（护栏，不是性能目标）：同一台机器、同一份数据，**把两条事件索引摘掉再刷
+      一次作对照**——正常路径必须比对照快 `MIN_INDEX_ADVANTAGE` 倍以上（索引真在承重）。
+      两侧各量两次取最快，负载尖峰只落在其中一次时不至于假红。另外留一条极宽松的绝对
+      上界，只拦灾难级回归（如把聚合写成逐行 EXISTS：46 秒）。
+
+    别把这里的数字当性能目标抄：IS-38 补事件索引时本机一次刷新 0.117 秒，护栏 1.0 秒；
+    次日 55a51ce 把计数口径统一到 round_tally 后**按设计**涨到约 0.53 秒（该提交自述），
+    绝对上界的余量从十倍缩到两倍——2026-09-23 一台比开发机慢 3 倍的采集机上因此假红
+    （实测 1.55 秒，程序无回归）。所以耗时段改成同机对照：机器快慢自动约掉。
     """
 
     SHOPS = 12
     ROWS_PER_SHOP = 25_000      # 12 店 × 2.5 万 = 30 万快照 + 30 万事件
-    REFRESH_LIMIT_SEC = 1.0
+    MIN_INDEX_ADVANTAGE = 1.5   # 实测：开发机 2.5 倍、慢机 3.2 倍；索引失效时是 1.0 倍
+    CATASTROPHE_LIMIT_SEC = 10.0
 
     def test_refresh_on_a_large_database_does_not_scan_the_snapshot_table(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1274,20 +1282,55 @@ class GuiRefreshCostTests(unittest.TestCase):
                 return opened
 
             api._open_conn = open_conn
-            started = time.perf_counter()
-            run = api.get_run()
-            elapsed = time.perf_counter() - started
+
+            def best_refresh(target_api, repeats: int = 2):
+                """一侧量两次取最快：负载尖峰只落在其中一次上时，不至于假红。"""
+                fastest, run = None, None
+                for _ in range(repeats):
+                    started = time.perf_counter()
+                    run = target_api.get_run()
+                    elapsed = time.perf_counter() - started
+                    fastest = elapsed if fastest is None else min(fastest, elapsed)
+                return run, fastest
+
+            run, elapsed = best_refresh(api)
 
             self.assertEqual(run["round_id"], rid)
             self.assertEqual(run["done_count"], self.SHOPS, "12 家店的指标都要算出来")
             self.assertGreater(run["done"][0]["skus"], 0)
             self.assertEqual(
-                [report.deduped_snapshot_rows for report in reports], [None],
-                "刷新一次不该扫整表：唯一索引已在，重复行不可能写进来",
+                {report.deduped_snapshot_rows for report in reports}, {None},
+                "刷新的每一次都不该扫整表：唯一索引已在，重复行不可能写进来",
             )
-            self.assertEqual([report.applied for report in reports], [()],
-                             "这次开库没有任何一段迁移需要动手")
-            self.assertLess(elapsed, self.REFRESH_LIMIT_SEC,
+            self.assertEqual({report.applied for report in reports}, {()},
+                             "每次开库都没有任何一段迁移需要动手")
+
+            # 同机对照：摘掉两条事件索引再刷一次。得让界面用裸连接——connect() 每次
+            # 开库都会把索引建回来，摘掉的索引因此真的不在了。
+            raw = sqlite3.connect(path)
+            try:
+                for name in db.EVENT_REFRESH_INDEXES:
+                    raw.execute(f"DROP INDEX IF EXISTS {name}")
+                raw.commit()
+            finally:
+                raw.close()
+
+            def open_raw():
+                opened = sqlite3.connect(path)
+                opened.row_factory = sqlite3.Row
+                return opened
+
+            control_api = gui_api(db_file=path, now=lambda: bench_refresh.NOW)
+            control_api._open_conn = open_raw
+            control_run, control_sec = best_refresh(control_api)
+            self.assertEqual(control_run["round_id"], rid,
+                             "对照真的刷了一轮，不是早退的错答案")
+
+            self.assertLess(
+                elapsed, control_sec / self.MIN_INDEX_ADVANTAGE,
+                f"事件索引没在承重：这次刷新 {elapsed:.3f} 秒，"
+                f"摘掉索引的对照 {control_sec:.3f} 秒")
+            self.assertLess(elapsed, self.CATASTROPHE_LIMIT_SEC,
                             f"一次刷新耗时离谱，实测 {elapsed:.3f} 秒")
 
 

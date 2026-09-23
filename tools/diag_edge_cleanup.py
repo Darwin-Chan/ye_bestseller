@@ -29,8 +29,11 @@ PROFILE = Path(os.environ.get("TEMP", ".")) / "edge_cleanup_probe_profile"
 
 def msedge_count() -> int:
     out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq msedge.exe", "/NH"],
-                         capture_output=True, text=True).stdout
-    return len([ln for ln in out.splitlines() if ln.lower().startswith("msedge.exe")])
+                         capture_output=True).stdout
+    # 与 browser_proc.listen_port_owner 同款：控制台输出按 OEM 码页解，别用 text=True
+    # 的解释器默认编码（UTF-8 模式下解 GBK 会拿到 None）。
+    text = browser_proc.decode_console_output(out)
+    return len([ln for ln in text.splitlines() if ln.lower().startswith("msedge.exe")])
 
 
 def port_owner() -> int | None:

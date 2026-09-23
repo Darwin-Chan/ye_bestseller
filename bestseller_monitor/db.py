@@ -161,7 +161,8 @@ CREATE INDEX IF NOT EXISTS idx_event_log_shop_ts ON event_log(shop_key, ts);
 CREATE INDEX IF NOT EXISTS idx_event_log_event ON event_log(event);
 CREATE INDEX IF NOT EXISTS idx_event_log_verification ON event_log(verification_type);
 -- 过程页刷新按「轮次 + 店铺」问这两件事：deny 计数、该店的时间跨度。只按 round_id
--- 索引的话，12 家店要各扫一遍本轮全部事件（IS-38：30 万行一次刷新 0.80 → 0.09 秒）。
+-- 索引的话，12 家店要各扫一遍本轮全部事件（IS-38 实测：30 万行一次刷新 0.80 → 0.117 秒；
+-- 现在一次刷新约 0.5 秒，大头是 round_tally，见 tools/bench_refresh.py）。
 CREATE INDEX IF NOT EXISTS idx_event_log_round_shop_event
     ON event_log(round_id, shop_key, event);
 CREATE INDEX IF NOT EXISTS idx_event_log_round_shop_ts

@@ -106,20 +106,38 @@ def terminate_process_capability(capability: ProcessCapability) -> bool:
 
 
 def release_process_capability(capability: ProcessCapability) -> None:
-    if os.name == "nt":
-        try:
-            ctypes.windll.kernel32.CloseHandle(capability.handle)
-        except Exception:
-            pass
+    if os.name != "nt":
+        return
+    if not isinstance(capability, ProcessCapability):
+        # 只有真能力句柄能进 ctypes：替身/异物（mock 什么属性都有）会在参数转换里被
+        # ctypes 摸属性，mock 自动生成子 mock → 无限递归 → 3.12/3.13 栈溢出杀进程。
+        return
+    try:
+        ctypes.windll.kernel32.CloseHandle(capability.handle)
+    except Exception:
+        pass
+
+
+def decode_console_output(data: bytes | None) -> str:
+    """控制台程序（netstat / tasklist）的输出：按 OEM 码页解码，坏字节替换掉。
+
+    这些程序的文本跟随控制台/OEM 码页（中文 Windows 是 GBK），而 `subprocess` 的
+    `text=True` 用的是解释器默认编码——UTF-8 模式（PYTHONUTF8=1；Python 3.15 起是
+    默认）下解 GBK 会在读取线程里抛 UnicodeDecodeError，stdout 静默变成 None。
+    读它们只认 ASCII 片段（TCP / LISTENING / PID / 进程名），替换字符不影响判断。
+    """
+    return (data or b"").decode("oem" if os.name == "nt" else "utf-8",
+                                errors="replace")
 
 
 def listen_port_owner(port: int) -> int | None:
-    """端口的 LISTENING 占用者 PID；没有监听返回 None。"""
+    """端口的 LISTENING 占用者 PID；没有监听或读不到时返回 None。"""
     try:
-        out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True).stdout
+        done = subprocess.run(["netstat", "-ano"], capture_output=True)
     except Exception as exc:  # noqa: BLE001
         log.debug("查询端口占用失败：%s", exc)
         return None
+    out = decode_console_output(done.stdout)
     for line in out.splitlines():
         parts = line.split()
         if len(parts) >= 5 and parts[0].lower() == "tcp" and parts[-1].isdigit():

@@ -313,7 +313,16 @@ class ProcessStopRuntime:
         return EffectResult(True) if closed is not None else EffectResult(False, "browser_close_failed")
 
     def release(self, bound: BoundTarget) -> None:
+        """释放绑定的句柄：只释放能力句柄。
+
+        与 `observe` / `terminate` 同一套判别——先认 `poll`（own_process 交进来的子
+        进程句柄自己管 OS 资源），剩下带 `handle` 的才交给 `browser_proc`。反过来说
+        只看 `handle` 会把子进程替身喂进 ctypes：mock 的属性会自动生成，参数转换在
+        那里无限递归，Python 3.12/3.13 栈溢出杀掉整个进程（见 2026-09-23 的 m2 记录）。
+        """
         capability = bound.capability
+        if capability is None or hasattr(capability, "poll"):
+            return
         if hasattr(capability, "handle"):
             from . import browser_proc
             browser_proc.release_process_capability(capability)
