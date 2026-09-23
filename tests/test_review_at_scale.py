@@ -56,11 +56,14 @@ class ReviewAtScaleTests(unittest.TestCase):
         expect(self.page.locator('#dirtyStatus')).to_have_text('未保存')
         expect(self.page.get_by_role('button', name='确认当前筛选全部组')).to_be_disabled()
         self.switch_tab('已确认')
+        # 撤回的是列表第一组（切页签后默认选中它），随后它就是待确认里剩下的那一组。
+        # 组号不按左列次序推（票 05 起左列按组内商品数排，序号不再是组号），读出来用。
+        withdrawn = self.page.locator('.group-choice').first.get_attribute('data-group')
         self.page.get_by_role('button', name='撤回当前分组').click()
         expect(self.page.locator('.group-choice')).to_have_count(3)
         self.switch_tab('待确认')
         expect(self.page.locator('.group-choice')).to_have_count(1)
-        expect(self.page.locator('#groupDetail h3')).to_have_text('G1 · 1 个商品')
+        expect(self.page.locator('#groupDetail h3')).to_have_text(f'{withdrawn} · 1 个商品')
         self.page.get_by_role('button', name='确认当前分组', exact=True).click()
         expect(self.page.locator('#groupDetail')).to_contain_text('暂无符合条件的分组')
         expect(self.page.locator('.group-choice')).to_have_count(0)
@@ -129,6 +132,7 @@ class ReviewAtScaleTests(unittest.TestCase):
         self.dates()
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
         expect(self.page.locator('#snapshotInfo')).to_contain_text('3012 个商品 · 3012 组同款（其中 3012 组待确认）', timeout=20000)
+        sid = self.page.url.split('analysis=')[1]
         expect(self.page.locator('.group-choice')).to_have_count(20)
         for index in (1, 2):
             choice = self.page.locator('.group-choice').nth(index)
@@ -137,7 +141,9 @@ class ReviewAtScaleTests(unittest.TestCase):
             expect(self.page.locator('#groupDetail h3')).to_have_text(f'{group} · 1 个商品')
         self.page.locator('#products input[type=checkbox]').first.check()
         self.page.get_by_role('button', name='下一页', exact=True).click()
-        expect(self.page.locator('#groupDetail h3')).to_have_text('G21 · 1 个商品')
+        # 第 2 屏的头一组照服务端给的左列次序取（票 05 起大组在前，左列序号不再等于组号）。
+        expect(self.page.locator('#groupDetail h3')).to_have_text(
+            f'{self.service.get(sid)["review_order"][20]} · 1 个商品')
         self.page.locator('#products input[type=checkbox]').first.check()
         self.page.get_by_role('button', name='上一页', exact=True).click()
         expect(self.page.locator('#products input[type=checkbox]').first).to_be_checked()
@@ -166,7 +172,6 @@ class ReviewAtScaleTests(unittest.TestCase):
         expect(dialog).not_to_be_visible(timeout=30000)
         expect(self.page.locator('#snapshotInfo')).to_contain_text('其中 0 组待确认')
         expect(self.page.locator('#groupDetail')).to_contain_text('暂无符合条件的分组')
-        sid = self.page.url.split('analysis=')[1]
         result = self.service.get(sid)
         self.assertEqual(sum(g['confirmed'] for g in result['groups']), 3012)
         self.switch_tab('已确认')

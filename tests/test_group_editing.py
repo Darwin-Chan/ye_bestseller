@@ -68,9 +68,10 @@ class GroupEditingTests(unittest.TestCase):
         self.dates()
         self.page.get_by_role('button', name='下一步、进入同款确认').click()
         # 这个用例确认后还要接着操作同一组，「全部」页签下组不因确认离开列表。
+        # 点哪一组与左列次序无关（票 05 起大组在前）：按组号选，别拿序号当组号。
         self.switch_tab('全部')
         expect(self.page.locator('.group-choice')).to_have_count(4)
-        self.page.locator('.group-choice').nth(1).click()
+        self.page.locator('.group-choice').filter(has_text='G2 ·').click()
         expect(self.page.locator('#groupDetail h3')).to_have_text('G2 · 1 个商品')
         self.page.get_by_role('button', name='确认当前分组', exact=True).click()
         self.page.get_by_role('button', name='组内新增商品').click()
@@ -231,8 +232,10 @@ class GroupEditingTests(unittest.TestCase):
                 self.dates()
                 self.page.get_by_role('button',name='下一步、进入同款确认').click()
                 # 四种状态组合要在同一份列表里来回切换，「全部」页签下组不因状态离开列表。
+                # 起点那一组显式点：默认选中的是左列第一组，而左列次序由服务端给（票 05）。
                 self.switch_tab('全部')
                 expect(self.page.locator('.group-choice')).to_have_count(4)
+                self.page.locator('.group-choice').filter(has_text='G1 ·').click()
                 if source_confirmed:
                     self.page.get_by_role('button',name='确认当前分组',exact=True).click()
                     expect(self.page.locator('#groupDetail .group-status')).to_have_text('已确认')

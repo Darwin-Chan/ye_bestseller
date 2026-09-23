@@ -205,8 +205,12 @@ function matchesProduct(p){
         && (!labels.length||labels.includes(p.match_label))
         && (!query||[p.product_name,p.offer_id,p.shop_key,shopName(p)].some(v=>String(v||'').toLocaleLowerCase().includes(query)));
 }
+// 左列次序由服务端给（票 05：组内商品数降序 → 并列销量降序 → 稳定），这里照单取组、
+// 不排序；筛选命中仍整组展示。结果屏名次与导出报告另用 snapshot.ranking，不受这份次序影响。
 function filteredGroups(){
-    return currentSnapshot.groups.filter(g=>(reviewTab==='all'||groupConfirmed(g)===(reviewTab==='confirmed'))&&groupProducts(g).some(matchesProduct));
+    const byId=new Map(currentSnapshot.groups.map(g=>[g.id,g]));
+    const order=currentSnapshot.review_order||currentSnapshot.groups.map(g=>g.id);
+    return order.map(id=>byId.get(id)).filter(g=>g&&(reviewTab==='all'||groupConfirmed(g)===(reviewTab==='confirmed'))&&groupProducts(g).some(matchesProduct));
 }
 // 批量动作由页签定：待确认页是确认、已确认页是撤回；“全部”页没有批量动作，也没有勾选框。
 function batchMode(){

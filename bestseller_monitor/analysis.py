@@ -680,6 +680,8 @@ class AnalysisService:
                 product['matching_state'] = state_of_status(product.get('matching_status'))
             product.setdefault('matching_source', '')   # 票 07 之前的草稿没有来源列
         payload['matching'] = matching_summary(payload['products'])
+        # 票 05 之前保存的草稿没有确认屏次序：读回时按现行规则补算（幂等，规则换了也跟着新）。
+        order_review_groups(payload)
         return payload
 
     def confirm(self, analysis_id, group_id):
@@ -715,6 +717,8 @@ class AnalysisService:
             # 状态不动的动作也算——它表达的正是「就按本机的决定办」。
             self._resolve_conflicts(
                 snapshot, {identity(m) for group in groups for m in group['members']})
+            # 确认屏次序与排名同更新时机（票 05）：确认本身不改成员数与销量，照算一遍。
+            order_review_groups(snapshot)
             return copy.deepcopy(snapshot)
 
     def source(self, offer_id):
@@ -880,12 +884,30 @@ def rank_groups(snapshot: dict) -> None:
     （并列保持原顺序，稳定），最后把成员的逐日点聚到组层。冻结后快照入库前调用一次，
     之后的读取与导出都消费同一份结果，页面不再自己重算销量或排序。只依赖快照数据，
     可以安全地对同一份快照反复调用。
+
+    确认屏左列的次序另有 `review_order` 一份（票 05），在这里一并算出：与排名同源、
+    同更新时机，但规则不同、互不干扰（见 `order_review_groups`）。
     """
     products = {identity(p): p for p in snapshot['products']}
     for group in snapshot['groups']:
         summarize_group(group, products)
         group['points'] = _aggregate_points([products[identity(m)]['points'] for m in group['members']])
     snapshot['ranking'] = [group['id'] for group in sorted(snapshot['groups'], key=lambda group: -group['sales'])]
+    order_review_groups(snapshot)
+
+
+def order_review_groups(snapshot: dict) -> None:
+    """确认屏左列的次序（票 05）：组内商品数降序 → 并列按组总销量降序 → 再并列保持稳定。
+
+    另出一份 `review_order`（组号列表）：组集合自身的次序不动，`ranking` 的并列稳定序
+    也不动——结果屏名次与导出报告的组序仍是区间总销量降序。页面照这份次序渲染左列，
+    不自行排序；页签、搜索、筛选与 20 组/页分页都作用在它上面。
+
+    次序只由快照数据决定，排序是稳定的（并列保持 `groups` 里的相对次序），同一份数据
+    重算两次结果一致。老草稿没有这一份：读回时补算。
+    """
+    snapshot['review_order'] = [group['id'] for group in sorted(
+        snapshot['groups'], key=lambda group: (-len(group['members']), -group.get('sales', 0)))]
 
 
 def _aggregate_points(series: list[list[dict]]) -> list[dict]:
