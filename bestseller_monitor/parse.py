@@ -159,6 +159,54 @@ def _extract_json_object(html_text: str, key: str) -> dict | None:
     return obj if isinstance(obj, dict) else None
 
 
+def _extract_json_array(html_text: str, key: str) -> list | None:
+    """取出页面内嵌 JSON 中 key 对应的数组；缺失、非数组或解析失败都返回 None。"""
+    m = re.search(r'"%s"\s*:\s*(\[)' % re.escape(key), html_text)
+    if not m:
+        return None
+    try:
+        value = json.JSONDecoder().raw_decode(html_text, m.start(1))[0]
+    except Exception:  # noqa: BLE001 —— 解析不了按「没有这段」处理
+        return None
+    return value if isinstance(value, list) else None
+
+
+def _sku_image_map(html_text: str) -> dict[str, str]:
+    """「规格值名 → 图地址」映射，取自内嵌 JSON skuProps 各规格值的 imageUrl。
+
+    取页面首个 `"skuProps"`（实测页里同一份数组出现多次、内容相同，与 skuInfoMap 的
+    取法一致）；若首个是空占位，映射为空、按空值处理，不报错。图是附加字段：单个规格
+    结构畸形只跳过它，其余映射照常、也不上抛异常。
+    """
+    out: dict[str, str] = {}
+    for prop in _extract_json_array(html_text, "skuProps") or []:
+        if not isinstance(prop, dict):
+            continue
+        values = prop.get("value")
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            if not isinstance(value, dict):
+                continue
+            name = str(value.get("name") or "").strip()
+            image = value.get("imageUrl")
+            if name and isinstance(image, str) and image.strip():
+                out[name] = image.strip()
+    return out
+
+
+def _sku_image_for(sku_name: str, image_map: dict[str, str]) -> str | None:
+    """SKU 的图地址：specAttrs 按 `>` 分段（先解 HTML 转义），逐段与规格值名精确匹配。
+
+    命中段的图地址即该 SKU 的图；规格值名自带 #C0WEK# 内部码，同名色靠它区分。
+    """
+    for seg in _html.unescape(sku_name).split(">"):
+        seg = seg.strip()
+        if seg and seg in image_map:
+            return image_map[seg]
+    return None
+
+
 def is_single_spec_offer(html_text: str) -> bool:
     """页面是否表明这是不使用 SKU 交易的单规格商品。
 
@@ -207,16 +255,19 @@ def _extract_default_sku(html_text: str) -> list[dict]:
         "sku_name": DEFAULT_SKU_NAME,
         "sku_price": _single_spec_price(trade_model),
         "sku_stock": stock,
+        "sku_image_url": None,   # 单规格商品没有规格值可配图，空值交给上层代填
     }]
 
 
 def extract_skus_from_html(html_text: str) -> list[dict]:
     """优先解析内嵌 JSON skuInfoMap（含 canBookCount 真实可售库存）；失败再走可见文本，
-    最后对单规格商品取商品级可售量。返回 [{sku_id, sku_name, sku_price, sku_stock}]。
+    最后对单规格商品取商品级可售量。返回 [{sku_id, sku_name, sku_price, sku_stock,
+    sku_image_url}]；图地址是附加字段，取不到一律 None，不影响库存判定。
     """
     rows: list[dict] = []
     obj = _extract_json_object(html_text, "skuInfoMap")
     if obj:
+        image_map = _sku_image_map(html_text)
         for key, val in obj.items():
             if not isinstance(val, dict):
                 continue
@@ -237,12 +288,14 @@ def extract_skus_from_html(html_text: str) -> list[dict]:
                 "sku_name": name,
                 "sku_price": price,
                 "sku_stock": stock,
+                "sku_image_url": _sku_image_for(name, image_map),
             })
     if rows:
         return rows
     # 兜底：可见文本 / DOM 结构
     for r in extract_sku_rows(html_text):
         r["sku_id"] = hashlib.sha1(r["sku_name"].encode("utf-8")).hexdigest()[:16]
+        r["sku_image_url"] = None   # 文本行没有规格值来源，图一律空
         rows.append(r)
     if not rows:
         # 再兜底：单规格/无 skuInfoMap 时取商品级默认价格/库存

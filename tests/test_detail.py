@@ -283,7 +283,35 @@ class ObserveHtmlTests(unittest.TestCase):
         self.assertEqual(observation.payload["main_image_url"], "https://img/1.png")
         self.assertEqual(observation.payload["rows"],
                          [{"sku_id": "red", "sku_name": "红色", "sku_price": 10.0,
-                           "sku_stock": 3}])
+                           "sku_stock": 3, "sku_image_url": None}])
+
+    def test_the_payload_rows_carry_the_sku_image_url(self):
+        """每个成功解析的 SKU 行都带图地址，空值是 None 而不是缺键（票 01）。"""
+        html = (
+            '<script>{"skuProps":[{"prop":"颜色","value":['
+            '{"name":"红色#A1#","imageUrl":"https://img/red.png"}]}],'
+            '"skuInfoMap":{"红色#A1#":{"skuId":"red","discountPrice":10,'
+            '"canBookCount":3,"specAttrs":"红色#A1#"}}}</script>'
+        )
+        with patch.object(detail, "extract_main_image", return_value=None):
+            observation = detail.observe_html(html, self.URL)
+
+        self.assertTrue(observation.ok)
+        self.assertEqual(observation.payload["rows"][0]["sku_image_url"],
+                         "https://img/red.png")
+
+    def test_a_broken_sku_props_section_is_no_parse_failure(self):
+        """图地址解析出岔子只让图字段为空，不升级为整页解析失败（图不是库存判据）。"""
+        html = (
+            '<script>{"skuProps":[{"name":,"skuInfoMap":'
+            '{"红色#A1#":{"skuId":"red","discountPrice":10,"canBookCount":3,'
+            '"specAttrs":"红色#A1#"}}}</script>'
+        )
+        with patch.object(detail, "extract_main_image", return_value=None):
+            observation = detail.observe_html(html, self.URL)
+
+        self.assertTrue(observation.ok)
+        self.assertIsNone(observation.payload["rows"][0]["sku_image_url"])
 
     def test_the_payload_carries_only_the_keys_that_are_read(self):
         """成功的 payload 只有三个键：`product_name` / `rows` / `main_image_url`。
