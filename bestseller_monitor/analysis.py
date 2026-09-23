@@ -440,7 +440,7 @@ class AnalysisService:
         calculations = calculate_inventory(rows, start, end)
         for product in products:
             key = (product["shop_key"], product["offer_id"])
-            result = calculations.get(key, {"sales": 0, "points": [], "skus": []})
+            result = calculations.get(key, _empty_bucket())
             product.update(result)
         return {"id": analysis_id, "start": start, "end": end,
                 "frozen_at": utcnow(), "inventory": rows, "products": products,
@@ -682,6 +682,14 @@ class AnalysisService:
         payload['matching'] = matching_summary(payload['products'])
         # 票 05 之前保存的草稿没有确认屏次序：读回时按现行规则补算（幂等，规则换了也跟着新）。
         order_review_groups(payload)
+        # 票 07 之前保存的草稿没有商品级切换表：照冻结库存补算（幂等，与图上断线同源——
+        # 断线键一直在旧正文里，缺的只是说明行的据）。
+        if any('shape_switches' not in product for product in payload['products']):
+            calculations = calculate_inventory(payload['inventory'], payload['start'], payload['end'])
+            for product in payload['products']:
+                switches = calculations.get((product['shop_key'], product['offer_id']),
+                                            _empty_bucket())['shape_switches']
+                product.setdefault('shape_switches', switches)
         return payload
 
     def confirm(self, analysis_id, group_id):
@@ -794,8 +802,17 @@ def _data_url(mime: str, content: bytes) -> str:
     return 'data:' + mime + ';base64,' + base64.b64encode(content).decode('ascii')
 
 
+def _empty_bucket() -> dict:
+    """没有计算结果的商品占位：键集与 calculate_inventory 的桶一致，加键时两处一起。"""
+    return {'sales': 0, 'points': [], 'skus': [], 'shape_switches': []}
+
+
 def calculate_inventory(rows: list[dict], start: str, end: str) -> dict:
-    """Infer representation segments from frozen observations, never SKU names."""
+    """Infer representation segments from frozen observations, never SKU names.
+
+    每个商品的桶还带 `shape_switches`：区间里看得见的形态翻转，切换日与前后形态
+    按时间顺序（True＝单规格）——页面商品级切换说明的据（票 07）。
+    """
     products = {}
     for row in rows:
         products.setdefault((row['shop_key'], row['offer_id']), []).append(row)
@@ -814,12 +831,21 @@ def calculate_inventory(rows: list[dict], start: str, end: str) -> dict:
                 segments.append({'start': day, 'shape': shape, 'rows': []})
             segments[-1]['rows'].extend(observed)
         skus = []
+        shape_switches = []
         dates = _dates(start, end)
+        shown_segment = False
         for index, segment in enumerate(segments):
             lower = max(start, segment['start']) if index else start
             upper = min(end, (date.fromisoformat(segments[index+1]['start']) - timedelta(days=1)).isoformat()) if index+1 < len(segments) else end
             if lower > upper:
                 continue
+            # 区间里看得见的形态翻转才算一次切换：切换日恰在区间第一天、或切换前的
+            # 形态一天也不在区间里时，图上没有断线可解释，说明行也就不出现。
+            if shown_segment:
+                shape_switches.append({'date': segment['start'],
+                                       'shape_before': segments[index-1]['shape'],
+                                       'shape_after': segment['shape']})
+            shown_segment = True
             calculated = _calculate_segment(segment['rows'], lower, upper)[key]
             first_day = min(r['date'] for r in segment['rows'])
             for sku in calculated['skus']:
@@ -828,11 +854,11 @@ def calculate_inventory(rows: list[dict], start: str, end: str) -> dict:
                 active_start = max(lower, first) if first > first_day else lower
                 points = {p['date']: p for p in sku['points'] if p['date'] >= active_start}
                 sku['points'] = [points.get(day, {'date': day, 'stock': None, 'sales': 0, 'color': 'inactive', 'actual': False}) for day in dates]
-                sku['segment'] = index + 1
                 sku['sales'] = sum(p['sales'] for p in sku['points'])
                 skus.append(sku)
         bucket = {'skus': skus, 'sales': sum(s['sales'] for s in skus),
-                  'points': _aggregate_points([s['points'] for s in skus])}
+                  'points': _aggregate_points([s['points'] for s in skus]),
+                  'shape_switches': shape_switches}
         switches = {segment['start'] for segment in segments[1:]}
         for point in bucket['points']:
             point['segment_start'] = point['date'] in switches
