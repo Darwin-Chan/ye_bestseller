@@ -87,7 +87,9 @@ class AnalysisUiAdjustmentTests(unittest.TestCase):
         self.review()
         tabs = self.page.get_by_role('tab')
         expect(tabs).to_have_count(3)
-        self.assertEqual([tabs.nth(index).inner_text() for index in range(3)], ['待确认', '已确认', '全部'])
+        # 票 02 起页签带计数徽标：这里只认标签本身（顺序）；徽标文本由票 02 的用例钉。
+        self.assertEqual([tabs.nth(index).inner_text().split()[0] for index in range(3)],
+                         ['待确认', '已确认', '全部'])
         expect(tabs.nth(0)).to_have_attribute('aria-selected', 'true')
         expect(self.page.get_by_role('checkbox')).to_have_count(4)
         expect(self.page.locator('#batchRow')).to_be_visible()
