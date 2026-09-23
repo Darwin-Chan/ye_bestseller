@@ -25,7 +25,7 @@ from bestseller_monitor.db import CST, cst_date
 from bestseller_monitor.image_store import ImageStoreError
 from bestseller_monitor.weekly_plan import PlanError, iso_week_label
 from tests.git_repos import GitSandbox
-from helpers import crawler_cfg, isolated_locks
+from helpers import crawler_cfg, insert_sku_image, isolated_locks
 
 # 字面量哈希（不是从字节算出来的）：包/清单里的 key 由哈希与 mime 推出来，
 # 期望值因此也是字面量——不跟实现共算式。
@@ -98,18 +98,6 @@ def build_source_db(path: pathlib.Path) -> sqlite3.Connection:
     return conn
 
 
-def add_sku_image(conn: sqlite3.Connection, day: str, *, shop_key="A01", offer_id="11",
-                  sku_id="s1", content_hash=None, image_error=None, source="专属图",
-                  url=None) -> None:
-    """直插一条 SKU 图流水行（不走采集路径）；观测时刻取当天 10:00。"""
-    conn.execute(
-        "INSERT INTO sku_image_versions(shop_key, offer_id, sku_id, observed_at, "
-        "observed_date, image_url, content_hash, image_error, source) VALUES (?,?,?,?,?,?,?,?,?)",
-        (shop_key, offer_id, sku_id, f"{day}T10:00:00+08:00", day, url, content_hash,
-         image_error, source))
-    conn.commit()
-
-
 class PackageBuildTests(unittest.TestCase):
     """接缝 1：交出来的包文件本身。"""
 
@@ -170,14 +158,14 @@ class PackageBuildTests(unittest.TestCase):
 
         失败行与无图行照带（失败原因是观测事实），来源三态原样过去。
         """
-        add_sku_image(self.conn, "2026-09-09", content_hash=H1,
-                      url="https://img.example/sku-1.jpg")
-        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s2",
-                      content_hash=H2, url="https://img.example/sku-2.png")
-        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s3",
-                      image_error="超时", url="https://img.example/sku-3.png")
-        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s4",
-                      source="无图")
+        insert_sku_image(self.conn, day="2026-09-09", content_hash=H1,
+                         url="https://img.example/sku-1.jpg")
+        insert_sku_image(self.conn, day="2026-09-16", shop_key="A02", offer_id="22", sku_id="s2",
+                         content_hash=H2, url="https://img.example/sku-2.png")
+        insert_sku_image(self.conn, day="2026-09-16", shop_key="A02", offer_id="22", sku_id="s3",
+                         image_error="超时", url="https://img.example/sku-3.png")
+        insert_sku_image(self.conn, day="2026-09-16", shop_key="A02", offer_id="22", sku_id="s4",
+                         source="无图")
         conn = self.build("2026-W37")
 
         self.assertEqual(
@@ -215,15 +203,15 @@ class PackageBuildTests(unittest.TestCase):
         self.conn.executemany(
             "INSERT INTO product_image_assets(content_hash, mime, content) VALUES (?,?,?)",
             [(H3, "image/png", b"png-bytes-3"), (H4, "image/jpeg", b"jpeg-bytes-4")])
-        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s2",
-                      content_hash=H3, url="https://img.example/sku-3.png")
-        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s3",
-                      content_hash=H2, source="主图代填")          # 与版本行同一张：并集去重
-        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s4",
-                      source="无图")
-        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s5",
-                      image_error="超时", url="https://img.example/sku-5.png")
-        add_sku_image(self.conn, "2026-09-09", content_hash=H1)    # 上一周：不进这个包
+        insert_sku_image(self.conn, day="2026-09-16", shop_key="A02", offer_id="22", sku_id="s2",
+                         content_hash=H3, url="https://img.example/sku-3.png")
+        insert_sku_image(self.conn, day="2026-09-16", shop_key="A02", offer_id="22", sku_id="s3",
+                         content_hash=H2, source="主图代填")          # 与版本行同一张：并集去重
+        insert_sku_image(self.conn, day="2026-09-16", shop_key="A02", offer_id="22", sku_id="s4",
+                         source="无图")
+        insert_sku_image(self.conn, day="2026-09-16", shop_key="A02", offer_id="22", sku_id="s5",
+                         image_error="超时", url="https://img.example/sku-5.png")
+        insert_sku_image(self.conn, day="2026-09-09", content_hash=H1)    # 上一周：不进这个包
 
         conn = self.build("2026-W38")
 
@@ -468,11 +456,11 @@ class ExportRunTests(unittest.TestCase):
         self.conn.execute(
             "INSERT INTO product_image_assets(content_hash, mime, content) VALUES (?,?,?)",
             (H3, "image/png", b"png-bytes-3"))
-        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s2",
-                      content_hash=H3, url="https://img.example/sku-3.png")
-        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s3",
-                      content_hash=H2, source="主图代填")
-        add_sku_image(self.conn, "2026-09-09", content_hash=H1)
+        insert_sku_image(self.conn, day="2026-09-16", shop_key="A02", offer_id="22", sku_id="s2",
+                         content_hash=H3, url="https://img.example/sku-3.png")
+        insert_sku_image(self.conn, day="2026-09-16", shop_key="A02", offer_id="22", sku_id="s3",
+                         content_hash=H2, source="主图代填")
+        insert_sku_image(self.conn, day="2026-09-09", content_hash=H1)
         self.export("2026-W38")
         key2 = f"img/cd/{H2}.png"
         key3 = f"img/ef/{H3}.png"
@@ -524,8 +512,8 @@ class ExportRunTests(unittest.TestCase):
         self.conn.execute(
             "INSERT INTO product_image_assets(content_hash, mime, content) VALUES (?,?,?)",
             (H3, "image/png", b"png-bytes-3"))
-        add_sku_image(self.conn, "2026-09-16", shop_key="A02", offer_id="22", sku_id="s2",
-                      content_hash=H3, url="https://img.example/sku-3.png")
+        insert_sku_image(self.conn, day="2026-09-16", shop_key="A02", offer_id="22", sku_id="s2",
+                         content_hash=H3, url="https://img.example/sku-3.png")
         store = Flaky()
 
         first = self.export("2026-W38", store=store)

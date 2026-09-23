@@ -38,7 +38,7 @@ from bestseller_monitor.config import ROLE_COLLECTOR, ROLE_MERGE_ONLY
 from bestseller_monitor.db import CST
 from bestseller_monitor.image_store import ImageStoreError
 from bestseller_monitor.matching import prepare_cache
-from helpers import crawler_cfg, group, ledger_of, member, store_weekly_plan
+from helpers import crawler_cfg, group, insert_sku_image, ledger_of, member, store_weekly_plan
 from tests.git_repos import GitSandbox
 
 WEEK = "2026-W38"
@@ -414,13 +414,9 @@ class SkuImageLedgerCase(unittest.TestCase):
             self.world.conn.execute(
                 "INSERT OR IGNORE INTO product_image_assets(content_hash, mime, content) "
                 "VALUES (?,?,?)", (content_hash, "image/jpeg", b"sku-jpeg-bytes"))
-        self.world.conn.execute(
-            "INSERT INTO sku_image_versions(shop_key, offer_id, sku_id, observed_at, "
-            "observed_date, image_url, content_hash, image_error, source) "
-            "VALUES ('A01','A01-o1','s1',?,?,?,?,?,?)",
-            (f"{day}T10:00:00+08:00", day, "https://img.example/sku.jpg", content_hash,
-             image_error, source))
-        self.world.conn.commit()
+        insert_sku_image(self.world.conn, day=day, shop_key="A01", offer_id="A01-o1",
+                         sku_id="s1", content_hash=content_hash, image_error=image_error,
+                         source=source, url="https://img.example/sku.jpg")
 
 
 class SkuImageReportTests(SkuImageLedgerCase):
@@ -448,6 +444,7 @@ class SkuImageReportTests(SkuImageLedgerCase):
         todo = todo_of(self.world.report())
         self.assertIn("1 条 SKU 图下载失败", todo)
         self.assertIn("python -m bestseller_monitor.product_images", todo)
+        self.assertIn("--database", todo, "照抄能跑：命令要带必给的 --database")
         self.assertIn("--retry-sku-image", todo, "待办点到重试命令的 SKU 图入口（票 03 的形状）")
 
     def test_empty_and_filled_sku_images_are_not_failures(self):

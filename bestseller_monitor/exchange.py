@@ -875,7 +875,8 @@ def _todo(*, machine_id, week, plan_of_shop, gaps, conflicts, missing, pulls, ex
             items.append(f"本周有 {export_result.sku_image_failures} 条 SKU 图下载失败"
                          "（见第一节）：用 SKU 图重试命令按最新失败行补回来"
                          "（`python -m bestseller_monitor.product_images "
-                         "--retry-sku-image <流水行编号>`），库存数据不动")
+                         "--database <库存库路径> --retry-sku-image <流水行编号>`），"
+                         "库存数据不动")
     for result in imported.values():
         if result.failed:
             items.append(f"{result.package} 没导成（见第二节）：修好后重跑一次"

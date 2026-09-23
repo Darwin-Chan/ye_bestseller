@@ -10,7 +10,7 @@ from bestseller_monitor import single_instance
 from bestseller_monitor import rounds
 from bestseller_monitor.click_events import CardRef
 from bestseller_monitor.config import ACCESS_READWRITE, ROLE_COLLECTOR
-from bestseller_monitor.db import WeeklyPlanRow, cst_date
+from bestseller_monitor.db import SKU_IMAGE_OWN, WeeklyPlanRow, cst_date
 from bestseller_monitor.listing import ListingLoadFailed
 from bestseller_monitor.matching import identity
 from bestseller_monitor.product_images import evidence
@@ -197,6 +197,23 @@ def insert_inventory_rows(conn, rows) -> None:
         "shop_name, product_name, sku_name) VALUES (?,?,?,?,?,?,?,?,?)",
         [(shop_key, offer_id, "default", date, 3, None, f"店铺{shop_key}",
           f"商品{offer_id}", "默认(单规格)") for shop_key, offer_id, date in rows])
+    conn.commit()
+
+
+def insert_sku_image(conn, *, day, shop_key="A01", offer_id="11", sku_id="s1",
+                     content_hash=None, image_error=None, url=None, source=None) -> None:
+    """按 SKU 图流水的列集直接写一行（列集只在 helpers 里一份，写完即提交）。
+
+    与 `insert_inventory_rows` 同一类用法：给**不经过采集路径**的流水行用（导出/汇总
+    用例的夹具）。观测时刻取当天 10:00（北京时刻）；`source` 缺省专属图，空图与代填
+    照 `db.SKU_IMAGE_*` 的三态显式给。
+    """
+    conn.execute(
+        "INSERT INTO sku_image_versions(shop_key, offer_id, sku_id, observed_at, "
+        "observed_date, image_url, content_hash, image_error, source) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (shop_key, offer_id, sku_id, f"{day}T10:00:00+08:00", day, url, content_hash,
+         image_error, source or SKU_IMAGE_OWN))
     conn.commit()
 
 

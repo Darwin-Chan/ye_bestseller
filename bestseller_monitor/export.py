@@ -87,7 +87,8 @@ class _PackageTable:
 
     DDL、INSERT 的列序、内容摘要都从 `columns` 这一处生成——三份各写一遍就会悄悄错列。
     `owned` 是「这一行归本机」的过滤条件（见 `_OWNED_*`）：观测表按 (店铺, 日期) 组的
-    取胜 claim、身份表按最近一次观测的写者。切片 SQL 用 `{owned}` 占位。
+    取胜 claim、身份表按最近一次观测的写者。切片 SQL 用 `{owned}` 占位（例外：资产表的
+    两个 arm 各自内联，见那张表条目旁的注释）。
     """
 
     name: str
