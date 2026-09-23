@@ -181,11 +181,14 @@ class ReviewOrderBrowserTests(unittest.TestCase):
         self.page.get_by_label('搜索分组商品', exact=True).fill('')
         self.assertEqual(self.listed(), [merged, best, rest])
         # 确认与撤回后次序即时正确：并组升到最前，撤回后仍是最前。
+        # 确认／撤回是异步请求：等列表真的少了／多了那一组再看次序，别抢在重画前面读。
         self.page.get_by_role('button', name='确认当前分组', exact=True).click()
+        expect(self.page.locator('.group-choice')).to_have_count(2)
         self.assertEqual(self.listed(), [best, rest])
         self.switch_tab('已确认')
         self.page.get_by_role('button', name='撤回当前分组').click()
         self.switch_tab('待确认')
+        expect(self.page.locator('.group-choice')).to_have_count(3)
         self.assertEqual(self.listed(), [merged, best, rest])
 
     def test_browser_paging_slices_the_new_order(self):
