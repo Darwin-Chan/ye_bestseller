@@ -22,7 +22,7 @@ class IndependentColumnScrollTests(unittest.TestCase):
     WIDE = {'width': 1440, 'height': 1200}   # 桌面窗口：两栏装得下，也拿得到足够的高度
     NARROW = {'width': 640, 'height': 900}   # 原型断点（800px）之下
 
-    GROUPS = 34   # 每件商品先自成一組：拼完还剩 22 组，左列长过一屏、也够翻两页
+    GROUPS = 44   # 每件商品先自成一組：拼完还剩 32 组，左列长过一屏、也够翻两页（第 2 页 12 组）
     BIG = 8       # 一个大组拼到 8 件商品：右列长过一屏
     SECOND = 6    # 再拼一个大组：换组回顶要「高组换高组」才判别得出（短组会被浏览器钳回 0）
     OFFERS = [str(1000 + index) for index in range(GROUPS)]
@@ -85,8 +85,12 @@ class IndependentColumnScrollTests(unittest.TestCase):
         expect(self.page.locator('#groupDetail .matching-member')).to_have_count(self.BIG)
 
     def open_second_group(self):
-        """点开另一个大组：右列换上 6 张成员卡。"""
-        self.page.locator('.group-choice', has_text=f'{self.SECOND} 个商品').first.click()
+        """另一个大组按组号排在后面、可能在别的分页上：先用搜索把它筛到眼前再点开。"""
+        self.page.get_by_label('搜索分组商品', exact=True).fill(f'滚动商品{self.BIG:02}')
+        expect(self.page.locator('.group-choice')).to_have_count(1)
+        self.page.locator('.group-choice').first.click()
+        expect(self.page.locator('#groupDetail h3')).to_have_text(
+            re.compile(rf'^G\d+ · {self.SECOND} 个商品$'))
         expect(self.page.locator('#groupDetail .matching-member')).to_have_count(self.SECOND)
 
     def test_each_column_scrolls_on_its_own_and_leaves_the_rest_of_the_page_alone(self):
@@ -111,6 +115,18 @@ class IndependentColumnScrollTests(unittest.TestCase):
                                stats['y'], delta=0.5, msg='统计行留在文档流里')
         self.assertAlmostEqual(self.page.get_by_role('button', name='暂时保存').bounding_box()['y'],
                                save['y'], delta=0.5, msg='保存行留在文档流里')
+
+        # 打开对话框不该把两栏压小：对话框在顶层，不是文档流里「两栏之下」的内容。
+        height = self.page.locator('#groupDetail').evaluate("node => node.clientHeight")
+        dialog = self.page.get_by_role('dialog', name='组内新增商品')
+        self.page.get_by_role('button', name='组内新增商品').click()
+        expect(dialog).to_be_visible()
+        self.assertEqual(self.page.locator('#groupDetail').evaluate("node => node.clientHeight"),
+                         height, '对话框开着时两栏不该被压小')
+        dialog.get_by_role('button', name='取消').click()
+        expect(dialog).not_to_be_visible()
+        self.assertEqual(self.page.locator('#groupDetail').evaluate("node => node.clientHeight"),
+                         height, '对话框关掉后两栏高度照旧')
 
     def test_a_group_near_the_bottom_opens_without_scrolling_the_page(self):
         self.review_with_groups()
@@ -146,6 +162,7 @@ class IndependentColumnScrollTests(unittest.TestCase):
         expect(self.page.locator('#pageInfo')).to_have_text('2 / 2')
         self.assertAlmostEqual(self.page.locator('#pageInfo').bounding_box()['y'], pager['y'],
                                delta=0.5, msg='翻页后分页行还在左列底部')
+        self.assertEqual(self.scroll_top('#products'), 0, '翻页后左列从顶部看起')
 
     def test_a_short_window_keeps_both_columns_usable(self):
         # 窗口矮到整页装不下时（两栏有下限），两栏仍要各滚各的、分页行仍在左列底部。
@@ -171,11 +188,7 @@ class IndependentColumnScrollTests(unittest.TestCase):
         self.scroll('#groupDetail', 300)
         self.assertGreater(self.scroll_top('#groupDetail'), 0)
 
-        second = self.page.locator('.group-choice', has_text=f'{self.SECOND} 个商品').first
-        chosen = second.get_attribute('data-group')
-        second.click()
-        expect(self.page.locator('#groupDetail h3')).to_have_text(
-            re.compile(rf'^{re.escape(chosen)} · {self.SECOND} 个商品$'))
+        self.open_second_group()
         self.assertEqual(self.scroll_top('#groupDetail'), 0, '换组后右列该回顶')
 
     def test_narrow_screen_stacks_the_columns_and_drops_the_fixed_height(self):
