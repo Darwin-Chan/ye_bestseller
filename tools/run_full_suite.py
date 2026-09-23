@@ -191,10 +191,10 @@ def main(argv: list[str] | None = None) -> int:
 
     total_ran = sum(r["ran"] or 0 for r in results)
     total_wall = sum(r["wall"] for r in results)
-    mismatches = [r for r in results
-                  if r["ran"] != r["expected"] or not r["ok"]]
-    reconciled = total_ran == expected_total and not mismatches
-    conclusion = "OK" if reconciled else "FAILED"
+    count_ok = (total_ran == expected_total
+                and all(r["ran"] == r["expected"] for r in results))
+    all_ok = all(r["ok"] for r in results)
+    conclusion = "OK" if (count_ok and all_ok) else "FAILED"
 
     lines = [f"分段全量测试 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
              f"仓库：{REPO}",
@@ -209,15 +209,17 @@ def main(argv: list[str] | None = None) -> int:
         lines.append(f"{res['label']}：{_fmt_result(res)}{expected_note}"
                      f"；日志 {res['log'].name}")
     lines += ["",
-              f"合计 {total_ran} 项（预期 {expected_total}），总耗时 {total_wall:.1f}s，"
-              f"对账{'一致' if total_ran == expected_total and not mismatches else '不一致'}，"
+              f"合计 {total_ran} 项（预期 {expected_total}，"
+              f"计数对账{'一致' if count_ok else '不一致'}），"
+              f"总耗时 {total_wall:.1f}s，"
+              f"段结果 {sum(1 for r in results if r['ok'])}/{len(results)} 段 OK，"
               f"结论 {conclusion}"]
     summary = "\n".join(lines) + "\n"
     (log_dir / "summary.txt").write_text(summary, encoding="utf-8", newline="\n")
 
     print()
     print(summary, end="")
-    return 0 if reconciled else 1
+    return 0 if (count_ok and all_ok) else 1
 
 
 if __name__ == "__main__":
