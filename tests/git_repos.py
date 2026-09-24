@@ -13,7 +13,8 @@
 钩子脚本一律写成 LF 行尾——Windows 上带 CRLF 的 sh 脚本会以 `\r` 报错。
 
 世界模板（2026-09-24，长尾地基税那张票的试点）：`WorldTemplate` 把「每个用例现搭世界」变成
-「每测试进程只搭一次、用例复制取独立副本」——语义与代价见该类的文档。
+「每测试进程只搭一次、用例复制取独立副本」——语义与代价见该类的文档；`GitSandbox.world`
+是各文件搭模板件都走的那个形状（一个裸远端 ＋ 若干份克隆，可带历史）。
 """
 from __future__ import annotations
 
@@ -150,7 +151,34 @@ class GitSandbox:
         work = pathlib.Path(tempfile.mkdtemp(prefix="seed-", dir=self.tmp))
         self.must("clone", str(remote), str(work))
         self.commit_push(work, files, message=message)
-        shutil.rmtree(work, ignore_errors=True)
+        _force_rmtree(work)      # 推过的库有只读对象，得先 chmod 再删（同模板清理）
+
+    def world(self, remote: str, *clones: str,
+              files: dict[str, str | bytes] | None = None) -> list[str]:
+        """在这座样例台里搭一件小世界：一个裸远端 ＋ 若干份克隆；返回相对路径清单。
+
+        `files` 给了就先走正常发布路径给远端放上第一个提交（远端与克隆因此**带历史**）、
+        没给就是空库（未出生 main）——两种形状生产里都真存在（已发布的计划库、刚建出来
+        还没人推的库）。顺序是「内容先到、机器克隆后建」（克隆出来就带着它）；要反过来的
+        形状（克隆先建出来、内容后到：空库的克隆是未出生的，靠 pull 落地——清单同步那半
+        的世界），分两步写：先 `world(remote, *clones)`，之后 `seed(self.tmp / remote, files)`。
+
+        克隆总有一份是真的 `clone`，其余几份是第一份的整份复制：同一个远端、同一条历史，
+        复制与再 clone 一次结果相同，省下重复的子进程。返回的清单按序、远端在头一个，
+        直接当 `WorldTemplate.obtain` 的 builder 结果用——各文件搭模板件都从这里起手。
+        """
+        if (self.tmp / remote).exists():
+            raise AssertionError(f"搭世界：{remote} 已经在了（一件世界在一座样例台里只搭一次）")
+        bare = self.new_remote(remote)
+        if files:
+            self.seed(bare, files)
+        for index, rel in enumerate(clones):
+            (self.tmp / rel).parent.mkdir(parents=True, exist_ok=True)
+            if index == 0:                          # 第一份真 clone
+                self.clone(bare, rel)
+            else:                                   # 其余是第一份的整份复制
+                shutil.copytree(self.tmp / clones[0], self.tmp / rel)
+        return [remote, *clones]
 
     def install_pre_push(self, clone: pathlib.Path, script: str) -> None:
         """装一个 pre-push 钩子（LF 行尾）：用它做「推送途中的远端变化」这类交错。"""
@@ -238,8 +266,14 @@ class WorldTemplate:
     裸库、克隆还是那些克隆，只有克隆配置里指着模板根的地址（origin）被改写成指着副本自己；
     用例之间因此看不见彼此的改动。
 
-    件里的库要是**刚建出来的形状**（空裸库、未出生的克隆）：`take()` 只改配置里的地址、
-    不碰 reflog，有历史的库会把自己的 reflog 消息（`clone: from <模板路径>`）带进副本。
+    件里的库**可以带历史**（长尾地基税票 03 起）：已 seed 的裸库、带着检出的克隆都行。
+    `take()` 改的是文件里指着模板根的地址——克隆配置里的 origin、`.git/logs/**` 的 reflog
+    （克隆的 `clone: from <模板路径>` 就写在里头）、裸库的 config——件里其余文件也逐份
+    查一遍，还留着模板地址就当场报错（git 还会往别处写地址，比如取过的克隆有
+    `.git/FETCH_HEAD`：那种形状要先把文件加进改写清单，别让它悄悄带进副本）；全程不起
+    git 子进程。带历史的克隆副本与「现场 clone 一份」的差别只剩 reflog 里那条来源消息写的
+    是副本自己的地址（远端、历史、检出、上游都一样；索引沿用模板那份的 stat 记录，头回
+    碰它时 git 会重描一遍，结果不变）。
     「取世界不新增 git 子进程」这条靠的是「模板的 git 调用只发生在这一进程第一次取该件
     的时候」——之后每次 `take()` 都只是复制。
 
@@ -261,7 +295,11 @@ class WorldTemplate:
 
     @classmethod
     def obtain(cls, name: str, build) -> "WorldTemplate":
-        """取同名模板：这一进程里第一次取的时候真搭一次（真跑 git），之后只复制。"""
+        """取同名模板：这一进程里第一次取的时候真搭一次（真跑 git），之后只复制。
+
+        件的内容不一样就换一个名字——按内容算个短摘要拼进名字里（见
+        `test_plan_step.world_template`），别让两件不同的世界共用同一个名字。
+        """
         with cls._lock:
             template = cls._built.get(name)
             if template is None:
@@ -287,15 +325,20 @@ class WorldTemplate:
 
         目的地已存在就报错（一件世界在一个沙盒里只取一次）——克隆地址这时已改写成
         副本自己的，重复取会把地址改花。复制中出错时把**这次落地的**几件清掉再抛，
-        免得留下半个世界把真正的错因盖住（先前就在那儿的路径不碰）。
+        免得留下半个世界把真正的错因盖住（先前就在那儿的路径不碰）；正在复制的这一件
+        也算「这次落地的」——`copytree` 先把目标建出来、批到最后才抛，漏掉它就会让
+        下一次取世界撞上一句「文件已存在」，把真正的原因盖住。
         """
         created: list[pathlib.Path] = []
         try:
             for rel in self.paths:
                 target = sandbox.tmp / rel
                 target.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists():
+                    raise FileExistsError(
+                        f"取世界：{target} 已经在了（一件世界在一个沙盒里只取一次）")
+                created.append(target)      # 记在复制之前：半份的也要清掉
                 shutil.copytree(self.root / rel, target)
-                created.append(target)
             self._repoint(sandbox.tmp)
         except Exception:
             for target in created:
@@ -303,34 +346,61 @@ class WorldTemplate:
             raise
 
     def _repoint(self, dest_root: pathlib.Path) -> None:
-        """把副本里配置中指着模板根的地址改写成副本自己的（克隆的 origin、裸库的 url）。
+        """把副本里指着模板根的地址改写成副本自己的（克隆的 origin、裸库的 url、reflog 的来源）。
 
         不改 `git remote set-url` 而改文本：取世界不许起 git 子进程（票 01 的验收线），
         而配置里要换的就是这一个路径。一个路径准备三种拼法：原样、配置里的转义写法
         （Windows 路径的反斜杠会写成 `\\`）、正斜杠写法；先换转义写法——它最具体，
-        换完就不会再被别的拼法误伤。还留着模板路径就是改写漏了，当场报错。
+        换完就不会再被别的拼法误伤。
+
+        要改的是「git 记来源地址的地方」：克隆的 `.git/config` 与 `.git/logs/**`、裸库的
+        `config`。件里**其余**文件也逐份查一遍残留（见 `_reject_leftover`）：git 还会往
+        别处写地址（取过的克隆有 `.git/FETCH_HEAD`、有人往模板里装过钩子……），那种形状
+        会在这里当场报错，逼着把文件加进改写清单，而不是悄悄带进每一份副本。
         """
 
-        def spellings(path: pathlib.Path) -> tuple[str, ...]:
+        def spellings(path: pathlib.Path) -> tuple[bytes, ...]:
             native = str(path)
-            return (native.replace("\\", "\\\\"), path.as_posix(), native)
+            return tuple(spell.encode("utf-8") for spell in
+                         (native.replace("\\", "\\\\"), path.as_posix(), native))
 
         pairs = tuple(zip(spellings(self.root), spellings(dest_root)))
         for rel in self.paths:
             tree = dest_root / rel
-            if (tree / ".git").is_dir():                # 克隆：配置在 .git 里
-                config = tree / ".git" / "config"
+            if (tree / ".git").is_dir():                # 克隆：配置在 .git 里，reflog 也在
+                written = [tree / ".git" / "config"]
+                logs = tree / ".git" / "logs"
+                if logs.is_dir():
+                    written += sorted(p for p in logs.rglob("*") if p.is_file())
             elif (tree / "HEAD").is_file():             # 裸库：配置在根上
-                config = tree / "config"
+                written = [tree / "config"]
             else:
                 raise AssertionError(f"取世界：{rel} 既不像克隆也不像裸库（{tree}）")
-            text = config.read_text(encoding="utf-8")
-            fixed = text
-            for old, new in pairs:
-                fixed = fixed.replace(old, new)
-            for old, _ in pairs:
-                if old in fixed:
-                    raise AssertionError(
-                        f"取世界：副本 {rel} 的配置里还留着模板地址（{old}）")
-            if fixed != text:
-                config.write_text(fixed, encoding="utf-8", newline="")
+            for path in written:
+                _rewrite_address(path, pairs)
+            for path in sorted(tree.rglob("*")):
+                if path.is_file():
+                    _reject_leftover(path, path.read_bytes(), pairs)
+
+
+def _rewrite_address(path: pathlib.Path, pairs) -> None:
+    """把一份 git 文件里的模板地址换成副本地址；换完还留着模板地址就报错。
+
+    按字节换、按字节写回：这些文件是 git 写的（内容可能不是本机编码），按文本解码读
+    一遍只会为跟本票无关的字节翻车；路径自己的编码与 git 写下的那份一致（UTF-8）。
+    """
+    data = path.read_bytes()
+    fixed = data
+    for old, new in pairs:
+        fixed = fixed.replace(old, new)
+    _reject_leftover(path, fixed, pairs)
+    if fixed != data:
+        path.write_bytes(fixed)
+
+
+def _reject_leftover(path: pathlib.Path, data: bytes, pairs) -> None:
+    """这份文件的字节里还留着模板地址就报错（副本与模板必须互不相干）。"""
+    for old, _ in pairs:
+        if old in data:
+            raise AssertionError(
+                f"取世界：{path} 里还留着模板地址（{old.decode('utf-8')}）")

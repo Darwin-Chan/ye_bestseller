@@ -2,13 +2,14 @@
 
 票 01 先把它们暂留在 test_exchange 里（那一票的改动范围只许动 `tests/git_repos.py` 与
 `tests/test_exchange.py`）；长尾地基税线的 02 票起把它们归位到这里——后续票（03–06）新增的
-原语用例也落这个文件。钉四件事：同名模板在一个进程里只搭一次；取世界只复制（一个 git 子
+原语用例也落这个文件。钉五件事：同名模板在一个进程里只搭一次；取世界只复制（一个 git 子
 进程都不起）、同一件世界在一处只取一次；复制出来的副本互相独立、也碰不到模板；副本里的 git
-是真的（远端还是未出生分支的空裸库、发布走正常克隆推送、钩子照旧可装可触发）。
+是真的（远端还是未出生分支的空裸库、发布走正常克隆推送、钩子照旧可装可触发）；**带历史
+的件**（票 03 起）同样能取——副本干净、地址改写连 reflog 一起、真能推（见
+`_build_seeded_world`）。
 """
 from __future__ import annotations
 
-import shutil
 import unittest
 import uuid
 from pathlib import Path
@@ -21,19 +22,43 @@ from tests.git_repos import GitSandbox, WorldTemplate, git
 def _build_world(site: GitSandbox) -> list[str]:
     """原语用例用的一件小世界：空裸库 + 交换区里的克隆 + 旁路工作克隆（与各票的世界同形）。
 
-    远端是空的（未出生 main），克隆出来既没有对象也没有 reflog，所以两份克隆逐字节相同
-    ——第二份直接复制，省一次 clone 子进程。
+    建法见 `GitSandbox.world`：远端真 init、克隆真 clone，第二份是第一份的整份复制。
     """
-    (site.tmp / "exchange").mkdir()
-    bare = site.new_remote("raw-mt.git")
-    site.clone(bare, "exchange/raw-mt")
-    shutil.copytree(site.tmp / "exchange" / "raw-mt", site.tmp / "mt-work")
-    return ["raw-mt.git", "exchange/raw-mt", "mt-work"]
+    return site.world("raw-mt.git", "exchange/raw-mt", "mt-work")
 
 
 def _selftest_template() -> WorldTemplate:
     """取（必要时搭一次）原语用例用的那件小模板（三处共用，只搭一次）。"""
     return WorldTemplate.obtain("git-repos-selftest", _build_world)
+
+
+def _build_seeded_world(site: GitSandbox) -> list[str]:
+    """带历史的一件小世界（票 03 起的能力）：已 seed 的裸库 ＋ 它的两份克隆。
+
+    与上面那件空件不同，这里的远端有提交、克隆因此带着检出与 reflog——模板件的「带历史」
+    契约（见 `git_repos.WorldTemplate` 的文档）靠它钉住；两份克隆又是各票里 m2/m3 那种
+    「第一份真 clone、其余复制」的形状。
+    """
+    return site.world("seeded-mt.git", "seeded-mt", "seeded-mt-work",
+                      files={"note.txt": "第一版\n"})
+
+
+def _seeded_template() -> WorldTemplate:
+    """取（必要时搭一次）带历史那件小模板（两处共用，只搭一次）。"""
+    return WorldTemplate.obtain("git-repos-seeded-selftest", _build_seeded_world)
+
+
+def _files_mentioning(root: Path, needle: str) -> list[str]:
+    """这棵树里哪些文件（相对路径）的字节里出现 needle 串——副本里不该再有模板地址。
+
+    按字节比、不按文本读：件里什么文件都有（二进制对象、git 按各种编码写的文本），
+    解码读一遍只会为跟本用例无关的字节翻车。needle 取「bestseller-template-」这个前缀
+    （模板根都建在它底下），三种拼法一网打尽——git 写进配置的是转义写法，拿完整路径的
+    原样拼法去比是比不出来的。
+    """
+    blob = needle.encode("utf-8")
+    return [str(path.relative_to(root)) for path in sorted(root.rglob("*"))
+            if path.is_file() and blob in path.read_bytes()]
 
 
 class WorldTemplateTests(unittest.TestCase):
@@ -129,6 +154,53 @@ class WorldTemplateTests(unittest.TestCase):
         box.install_declining_hook(work, counter2)
         self.assertNotEqual(git("push", cwd=work).returncode, 0)
         self.assertTrue(counter2.exists(), "pre-push 钩子真的跑了")
+
+    def test_a_seeded_world_is_copied_clean_and_keeps_no_template_address(self):
+        template = _seeded_template()
+        box = GitSandbox(self, prefix="bestseller-take-seeded-")
+        template.take(box)
+        clone, work, bare = (box.tmp / "seeded-mt", box.tmp / "seeded-mt-work",
+                             box.tmp / "seeded-mt.git")
+
+        # 副本带着模板里那条历史，但要和刚 clone 出来一样干净（索引的 stat 也对得上）
+        self.assertEqual(box.must("status", "--porcelain", cwd=clone), "")
+        commits = box.must("log", "--oneline", cwd=clone).splitlines()
+        self.assertEqual(len(commits), 1, "模板里那一笔 seed 跟着来了")
+        self.assertTrue(commits[0].endswith("seed"))
+        self.assertEqual(box.must("rev-parse", "HEAD", cwd=clone).strip(),
+                         git("--git-dir", str(bare), "rev-parse", "main").stdout.strip(),
+                         "HEAD 就是副本自己裸库的 main")
+        # 第二份克隆是第一份的整份复制：同一条历史、同一个远端
+        self.assertEqual(box.must("status", "--porcelain", cwd=work), "")
+        self.assertEqual(box.must("rev-parse", "HEAD", cwd=work).strip(),
+                         box.must("rev-parse", "HEAD", cwd=clone).strip())
+        for name, tree in (("第一份克隆", clone), ("复制出来的第二份", work)):
+            self.assertEqual(Path(box.must("remote", "get-url", "origin", cwd=tree).strip()),
+                             bare, f"{name}的 origin 该指着副本自己的裸库")
+            self.assertEqual(box.must("rev-parse", "--abbrev-ref", "@{u}", cwd=tree).strip(),
+                             "origin/main", f"{name}的上游也还认得出来")
+
+        # 副本整棵树里不该再有模板地址：配置与 .git/logs 的 reflog 都改写了
+        self.assertEqual(_files_mentioning(box.tmp, "bestseller-template-"), [],
+                         "副本里还留着模板地址（模板根都建在这个前缀底下）")
+
+    def test_a_copied_seeded_world_speaks_real_git(self):
+        template = _seeded_template()
+        box = GitSandbox(self, prefix="bestseller-take-seeded-git-")
+        template.take(box)
+        clone, work, bare = (box.tmp / "seeded-mt", box.tmp / "seeded-mt-work",
+                             box.tmp / "seeded-mt.git")
+
+        # 上游是副本自己的裸库：pull 空转，不是回模板那儿拉
+        self.assertEqual(git("pull", "--rebase", cwd=clone).returncode, 0)
+
+        # 复制出来的第二份真推一笔：落进副本自己的裸库；模板只被复制、从不被写，看不见它
+        box.commit_push(work, {"second.txt": "第二版\n"}, message="second")
+        self.assertEqual(git("--git-dir", str(bare), "show", "main:second.txt").returncode, 0)
+        self.assertNotEqual(
+            git("--git-dir", str(template.root / "seeded-mt.git"),
+                "show", "main:second.txt").returncode, 0,
+            "副本的推送到不了模板")
 
 
 if __name__ == "__main__":

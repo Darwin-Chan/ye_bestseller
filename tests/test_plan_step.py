@@ -8,9 +8,16 @@
 
 期望值都是手写的清单、名册、计划与包内容，不重算实现；「远端现在长什么样」经全新克隆看，
 与另一台机器会看到的完全一样。降级矩阵（spec §6）逐行都有对应用例。
+
+世界（长尾地基税票 03）：`PrepWorldTestCase` 一族的世界每测试进程只搭一次模板、用例
+`seed_repo` 复制取独立副本——计划库裸远端已 seed ＋ m1/m2/m3 三份克隆（模板件带历史，
+见 `git_repos.WorldTemplate` 的文档）；本机库（`data/crawler.db`）的建表成本同样只付
+一次（`empty_machine_db`）。真 git 照旧真跑：prepare_week 的发布与重读、竞态、
+pre-commit 拒绝、人改远端、坏远端。
 """
 from __future__ import annotations
 
+import atexit
 import datetime as dt
 import gzip
 import hashlib
@@ -26,7 +33,7 @@ from bestseller_monitor import plan_step, rounds, shops_sync
 from bestseller_monitor.config import ROLE_MERGE_ONLY
 from bestseller_monitor.db import Database, WeeklyPlanRow
 from bestseller_monitor.rounds import RoundRequest, ShopScope
-from tests.git_repos import GitSandbox
+from tests.git_repos import GitSandbox, WorldTemplate
 from tests.helpers import crawler_cfg, store_weekly_plan
 
 # 样例世界：两家店、两台机器（手算：A01 页多 → m1，A02 → m2；见票 03 的算法口径）
@@ -81,19 +88,86 @@ def write_package(path: pathlib.Path, rows: list[tuple[str, str]]) -> None:
     raw.unlink()
 
 
-class Machine:
-    """一台机器的小世界：自己的交换区根、本机清单副本、计划库克隆与本机库。"""
+# 计划库裸远端在世界里的相对路径（与现搭时同一个名字）
+PLAN_REMOTE = "plan.git"
+# 模板件里预置的克隆：本文件的机器只用到这三台（用例点名要哪台）
+PLAN_WORLD_MACHINES = ("m1", "m2", "m3")
 
-    def __init__(self, box: GitSandbox, remote: pathlib.Path, machine_id: str):
+_EMPTY_DB: pathlib.Path | None = None
+
+
+def empty_machine_db() -> pathlib.Path:
+    """进程内建一次的空本机库（`data/crawler.db`）：各机器复制一份当自己的。
+
+    建表那一步（`dbm.connect` 的 `executescript(SCHEMA)`）本机一次约 90ms，二十多台机器
+    各建一次就是两秒多的纯 Python 成本。本机库是**纯数据文件**，不跟世界模板走（模板件
+    复制的是库、件里的文件还要逐份查模板地址残留，见 `git_repos.WorldTemplate`），所以
+    它自己管这一次性建库；这份底稿只被复制、从不被写。
+    """
+    global _EMPTY_DB
+    if _EMPTY_DB is None:
+        root = pathlib.Path(tempfile.mkdtemp(prefix="bestseller-plan-step-db-"))
+        atexit.register(shutil.rmtree, root, ignore_errors=True)
+        dbm.connect(root / "crawler.db").close()
+        _EMPTY_DB = root / "crawler.db"
+    return _EMPTY_DB
+
+
+def world_paths(machine_id: str) -> str:
+    """一台机器的计划库克隆在交换区里的相对路径（与现搭时同一个名字）。"""
+    return f"{machine_id}/exchange/plan"
+
+
+def build_world(site: GitSandbox, *, shops: str, roster: str | None) -> list[str]:
+    """搭一件「计划库世界」：已 seed 的裸远端 ＋ 三台机器各一份克隆。
+
+    seed 走正常发布路径（clone → 提交 → 推送），克隆因此带着那条历史取；三份克隆是同一
+    份的复制（同一个远端、同一条历史）。带历史的件进模板是长尾地基税票 03 起的能力，
+    语义见 `git_repos.WorldTemplate` 的文档。
+    """
+    files = {"shops.csv": shops.encode("utf-8")}
+    if roster is not None:
+        files["machines.json"] = roster.encode("utf-8")
+    return site.world(PLAN_REMOTE, *(world_paths(m) for m in PLAN_WORLD_MACHINES),
+                      files=files)
+
+
+def world_template(shops: str, roster: str | None) -> WorldTemplate:
+    """取（必要时真搭一次）一件计划库世界的模板：seed 内容不同的几种各自成件。
+
+    模板名按 seed 内容的摘要走（内容一样就共用一件）；前缀 `plan-step-` 是本文件的识别
+    标，与别的测试文件的模板不撞（缓存按名字走、整个测试进程共用）。
+    """
+    tag = hashlib.sha256(f"{shops}\0{roster}".encode("utf-8")).hexdigest()[:10]
+    return WorldTemplate.obtain(
+        f"plan-step-{tag}", lambda site: build_world(site, shops=shops, roster=roster))
+
+
+class Machine:
+    """一台机器的小世界：自己的交换区根、本机清单副本、计划库克隆与本机库。
+
+    计划库克隆是模板取来的那一份（`PrepWorldTestCase.seed_repo` 那一步复制进来的）——
+    现搭时那句 `clone` 现在发生在模板里；本机清单按用例现写，本机库从进程内那份空库
+    复制（建表只付一次）。
+    """
+
+    def __init__(self, box: GitSandbox, machine_id: str):
         self.machine_id = machine_id
         self.base = box.tmp / machine_id
-        self.clone = box.clone(remote, f"{machine_id}/exchange/plan")
+        self.clone = box.tmp / world_paths(machine_id)
+        if not (self.clone / ".git").is_dir():
+            raise AssertionError(
+                f"{machine_id} 的计划库克隆不在世界里：先 seed_repo 取世界，"
+                f"而且机器只挑 {'、'.join(PLAN_WORLD_MACHINES)} 这几台")
         self.cfg = crawler_cfg(
             machine_id=machine_id,
             shop_csv=self.base / "config" / "shops.csv",
             exchange_root=self.base / "exchange",
         )
-        self.conn = dbm.connect(self.base / "data" / "crawler.db")
+        db_file = self.base / "data" / "crawler.db"
+        db_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(empty_machine_db(), db_file)
+        self.conn = dbm.connect(db_file)
         self.db = Database(self.conn)
 
     def prepare(self, *, now: str = NOW) -> plan_step.PrepResult:
@@ -105,11 +179,12 @@ class Machine:
 
 
 class PrepWorldTestCase(unittest.TestCase):
-    """样例台：一个裸库当计划库远端，外加按需克隆的若干「机器」。"""
+    """样例台：一件计划库世界（已 seed 的裸远端 ＋ 三台机器的克隆）每测试进程只搭一次，
+    用例 `seed_repo` 复制取独立副本；真 git 照旧真跑（发布与重读、竞态、坏远端、人改远端）。"""
 
     def setUp(self):
         self.box = GitSandbox(self)
-        self.remote = self.box.new_remote("plan.git")
+        self.remote = self.box.tmp / PLAN_REMOTE
         self._copies = 0
         self._machines: list[Machine] = []
 
@@ -120,13 +195,16 @@ class PrepWorldTestCase(unittest.TestCase):
     # ---- 世界搭建 ----
 
     def seed_repo(self, *, shops: str = SHOPS_CSV, roster: str | None = ROSTER_JSON) -> None:
-        files = {"shops.csv": shops.encode("utf-8")}
-        if roster is not None:
-            files["machines.json"] = roster.encode("utf-8")
-        self.box.seed(self.remote, files)
+        """取一件计划库世界（复制模板里的副本）；口径不变：远端里已经有这份 seed 内容。
+
+        一件世界在一个用例里只取一次（`take` 的目标已存在就报错）；本进程第一次取某份
+        seed 内容时才真搭模板（真跑 git），之后每次取都只是复制——这笔一次性成本算在
+        第一个取到它的用例头上。
+        """
+        world_template(shops, roster).take(self.box)
 
     def machine(self, machine_id: str, *, local_shops: str | None = SHOPS_CSV) -> Machine:
-        world = Machine(self.box, self.remote, machine_id)
+        world = Machine(self.box, machine_id)
         self._machines.append(world)
         if local_shops is not None:
             world.cfg.shop_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -165,15 +243,6 @@ class PrepWorldTestCase(unittest.TestCase):
         clone = self.fresh_clone()
         return sorted(p.name for p in (clone / "published").glob("*.md")) \
             if (clone / "published").exists() else []
-
-    def other_publishes_plan(self, document: dict, machine_id: str = "m1") -> None:
-        """另一台机器先发布了本周计划（经一个临时克隆走正常发布路径）。"""
-        self._copies += 1
-        other = self.box.clone(self.remote, f"other-{self._copies}")
-        self.box.commit_push(other, {
-            f"plan/{document['week']}.json": plan_text(document),
-            f"published/{machine_id}.md": f"# {machine_id} 发布的计划\n",
-        }, message=f"publish plan {document['week']}")
 
 
 class WeeklyPlanTableTests(unittest.TestCase):

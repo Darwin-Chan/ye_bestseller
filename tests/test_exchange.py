@@ -169,27 +169,12 @@ def _machine_world_paths(kind: str, machine: str) -> dict[str, str]:
 _PLAN_PATHS = {"remote": "plan.git", "exchange": "exchange/plan", "work": "plan-work"}
 
 
-def _build_machine_world(site: GitSandbox, *, remote: str, exchange: str,
-                         work: str) -> list[str]:
-    """搭一台机器的一套 git 小世界：空裸远端 + 交换区里的克隆 + 旁路工作克隆。
-
-    三样东西的相对路径由调用方给（`_machine_world_paths`），远端真 init、克隆真 clone，
-    与用例里现搭时逐字节同形，只是搬进了模板根。远端是空的（未出生 main），克隆出来既
-    没有对象也没有 reflog，所以两个克隆逐字节相同——第二份直接用第一份的副本（纯文件
-    复制），省一次 clone 子进程，结果与再 clone 一次一样。
-    """
-    (site.tmp / exchange).parent.mkdir(parents=True, exist_ok=True)
-    bare = site.new_remote(remote)
-    site.clone(bare, exchange)
-    shutil.copytree(site.tmp / exchange, site.tmp / work)
-    return [remote, exchange, work]
-
-
 def _world_template(kind: str, machine: str) -> WorldTemplate:
     """取（必要时搭一次）一件世界模板：`raw` / `judged` 各半，每件 = 一台机器的那一套。"""
     names = _machine_world_paths(kind, machine)
+    world = (names["remote"], names["exchange"], names["work"])
     return WorldTemplate.obtain(f"exchange-{kind}-{machine}",
-                                lambda site: _build_machine_world(site, **names))
+                                lambda site: site.world(*world))
 
 
 def _plan_template() -> WorldTemplate:
@@ -198,8 +183,8 @@ def _plan_template() -> WorldTemplate:
     模板里是空裸库 + 未出生的克隆（与上机清单里的形状一致）；种子提交由用的用例自己走
     正常发布路径（`seed`），所以「克隆出来还是未出生、pull 才把它落地」这一路照旧有覆盖。
     """
-    return WorldTemplate.obtain("exchange-plan",
-                                lambda site: _build_machine_world(site, **_PLAN_PATHS))
+    world = (_PLAN_PATHS["remote"], _PLAN_PATHS["exchange"], _PLAN_PATHS["work"])
+    return WorldTemplate.obtain("exchange-plan", lambda site: site.world(*world))
 
 
 class ConsoleWorld:

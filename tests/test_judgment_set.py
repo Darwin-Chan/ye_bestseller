@@ -74,21 +74,6 @@ def _world_paths(repo: str) -> dict[str, str]:
     return {"remote": f"{repo}.git", "exchange": f"exchange/{repo}", "work": f"{repo}-work"}
 
 
-def _build_world(site: GitSandbox, *, remote: str, exchange: str, work: str) -> list[str]:
-    """搭一个库的一套 git 小世界：空裸远端 + 交换区里的克隆 + 旁路工作克隆（那台机器自己发布用）。
-
-    三样东西的相对路径由调用方给（`_world_paths`），远端真 init、克隆真 clone——形状就是生产里的
-    那个（空裸库 + 未出生克隆），与 `test_exchange` 的 builder 同形。远端是空的（未出生 main），
-    克隆出来既没有对象也没有 reflog，所以两个克隆逐字节相同——第二份直接用第一份的副本（纯文件
-    复制），省一次 clone 子进程。
-    """
-    (site.tmp / exchange).parent.mkdir(parents=True, exist_ok=True)
-    bare = site.new_remote(remote)
-    site.clone(bare, exchange)
-    shutil.copytree(site.tmp / exchange, site.tmp / work)
-    return [remote, exchange, work]
-
-
 def _world_template(repo: str) -> WorldTemplate:
     """取（必要时搭一次）一个库的世界模板：`judged-m1` / `raw-m1` 各一件，每测试进程只搭一次。
 
@@ -97,8 +82,9 @@ def _world_template(repo: str) -> WorldTemplate:
     不撞（缓存按名字走、整个测试进程共用）。
     """
     names = _world_paths(repo)
+    world = (names["remote"], names["exchange"], names["work"])
     return WorldTemplate.obtain(f"judgment-{repo}",
-                                lambda site: _build_world(site, **names))
+                                lambda site: site.world(*world))
 
 
 def _take_world(box: GitSandbox, repo: str) -> dict[str, Path]:
