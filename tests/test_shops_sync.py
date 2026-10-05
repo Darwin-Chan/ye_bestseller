@@ -5,9 +5,15 @@
 
 期望值都是手写的清单内容，不重算实现；「远端那份长什么样」经全新克隆看，
 与另一台机器会看到的完全一样。
+
+世界（长尾地基税票 04）：`ShopsSyncTestCase` 一族的世界每测试进程只搭一次模板、用例
+`seed_shared` 复制取独立副本——形状与建序见 `build_world`（计划库克隆总是**未出生**
+的：克隆先出生、内容后到，正是本文件在测的「pull 把远端内容带下来」那一序）。真 git
+照旧真跑：推送、rebase 撞车、BOM/CRLF 判读、全新克隆读远端。
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import stat
@@ -16,7 +22,7 @@ from pathlib import Path
 
 from bestseller_monitor import shops_sync
 from bestseller_monitor.config import load_shops
-from tests.git_repos import GitSandbox
+from tests.git_repos import GitSandbox, WorldTemplate
 
 BOM = b"\xef\xbb\xbf"
 V1 = ("shop_key,shop_name,shop_url,pages,active\n"
@@ -27,16 +33,61 @@ REPO_EDIT = V1 + "A03,店三,https://a03.example/,7,1\n"
 CLASH_LOCAL = V1.replace("3,1", "5,1")
 CLASH_REPO = V1.replace("3,1", "9,1")
 
+# 计划库世界里的相对路径（plan.git 与 exchange/plan 沿用现搭时的名字）
+PLAN_REMOTE = "plan.git"
+PLAN_CLONE = "exchange/plan"
+OTHER_CLONE = "other-machine"      # 另一台机器的克隆（只在有共享清单的世界里）
+
+
+def build_world(site: GitSandbox, *, shared: str | None) -> list[str]:
+    """搭一件计划库世界：空远端 ＋ 未出生克隆（先建克隆）＋ 视内容 seed ＋ 另一台机器的克隆。
+
+    这一件世界的序是「克隆先出生、内容后到」（`GitSandbox.world` 文档里的两步写法）——
+    克隆出来是未出生的 main，共享清单等着 sync 里的 pull 落地；`shared=None` 就是全新
+    计划库（第一台机器都还没推过，也就没有别的机器）。有共享清单时「另一台机器」的克隆
+    在 seed 之后才建——它要带着那份历史，改一笔就能直接推。
+    """
+    paths = site.world(PLAN_REMOTE, PLAN_CLONE)
+    # 「克隆先出生」是这件世界的签名，建成的样子在这里查一眼：出生过的克隆会带 `.git/logs`
+    # （`clone: from …` 那条 reflog），未出生的不会。谁把两步序改成一步到位（比如
+    # `world(..., files=…)`），这里当场红——那会把「pull 把远端内容带下来」的覆盖悄悄弄没。
+    if (site.tmp / PLAN_CLONE / ".git" / "logs").exists():
+        raise AssertionError(
+            f"计划库克隆该是未出生的（克隆要建在 seed 之前），{PLAN_CLONE} 已经出生了")
+    if shared is not None:
+        site.seed(site.tmp / PLAN_REMOTE, {"shops.csv": shared.encode("utf-8")})
+        site.clone(site.tmp / PLAN_REMOTE, OTHER_CLONE)
+        paths.append(OTHER_CLONE)
+    return paths
+
+
+def world_template(shared: str | None) -> WorldTemplate:
+    """取（必要时真搭一次）一件计划库世界的模板；远端内容不同的世界各自成件。
+
+    模板名按远端那份内容的摘要走（内容一样共用一件；`None`＝全新计划库，自成一档）；
+    前缀 `shops-sync-` 是本文件的识别标，与别的测试文件的模板不撞（缓存按名字走、
+    整个测试进程共用）。
+    """
+    tag = ("empty" if shared is None
+           else hashlib.sha256(shared.encode("utf-8")).hexdigest()[:10])
+    return WorldTemplate.obtain(
+        f"shops-sync-{tag}", lambda site: build_world(site, shared=shared))
+
 
 class ShopsSyncTestCase(unittest.TestCase):
-    """样例台：<tmp>/exchange/plan 是计划库克隆；<tmp>/config/shops.csv 是本机副本。"""
+    """样例台：<tmp>/exchange/plan 是计划库克隆；<tmp>/config/shops.csv 是本机副本。
+
+    世界由 `seed_shared` 取（每测试进程只真搭一次模板、用例复制取独立副本）；
+    形状与建序见 `build_world`。
+    """
 
     def setUp(self):
         self.box = GitSandbox(self)
-        self.remote = self.box.new_remote("plan.git")
-        self.plan = self.box.clone(self.remote, "exchange/plan")
+        self.remote = self.box.tmp / PLAN_REMOTE
+        self.plan = self.box.tmp / PLAN_CLONE
         self.local = self.box.tmp / "config" / "shops.csv"
         self._copies = 0
+        self._world_taken = False
 
     # ---- 手 ----
 
@@ -47,14 +98,29 @@ class ShopsSyncTestCase(unittest.TestCase):
     def write_local(self, text: str, *, encoding: str = "utf-8") -> None:
         self.write_local_bytes(text.encode(encoding))
 
-    def seed_shared(self, text: str) -> None:
-        """共享清单的第一个版本（第一台机器建库时推的那份）。"""
-        self.box.seed(self.remote, {"shops.csv": text.encode("utf-8")})
+    def seed_shared(self, text: str | None) -> None:
+        """取一件计划库世界（复制模板里的副本）。
+
+        `text` 是远端里等着的那份首版共享清单（第一台机器建库时推上去的）；`None`
+        表示全新的计划库——远端还是空的、还没有共享清单。内容不同的世界各自成件，
+        本进程第一次取某件时才真搭模板（真跑 git），之后每次取只是复制——这笔一次性
+        成本算在第一个取到它的用例头上；一件世界在一个用例里只取一次（`take` 的目标
+        已存在就报错）。
+        """
+        world_template(text).take(self.box)
+        self._world_taken = True
 
     def other_pushes(self, text: str) -> None:
-        """另一台机器改了共享清单并推上去。"""
-        other = self.box.clone(self.remote, f"other-{self._copies}")
-        self._copies += 1
+        """另一台机器改了共享清单并推上去（它的克隆取世界时就带着首版历史）。
+
+        它像一台常驻的机器：起点停在 seed 那一笔，不会回头拉新的远端状态——调用点须是
+        远端仍停在那儿的时候（本文件的几处都是：前面那趟 sync 判成 IN_SYNC、没有推过）。
+        """
+        other = self.box.tmp / OTHER_CLONE
+        if not other.is_dir():
+            raise AssertionError(
+                f"这件世界没有「另一台机器」（{OTHER_CLONE}）：它只在有共享清单的"
+                "世界里——先 seed_shared(V1)")
         self.box.commit_push(other, {"shops.csv": text.encode("utf-8")},
                              message="另一台机器改的共享清单")
 
@@ -67,6 +133,10 @@ class ShopsSyncTestCase(unittest.TestCase):
         return (self.fresh_clone() / "shops.csv").read_bytes()
 
     def sync(self) -> shops_sync.SyncResult:
+        if not self._world_taken:
+            raise AssertionError(
+                "先 seed_shared 取一件世界（setUp 只摆路径、不再现搭计划库）；"
+                "漏了它，sync 会把「世界没取」误报成「计划库还没 clone」")
         return shops_sync.sync_shared_shops(self.local, self.plan)
 
 
@@ -164,6 +234,7 @@ class FirstContactTests(ShopsSyncTestCase):
 
     def test_first_push_writes_a_bom_copy_that_load_shops_reads(self):
         """共享清单的磁盘形态：UTF-8 带 BOM（load_shops 第一分支即命中）。"""
+        self.seed_shared(None)      # 全新计划库：远端还没有共享清单
         self.write_local(LOCAL_EDIT)
 
         outcome = self.sync()
@@ -175,6 +246,7 @@ class FirstContactTests(ShopsSyncTestCase):
 
     def test_legacy_gbk_local_becomes_the_shared_list(self):
         """m1 现机首次：本机清单还是 GBK，推上去那份转成 UTF-8 BOM，本机副本跟上。"""
+        self.seed_shared(None)      # 全新计划库：远端还没有共享清单
         self.write_local(LOCAL_EDIT, encoding="gbk")
 
         outcome = self.sync()
@@ -186,6 +258,7 @@ class FirstContactTests(ShopsSyncTestCase):
         self.assertTrue(self.local.read_bytes().startswith(BOM), "本机那份也统一成同一编码")
 
     def test_both_sides_missing_is_an_error(self):
+        self.seed_shared(None)      # 全新计划库 ＋ 没有本机清单：两边都没有
         with self.assertRaises(shops_sync.ShopsSyncError) as ctx:
             self.sync()
 
@@ -213,7 +286,8 @@ class DegradationTests(ShopsSyncTestCase):
 
     def test_missing_plan_clone_warns_and_keeps_local(self):
         """还没走上机清单第 9 步：计划库没 clone，本机照样开轮。"""
-        shutil.rmtree(self.plan)
+        self.seed_shared(None)
+        shutil.rmtree(self.plan)    # 「计划库没 clone」是显式摆出来的空位（sync 靠它判 UNREACHABLE）
         self.write_local(V1)
 
         outcome = self.sync()
@@ -223,6 +297,7 @@ class DegradationTests(ShopsSyncTestCase):
         self.assertTrue(self.local.exists())
 
     def test_missing_clone_and_missing_local_is_an_error(self):
+        self.seed_shared(None)      # 全新计划库 ＋ 没有本机清单：两边都没有
         with self.assertRaises(shops_sync.ShopsSyncError):
             self.sync()
 
@@ -265,7 +340,7 @@ class DegradationTests(ShopsSyncTestCase):
         self.write_local(V1)
         self.sync()
         self.write_local(CLASH_LOCAL)
-        other = self.box.clone(self.remote, "other")
+        other = self.box.tmp / OTHER_CLONE
         self.box.write_files(other, {"shops.csv": CLASH_REPO})
         self.box.must("add", "--", "shops.csv", cwd=other)
         self.box.must("commit", "-m", "同一行的另一种改法", "--", "shops.csv", cwd=other)
@@ -292,6 +367,7 @@ class DegradationTests(ShopsSyncTestCase):
 
     def test_push_lands_even_if_the_local_copy_cannot_be_rewritten(self):
         """副本写不动不该拦推送：库那边成了；本机副本统一编码这事下次再说。"""
+        self.seed_shared(None)      # 全新计划库：远端还没有共享清单
         self.write_local(LOCAL_EDIT)
         self.make_local_readonly()
 

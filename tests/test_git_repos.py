@@ -2,11 +2,13 @@
 
 票 01 先把它们暂留在 test_exchange 里（那一票的改动范围只许动 `tests/git_repos.py` 与
 `tests/test_exchange.py`）；长尾地基税线的 02 票起把它们归位到这里——后续票（03–06）新增的
-原语用例也落这个文件。钉五件事：同名模板在一个进程里只搭一次；取世界只复制（一个 git 子
+原语用例也落这个文件。钉六件事：同名模板在一个进程里只搭一次；取世界只复制（一个 git 子
 进程都不起）、同一件世界在一处只取一次；复制出来的副本互相独立、也碰不到模板；副本里的 git
 是真的（远端还是未出生分支的空裸库、发布走正常克隆推送、钩子照旧可装可触发）；**带历史
 的件**（票 03 起）同样能取——副本干净、地址改写连 reflog 一起、真能推（见
-`_build_seeded_world`）。
+`_build_seeded_world`）；**克隆先出生、内容后 seed 的件**（票 04 起，`GitSandbox.world`
+文档里的两步写法）同样能取——克隆副本还是未出生的 main，内容靠 pull 落地（见
+`_build_late_seed_world`）。
 """
 from __future__ import annotations
 
@@ -46,6 +48,23 @@ def _build_seeded_world(site: GitSandbox) -> list[str]:
 def _seeded_template() -> WorldTemplate:
     """取（必要时搭一次）带历史那件小模板（两处共用，只搭一次）。"""
     return WorldTemplate.obtain("git-repos-seeded-selftest", _build_seeded_world)
+
+
+def _build_late_seed_world(site: GitSandbox) -> list[str]:
+    """「空远端 ＋ 未出生克隆 ＋ 后 seed」那一序（`GitSandbox.world` 文档里的两步写法）。
+
+    与 `_build_seeded_world` 的方向相反：克隆先出生（未出生的 main），内容后到——清单同步
+    那半的世界就是这个序（票 04 起），模板件取出来克隆还是未出生的；seed 走正常发布路径
+    （临时克隆 → 提交 → 推送），落进远端等 pull。
+    """
+    paths = site.world("late-seed-mt.git", "late-seed")
+    site.seed(site.tmp / "late-seed-mt.git", {"note.txt": "晚到的第一版\n"})
+    return paths
+
+
+def _late_seed_template() -> WorldTemplate:
+    """取（必要时搭一次）先出生后 seed 那件小模板（只搭一次）。"""
+    return WorldTemplate.obtain("git-repos-late-seed-selftest", _build_late_seed_world)
 
 
 def _files_mentioning(root: Path, needle: str) -> list[str]:
@@ -201,6 +220,26 @@ class WorldTemplateTests(unittest.TestCase):
             git("--git-dir", str(template.root / "seeded-mt.git"),
                 "show", "main:second.txt").returncode, 0,
             "副本的推送到不了模板")
+
+    def test_a_world_seeded_after_its_clone_keeps_the_clone_unborn(self):
+        template = _late_seed_template()
+        box = GitSandbox(self, prefix="bestseller-take-late-seed-")
+        template.take(box)
+        clone, bare = box.tmp / "late-seed", box.tmp / "late-seed-mt.git"
+
+        # 件里的克隆是未出生的 main：内容还没来（清单同步那半要的正是这个形状）
+        self.assertNotEqual(git("rev-parse", "--verify", "HEAD", cwd=clone).returncode, 0,
+                            "先出生后 seed 的件：克隆该是未出生的 main")
+        self.assertEqual(box.must("status", "--porcelain", cwd=clone), "")
+        # 副本自己的裸库里已经有后 seed 的那一笔；pull 一下内容就落到克隆里
+        self.assertEqual(box.must("--git-dir", str(bare), "show", "main:note.txt"),
+                         "晚到的第一版\n")
+        box.must("pull", "--rebase", cwd=clone)
+        self.assertEqual((clone / "note.txt").read_bytes(), "晚到的第一版\n".encode("utf-8"))
+        # 克隆指着副本自己的裸库；副本整棵树里不留模板地址（这份配置里没有 reflog 也要查）
+        self.assertEqual(Path(box.must("remote", "get-url", "origin", cwd=clone).strip()),
+                         bare)
+        self.assertEqual(_files_mentioning(box.tmp, "bestseller-template-"), [])
 
 
 if __name__ == "__main__":
