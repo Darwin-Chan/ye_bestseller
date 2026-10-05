@@ -2,19 +2,85 @@
 
 三条验收路径就是三个类：pull / push / push 被 non-fast-forward 拒绝后重试。
 其余失败（认证、网络、钩子拒绝）不重试的边界单独钉住。
+
+世界（长尾地基税票 05）：各用例的铺场（裸库远端 ＋ seed 链 ＋ 夹具克隆）每测试进程只真搭
+一次模板、用例复制取独立副本；`GitChannel.clone` / `pull` / `push` 本体与被测真操作照旧
+真跑（含读回验证的全新克隆）。多个用例共用的内容各自成件（按内容与克隆名单的摘要取名，
+见 `world_template`）；单用例内容取共享空件、在副本上自己走两步（见 `blank_world_template`）。
 """
 from __future__ import annotations
 
+import hashlib
 import unittest
 
 from bestseller_monitor.git_channel import ChannelError, GitChannel
-from tests.git_repos import GitSandbox
+from tests.git_repos import GitSandbox, WorldTemplate
+
+# 各件世界在副本里的相对路径（沿用现搭时的名字）
+REMOTE = "remote.git"
+MINE = "plan"
+OTHER = "other"
+RAW_M1 = "raw-m1"      # 发布侧那件（HeadAndPathTests）的克隆名
+
+# 各件世界（模板件）远端第一笔提交的内容——内容一样的世界共用一件模板（按摘要取名）；
+# 单用例内容不设常量、就地写在用例里（见 `blank_world_template`）
+V1 = "v1\n"
+BASE = "base\n"
+NOTE = "seed\n"
+PLAN_JSON = "{}\n"
+
+
+def blank_world_template() -> WorldTemplate:
+    """共享的空件：一个空裸库当远端（「先建远端」那一步）。
+
+    单用例内容的世界不单独成件（成件的一次性搭建与用例自铺场的调用数持平：2–6 次，
+    各只服务一条用例；取舍见本票 Comments 的等价性清单）——用例取这份空件后自己走
+    两步：`seed` 给副本里的远端放上首笔提交、再 `clone` 出夹具克隆，与逐用例现搭的
+    调用序逐拍一致；只有 init 这一次调用被三个用例共用省掉。
+    """
+    def build(site: GitSandbox) -> list[str]:
+        paths = site.world(REMOTE)
+        # 这件空件的签名是「远端还没有任何分支」（未出生的裸库）：谁把它改成带 seed 的件，
+        # 这里当场红——tolerates 的「空库 pull 不抛」、broken 的起点、CloneTests 的自 seed
+        # 都会以别的理由照常绿（实测：播上种后 17 项全绿），覆盖被悄悄换掉。裸库默认不写
+        # reflog（票 03 定论），所以查引用：刚 init 的空裸库 refs/ 下没有文件。
+        if any(p.is_file() for p in (site.tmp / REMOTE / "refs").rglob("*")):
+            raise AssertionError("空件的远端该还没有任何引用（它该是刚 init 的空裸库）")
+        return paths
+
+    return WorldTemplate.obtain("git-channel-blank", build)
+
+
+def world_template(files: dict[str, str | bytes], *clones: str) -> WorldTemplate:
+    """取（必要时真搭一次）一件「已 seed 的裸远端 ＋ 若干夹具克隆」的世界（一步写法）。
+
+    建序就是本文件世界的签名：先 seed（正常发布路径）再建克隆，克隆带着那条历史出生
+    ——「带历史的模板件」是长尾地基税票 03 起原语的能力（见 `git_repos.WorldTemplate`）。
+    模板名按 seed 内容与克隆名单的摘要走（两样都一样才共用一件）；前缀 `git-channel-`
+    是本文件的识别标，与别的测试文件的模板不撞（缓存按名字走、整个测试进程共用）。
+    """
+    tag = hashlib.sha256(
+        repr((sorted(files.items()), clones)).encode("utf-8")).hexdigest()[:10]
+
+    def build(site: GitSandbox) -> list[str]:
+        paths = site.world(REMOTE, *clones, files=files)
+        # 件里的克隆该是「出生过的」：建在 seed 之后，带着检出与 `.git/logs` 的 reflog。
+        # 谁把建序改成两步写法（先建克隆、后 seed 的空件那种形状），这里当场红——那份
+        # 世界里克隆是未出生的，「pull 拉的是接在 v1 上的增量提交」这类覆盖会被悄悄弄没
+        # （先例：`test_shops_sync.build_world` 的反向建成即查）。
+        if clones and not (site.tmp / clones[0] / ".git" / "logs").is_dir():
+            raise AssertionError(
+                f"世界里的 {clones[0]} 该是带着历史出生的（克隆要建在 seed 之后）")
+        return paths
+
+    return WorldTemplate.obtain(f"git-channel-{tag}", build)
 
 
 class CloneTests(unittest.TestCase):
     def test_clone_brings_remote_content_to_the_target_path(self):
         box = GitSandbox(self)
-        remote = box.new_remote()
+        blank_world_template().take(box)        # 空件：空裸库当远端；单用例内容，用例自己 seed
+        remote = box.tmp / REMOTE
         box.seed(remote, {"shops.csv": "shop_key\nA01\n"})
         target = box.tmp / "exchange" / "plan"
 
@@ -28,12 +94,12 @@ class CloneTests(unittest.TestCase):
 class PullTests(unittest.TestCase):
     def setUp(self):
         self.box = GitSandbox(self)
-        self.remote = self.box.new_remote()
+        self.remote = self.box.tmp / REMOTE
 
     def test_pull_brings_new_commits_from_the_remote(self):
-        self.box.seed(self.remote, {"shops.csv": "v1\n"})
-        mine = self.box.clone(self.remote, "plan")
-        other = self.box.clone(self.remote, "other")
+        world_template({"shops.csv": V1}, MINE, OTHER).take(self.box)   # 远端已 seed v1
+        mine = self.box.tmp / MINE
+        other = self.box.tmp / OTHER
         self.box.commit_push(other, {"shops.csv": "v2\n"})
 
         GitChannel(mine).pull()
@@ -42,13 +108,15 @@ class PullTests(unittest.TestCase):
 
     def test_pull_tolerates_a_remote_that_has_no_branch_yet(self):
         """Gitee 上刚建的空库：远端还没有这个分支，没有可拉的，不算失败。"""
-        mine = self.box.clone(self.remote, "plan")
+        blank_world_template().take(self.box)   # 空件：远端还没人推过
+        mine = self.box.clone(self.remote, MINE)
 
         GitChannel(mine).pull()                     # 不抛
 
     def test_pull_surfaces_a_broken_remote(self):
-        self.box.seed(self.remote, {"x.txt": "x\n"})
-        mine = self.box.clone(self.remote, "plan")
+        blank_world_template().take(self.box)
+        self.box.seed(self.remote, {"x.txt": "x\n"})    # 单用例内容：用例自己 seed
+        mine = self.box.clone(self.remote, MINE)
         self.box.must("remote", "set-url", "origin", str(self.box.tmp / "gone.git"), cwd=mine)
 
         with self.assertRaises(ChannelError) as ctx:
@@ -60,9 +128,9 @@ class PullTests(unittest.TestCase):
 class PushTests(unittest.TestCase):
     def setUp(self):
         self.box = GitSandbox(self)
-        self.remote = self.box.new_remote()
-        self.box.seed(self.remote, {"base.txt": "base\n"})
-        self.mine = self.box.clone(self.remote, "plan")
+        world_template({"base.txt": BASE}, MINE, OTHER).take(self.box)
+        self.remote = self.box.tmp / REMOTE
+        self.mine = self.box.tmp / MINE
 
     def test_commit_then_push_lands_on_the_remote(self):
         self.box.write_files(self.mine, {"new.txt": "new\n"})
@@ -86,7 +154,7 @@ class PushTests(unittest.TestCase):
         用 pre-push 钩子在推送途中让另一台机器抢先把提交推上去，制造真拒绝；
         通道应当自己 `pull --rebase` 重来，最终两条提交都在远端上。
         """
-        other = self.box.clone(self.remote, "other")
+        other = self.box.tmp / OTHER
         self.box.write_files(other, {"other.txt": "other\n"})
         self.box.must("add", "--", "other.txt", cwd=other)
         self.box.must("commit", "-m", "other", "--", "other.txt", cwd=other)
@@ -103,7 +171,7 @@ class PushTests(unittest.TestCase):
 
     def test_push_gives_up_after_the_attempt_budget(self):
         """远端每次都抢先动一格：重试用尽就报错，不无限打转。"""
-        other = self.box.clone(self.remote, "other")
+        other = self.box.tmp / OTHER
         self.box.install_advancing_hook(self.mine, other)
         self.box.write_files(self.mine, {"mine.txt": "mine\n"})
         channel = GitChannel(self.mine)
@@ -153,15 +221,15 @@ class ReadOnlyCredentialTests(unittest.TestCase):
 
     def setUp(self):
         self.box = GitSandbox(self)
-        self.remote = self.box.new_remote()
-        self.box.seed(self.remote, {"shops.csv": "v1\n"})
+        world_template({"shops.csv": V1}, MINE, OTHER).take(self.box)   # 与 PullTests 共用一件
+        self.remote = self.box.tmp / REMOTE
         self.attempts = self.box.tmp / "push-attempts"
         self.box.install_read_only_remote(self.remote, self.attempts)
-        self.mine = self.box.clone(self.remote, "plan")   # 只读凭据下 clone 照常
+        self.mine = self.box.tmp / MINE    # 只读凭据下 clone 照常（钩子只拦 push；clone 在模板里）
 
     def test_pull_still_brings_what_another_machine_published(self):
         """别的机器（有写权限）发布的提交，只读这台 pull 得到。"""
-        other = self.box.clone(self.remote, "other")
+        other = self.box.tmp / OTHER
         self.box.write_files(other, {"shops.csv": "v2\n"})
         self.box.must("add", "--", "shops.csv", cwd=other)
         self.box.must("commit", "-m", "v2", "--", "shops.csv", cwd=other)
@@ -184,7 +252,7 @@ class ReadOnlyCredentialTests(unittest.TestCase):
         self.assertIn("remote rejected", str(ctx.exception), "把远端的拒绝原样带回来")
         # 远端一个字节都没变；本机那笔提交还留着（谁也没撤它）
         landed = self.box.clone(self.remote, "check")
-        self.assertEqual((landed / "shops.csv").read_text(encoding="utf-8"), "v1\n")
+        self.assertEqual((landed / "shops.csv").read_text(encoding="utf-8"), V1)
         self.assertFalse((landed / "mine.txt").exists())
 
 
@@ -193,9 +261,8 @@ class LocalChangesTests(unittest.TestCase):
 
     def setUp(self):
         self.box = GitSandbox(self)
-        self.remote = self.box.new_remote()
-        self.box.seed(self.remote, {"plan/2026-W38.json": "{}\n"})
-        self.mine = self.box.clone(self.remote, "plan")
+        world_template({"plan/2026-W38.json": PLAN_JSON}, MINE).take(self.box)
+        self.mine = self.box.tmp / MINE
 
     def test_a_clean_clone_reports_nothing(self):
         self.assertEqual(GitChannel(self.mine).local_changes(), [])
@@ -220,9 +287,8 @@ class HeadAndPathTests(unittest.TestCase):
 
     def setUp(self):
         self.box = GitSandbox(self)
-        self.remote = self.box.new_remote()
-        self.box.seed(self.remote, {"note.txt": "seed\n"})
-        self.mine = self.box.clone(self.remote, "raw-m1")
+        world_template({"note.txt": NOTE}, RAW_M1).take(self.box)
+        self.mine = self.box.tmp / RAW_M1
 
     def test_head_is_the_short_hash_of_the_current_commit(self):
         channel = GitChannel(self.mine)
