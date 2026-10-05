@@ -38,6 +38,36 @@ from collections import deque
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
+# Python 管道编码契约（ADR-0046）：写方在解释器启动前设置，读方用同一编码。
+# 只管 Python 标准流；Git / tasklist 等外部命令保留各自的读取政策。
+PYTHON_TEXT_ENCODING = "utf-8"
+PYTHON_TEXT_DECODE_ERRORS = "replace"
+
+
+def python_text_env(base_env: Mapping[str, str]) -> dict[str, str]:
+    """复制调用方环境，让受控 Python 写方按管道契约输出；不改父环境。"""
+    return {**base_env, "PYTHONIOENCODING": PYTHON_TEXT_ENCODING}
+
+
+def configure_tool_output(*, errors: str | None = "replace") -> None:
+    """显式配置工具自己的标准流；import 无副作用，不配置交互输入。
+
+    工具输出沿用原来的调用政策；errors=None 省略错误参数（issue_bundle 原有行为）。
+    注意 reconfigure 指定新 encoding 却省略 errors 时，Python 会将 errors 重置为 strict。
+    pythonw 的 None 与测试的 StringIO 不支持 reconfigure，直接略过。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            if errors is None:
+                stream.reconfigure(encoding=PYTHON_TEXT_ENCODING)
+            else:
+                stream.reconfigure(encoding=PYTHON_TEXT_ENCODING, errors=errors)
+        except (AttributeError, OSError):
+            pass
+
+
 # `ModuleNotFoundError: No module named 'webview'` —— 认得出就给出「怎么办」。
 MISSING_MODULE_RE = re.compile(r"No module named '([^']+)'")
 
@@ -241,8 +271,9 @@ def _pump_stderr(proc: subprocess.Popen, log: LauncherLog) -> None:
     """子进程的 stderr 一路抄进日志；进程没了管道也会关，循环自然会退出。"""
     if proc.stderr is None:
         return
-    for line in proc.stderr:
-        log.write(line.rstrip("\n"))
+    with proc.stderr:
+        for line in proc.stderr:
+            log.write(line.rstrip("\n"))
 
 
 def launch(root: Path, python: str, env: Mapping[str, str], log: LauncherLog,
@@ -255,13 +286,14 @@ def launch(root: Path, python: str, env: Mapping[str, str], log: LauncherLog,
         proc = subprocess.Popen(
             command,
             cwd=str(root),
+            env=python_text_env(env),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             creationflags=flags,
             text=True,
-            encoding="utf-8",
-            errors="replace",
+            encoding=PYTHON_TEXT_ENCODING,
+            errors=PYTHON_TEXT_DECODE_ERRORS,
         )
     except OSError as exc:
         notify(f"调不起本机 python（{python}）：{exc}", log, env, spec)

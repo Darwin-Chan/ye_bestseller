@@ -19,10 +19,8 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-except Exception:
-    pass
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "shells"))  # noqa: E402
+from launcher_core import configure_tool_output  # noqa: E402
 
 REPO = os.path.abspath(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if REPO not in sys.path:
@@ -369,4 +367,5 @@ def _diagnose(page, url: str) -> int:
 
 
 if __name__ == "__main__":
+    configure_tool_output()
     raise SystemExit(main(sys.argv))

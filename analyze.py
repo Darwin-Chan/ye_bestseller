@@ -48,10 +48,9 @@ def _configure_logging() -> None:
     """分析自己的动作也留日志：落 stderr——分析壳把子进程 stderr 抄进壳日志，
     命令行直接跑时在终端看得到。
 
-    stderr 是管道（壳收着它）时对齐到 UTF-8：壳正文按 UTF-8 读子进程 stderr
-    （`launcher_core` 的约定），而重定向的 stderr 默认走本机 ANSI 代码页（GBK），
-    中文会变成乱码——提示与 traceback 尾巴在壳日志、失败弹窗里都读不出来。
-    控制台上 Python 本就用 UTF-8 写，这一步等于没动。
+    保留直接运行分析时重定向 stderr 的 UTF-8 兼容保护（ADR-0046）；这里不是
+    Python 管道编码契约的定义处。壳由 launcher_core 在启动解释器前设置子进程环境，
+    因而导入阶段的异常也受保护，不依赖本函数执行；运行时入口不反向 import shells/。
     """
     if sys.stderr is not None:
         try:

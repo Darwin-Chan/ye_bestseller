@@ -54,10 +54,8 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-except Exception:
-    pass
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "shells"))  # noqa: E402
+from launcher_core import configure_tool_output  # noqa: E402
 
 from bestseller_monitor import exchange, export, merge, weekly_plan  # noqa: E402
 from bestseller_monitor.db import Database, cst_date  # noqa: E402
@@ -619,4 +617,5 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    configure_tool_output()
     raise SystemExit(main())

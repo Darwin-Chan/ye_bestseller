@@ -37,6 +37,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))  # noqa: E402
 
+sys.path.insert(0, str(ROOT / "shells"))  # noqa: E402
+from launcher_core import configure_tool_output  # noqa: E402
+
 ISSUES_SUBDIR = Path(".scratch") / "tool-output" / "issues"
 INBOX_SUBDIR = Path(".scratch") / "inbox"
 REPORT_NAME = "REPORT.md"
@@ -905,18 +908,6 @@ def _newest_bundle(out_root: Path | None = None) -> Path | None:
     return max(dirs, key=lambda d: d.stat().st_mtime) if dirs else None
 
 
-def _force_utf8_output() -> None:
-    """管道/重定向时把输出对齐到 UTF-8：重定向的 stdout 默认走本机 ANSI 代码页（GBK），
-    中文会乱码——别人（或 agent）捕获这条命令的输出就什么都读不出来。控制台上本就是
-    UTF-8，这一步等于没动。"""
-    for stream in (sys.stdout, sys.stderr):
-        if stream is not None:
-            try:
-                stream.reconfigure(encoding="utf-8")
-            except (AttributeError, OSError):
-                pass
-
-
 def interactive(root: Path | None = None, out_root: Path | None = None) -> int:
     """双击流程：问一句点题 → 采集 → 打开 REPORT.md → 等人填完 → 打包。
 
@@ -956,7 +947,6 @@ def interactive(root: Path | None = None, out_root: Path | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    _force_utf8_output()
     parser = argparse.ArgumentParser(
         description="运行问题记录与打包：采集机器事实 + 日志 + 库状态，收成可拷走的记录包。")
     parser.add_argument("--title", default="", help="一句话点题（进目录名与 REPORT.md 标题）")
@@ -1036,4 +1026,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    configure_tool_output(errors=None)
     raise SystemExit(main())

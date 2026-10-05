@@ -22,6 +22,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+sys.path.insert(0, str(ROOT / "shells"))  # noqa: E402
+from launcher_core import (PYTHON_TEXT_DECODE_ERRORS, PYTHON_TEXT_ENCODING,
+                           python_text_env)  # noqa: E402
+
 CHILD_ENV_DB = "DIAG_STOP_DB"
 CHILD_ENV_LOCK = "DIAG_STOP_LOCK"
 
@@ -93,12 +97,12 @@ def _stop_request(db_path: Path):
 
 
 def spawn_child(db_path: Path, lock: str) -> subprocess.Popen:
-    env = dict(os.environ, PYTHONIOENCODING="utf-8",
-               **{CHILD_ENV_DB: str(db_path), CHILD_ENV_LOCK: lock})
+    env = python_text_env({**os.environ, CHILD_ENV_DB: str(db_path),
+                           CHILD_ENV_LOCK: lock})
     return subprocess.Popen(
         [sys.executable, str(Path(__file__).resolve()), "child"],
         cwd=str(ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, encoding="utf-8", errors="replace",
+        text=True, encoding=PYTHON_TEXT_ENCODING, errors=PYTHON_TEXT_DECODE_ERRORS,
     )
 
 

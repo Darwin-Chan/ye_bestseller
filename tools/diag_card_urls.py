@@ -8,10 +8,8 @@ import re
 import time
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-except Exception:
-    pass
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "shells"))  # noqa: E402
+from launcher_core import configure_tool_output  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
@@ -88,4 +86,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    configure_tool_output()
     raise SystemExit(main(sys.argv))

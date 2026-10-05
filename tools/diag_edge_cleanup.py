@@ -20,6 +20,10 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+sys.path.insert(0, str(ROOT / "shells"))  # noqa: E402
+from launcher_core import (PYTHON_TEXT_DECODE_ERRORS, PYTHON_TEXT_ENCODING,
+                           python_text_env)  # noqa: E402
+
 from bestseller_monitor import browser_proc  # noqa: E402
 
 EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
@@ -89,7 +93,10 @@ def mode_round() -> int:
 
 def run_child(mode: str, wait_s: float = 180):
     proc = subprocess.Popen([sys.executable, str(Path(__file__)), mode],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                            env=python_text_env(os.environ),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding=PYTHON_TEXT_ENCODING,
+                            errors=PYTHON_TEXT_DECODE_ERRORS)
     try:
         out, err = proc.communicate(timeout=wait_s)
     except subprocess.TimeoutExpired:
@@ -110,7 +117,10 @@ def run_child(mode: str, wait_s: float = 180):
 def paused_crawler() -> subprocess.Popen:
     """起一个"正在跑"的抓取进程，然后像 GUI 暂停那样强杀它，留下它启动的浏览器。"""
     holder = subprocess.Popen([sys.executable, str(Path(__file__)), "hold"],
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                              env=python_text_env(os.environ),
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, encoding=PYTHON_TEXT_ENCODING,
+                              errors=PYTHON_TEXT_DECODE_ERRORS)
     time.sleep(12)
     print(f"    暂停前端口占用者={port_owner()}")
     holder.terminate()

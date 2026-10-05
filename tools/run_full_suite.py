@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import os
 import re
 import subprocess
 import sys
@@ -23,11 +24,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 TESTS = REPO / "tests"
 
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        _stream.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "shells"))  # noqa: E402
+from launcher_core import (PYTHON_TEXT_DECODE_ERRORS, PYTHON_TEXT_ENCODING,
+                           configure_tool_output, python_text_env)  # noqa: E402
 
 # 重段：实测最慢、且以「真子进程 / 真打包 / 真文件 IO」为主的一批（各自一个进程）。
 # 它们在负载下会放大 2–3 倍，所以先跑、单独成段。刷新方法见研究 §4.4：全量加
@@ -90,7 +89,8 @@ def run_segment(label: str, patterns: list[str], log_path: Path,
         log_file.write(("# 命令：" + " ".join(cmd) + "\n\n").encode("utf-8"))
         log_file.flush()
         try:
-            proc = subprocess.run(cmd, cwd=REPO, stdout=log_file,
+            proc = subprocess.run(cmd, cwd=REPO, env=python_text_env(os.environ),
+                                  stdout=log_file,
                                   stderr=subprocess.STDOUT,
                                   timeout=timeout or None)
             code: int | None = proc.returncode
@@ -98,7 +98,8 @@ def run_segment(label: str, patterns: list[str], log_path: Path,
             timed_out, code = True, None
     elapsed = time.perf_counter() - started
 
-    text = log_path.read_text(encoding="utf-8", errors="replace")
+    text = log_path.read_text(encoding=PYTHON_TEXT_ENCODING,
+                              errors=PYTHON_TEXT_DECODE_ERRORS)
     result = _parse_segment(text)
     if timed_out:
         result["ok"], result["detail"] = False, "超时"
@@ -223,4 +224,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    configure_tool_output()
     raise SystemExit(main())
