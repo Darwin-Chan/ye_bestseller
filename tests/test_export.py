@@ -9,6 +9,10 @@
 
 夹具只搭一个够用的小世界：两家店、两个商品、两周各一条观测，跨周边界都在 W37/W38 上
 （与 spec §12 的补历史场景同一套日历）。
+
+世界（长尾地基税票 06）：`ExportRunTests` 的铺场（远端裸库 ＋ 交换区克隆）每测试进程只真搭
+一次模板、用例复制取独立副本（见 `blank_world_template`）；一次导出里的真操作（pull／提交／
+推送）与读回验证的全新克隆照旧真跑。
 """
 from __future__ import annotations
 
@@ -24,7 +28,7 @@ from bestseller_monitor import export
 from bestseller_monitor.db import CST, cst_date
 from bestseller_monitor.image_store import ImageStoreError
 from bestseller_monitor.weekly_plan import PlanError, iso_week_label
-from tests.git_repos import GitSandbox
+from tests.git_repos import GitSandbox, WorldTemplate
 from helpers import crawler_cfg, insert_sku_image, isolated_locks
 
 # 字面量哈希（不是从字节算出来的）：包/清单里的 key 由哈希与 mime 推出来，
@@ -248,17 +252,45 @@ class PackageBuildTests(unittest.TestCase):
         self.assertIs(export.read_package_meta(conn)["crawl_in_progress"], True)
 
 
+# 世界里的相对路径（沿用现搭时的名字）
+REMOTE = "raw-m1.git"          # 远端裸库
+CLONE = "exchange/raw-m1"      # 交换区里的克隆（导出真正操作的那一份）
+
+
+def blank_world_template() -> WorldTemplate:
+    """共享的空件：刚 init 的空裸库当远端 ＋ 未出生的交换区克隆——`ExportRunTests` 的铺场原样。
+
+    导出用例的世界起点就是「Gitee 上刚建好的 raw 库 ＋ 上机向导里做的克隆」：远端还没
+    任何提交（第一次导出的提交就是它的第一笔）、克隆是未出生的 main。整件世界每测试
+    进程只真搭一次、各用例复制取独立副本；留在地板上的构成（读回验证克隆等）见本票
+    Comments 的地板表。
+    """
+    def build(site: GitSandbox) -> list[str]:
+        paths = site.world(REMOTE, CLONE)
+        # 建成即查（世界签名护栏）：这件世界的签名是「远端还没有任何引用」——谁把它改成
+        # 带 seed 的件（比如 `world(..., files=…)`），这里在 build 期当场红、把错因指名
+        # 到世界形状上；不查的话播种突变大多要等跑到提交数断言（commits()==1/==2 那几
+        # 条）才红，其余用例则在漂移过的起点上照绿。裸库默认不写 reflog（票 03 定论），
+        # 所以查引用：刚 init 的空裸库 `refs/` 下没有文件。
+        if any(p.is_file() for p in (site.tmp / REMOTE / "refs").rglob("*")):
+            raise AssertionError("空件的远端该还没有任何引用（它该是刚 init 的空裸库）")
+        return paths
+
+    return WorldTemplate.obtain("export-blank", build)
+
+
 class ExportRunTests(unittest.TestCase):
     """接缝 2：跑一次导出——raw 库里的文件（真跑 git）、outbox 里的包、结果对象。"""
 
     def setUp(self):
         self.box = GitSandbox(self, prefix="bestseller-export-")
+        blank_world_template().take(self.box)
         self.source = self.box.tmp / "data" / "bestseller.db"
         self.conn = build_source_db(self.source)
         self.addCleanup(self.conn.close)
-        self.remote = self.box.new_remote("raw-m1.git")
-        self.exchange = self.box.tmp / "exchange"
-        self.box.must("clone", str(self.remote), str(self.exchange / "raw-m1"))
+        self.remote = self.box.tmp / REMOTE
+        self.raw = self.box.tmp / CLONE          # 交换区里的 raw 库克隆
+        self.exchange = self.raw.parent          # 交换区根（cfg 与 outbox 用）
         self.store = FakeImageStore()
         self.cfg = crawler_cfg(db_file=self.source, machine_id="m1",
                                exchange_root=self.exchange)
@@ -346,7 +378,7 @@ class ExportRunTests(unittest.TestCase):
     def test_a_package_from_the_previous_format_version_is_republished(self):
         """远端那份是上一版程序发的（六表、没有 SKU 图流水）：新程序读不成它的摘要，同数据也重发。"""
         self.export("2026-W38")
-        clone = self.exchange / "raw-m1"
+        clone = self.raw
         rel = "data/2026/W38-m1.db.gz"
         path = self.box.tmp / "as-v1.db"
         path.write_bytes(gzip.decompress((clone / rel).read_bytes()))
@@ -381,7 +413,7 @@ class ExportRunTests(unittest.TestCase):
 
     def test_unreachable_raw_repo_reports_failure_and_keeps_the_package(self):
         self.box.must("remote", "set-url", "origin",
-                      str(self.box.tmp / "gone.git"), cwd=self.exchange / "raw-m1")
+                      str(self.box.tmp / "gone.git"), cwd=self.raw)
 
         result = self.export("2026-W38")
 
@@ -394,19 +426,19 @@ class ExportRunTests(unittest.TestCase):
 
     def test_a_rejected_push_cleans_the_clone_and_the_next_run_heals(self):
         counter = self.box.tmp / "hook-runs"
-        self.box.install_declining_hook(self.exchange / "raw-m1", counter)
+        self.box.install_declining_hook(self.raw, counter)
 
         first = self.export("2026-W38")
 
         self.assertTrue(first.failed)
         self.assertFalse(first.published)
         self.assertIsNone(first.images, "包都没发出去，图片这趟不做")
-        status = self.box.must("status", "--porcelain", cwd=self.exchange / "raw-m1")
+        status = self.box.must("status", "--porcelain", cwd=self.raw)
         self.assertEqual(status.strip(), "", "推送失败后克隆要退回远端状态（没有半截改动）")
         self.assertTrue((self.exchange / "outbox" / "W38-m1.db.gz").exists(),
                         "包留在本机 outbox，修好后重跑即可发布")
 
-        self.box.remove_pre_push(self.exchange / "raw-m1")
+        self.box.remove_pre_push(self.raw)
         second = self.export("2026-W38")
 
         self.assertTrue(second.published, second.failure)
@@ -417,7 +449,7 @@ class ExportRunTests(unittest.TestCase):
     def test_a_dirty_leftover_clone_is_repaired_before_publishing(self):
         """上次导出中断留下的脏工作区：拉取先退回远端状态，再照常发布。"""
         self.export("2026-W38")
-        tracked = self.exchange / "raw-m1" / "data" / "2026" / "W38-m1.db.gz"
+        tracked = self.raw / "data" / "2026" / "W38-m1.db.gz"
         tracked.write_bytes(b"half-written junk")          # 跟踪文件被改脏：pull --rebase 会拒绝
         self.conn.execute(
             "INSERT INTO inventory(shop_key, offer_id, sku_id, date, stock, price, "
@@ -429,7 +461,7 @@ class ExportRunTests(unittest.TestCase):
 
         self.assertTrue(result.published, result.failure)
         self.assertEqual(self.commits(), 2)
-        status = self.box.must("status", "--porcelain", cwd=self.exchange / "raw-m1")
+        status = self.box.must("status", "--porcelain", cwd=self.raw)
         self.assertEqual(status.strip(), "")
 
     def test_crawl_in_progress_follows_the_crawler_lock(self):
@@ -543,10 +575,10 @@ class ExportRunTests(unittest.TestCase):
     def test_a_leftover_package_from_a_crash_does_not_masquerade_as_published(self):
         """崩溃在「写完包、还没提交」留下的未跟踪残迹，不能骗过发布判定——
         判定比的是 HEAD 里那份（远端的事实），不是工作区里躺着什么。"""
-        self.box.commit_push(self.exchange / "raw-m1", {"README.md": "seed\n"},
-                             message="seed")
+        self.box.commit_push(self.raw, {"README.md": "seed\n"},
+                            message="seed")
         first = self.export("2026-W38")
-        clone = self.exchange / "raw-m1"
+        clone = self.raw
         package = clone / "data" / "2026" / "W38-m1.db.gz"
         built_bytes = package.read_bytes()
         self.box.must("reset", "--hard", "HEAD~1", cwd=clone)
