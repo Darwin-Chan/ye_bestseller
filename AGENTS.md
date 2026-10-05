@@ -46,6 +46,10 @@ python tools/run_full_suite.py
 - 重段名单在 `tools/run_full_suite.py` 的 `HEAVY_MODULES`。刷新方法：全量加 `--durations 0`
   把逐用例耗时按模块聚合、从大到小取。依据、实测与合规对账见
   `.scratch/test-suite-segmentation/`（不进版本库）。
+- 重段文件的夹具走 `tests/git_repos.py` 的模板原语（`WorldTemplate` / `GitSandbox.world`）：
+  每测试进程只搭一次模板、用例复制取副本（取世界零 git 子进程），模板名带各文件的线名前缀
+  （`exchange-*`／`judgment-*`／…，名字别撞）；往重段里加用例时沿用这一套，别再逐用例现搭
+  （长尾地基税线 2026-09-24~10-05 收口，复核记录见同一 `.scratch/test-suite-segmentation/`）。
 - 「只跑长脚本就收尾」不算收尾；收尾那一趟也不要加 `-f`（本机有已知假红，提前停会让
   这一趟失去收尾效力）。
 - 日常开发不跑全量：单文件 `-p`、单个用例 `-k`，快速反馈加 `-f`；全量只在收尾跑一次。
