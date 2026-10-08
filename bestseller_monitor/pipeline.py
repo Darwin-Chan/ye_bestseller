@@ -259,6 +259,8 @@ def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *,
     conn = connect(cfg.db_file)
     db = Database(conn)
     started_at: str | None = None
+    opened = None
+    initializing = True
     try:
         request = RoundRequest(
             run_date=cst_date(),
@@ -298,6 +300,7 @@ def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *,
 
         stop_request.install(check_execution)
         try:
+            initializing = False
             _run_pwcdp_round(db, cfg, round_id, work_shops,
                              on_execution_end=segment.settle,
                              explicit_new=new_intent is not None)
@@ -320,6 +323,11 @@ def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *,
                 print(f"\n>>> {outcome.notice.format(**fields)}\n")
             else:
                 _report_late_stop(settled, outcome.round_end)
+    except Exception as exc:
+        if new_intent is not None and opened is not None and initializing:
+            rounds.finish_if_open(db, opened.round, TerminalReason.STARTUP_FAILED,
+                                  note=f"采集初始化失败，未进入采集：{exc}")
+        raise  # Collection failures after initialization retain their real semantics.
     finally:
         stop_request.uninstall()
         identity = db.crawler_process()
@@ -419,11 +427,6 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
                      shops: list[Shop], started_at: str | None = None, *,
                      on_execution_end: Callable[[], bool] | None = None,
                      explicit_new: bool = False) -> None:
-    if started_at is None:
-        row = db.crawler_process()
-        started_at = row["started_at"] if row is not None else None
-    config_hash = db.record_params(cfg)
-    emit = db.event_logger(round_id, config_hash)
     def publish(state, port, browser_pid, browser_os_started):
         if started_at is None:
             return False
@@ -433,6 +436,12 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
             browser_os_started=browser_os_started)
 
     try:
+        if started_at is None:
+            row = db.crawler_process()
+            started_at = row["started_at"] if row is not None else None
+        config_hash = db.record_params(cfg)
+        emit = db.event_logger(round_id, config_hash)
+        deny_tracker = DenyTracker(cfg.deny_window_minutes * 60)
         pw, br, page, ctx = browser_pw.open_session(cfg, publish_browser=publish)
     except STOP_WITH_OUTCOME:
         raise  # Preserve explicit stop and intervention semantics.
@@ -442,9 +451,8 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
             # round or a fictional user abort. Browser debt remains independent.
             rounds.finish_if_open(db, rounds.load(db, round_id),
                                   TerminalReason.STARTUP_FAILED,
-                                  note=f"浏览器建立失败，未进入采集：{exc}")
+                                  note=f"采集启动失败，未进入采集：{exc}")
         raise
-    deny_tracker = DenyTracker(cfg.deny_window_minutes * 60)
     try:
         _run_listing_pw(db, cfg, round_id, shops, page, emit=emit, deny_tracker=deny_tracker)
     finally:

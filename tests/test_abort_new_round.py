@@ -1,6 +1,6 @@
 """Ticket 01: explicit abort, safe cleanup, then explicit new round."""
 import json
-from contextlib import closing
+from contextlib import closing, contextmanager
 import tempfile
 import unittest
 from pathlib import Path
@@ -178,6 +178,52 @@ class ExplicitNewRoundTests(unittest.TestCase):
         self.assertTrue(self.api.get_start()["start_allowed"])
         self.assertFalse(single_instance.is_held(single_instance.CRAWLER_LOCK))
 
+    def test_driver_preparation_failure_settles_new_round_before_any_browser_start(self):
+        import sqlite3
+        with closing(connect(self.db_path)) as conn:
+            db = Database(conn)
+            intent = rounds.plan_new(db, rounds.RoundRequest(cst_date(), (
+                rounds.ShopScope("D", self.shops[-1].url, "D"),)))
+            conn.execute("CREATE TRIGGER fail_run_params BEFORE INSERT ON run_params "
+                         "BEGIN SELECT RAISE(ABORT, 'test parameter storage unavailable'); END")
+            conn.commit()
+        cfg = crawler_cfg(db_file=self.db_path, ensure_dirs=lambda: None)
+        with patch("bestseller_monitor.browser_pw.subprocess.Popen") as spawn, \
+                patch("playwright.sync_api.sync_playwright") as playwright:
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "test parameter storage unavailable"):
+                pipeline.run_round(cfg, [self.shops[-1]], new_intent=intent)
+            spawn.assert_not_called()
+            playwright.assert_not_called()
+        with closing(connect(self.db_path)) as conn:
+            db = Database(conn)
+            self.assertIsNone(rounds.active_round(db))
+            self.assertEqual(rounds.latest(db).reason.value, "STARTUP_FAILED")
+            self.assertIsNone(db.crawler_process())
+        self.assertFalse(single_instance.is_held(single_instance.CRAWLER_LOCK))
+        self.assertTrue(self.api.get_start()["start_allowed"])
+
+    def test_new_round_initialization_failure_does_not_leave_an_unfinished_round(self):
+        with closing(connect(self.db_path)) as conn:
+            intent = rounds.plan_new(Database(conn), rounds.RoundRequest(cst_date(), (
+                rounds.ShopScope("D", self.shops[-1].url, "D"),)))
+        cfg = crawler_cfg(db_file=self.db_path, ensure_dirs=lambda: None,
+                          shop_csv=Path(self.tmp) / "removed-shops.csv")
+        with patch("bestseller_monitor.browser_pw.subprocess.Popen") as spawn, \
+                patch("playwright.sync_api.sync_playwright") as playwright:
+            with self.assertRaises(FileNotFoundError):
+                pipeline.run_round(cfg, [self.shops[-1]], new_intent=intent)
+            spawn.assert_not_called()
+            playwright.assert_not_called()
+        with closing(connect(self.db_path)) as conn:
+            db = Database(conn)
+            self.assertIsNone(rounds.active_round(db), "采集前初始化失败不能留下空进行中轮")
+            self.assertEqual(rounds.latest(db).reason.value, "STARTUP_FAILED")
+            self.assertIsNone(db.crawler_process())
+        self.assertFalse(single_instance.is_held(single_instance.CRAWLER_LOCK))
+        self.assertTrue(self.api.get_start()["start_allowed"])
+        with patch.object(gui.subprocess, "Popen"):
+            self.assertTrue(self.api.start_run(["D"])["ok"])
+
     def test_real_missing_browser_startup_releases_cleanup_gate_for_explicit_retry(self):
         with closing(connect(self.db_path)) as conn:
             intent = rounds.plan_new(Database(conn), rounds.RoundRequest(cst_date(), (
@@ -249,14 +295,10 @@ class ExplicitNewRoundTests(unittest.TestCase):
             self.assertEqual(rounds.latest(Database(conn)).reason, rounds.TerminalReason.COMPLETED)
         self.assertTrue(self.api.get_start()["start_allowed"])
 
-    def test_paused_confirmation_rechecks_absent_target_at_sqlite_write_boundary(self):
+    @contextmanager
+    def competing_execution_at_terminal_write(self, rid):
+        """Inject only an external SQLite race; both public entrances stay real."""
         import sqlite3
-        rid, process, death = self.running()
-        self.assertTrue(self.api.pause_run()["ok"])
-        death()
-        self.api.get_run()
-        prepared = self.api.prepare_abort()
-        self.assertTrue(prepared["ok"])
         competitor = self.enterContext(closing(connect(self.db_path)))
         raced = []
         native_connect = sqlite3.connect
@@ -272,6 +314,16 @@ class ExplicitNewRoundTests(unittest.TestCase):
             conn.set_trace_callback(trace)
             return conn
         with patch.object(sqlite3, "connect", side_effect=traced_connect):
+            yield raced, competitor
+
+    def test_paused_confirmation_rechecks_absent_target_at_sqlite_write_boundary(self):
+        rid, process, death = self.running()
+        self.assertTrue(self.api.pause_run()["ok"])
+        death()
+        self.api.get_run()
+        prepared = self.api.prepare_abort()
+        self.assertTrue(prepared["ok"])
+        with self.competing_execution_at_terminal_write(rid) as (raced, competitor):
             result = self.api.confirm_abort(prepared["confirmation"])
         self.assertTrue(raced)
         self.assertFalse(result["ok"], "暂停确认的空目标不能授权同轮后来登记的执行")
@@ -280,28 +332,13 @@ class ExplicitNewRoundTests(unittest.TestCase):
         process.terminate.assert_not_called()
 
     def test_native_paused_close_rechecks_target_at_sqlite_write_boundary(self):
-        import sqlite3
         rid, process, death = self.running()
         self.assertTrue(self.api.pause_run()["ok"])
         death()
         self.api.get_run()
         expected = self.api.close_snapshot()
         self.assertEqual(expected.kind, "paused")
-        competitor = self.enterContext(closing(connect(self.db_path)))
-        raced = []
-        native_connect = sqlite3.connect
-        def trace(sql):
-            if (sql == "BEGIN IMMEDIATE" or sql.startswith("UPDATE rounds SET terminal_reason=")) and not raced:
-                raced.append(True)
-                Database(competitor).record_crawler_process(5432, rid,
-                    process_os_started="process-b", browser_state="BORROWED")
-                lock_b = single_instance.acquire(single_instance.CRAWLER_LOCK)
-                self.addCleanup(lock_b.release)
-        def traced_connect(*args, **kwargs):
-            conn = native_connect(*args, **kwargs)
-            conn.set_trace_callback(trace)
-            return conn
-        with patch.object(sqlite3, "connect", side_effect=traced_connect):
+        with self.competing_execution_at_terminal_write(rid) as (raced, competitor):
             result = self.api.begin_close(expected)
         self.assertTrue(raced)
         self.assertFalse(result["ok"], "正常关窗不能结束同轮后来执行")
@@ -357,6 +394,43 @@ class ExplicitNewRoundTests(unittest.TestCase):
         self.api.proc = process
         self.api.round_id = rid
         return rid, process, death
+
+    def test_force_transaction_identity_loss_keeps_frozen_browser_debt_and_gate(self):
+        import sqlite3
+        from bestseller_monitor import browser_proc
+        rid, process, death = self.running(owned=True)
+        self.assertTrue(self.api.abort_run()["ok"])
+        self.clock.advance(20)
+        competitor = self.enterContext(closing(connect(self.db_path)))
+        original = Database(competitor).crawler_process()
+        native_connect = sqlite3.connect
+        raced = []
+        def trace(sql):
+            if sql == "BEGIN IMMEDIATE" and not raced:
+                raced.append(True)
+                Database(competitor).clear_crawler_process(
+                    target_pid=original["pid"], target_started_at=original["started_at"])
+        def traced_connect(*args, **kwargs):
+            conn = native_connect(*args, **kwargs)
+            conn.set_trace_callback(trace)
+            return conn
+        with patch.object(sqlite3, "connect", side_effect=traced_connect), \
+                patch.object(browser_proc, "close_browser", return_value=None) as close:
+            result = self.api.get_run()
+            self.assertTrue(raced)
+            self.assertEqual(result["stopping"], "verifying")
+            process.terminate.assert_not_called()
+            close.assert_not_called()
+            self.assertFalse(self.api.get_start()["start_allowed"])
+            self.assertFalse(self.api.start_run(["D"])["ok"])
+            death()
+            self.assertEqual(self.api.get_run()["stopping"], "cleanup_pending")
+            self.assertFalse(self.api.get_start()["start_allowed"])
+            self.assertEqual(self.load_round(rid).reason, rounds.TerminalReason.ABANDONED)
+        with patch.object(browser_proc, "close_browser", return_value=True):
+            self.assertIsNone(self.api.get_run()["stopping"])
+        self.assertTrue(self.api.get_start()["start_allowed"])
+        self.assertEqual(self.load_round(rid).reason, rounds.TerminalReason.ABANDONED)
 
     def test_abort_during_pause_cleanup_reuses_original_stop_and_target(self):
         from bestseller_monitor import stop_request

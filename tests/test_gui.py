@@ -1096,16 +1096,18 @@ class GuiCrossSessionAbortTests(unittest.TestCase):
         seen = {}
 
         capability = browser_proc.ProcessCapability(4321, 91, "crawler-proof")
+        alive = [True]
 
         def kill(cap):
             seen["reason_at_kill_time"] = self._row("terminal_reason")
             seen["pid"] = cap.pid
+            alive[0] = False
             self.lock.release()   # 进程被杀掉 → 内核释放会话锁
             return True
 
         with patch.object(browser_proc, "bind_process", return_value=capability), \
                 patch.object(browser_proc, "process_capability_alive",
-                             side_effect=[True, False]), \
+                             side_effect=lambda _: alive[0]), \
                 patch.object(browser_proc, "terminate_process_capability", side_effect=kill), \
                 patch.object(browser_proc, "release_process_capability"):
             result = self.api.abort_run()

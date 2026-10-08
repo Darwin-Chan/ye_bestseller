@@ -553,7 +553,18 @@ class StopWatch:
                     and (StopTarget.of(current) != target)):
                 conn.rollback()
                 return self._replaced(stop)
-            current_facts = self._runtime.observe(conn, stop.bound)
+            current_facts = self._original_browser_facts(
+                stop, self._runtime.observe(conn, stop.bound))
+            relation = self._relation(target, current_facts)
+            if relation is StopRelation.REPLACED:
+                conn.rollback()
+                return self._replaced(stop)
+            if relation is StopRelation.UNVERIFIABLE:
+                conn.rollback()
+                return self._verify(stop, "target_unverifiable")
+            if relation is StopRelation.GONE:
+                conn.rollback()
+                return self._cleanup_exited(conn, db, stop)
             browser = current_facts.browser
             if (current_facts.browser_state in ("STARTING", "UNKNOWN", "OWNED")
                     and browser is None):
