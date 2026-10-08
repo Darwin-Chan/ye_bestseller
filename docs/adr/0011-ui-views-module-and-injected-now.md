@@ -81,3 +81,9 @@ fixture——`test_gui.py` 的断言没有搬家，新增的 `tests/test_views.p
 相关词汇见 [CONTEXT.md](../../CONTEXT.md) 的「界面刷新」「界面会话事实」；来源是
 `docs/reviews/architecture-review-2026-09-13.html` 候选 04，规格与工单在
 `.scratch/ui-views/spec.md`。
+## 2026-10-08：elapsed 的轮次归属设计
+
+[ADR-0051](0051-round-elapsed-owned-by-collection-execution.md) 已获用户确认，设计上仅替代
+“本次已抓时长属于 GUI 会话事实”：改为轮次事实、由采集执行贡献时间段并在本地数据库记录，
+GUI/views 消费解释好的事实。随后获授权的 01 已移除 GUI 旧计时字段并贯通单段保存与两页取数；单票独立审查和隔离全量 1446 项、7/7 段 OK。02/03 仍待实施，不宣称完整中断/跨入口矩阵已验收。验收见 [01 交付记录](../design/elapsed-01-delivery-2026-10-08.md)。
+本 ADR 的 views module、外部注入时刻/连接与其他界面会话事实决策继续保留。

@@ -59,7 +59,7 @@ class CrawlerMutexTests(unittest.TestCase):
     def test_the_running_crawler_registers_itself_and_clears_it_afterwards(self):
         seen = {}
 
-        def driver(_db, _cfg, _round_id, _shops):
+        def driver(_db, _cfg, _round_id, _shops, *, on_execution_end=None):
             seen.update(self._identity_row() or {})
 
         with isolated_locks():
@@ -95,7 +95,7 @@ class CrawlerMutexTests(unittest.TestCase):
 
     def test_a_late_finish_does_not_overwrite_the_abandoned_round(self):
         """界面中止后，还在跑的采集进程到检查点停下：不崩，也不改回「跨天中止」。"""
-        def abandon_then_stop(_db, _cfg, round_id, _shops):
+        def abandon_then_stop(_db, _cfg, round_id, _shops, *, on_execution_end=None):
             self._abandon(round_id)
             raise DayBoundaryReached()
 
@@ -107,7 +107,7 @@ class CrawlerMutexTests(unittest.TestCase):
 
     def test_finalizing_does_not_overwrite_the_abandoned_round(self):
         """采集跑完时轮次已经被中止：正常收尾也不该把它改写成「完成」。"""
-        def finish_shop_then_abandon(db, _cfg, round_id, _shops):
+        def finish_shop_then_abandon(db, _cfg, round_id, _shops, *, on_execution_end=None):
             db.save_shop_offers(round_id, "A01", "https://shop.example/", "店铺A", [],
                                 pages_read=1, confirmed_empty=True)
             self._abandon(round_id)
@@ -120,7 +120,7 @@ class CrawlerMutexTests(unittest.TestCase):
 
     def test_a_late_stop_does_not_claim_the_original_reason(self):
         """被人工中止的采集到检查点停下：日志与输出不该说成「跨天中止」。"""
-        def abandon_then_stop(_db, _cfg, round_id, _shops):
+        def abandon_then_stop(_db, _cfg, round_id, _shops, *, on_execution_end=None):
             self._abandon(round_id)
             raise DayBoundaryReached()
 
@@ -158,7 +158,7 @@ class CrawlerMutexTests(unittest.TestCase):
         """界面按暂停：采集进程在检查点自己停下，轮次保持进行中、可以续跑。"""
         seen = {}
 
-        def driver(db, _cfg, round_id, _shops):
+        def driver(db, _cfg, round_id, _shops, *, on_execution_end=None):
             self._request_pause(round_id)
             try:
                 rounds.ensure_workable(db, round_id, utcnow())   # 采集进程的下一个检查点

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from bestseller_monitor import plan_step, rounds, views, weekly_plan
+from bestseller_monitor import elapsed, plan_step, rounds, views, weekly_plan
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import Database, connect
 from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
@@ -393,7 +393,7 @@ class RunViewTests(ViewsTestCase):
 
     def test_progress_page_carries_the_ui_session_facts(self):
         state = views.UiState(crawler_running=True, manually_paused=True,
-                              stopping="stopping", stop_grace_sec=8.0, elapsed_sec=123.0)
+                              stopping="stopping", stop_grace_sec=8.0)
 
         view = views.run_view(self.conn, state=state, now=NOW)
 
@@ -422,7 +422,7 @@ class ResultViewTests(ViewsTestCase):
 
         self.assertEqual(view["reason"], "COMPLETED")
         self.assertEqual((view["tag"], view["note"]), ("正常完成", "本轮正常完成。"))
-        self.assertEqual(view["duration_text"], "10 分")
+        self.assertEqual(view["duration_text"], "未记录")
         self.assertEqual((view["done_count"], view["total_count"]), (1, 2))
         self.assertEqual((view["products_total"], view["skus_total"]), (1, 2))
         self.assertEqual(view["todo"], [{
@@ -432,11 +432,15 @@ class ResultViewTests(ViewsTestCase):
         }])
         self.assertEqual(view["done"][0]["key"], "A01")
 
-    def test_result_page_uses_current_elapsed_time_while_the_round_is_still_open(self):
+    def test_result_page_reads_saved_collection_time_while_the_round_is_still_open(self):
         round_id = new_round(self.db, run_date=TODAY)
 
+        ticks = iter((0.0, 123.0))
+        segment = elapsed.begin(self.conn, round_id, process_started="test-run",
+                                new_round=True, clock=lambda: next(ticks))
+        segment.settle()
         view = views.result_view(
-            self.conn, state=views.UiState(round_id=round_id, elapsed_sec=123.0), now=NOW)
+            self.conn, state=views.UiState(round_id=round_id), now=NOW)
 
         self.assertEqual((view["tag"], view["duration_text"]), ("进行中", "2 分"))
 

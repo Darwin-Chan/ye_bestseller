@@ -9,8 +9,9 @@ from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import Callable
 
-from . import (browser_proc, browser_pw, click_listing, dedupe, detail, detail_visit, plan_step, shop_progress,
+from . import (browser_proc, browser_pw, click_listing, dedupe, detail, detail_visit, elapsed, plan_step, shop_progress,
                rounds, single_instance, stop_request, weekly_plan)
 from .guard import DenyTracker, RoundDenyExceeded, ShopDenyExceeded
 from .config import Config, Shop, load_shops
@@ -218,7 +219,7 @@ class CrawlerAlreadyRunning(RuntimeError):
     """已有采集进程在跑：同一时刻至多一个，由会话锁保证（见 single_instance）。"""
 
 
-def run_round(cfg: Config, shops: list[Shop], *, deviations=()) -> None:
+def run_round(cfg: Config, shops: list[Shop], *, deviations=(), elapsed_clock: Callable[[], float] | None = None) -> None:
     """开始或续跑一轮。
 
     shops 是本次调用请求的店铺范围：今天已有进行中的轮次时范围必须一致，否则
@@ -239,12 +240,12 @@ def run_round(cfg: Config, shops: list[Shop], *, deviations=()) -> None:
             "已有采集进程在运行：同一时刻只能跑一轮，等它结束或在界面里中止它。"
         )
     try:
-        _run_round_locked(cfg, shops, deviations)
+        _run_round_locked(cfg, shops, deviations, elapsed_clock=elapsed_clock)
     finally:
         lock.release()
 
 
-def _run_round_locked(cfg: Config, shops: list[Shop], deviations=()) -> None:
+def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *, elapsed_clock: Callable[[], float] | None = None) -> None:
     """拿到采集锁之后真正干活的部分。"""
     cfg.ensure_dirs()
     conn = connect(cfg.db_file)
@@ -266,7 +267,6 @@ def _run_round_locked(cfg: Config, shops: list[Shop], deviations=()) -> None:
             browser_state="NOT_STARTED" if cfg.start_browser else "BORROWED",
             browser_port=cfg.attach_port if not cfg.start_browser else None)
         # 长睡眠的切片问的就是这一句：轮次还允许干活吗（ADR-0009）。
-        stop_request.install(lambda: rounds.ensure_workable(db, round_id, utcnow()))
         log.info(
             "%s轮次 #%s（%s，%s 家店）",
             "新建" if opened.created else "续跑", round_id, request.run_date,
@@ -280,7 +280,19 @@ def _run_round_locked(cfg: Config, shops: list[Shop], deviations=()) -> None:
         work_shops = round_shops(db, round_id, cfg)
 
         # 采集驱动只有一条；别的值在配置加载处就被拦住（ADR-0010），这里不再有分支。
-        _run_pwcdp_round(db, cfg, round_id, work_shops)
+        segment = elapsed.begin(conn, round_id, process_started=started_at,
+                                new_round=opened.created, clock=elapsed_clock)
+
+        def check_execution():
+            segment.checkpoint()
+            rounds.ensure_workable(db, round_id, utcnow())
+
+        stop_request.install(check_execution)
+        try:
+            _run_pwcdp_round(db, cfg, round_id, work_shops,
+                             on_execution_end=segment.settle)
+        finally:
+            segment.settle()
         _finalize_round(db, cfg, opened.round)
     except STOP_WITH_OUTCOME as exc:
         # 停止这一族在这里统一收尾：分类与文案都来自 _STOP_OUTCOMES。
@@ -391,7 +403,8 @@ def _finalize_round(db: Database, cfg: Config, run: Round) -> None:
 # ---------- Playwright 连接接管（pw_cdp）路径 ----------
 
 def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
-                     shops: list[Shop], started_at: str | None = None) -> None:
+                     shops: list[Shop], started_at: str | None = None, *,
+                     on_execution_end: Callable[[], bool] | None = None) -> None:
     if started_at is None:
         row = db.crawler_process()
         started_at = row["started_at"] if row is not None else None
@@ -410,7 +423,13 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
     try:
         _run_listing_pw(db, cfg, round_id, shops, page, emit=emit, deny_tracker=deny_tracker)
     finally:
-        browser_pw.close_session(pw, br, publish_browser=publish)
+        # 采集已结束；浏览器归属清理不再贡献采集段时长。
+        # callback 只表达执行结束事件，差值/保存/冻结知识仍属于 elapsed。
+        try:
+            if on_execution_end is not None:
+                on_execution_end()
+        finally:
+            browser_pw.close_session(pw, br, publish_browser=publish)
 
 
 def _record_shop_stop(db: Database, round_id: int, shop: Shop, exc: BaseException,

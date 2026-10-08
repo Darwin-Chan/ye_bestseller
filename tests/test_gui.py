@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import gui
-from bestseller_monitor import browser_proc, db, plan_step, rounds, single_instance, \
+from bestseller_monitor import browser_proc, db, elapsed, plan_step, rounds, single_instance, \
     stop_request, weekly_plan
 from bestseller_monitor.config import ROLE_MERGE_ONLY, Shop
 from bestseller_monitor.db import (CST, DETAIL_BUDGET_NOTE, Database, connect,
@@ -424,21 +424,25 @@ class GuiResultTests(unittest.TestCase):
             finally:
                 conn.close()
 
-    def test_resumable_interruption_uses_current_elapsed_time(self):
+    def test_resumable_interruption_reads_saved_round_collection_time(self):
         with tempfile.TemporaryDirectory() as tmp:
             conn = connect(Path(tmp) / "test.db")
             try:
                 round_id = new_round(Database(conn))
                 api = gui_api(open_conn=lambda: conn)
                 api.round_id = round_id
-                api._current_elapsed = MagicMock(return_value=125.0)
+                clock = StopClock()
+                segment = elapsed.begin(conn, round_id, process_started="test-run",
+                                        new_round=True, clock=clock)
+                clock.advance(125)
+                segment.settle()
 
                 result = api.get_result()
 
                 self.assertIsNone(result["reason"])
                 self.assertEqual(result["tag"], "进行中")
                 self.assertEqual(result["duration_text"], "2 分")
-                api._current_elapsed.assert_called_once_with()
+                self.assertEqual(result["elapsed_sec"], 125)
             finally:
                 conn.close()
 

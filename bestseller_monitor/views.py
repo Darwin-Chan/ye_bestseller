@@ -16,7 +16,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from . import click_events, pacing, plan_step, rounds, shop_progress, weekly_plan
+from . import click_events, elapsed, pacing, plan_step, rounds, shop_progress, weekly_plan
 from .config import effective_pages_limit, is_merge_only
 from .crawler_identity import CrawlerProcess
 from .db import CST, Database, RoundTally, cst_date
@@ -35,7 +35,6 @@ class UiState:
     manually_paused: bool = False
     stopping: str | None = None
     stop_grace_sec: float = 0.0
-    elapsed_sec: float = 0.0
     start_error: str | None = None
     # 本界面这一次、属于本周的开轮前准备（ADR-0035）：闸门与「未能确认最新」的事实源
     # 是它，不是库里的计划表——库里的表回答「本地有没有」，它回答「这次确认到没有」。
@@ -469,6 +468,7 @@ def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str,
     tally = Database(conn).round_tally(round_id)
     done, todo = _shop_breakdown(conn, round_id, tally, max_attempts)
     total, deny = _round_counts(conn, round_id)
+    timing = elapsed.read(conn, round_id)
     pacing_remaining, pacing_paused = _pacing_state(
         conn, round_id, now=now, running=state.crawler_running)
     return {
@@ -479,7 +479,10 @@ def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str,
         "has_round": True,
         "round_id": round_id,
         "started_hhmm": _fmt_hhmm(active.started_at),
-        "elapsed_sec": max(state.elapsed_sec, 0),
+        "elapsed_sec": timing.seconds,
+        "elapsed_text": timing.text,
+        "elapsed_quality": timing.quality,
+        "elapsed_note": timing.note,
         "deny": deny,
         "pacing_remaining_sec": pacing_remaining,
         "pacing_remaining_text": _fmt_countdown(pacing_remaining),
@@ -518,11 +521,7 @@ def result_view(conn: sqlite3.Connection, *, state: UiState, now: str,
             "stop_grace_sec": state.stop_grace_sec,
         }
     round_id = run.id
-    duration = _duration_seconds(run.started_at, run.finished_at)
-    if duration is None and round_id == state.round_id:
-        # 榜单未完成时轮次保持进行中、没有 finished_at，
-        # 即便抓取进程已经停下也仍可续跑，所以用当前已抓时长。
-        duration = state.elapsed_sec
+    timing = elapsed.read(conn, round_id)
     tally = db.round_tally(round_id)
     done, todo = _shop_breakdown(conn, round_id, tally, max_attempts)
     total, deny = _round_counts(conn, round_id)
@@ -536,7 +535,10 @@ def result_view(conn: sqlite3.Connection, *, state: UiState, now: str,
         "reason": run.reason.value if run.reason is not None else None,
         "started_hhmm": _fmt_hhmm(run.started_at),
         "finished_hhmm": _fmt_hhmm(run.finished_at),
-        "duration_text": _fmt_dur(duration),
+        "duration_text": timing.text,
+        "elapsed_sec": timing.seconds,
+        "elapsed_quality": timing.quality,
+        "elapsed_note": timing.note,
         "deny": deny,
         "done_count": len(done),
         "total_count": total,

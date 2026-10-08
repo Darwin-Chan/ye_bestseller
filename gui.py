@@ -161,12 +161,9 @@ class Api:
         self._lock = threading.RLock()
         self.proc: subprocess.Popen | None = None
         self.round_id: int | None = None
-        self.start_ts: float | None = None
         self.user_paused = False
         self._paused_round_id: int | None = None
         self._closing_requested = False
-        self._elapsed_base = 0.0
-        self._run_start_ts: float | None = None
         # 停止编排（窗口、回执、超时强杀）在 stop_request 里；**冻结目标之后的处置也在那里**，
         # 界面只交一件事实：本界面拉起的那个子进程。晚绑定 lambda 让 begin 那一刻读一次
         # `self.proc` 并冻进绑定，此后窗口不再读这个可变字段（ADR-0024）。
@@ -180,12 +177,6 @@ class Api:
     def _today(self) -> str:
         """今天的北京日期；「现在」来自构造时注入的时刻，不读挂钟。"""
         return cst_date(self._now())
-
-    def _current_elapsed(self) -> float:
-        """当前已抓时长：运行中 = 累计段 + 当前段；暂停 = 仅累计段（冻结）。"""
-        if self._run_start_ts is not None:
-            return self._elapsed_base + (time.time() - self._run_start_ts)
-        return self._elapsed_base
 
     def _refused_start_message(self) -> str | None:
         """本界面拉起的采集子进程被拒时，要显示的那句话（按子进程的退出码分流）。"""
@@ -207,7 +198,6 @@ class Api:
             manually_paused=self.user_paused,
             stopping=self._stop_watch.state,
             stop_grace_sec=self._stop_watch.grace_sec,
-            elapsed_sec=self._current_elapsed(),
             start_error=self._refused_start_message(),
             # 这次准备原样交给取数：跨周的那次不算本周的确认，但也正是「窗口跨周了」
             # 的判据（plan_step.start_plan 自己按周折）。
@@ -453,11 +443,8 @@ class Api:
             finally:
                 conn.close()
             self.round_id = None
-            self.start_ts = time.time()
             self.user_paused = False
             self._paused_round_id = None
-            self._elapsed_base = 0.0
-            self._run_start_ts = time.time()
             try:
                 self._spawn_crawler(keys)
             except Exception as exc:  # noqa: BLE001
@@ -499,10 +486,8 @@ class Api:
             finally:
                 conn.close()
             self.round_id = rid
-            self.start_ts = time.time()
             self.user_paused = False
             self._paused_round_id = None
-            self._run_start_ts = time.time()
             try:
                 # 不带范围：子进程按「开始或续跑」处理，范围以轮次自身为准，
                 # 配置里删掉过的店铺也能继续跑完。
@@ -520,9 +505,6 @@ class Api:
             if self._closing_requested:
                 return {"ok": False, "error": CLOSING_REFUSAL}
             self.user_paused = True
-            if self._run_start_ts is not None:
-                self._elapsed_base += time.time() - self._run_start_ts
-                self._run_start_ts = None
             conn = self._open_conn()
             try:
                 # Reconcile any older target before selecting the current crawler.

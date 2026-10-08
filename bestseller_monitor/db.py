@@ -201,6 +201,20 @@ CREATE TABLE IF NOT EXISTS crawler_process (
     browser_os_started TEXT
 );
 
+-- 本机采集段计时；不参与交换。没有记录的旧轮保持未知。
+CREATE TABLE IF NOT EXISTS elapsed_rounds (
+    round_id INTEGER PRIMARY KEY,
+    history_known INTEGER NOT NULL CHECK (history_known IN (0, 1))
+);
+CREATE TABLE IF NOT EXISTS elapsed_segments (
+    execution_id TEXT PRIMARY KEY,
+    round_id INTEGER NOT NULL,
+    process_started TEXT NOT NULL,
+    seconds REAL NOT NULL DEFAULT 0 CHECK (seconds >= 0),
+    settled INTEGER NOT NULL DEFAULT 0 CHECK (settled IN (0, 1))
+);
+CREATE INDEX IF NOT EXISTS idx_elapsed_segments_round ON elapsed_segments(round_id);
+
 CREATE TABLE IF NOT EXISTS stop_requests (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     round_id INTEGER,
