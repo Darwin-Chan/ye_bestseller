@@ -642,16 +642,17 @@ class Api:
                     return CloseSnapshot(kind, status.target, status.round_id,
                                          promotion_error or status.code, phase)
                 reason = rounds.load(Database(conn), rid).reason if rid is not None else None
-                if self.user_paused and reason is None:
-                    if (self._paused_round_id is None or rid != self._paused_round_id
-                            or target is not None):
-                        return CloseSnapshot("unknown", target, rid)
-                    return CloseSnapshot("paused", round_id=rid, pause_phase="paused")
+                # An external replacement is running, not this GUI's old pause.
                 if self.any_crawler_running():
                     if target is None or rid is None:
                         return CloseSnapshot("unknown", target, rid)
                     kind = "aborting" if reason is TerminalReason.ABANDONED else "running"
                     return CloseSnapshot(kind, target, rid)
+                if self.user_paused and reason is None:
+                    if (self._paused_round_id is None or rid != self._paused_round_id
+                            or target is not None):
+                        return CloseSnapshot("unknown", target, rid)
+                    return CloseSnapshot("paused", round_id=rid, pause_phase="paused")
                 return CloseSnapshot("idle", round_id=rid)
             finally:
                 conn.close()

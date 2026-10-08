@@ -270,7 +270,7 @@ class ProcessStopRuntime:
                 alive = browser_proc.process_capability_alive(handle)
             return RuntimeFacts(None, alive,
                                 error="identity_missing" if alive is not False else None)
-        if identity.pid != bound.target.pid or identity.started_at != bound.target.started_at:
+        if StopTarget.of(identity) != bound.target:
             return RuntimeFacts(identity, False)
         handle = bound.capability
         if hasattr(handle, "poll"):
@@ -466,7 +466,7 @@ class StopWatch:
     @staticmethod
     def _relation(target, facts) -> StopRelation:
         who = facts.identity
-        if who is not None and (who.pid != target.pid or who.started_at != target.started_at):
+        if who is not None and (StopTarget.of(who) != target):
             return StopRelation.REPLACED
         if facts.error or facts.process_alive is None:
             return StopRelation.UNVERIFIABLE
@@ -509,7 +509,7 @@ class StopWatch:
             current = crawler_identity.registered(conn)
             target = stop.command.target
             if (current is not None
-                    and (current.pid != target.pid or current.started_at != target.started_at)):
+                    and (StopTarget.of(current) != target)):
                 self._delete_target_in_transaction(conn, target)
                 conn.commit()
                 self._finish(stop)
@@ -526,8 +526,7 @@ class StopWatch:
                 return self._verify(stop, effect.code or "terminate_failed")
             after = self._runtime.observe(conn, stop.bound)
             if (after.identity is not None
-                    and (after.identity.pid != target.pid
-                         or after.identity.started_at != target.started_at)):
+                    and (StopTarget.of(after.identity) != target)):
                 self._delete_target_in_transaction(conn, target)
                 conn.commit()
                 self._finish(stop)
@@ -611,15 +610,21 @@ class StopWatch:
 
     @staticmethod
     def _cleanup_target(db, target):
-        db.clear_browser_facts_if_current(target_pid=target.pid,
-                                          target_started_at=target.started_at)
-        db.clear_crawler_process(target_pid=target.pid,
-                                 target_started_at=target.started_at)
-        db.clear_stop_request(target_pid=target.pid,
-                              target_started_at=target.started_at)
+        # Hold the write lock across full-proof verification and conditional
+        # deletion; a replacement cannot publish between those two operations.
+        db.conn.execute("BEGIN IMMEDIATE")
+        try:
+            StopWatch._delete_target_in_transaction(db.conn, target)
+            db.conn.commit()
+        except Exception:
+            db.conn.rollback()
+            raise
 
     @staticmethod
     def _delete_target_in_transaction(conn, target):
+        current = crawler_identity.registered(conn)
+        if current is not None and StopTarget.of(current) != target:
+            return
         conn.execute("DELETE FROM crawler_process WHERE id=1 AND pid=? AND started_at=?",
                      (target.pid, target.started_at))
         conn.execute("DELETE FROM stop_requests WHERE id=1 AND target_pid=? "

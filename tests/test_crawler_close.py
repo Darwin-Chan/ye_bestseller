@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import gui
-from bestseller_monitor import rounds, stop_request
+from bestseller_monitor import rounds, stop_request, single_instance
 from bestseller_monitor.db import Database, connect
 from helpers import isolated_locks, new_round, insert_inventory_rows
 from test_gui import gui_api, StopClock
@@ -94,6 +94,281 @@ class CrawlerCloseTests(unittest.TestCase):
             return rounds.load(Database(conn), self.rid).reason
         finally:
             conn.close()
+
+    def test_paused_replacement_can_be_freshly_confirmed_as_running(self):
+        self.running()
+        runtime = stop_request.RecordingStopRuntime(alive=True)
+        self.api._stop_watch = stop_request.StopWatch(runtime, now=self.clock)
+        self.assertTrue(self.api.pause_run()["ok"])
+        confirmations = 0
+        def confirm(text):
+            nonlocal confirmations
+            confirmations += 1
+            if confirmations == 1:
+                conn = connect(self.path)
+                try:
+                    Database(conn).record_crawler_process(
+                        pid=9999, round_id=self.rid, process_os_started="replacement-proof")
+                finally:
+                    conn.close()
+            return True
+        def wait(seconds):
+            runtime.alive = False
+            self.process.alive = False
+        self.install(answer=confirm, wait=wait)
+        self.assertFalse(self.window.close())
+        self.assertIsNone(self.terminal(), "old authorization cannot abandon the replacement")
+        while self.tasks:
+            self.tasks.pop()()
+        self.assertFalse(self.window.destroyed)
+        self.assertFalse(self.window.close())
+        self.assertEqual(confirmations, 2, "fresh confirmation must describe the actual running target")
+        self.assertIn("采集正在进行中", self.messages[-1])
+        self.tasks.pop()()
+        self.assertTrue(self.window.destroyed)
+        self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
+
+    def test_changed_os_start_proof_during_wait_preserves_replacement_and_browser(self):
+        self.running()
+        browser = stop_request.BoundBrowser(9500, 9222, "new-browser-proof")
+        runtime = stop_request.RecordingStopRuntime(
+            alive=True, browser=browser, browser_state="OWNED")
+        self.api._stop_watch = stop_request.StopWatch(runtime, now=self.clock)
+        waits = 0
+        def wait(seconds):
+            nonlocal waits
+            waits += 1
+            if waits > 1:
+                raise RuntimeError("test watchdog: replacement was not recognized")
+            conn = connect(self.path)
+            try:
+                # Keep PID and registration timestamp: OS creation proof alone
+                # is sufficient to reject authorization for a different process.
+                conn.execute("UPDATE crawler_process SET process_os_started=? WHERE id=1",
+                             ("replacement-os-proof",))
+                conn.commit()
+            finally:
+                conn.close()
+            self.clock.advance(20)
+        self.install(answer=True, wait=wait)
+        self.window.close()
+        self.tasks.pop()()
+        self.assertFalse(self.window.destroyed)
+        self.assertTrue(runtime.alive)
+        self.assertIn("重新确认", self.messages[-1])
+        self.assertFalse(any(action in ("terminate", "close_browser")
+                             for action, target in runtime.actions))
+        conn = connect(self.path)
+        try:
+            self.assertEqual(Database(conn).crawler_process()["process_os_started"],
+                             "replacement-os-proof")
+        finally:
+            conn.close()
+
+    def external_running(self, entry):
+        conn = connect(self.path)
+        try:
+            old = new_round(Database(conn), "OLD", run_date="2026-10-07")
+        finally:
+            conn.close()
+        self.running()
+        self.api.proc = None
+        self.api.round_id = old if entry == "previous_gui" else None
+        lock = single_instance.acquire(single_instance.CRAWLER_LOCK)
+        self.assertIsNotNone(lock)
+        self.addCleanup(lock.release)
+        runtime = stop_request.RecordingStopRuntime(alive=True, browser_state="BORROWED")
+        self.api._stop_watch = stop_request.StopWatch(runtime, now=self.clock)
+        return runtime, lock, old
+
+    def test_cli_target_without_gui_memory_is_aborted_and_borrowed_browser_preserved(self):
+        runtime, lock, old = self.external_running("cli")
+        def wait(seconds):
+            self.clock.advance(20)
+            if not runtime.alive:
+                lock.release()
+        self.install(answer=True, wait=wait)
+        self.assertFalse(self.window.close())
+        self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
+        self.tasks.pop()()
+        self.assertTrue(self.window.destroyed)
+        self.assertFalse(any(action == "close_browser" for action, target in runtime.actions))
+
+    def test_prior_gui_actual_round_wins_over_stale_gui_round(self):
+        runtime, lock, old = self.external_running("previous_gui")
+        def wait(seconds):
+            runtime.alive = False
+            lock.release()
+        self.install(answer=True, wait=wait)
+        self.window.close()
+        self.tasks.pop()()
+        self.assertTrue(self.window.destroyed)
+        self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
+        conn = connect(self.path)
+        try:
+            self.assertEqual(rounds.load(Database(conn), old).reason, rounds.TerminalReason.DAY_BOUNDARY)
+        finally:
+            conn.close()
+
+    def test_natural_completion_during_confirmation_preserves_completed_terminal(self):
+        self.running()
+        def confirm(text):
+            conn = connect(self.path)
+            try:
+                rounds.finish_if_open(Database(conn), rounds.load(Database(conn), self.rid),
+                                      rounds.TerminalReason.COMPLETED)
+            finally:
+                conn.close()
+            self.process.alive = False
+            return True
+        self.install(answer=confirm)
+        self.window.close()
+        self.tasks.pop()()
+        self.assertTrue(self.window.destroyed)
+        self.assertEqual(self.terminal(), rounds.TerminalReason.COMPLETED)
+
+    def test_natural_completion_during_confirmation_waits_for_original_live_cleanup(self):
+        self.running()
+        def confirm(text):
+            conn = connect(self.path)
+            try:
+                rounds.finish_if_open(Database(conn), rounds.load(Database(conn), self.rid),
+                                      rounds.TerminalReason.COMPLETED)
+            finally:
+                conn.close()
+            return True
+        self.install(answer=confirm)
+        self.window.close()
+        self.assertFalse(self.window.destroyed)
+        self.assertTrue(self.process.alive)
+        self.tasks.pop()()
+        self.assertTrue(self.window.destroyed)
+        self.assertEqual(self.terminal(), rounds.TerminalReason.COMPLETED)
+
+    def test_pid_reuse_during_confirmation_requires_fresh_confirmation(self):
+        self.running()
+        def confirm(text):
+            conn = connect(self.path)
+            try:
+                Database(conn).record_crawler_process(
+                    pid=self.process.pid, round_id=self.rid,
+                    process_os_started="reused-pid-proof")
+            finally:
+                conn.close()
+            return True
+        self.install(answer=confirm)
+        self.assertFalse(self.window.close())
+        self.assertFalse(self.window.destroyed)
+        self.assertIsNone(self.terminal())
+        self.assertIn("重新确认", self.messages[-1])
+        self.assertEqual(self.tasks, [])
+
+    def test_replacement_during_wait_requires_fresh_confirmation_and_keeps_new_browser(self):
+        self.running()
+        runtime = stop_request.RecordingStopRuntime(
+            alive=True, browser=stop_request.BoundBrowser(9501, 9222, "new-browser"),
+            browser_state="OWNED")
+        self.api._stop_watch = stop_request.StopWatch(runtime, now=self.clock)
+        def wait(seconds):
+            conn = connect(self.path)
+            try:
+                self.new_rid = new_round(Database(conn), "B02")
+                Database(conn).record_crawler_process(
+                    pid=9999, round_id=self.new_rid, process_os_started="new-proof")
+            finally:
+                conn.close()
+            self.clock.advance(20)
+        self.install(answer=True, wait=wait)
+        self.window.close()
+        self.tasks.pop()()
+        self.assertFalse(self.window.destroyed)
+        self.assertIn("重新确认", self.messages[-1])
+        self.assertTrue(runtime.alive)
+        self.assertFalse(any(action in ("terminate", "close_browser")
+                             for action, target in runtime.actions))
+        conn = connect(self.path)
+        try:
+            self.assertIsNone(rounds.load(Database(conn), self.new_rid).reason)
+            self.assertEqual(Database(conn).crawler_process()["pid"], 9999)
+        finally:
+            conn.close()
+        self.assertFalse(self.api.start_run([])["ok"])
+        self.assertFalse(self.api.resume_run()["ok"])
+
+    def test_unverifiable_process_wait_is_visible_and_retries_original_binding(self):
+        self.running()
+        runtime = stop_request.RecordingStopRuntime(alive=None)
+        self.api._stop_watch = stop_request.StopWatch(runtime, now=self.clock)
+        waits = 0
+        def wait(seconds):
+            nonlocal waits
+            waits += 1
+            self.assertFalse(self.window.destroyed)
+            self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
+            self.assertIn("重试", self.window.title)
+            self.assertFalse(any(action == "terminate" for action, target in runtime.actions))
+            runtime.alive = False
+            self.process.alive = False
+            if waits > 1:
+                self.fail("original binding must finish after verification recovers")
+        self.install(answer=True, wait=wait)
+        self.window.close()
+        self.tasks.pop()()
+        self.assertTrue(self.window.destroyed)
+
+    def test_paused_confirmed_wait_replacement_keeps_new_round_open(self):
+        self.running()
+        runtime = stop_request.RecordingStopRuntime(alive=True)
+        self.api._stop_watch = stop_request.StopWatch(runtime, now=self.clock)
+        self.api.pause_run()
+        def wait(seconds):
+            conn = connect(self.path)
+            try:
+                self.new_rid = new_round(Database(conn), "B02")
+                Database(conn).record_crawler_process(
+                    pid=self.process.pid, round_id=self.new_rid,
+                    process_os_started="reused-pid-proof")
+            finally:
+                conn.close()
+            self.clock.advance(20)
+        self.install(answer=True, wait=wait)
+        self.window.close()
+        self.tasks.pop()()
+        self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
+        self.assertFalse(self.window.destroyed)
+        self.assertIn("重新确认", self.messages[-1])
+        self.assertTrue(runtime.alive)
+        conn = connect(self.path)
+        try:
+            self.assertIsNone(rounds.load(Database(conn), self.new_rid).reason)
+        finally:
+            conn.close()
+
+    def test_cross_entry_owned_browser_cleanup_remains_pending_until_exact_browser_finishes(self):
+        runtime, lock, old = self.external_running("cli")
+        browser = stop_request.BoundBrowser(9501, 9222, "owned-proof")
+        runtime.browser, runtime.browser_state = browser, "OWNED"
+        runtime.fail_close = True
+        waits = 0
+        def wait(seconds):
+            nonlocal waits
+            waits += 1
+            if waits == 1:
+                self.clock.advance(20)
+            elif waits == 2:
+                self.assertFalse(self.window.destroyed)
+                self.assertEqual(runtime.browser, browser)
+                self.assertIn("浏览器收尾", self.window.title)
+                lock.release()
+                runtime.fail_close = False
+            else:
+                self.fail("must finish original bounded cleanup")
+        self.install(answer=True, wait=wait)
+        self.window.close()
+        self.tasks.pop()()
+        self.assertTrue(self.window.destroyed)
+        self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
+        self.assertIsNone(runtime.browser)
 
     def test_cancel_keeps_window_and_collection_running(self):
         self.running()
