@@ -134,7 +134,8 @@ def round_shops(db: Database, round_id: int, cfg: Config) -> list[Shop]:
     configured: dict[str, Shop] = {}
     shop_csv = getattr(cfg, "shop_csv", None)
     if shop_csv:
-        configured = {shop.key: shop for shop in load_shops(shop_csv)}
+        configured = {shop.key: shop for shop in load_shops(
+            shop_csv, allow_empty=getattr(cfg, "local_trial", False))}
     shops: list[Shop] = []
     for scope in rounds.scope_shops(db, round_id):
         known = configured.get(scope.key)

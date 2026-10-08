@@ -85,7 +85,7 @@ def trial_shops(cfg: Config, limit_keys: set[str] | None = None) -> list[Shop]:
     """Read only the local shop list and trial round scope; no plan preparation."""
     from .pipeline import round_shops
 
-    configured = load_shops(cfg.shop_csv)
+    configured = load_shops(cfg.shop_csv, allow_empty=True)
     enabled = [shop for shop in configured if shop.active]
     if limit_keys is not None:
         unknown = limit_keys - {shop.key for shop in enabled}
@@ -94,13 +94,15 @@ def trial_shops(cfg: Config, limit_keys: set[str] | None = None) -> list[Shop]:
         selected = [shop for shop in enabled if shop.key in limit_keys]
     else:
         selected = enabled
-    if not selected:
-        raise TrialUnavailable("本机清单里没有有效店铺（active=1）。")
     conn = connect(cfg.db_file)
     try:
         db = Database(conn)
-        db.upsert_shops(configured)
         active = rounds.active_round(db, cst_date())
-        return round_shops(db, active.id, cfg) if active is not None and limit_keys is None else selected
+        if active is not None and limit_keys is None:
+            return round_shops(db, active.id, cfg)
+        if not selected:
+            raise TrialUnavailable("本机清单里没有有效店铺（active=1）。")
+        db.upsert_shops(configured)
+        return selected
     finally:
         conn.close()

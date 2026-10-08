@@ -203,6 +203,32 @@ class LocalTrialCliTests(unittest.TestCase):
         self.assertEqual(db.conn.execute("SELECT count(*) FROM rounds").fetchone()[0], 2)
         self.assertEqual(rounds.active_round(db).shop_keys, ("A02",))
 
+    def test_bare_resume_preserves_round_after_all_local_shops_disabled(self):
+        self.assertEqual(self.cli("--local-trial", "--limit-shops", "A01")[0], 0)
+        db = self.trial_db()
+        original = rounds.active_round(db).id
+        self.shops.write_text(self.shops.read_text(encoding="utf-8").replace(",1,", ",0,"), encoding="utf-8")
+        code, out = self.cli("--local-trial")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(rounds.active_round(db).id, original)
+        self.assertEqual(rounds.active_round(db).shop_keys, ("A01",))
+        self.assertEqual(len(self.sessions), 2)
+        rounds.finish(db, rounds.active_round(db), rounds.TerminalReason.ABANDONED)
+        self.assertEqual(self.cli("--local-trial")[0], 2)
+
+    def test_bare_resume_preserves_round_after_local_shop_rows_removed(self):
+        self.assertEqual(self.cli("--local-trial", "--limit-shops", "A01")[0], 0)
+        db = self.trial_db()
+        original = rounds.active_round(db).id
+        self.shops.write_text("shop_key,shop_name,shop_url,pages,active,offer_list_url\n", encoding="utf-8")
+        code, out = self.cli("--local-trial")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(rounds.active_round(db).id, original)
+        self.assertEqual(rounds.active_round(db).shop_keys, ("A01",))
+        self.assertEqual(len(self.sessions), 2)
+        rounds.finish(db, rounds.active_round(db), rounds.TerminalReason.ABANDONED)
+        self.assertEqual(self.cli("--local-trial")[0], 2)
+
     def test_cross_day_supersedes_trial_only_and_preserves_formal_round(self):
         self.cli("--local-trial", "--limit-shops", "A01")
         db = self.trial_db()

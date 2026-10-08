@@ -356,8 +356,11 @@ def decode_shops_bytes(raw: bytes) -> str:
         return raw.decode("gbk", errors="replace")
 
 
-def load_shops(path: pathlib.Path) -> list[Shop]:
-    """读取 shops.csv；跳过空行与 # 注释行；url 去空格。"""
+def load_shops(path: pathlib.Path, *, allow_empty: bool = False) -> list[Shop]:
+    """读取 shops.csv；跳过空行与 # 注释行；url 去空格。
+
+    allow_empty 仅供试采恢复原轮次：允许有效表头无数据行，默认仍拒绝空清单。
+    """
     if not path.exists():
         raise FileNotFoundError(
             f"找不到店铺清单：{path}\n请复制 config/shops.example.csv 为 config/shops.csv 并填入真实店铺。"
@@ -396,5 +399,8 @@ def load_shops(path: pathlib.Path) -> list[Shop]:
                  offer_list_url=offer_list or None, pages=pages, active=active)
         )
     if not shops:
-        raise ValueError("shops.csv 中没有店铺。")
+        if not allow_empty:
+            raise ValueError("shops.csv 中没有店铺。")
+        if not {"shop_key", "shop_url"}.issubset(reader.fieldnames or []):
+            raise ValueError("shops.csv 缺少有效店铺表头。")
     return shops
