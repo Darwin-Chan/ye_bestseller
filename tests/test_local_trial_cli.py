@@ -284,6 +284,8 @@ class LocalTrialCliTests(unittest.TestCase):
     def test_repeated_cli_logging_never_writes_formal_handler(self):
         handler = logging.FileHandler(self.root / "formal.log", encoding="utf-8")
         logger = logging.getLogger()
+        previous_level = logger.level
+        logger.setLevel(logging.INFO)
         logger.addHandler(handler)
         try:
             self.cli("--local-trial")
@@ -294,6 +296,7 @@ class LocalTrialCliTests(unittest.TestCase):
             self.assertIn("续跑", (self.root / "local-trial/logs/run.log").read_text(encoding="utf-8"))
         finally:
             logger.removeHandler(handler)
+            logger.setLevel(previous_level)
             handler.close()
 
     def test_existing_non_directory_trial_root_refuses_without_fallback(self):

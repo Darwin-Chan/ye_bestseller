@@ -178,10 +178,13 @@ def _run_local_trial(formal: Config, args: argparse.Namespace) -> int:
         keys = ({s.strip() for s in args.limit_shops.split(",") if s.strip()}
                 if args.limit_shops is not None else None)
         prepare_trial_storage(cfg)
-        shops = trial_shops(cfg, keys)
-        print(f"\n>>> 本机试采，不共享；数据库：{cfg.db_file}；日志：{cfg.logs_dir}。"
-              "沿用试采历史，同日已采商品可能跳过。\n")
-        return _collect(cfg, shops)
+        # First-open database migrations log too: isolate before preparing shops.
+        with _collection_logging(cfg):
+            shops = trial_shops(cfg, keys)
+            print(f"\n>>> 本机试采，不共享；数据库：{cfg.db_file}；日志：{cfg.logs_dir}。"
+                  "沿用试采历史，同日已采商品可能跳过。\n")
+            cfg.ensure_dirs()
+            return _run_collection(cfg, shops)
     except (TrialUnavailable, OSError, ValueError, sqlite3.Error) as exc:
         print(f"\n>>> 本机试采无法开始：{exc}；请检查本机清单与隔离空间，不会回退到正式数据。\n")
         return EXIT_NOT_DONE
@@ -189,7 +192,6 @@ def _run_local_trial(formal: Config, args: argparse.Namespace) -> int:
 
 def _collect(cfg: Config, shops, *, deviations=()) -> int:
     cfg.ensure_dirs()
-    sound.configure(cfg.alarm_on_intervention)
     with _collection_logging(cfg):
         return _run_collection(cfg, shops, deviations=deviations)
 
@@ -220,6 +222,7 @@ def _collection_logging(cfg: Config):
 
 
 def _run_collection(cfg: Config, shops, *, deviations=()) -> int:
+    sound.configure(cfg.alarm_on_intervention)
     try:
         run_round(cfg, shops, deviations=deviations)
     except CrawlerAlreadyRunning as exc:
