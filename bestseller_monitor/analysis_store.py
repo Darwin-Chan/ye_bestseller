@@ -25,6 +25,7 @@ from typing import NamedTuple
 from .matching import digest as _digest
 
 SCHEMA_VERSION = 1
+SKU_SCHEMA_VERSION = 3
 
 # 冲突账（票 04）：冲突是「没能并进来的那些决定」——与本机账本同一个文件，
 # 同生同死说得清；只增不自动消解，人在页面上裁决的是账本，不是它。
@@ -285,8 +286,10 @@ class DraftStore:
                     id TEXT PRIMARY KEY, saved_at TEXT NOT NULL, schema_version INTEGER NOT NULL,
                     start TEXT NOT NULL, end TEXT NOT NULL, payload TEXT NOT NULL)""")
                 conn.execute("""INSERT INTO sku_analysis_drafts VALUES (?,?,?,?,?,?)
-                    ON CONFLICT(id) DO UPDATE SET saved_at=excluded.saved_at,payload=excluded.payload""",
-                    (payload['id'], payload['saved_at'], 2, payload['start'], payload['end'],
+                    ON CONFLICT(id) DO UPDATE SET saved_at=excluded.saved_at,
+                    schema_version=excluded.schema_version,start=excluded.start,
+                    end=excluded.end,payload=excluded.payload""",
+                    (payload['id'], payload['saved_at'], SKU_SCHEMA_VERSION, payload['start'], payload['end'],
                      json.dumps(payload, ensure_ascii=False)))
                 self._mark_saved(conn, payload['id'])
         finally:
@@ -314,7 +317,7 @@ class DraftStore:
             if conn.execute("SELECT 1 FROM sqlite_master WHERE name='sku_analysis_drafts'").fetchone():
                 sku = conn.execute('SELECT * FROM sku_analysis_drafts WHERE id=?', (analysis_id,)).fetchone()
                 if sku:
-                    if sku['schema_version'] != 2:
+                    if sku['schema_version'] not in (2, SKU_SCHEMA_VERSION):
                         raise ValueError('SKU 草稿版本不兼容，未做任何修改')
                     return StoredDraft(json.loads(sku['payload']), sku['saved_at'])
             row = conn.execute("SELECT * FROM analysis_drafts WHERE id=?", (analysis_id,)).fetchone()

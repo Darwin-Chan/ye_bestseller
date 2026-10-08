@@ -23,6 +23,7 @@ from .matching import (MATCH_DISABLED, PHASE_ASSEMBLE, PHASE_JUDGE, PHASE_RECALL
                        STATUS_DISABLED, identity, matching_summary, offer_of, state_of_status,
                        summarize_group, version)
 from .report import report_name, write_report
+from .sku_grouping import apply_saved as apply_saved_sku, edit_group as edit_sku_group, refresh as refresh_sku
 
 log = logging.getLogger(__name__)
 
@@ -381,6 +382,13 @@ class AnalysisService:
             # 「继续上次分析」读原快照；新日期区间走这里：重算销量后，把已保存的
             # 人工分组按商品版本套回来（票 09），不适用的留在待确认由人工处理。
             if snapshot.get('member_kind') == 'sku':
+                # SKU decisions live only in the versioned SKU draft. Never read
+                # the legacy product ledger or copy a product decision to a SKU.
+                latest = self.store.latest()
+                if latest:
+                    stored = self.store.read(latest['id'])
+                    if stored and stored.payload.get('member_kind') == 'sku':
+                        apply_saved_sku(snapshot, stored.payload)
                 with self._lock:
                     self._snapshots[snapshot['id']] = snapshot
                 progress.update(products=len(snapshot['members']),
@@ -475,10 +483,13 @@ class AnalysisService:
 
     def _guard_product_operation(self, snapshot):
         if snapshot.get('member_kind') == 'sku':
-            raise ValueError('SKU 人工分组、自动匹配与排行报告尚未开放')
+            raise ValueError('SKU 草稿请使用 SKU 级人工分组接口')
         if self.config.member_kind == 'sku':
             raise ValueError('旧商品级草稿仅供查阅，请重新发起 SKU 分析')
 
+    def _guard_sku_operation(self, snapshot):
+        if snapshot.get('member_kind') != 'sku':
+            raise ValueError('该操作仅适用于 SKU 分析')
     def retry_matching(self, analysis_id, progress=None, stop=None):
         with self._lock:
             if analysis_id not in self._snapshots:
@@ -632,8 +643,8 @@ class AnalysisService:
         result = {"available": True, "id": latest['id'], "start": latest['start'],
                   "end": latest['end'], "saved_at": latest['saved_at']}
         if self.config.member_kind == 'sku':
-            result.update(member_kind='sku' if latest['schema_version'] == 2 else 'product',
-                          migration_note='' if latest['schema_version'] == 2 else '旧商品级草稿仅供查阅，请重新发起 SKU 分析')
+            result.update(member_kind='sku' if latest['schema_version'] in (2, 3) else 'product',
+                          migration_note='' if latest['schema_version'] in (2, 3) else '旧商品级草稿仅供查阅，请重新发起 SKU 分析')
         return result
 
     def save_draft(self, analysis_id):
@@ -753,6 +764,24 @@ class AnalysisService:
             snapshot = self._snapshots.get(analysis_id)
             if snapshot is None:
                 raise ValueError("分析已不存在，请重新选择日期")
+            if snapshot.get('member_kind') == 'sku':
+                self._guard_sku_operation(snapshot)
+                targets = set(group_ids)
+                groups = [g for g in snapshot['groups'] if g['id'] in targets]
+                if len(groups) != len(targets):
+                    raise ValueError("同款组不存在")
+                if confirmed and any(group.get('excluded_group') for group in groups):
+                    raise ValueError('人工排除的 SKU 不能确认，请先撤销排除')
+                changed = False
+                for group in groups:
+                    if group.get('confirmed', False) != confirmed:
+                        group['confirmed'] = confirmed
+                        group['adjusted'] = True
+                        changed = True
+                if changed:
+                    snapshot['dirty'] = True
+                refresh_sku(snapshot)
+                return copy.deepcopy(snapshot)
             self._guard_product_operation(snapshot)
             targets = set(group_ids)
             groups = [g for g in snapshot['groups'] if g['id'] in targets]
@@ -819,11 +848,16 @@ class AnalysisService:
 
     def edit_group(self, analysis_id, action, group_id, member, target_id=None):
         """Commit an atomic edit only to the in-memory analysis draft."""
-        from .grouping import edit_group
         with self._lock:
             if analysis_id not in self._snapshots:
                 raise ValueError('分析已不存在')
             snapshot = copy.deepcopy(self._snapshots[analysis_id])
+            if snapshot.get('member_kind') == 'sku':
+                self._guard_sku_operation(snapshot)
+                edit_sku_group(snapshot, action, group_id, member, target_id)
+                self._snapshots[analysis_id] = snapshot
+                return copy.deepcopy(snapshot)
+            from .grouping import edit_group
             self._guard_product_operation(snapshot)
             moved = identity(member)
             edit_group(snapshot, action, group_id, member, target_id, self.matcher)

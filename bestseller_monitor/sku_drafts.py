@@ -7,6 +7,7 @@ from datetime import datetime
 
 from .db import cst_date, SKU_IMAGE_OWN
 from .parse import DEFAULT_SKU_ID, sku_name_source
+from .sku_grouping import _new_group, refresh
 
 
 def _time(value):
@@ -83,14 +84,19 @@ def freeze(conn, analysis_id, start, end, calculate, frozen_at):
                 stock=latest['stock'],price=latest['price'],sales=sum(s['sales'] for s in parts),
                 points=points,matching_state='unjudged',confirmed=False))
             members[-1].update(_evidence(conn,shop,offer,sku_id,latest,end))
-    groups=[dict(id='sku-'+str(i+1),members=[dict(shop_key=m['shop_key'],offer_id=m['offer_id'],sku_id=m['sku_id'])],
-                 confirmed=False,sales=m['sales'],status='尚未判断') for i,m in enumerate(members)]
-    return dict(id=analysis_id,start=start,end=end,frozen_at=frozen_at,member_kind='sku',
-                draft_version=2,inventory=rows,members=members,products=[],groups=groups,
+    groups=[]
+    for member in members:
+        group=_new_group(member, group_id='sku-'+str(len(groups)+1))
+        group['status']='待确认'
+        groups.append(group)
+    snapshot=dict(id=analysis_id,start=start,end=end,frozen_at=frozen_at,member_kind='sku',
+                draft_version=3,inventory=rows,members=members,products=[],groups=groups,
                 shops=[dict(s) for s in conn.execute('SELECT * FROM shops ORDER BY shop_key')],
-                dirty=True,saved_at=None,conflicts=[],review_order=[g['id'] for g in groups],
-                limitations=['SKU 自动匹配、人工分组、排行报告和共享尚未开放'])
-
+                dirty=True,saved_at=None,conflicts=[],excluded=[],
+                review_order=[g['id'] for g in groups],
+                limitations=['SKU 结果排行与离线报告由后续票提供'])
+    refresh(snapshot)
+    return snapshot
 
 def _image(conn, tables, batch, sku, shop, offer, sku_id):
     observed_at=batch['observed_at']

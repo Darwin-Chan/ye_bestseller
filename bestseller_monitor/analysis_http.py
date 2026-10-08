@@ -83,7 +83,7 @@ def create_server(service, port=0):
                         return self.reply(service.retry_matching_job(data['id']))
                     if data.get('action') == 'stop_matching':
                         return self.reply(service.request_stop(data['id']))
-                    if data.get('action') in ('move', 'remove'):
+                    if data.get('action') in ('move', 'remove', 'exclude', 'undo_exclude', 'rejoin'):
                         return self.reply(service.edit_group(data['id'], data['action'], data['group'],
                                                              data['member'], data.get('target')))
                     if data.get('action'):

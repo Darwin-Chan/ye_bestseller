@@ -174,6 +174,7 @@ const reviewControls=document.createElement('div');
 // 徽标是页签名字的一部分（读屏能听到组数），不是纯装饰；计数口径见 renderProducts 里的页签块。
 reviewControls.innerHTML=`<p id="dirtyStatus" role="status"></p><div class="review-tabs" role="tablist" aria-label="确认状态"><button role="tab" data-tab="pending" aria-selected="true">待确认 <span class="tab-count">0</span></button><button role="tab" data-tab="confirmed" aria-selected="false">已确认 <span class="tab-count">0</span></button><button role="tab" data-tab="all" aria-selected="false">全部 <span class="tab-count">0</span></button></div><div class="review-filters filter-panel"><label>搜索分组商品 <input id="reviewQuery" placeholder="商品名称、编号或店铺"></label><div class="filter-row" role="group" aria-label="商品来源"><b>商品来源</b><label><input type="checkbox" data-filter="origin" value="新商品">新商品</label><label><input type="checkbox" data-filter="origin" value="信息变更">信息变更</label></div><div class="filter-row" role="group" aria-label="匹配状态"><b>匹配状态</b><label><input type="checkbox" data-filter="match" value="暂无匹配同款">暂无匹配同款</label><label><input type="checkbox" data-filter="match" value="匹配唯一同款">匹配唯一同款</label><label><input type="checkbox" data-filter="match" value="匹配多组同款">匹配多组同款</label></div><small>标签属于商品；同一商品同时符合两类条件才命中。命中后展示完整组，突出匹配成员。</small></div><div class="review-filters" id="batchRow"><button id="batchSelected" onclick="openBulk(false)"></button><button id="batchFiltered" onclick="openBulk(true)"></button><span id="selectionCount"></span></div>`;
 $('reviewPage').insertBefore(reviewControls,document.querySelector('.review-layout'));
+reviewControls.insertAdjacentHTML('beforeend', `<div id="skuReviewControls" hidden><div class="review-filters filter-panel"><label>搜索 SKU 分组 <input id="skuQuery" placeholder="商品名称、SKU 名称、商品编号、平台 SKU 编号或同款分组编号"></label><small>搜索命中任一成员时展示完整同款组；按同款分组编号可直接定位该组及其成员。</small></div></div>`);
 // 页签按钮专属绑定：阶段图例的节点也带 data-tab，别把它卷进来（票 16）。切页签清掉匹配结果。
 document.querySelectorAll('.review-tabs [data-tab]').forEach(button=>button.onclick=()=>{reviewTab=button.dataset.tab;matchResult=null;resetReview();});
 $('reviewQuery').addEventListener('input',resetReview);
@@ -349,48 +350,77 @@ function memberCard(p, full=false) {
         ${full&&!currentSnapshot.migration_note&&group.members.length>1?`<button class="remove-member" data-mutation aria-label="从当前分组移除商品" title="从当前分组移除商品" onclick="requestRemoval(${index})"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg></button>`:''}</section>`;
 }
 function selectGroup(id) {selectedGroup=id;matchResult=null;renderProducts();}
+function skuMemberKey(m){return JSON.stringify([m.shop_key,m.offer_id,m.sku_id]);}
+function skuMemberIndex(m){return currentSnapshot.members.findIndex(item=>skuMemberKey(item)===skuMemberKey(m));}
+function skuGroupFor(m){return currentSnapshot.groups.find(g=>g.members.some(item=>skuMemberKey(item)===skuMemberKey(m)));}
+function skuShopName(m){return currentSnapshot.shops.find(s=>s.shop_key===m.shop_key)?.shop_name||m.shop_key;}
+function skuStatus(g){return g.excluded_group?'人工排除':g.confirmed?'已确认':'待确认';}
+function skuImageSource(m){return ({sku:'SKU 专图',product_main_same_observation:'同次商品主图代填',missing:'当次缺图'})[m.image_source]||'未知来源';}
+function skuSearchValues(g){return g.members.flatMap(ref=>{const m=currentSnapshot.members.find(item=>skuMemberKey(item)===skuMemberKey(ref))||{};return [m.product_name,m.raw_sku_name,m.offer_id,m.sku_id,m.shop_key,skuShopName(m),g.id];}).map(v=>String(v||'').toLocaleLowerCase());}
+function skuConfirm(id){return updateDraft({action:'confirm_groups',groups:[id]});}
+function skuWithdraw(id){return updateDraft({action:'withdraw_groups',groups:[id]});}
+function skuEdit(action,index,target=null){
+    const m=currentSnapshot.members[index], source=skuGroupFor(m);
+    if(!m||!source)return false;
+    return updateDraft({action,group:source.id,member:{shop_key:m.shop_key,offer_id:m.offer_id,sku_id:m.sku_id},target});
+}
+function skuMove(index){
+    const m=currentSnapshot.members[index], source=skuGroupFor(m);
+    if(!m||!source)return;
+    const choices=currentSnapshot.groups.filter(g=>g.id!==source.id&&!g.excluded_group).map(g=>g.id);
+    if(!choices.length){error(new Error('当前没有可加入的其他 SKU 组'));return;}
+    const target=window.prompt(`请输入目标同款分组编号（可选：${choices.join('、')}）`,choices[0]);
+    if(target&&choices.includes(target))skuEdit('move',index,target);
+}
+function skuRemove(index){skuEdit('remove',index);}
+function skuExclude(index){skuEdit('exclude',index);}
+function skuUndoExclude(index){skuEdit('undo_exclude',index);}
+function skuGroupActions(g){
+    const id=esc(g.id);
+    if(g.excluded_group)return `<button data-mutation data-group="${id}" onclick="skuUndoExclude(${skuMemberIndex(g.members[0])})">撤销人工排除</button>`;
+    return `${g.confirmed?`<button data-mutation data-group="${id}" onclick="skuWithdraw(this.dataset.group)">撤回确认</button>`:`<button data-mutation data-group="${id}" onclick="skuConfirm(this.dataset.group)">确认当前分组</button>`}<button data-mutation onclick="openAdd()">添加 SKU</button>`;
+}
+function renderSkuMember(m,g){
+    const index=skuMemberIndex(m), source=skuImageSource(m);
+    const evidence=m.evidence_note?`<aside class="change"><b>证据说明</b><p>${esc(m.evidence_note)}</p></aside>`:'';
+    const basis=g.manual_reason|| (g.adjusted?'人工调整后待确认':'自动独立组，尚未人工确认');
+    return `<section class="matching-member sku-evidence-card" data-sku="${esc(m.sku_id)}"><div>${productPhoto(m)}</div><div class="member-info"><h4>${esc(m.product_name||m.offer_id)} ${sourceIcon(m)}</h4><p>原始 SKU 名称：${esc(m.raw_sku_name||'（空）')}</p><p>匹配商品名称：${esc(m.matching_input?.product_name||m.product_name||'')}</p><p>匹配 SKU 名称：${esc(m.matching_input?.sku_name||'空')}</p><p>店铺：${esc(skuShopName(m))} · 商品编号：${esc(m.offer_id)} · 平台 SKU：${esc(m.sku_id)}（平台 SKU 编号）</p><p><b>区间销量：${esc(m.sales)}</b>（SKU 销售单位，不换算实物数量）</p><p>观测库存：${esc(m.stock??'未知')} · 价格：${esc(m.price??'未知')}</p><p>观测时间：${esc(m.observed_at||((m.observed_date||'')+'（精确时间不可恢复）'))}</p><p>完整观测：${m.observation_complete?`${esc(m.observation_sku_count)} 个 SKU`:'无法证明'} · 单 SKU：${m.single_sku===null?'无法证明':m.single_sku?'是':'否'}</p><p>SKU 图片来源：${esc(source)}${m.image_observed_at?` · 观测于 ${esc(m.image_observed_at)}`:''}</p><p>人工依据：${esc(basis)}</p>${evidence}<div class="group-actions"><button data-mutation onclick="skuMove(${index})">移到其他组</button>${g.excluded_group?`<button data-mutation onclick="skuUndoExclude(${index})">撤销排除</button>`:`<button data-mutation onclick="skuRemove(${index})">移出／独立</button><button data-mutation onclick="skuExclude(${index})">排除</button>`}</div></div></section>`;
+}
 function renderSkuDraft() {
     const s=currentSnapshot;
-    reviewControls.hidden=true;
+    reviewControls.hidden=false;
+    reviewControls.querySelector('.review-tabs').hidden=true;
+    reviewControls.querySelector('.filter-panel').hidden=true;
+    $('batchRow').hidden=true;
+    $('skuReviewControls').hidden=false;
     $('runMatching').disabled=true;
-    $('matchingStatus').textContent=s.limitations.join('；');
-    const skuIdLabel=m=>m.sku_id_source==='platform'?'平台 SKU':m.sku_id_source==='system_default'?'系统默认 SKU':'SKU（非平台已证实编号）';
-    const findSkuMember=id=>s.members.find(m=>m.shop_key===id.shop_key&&m.offer_id===id.offer_id&&m.sku_id===id.sku_id);
-    const groups=s.groups, start=productPage*GROUPS_PER_PAGE;
-    if(!groups.slice(start,start+GROUPS_PER_PAGE).some(g=>g.id===selectedGroup))selectedGroup=groups[start]?.id;
-    $('products').innerHTML=groups.slice(start,start+GROUPS_PER_PAGE).map(g=>{
-        const id=g.members[0], m=findSkuMember(id);
-        return `<button class="group-choice" data-sku-group="${esc(g.id)}">${esc(m.product_name)} · ${esc(m.single_sku?'单 SKU':m.raw_sku_name)}<br>${skuIdLabel(m)}：${esc(m.sku_id)} · ${esc(m.sales)} · 尚未判断</button>`;
-    }).join('');
+    $('matchingStatus').textContent=(s.limitations||[]).join('；');
+    const query=($('skuQuery').value||'').trim().toLocaleLowerCase();
+    const ordered=(s.review_order||s.groups.map(g=>g.id)).map(id=>s.groups.find(g=>g.id===id)).filter(Boolean);
+    const filtered=query?ordered.filter(g=>skuSearchValues(g).some(v=>v.includes(query))):ordered;
+    const pages=Math.max(1,Math.ceil(filtered.length/GROUPS_PER_PAGE));
+    productPage=Math.min(productPage,pages-1);
+    const start=productPage*GROUPS_PER_PAGE, visible=filtered.slice(start,start+GROUPS_PER_PAGE);
+    if(!visible.some(g=>g.id===selectedGroup))selectedGroup=visible[0]?.id;
+    $('products').innerHTML=visible.map(g=>{const lead=g.members.slice().sort((a,b)=>b.sales-a.sales)[0];return `<button class="group-choice" aria-pressed="${g.id===selectedGroup}" data-sku-group="${esc(g.id)}"><b>${esc(g.id)} · ${g.sku_count||g.members.length} 个 SKU</b><small>${esc(lead?.product_name||'')} · 组销量 ${esc(g.sales||0)}</small><small>店铺 ${esc(g.shop_count||0)} · 商品 ${esc(g.product_count||0)} · ${esc(skuStatus(g))}</small></button>`;}).join('')||'<p class="muted">没有匹配的 SKU 分组</p>';
     $('products').querySelectorAll('[data-sku-group]').forEach(b=>b.onclick=()=>{selectedGroup=b.dataset.skuGroup;renderSkuDraft();});
-    const g=groups.find(g=>g.id===selectedGroup), id=g?.members[0];
-    const m=id&&findSkuMember(id);
-    const source={'sku':'SKU 专图','product_main_same_observation':'同次商品主图代填','missing':'当次缺图'};
-    $('groupDetail').innerHTML=m?`<section class="sku-evidence-card"><h3>${esc(m.product_name)}${m.single_sku?'':` · ${esc(m.raw_sku_name)}`}</h3>
-        <p>尚未判断 · 独立成组；不是确定非同款，也不是人工已确认</p>
-        <p>店铺：${esc(m.shop_key)} · 商品编号：${esc(m.offer_id)} · ${skuIdLabel(m)}：${esc(m.sku_id)}</p>
-        <p><b>区间销量：${esc(m.sales)}</b>（SKU 销售单位，不换算实物数量）</p>
-        <p>观测库存：${esc(m.stock)} · 价格：${esc(m.price??'未知')}</p>
-        <p>观测时间：${esc(m.observed_at||((m.observed_date||'')+'（精确时间不可恢复）'))}</p>
-        <p>原始商品名称：${esc(m.product_name)}<br>原始 SKU 名称：${esc(m.raw_sku_name)}<br>名称来源：${m.name_source==='system_default'?'系统默认占位':'真实观测'}</p>
-        <p>完整观测：${m.observation_complete?`${m.observation_sku_count} 个 SKU`:'无法证明'} · 单 SKU：${m.single_sku===null?'无法证明':m.single_sku?'是':'否'}</p>
-        ${m.evidence_note?`<p class="error">${esc(m.evidence_note)}</p>`:''}
-        <p>匹配商品名称：${esc(m.matching_input.product_name)}<br>匹配 SKU 名称：${esc(m.matching_input.sku_name||'空')}</p>
-        <p>图片来源：${esc(source[m.image_source])}<br>图片观测时间：${esc(m.image_observed_at||'不可恢复')}<br>原图片地址：${esc(m.image_url||'无')}</p>
-        ${m.image_data?`<img data-sku-image src="${esc(m.image_data)}" alt="SKU 历史证据图片" style="max-width:240px;max-height:240px;cursor:zoom-in">`:`<p class="muted">${esc(m.image_error||'当次缺图')}</p>`}
-        </section>`:'暂无可展示的 SKU';
-    const image=$('groupDetail').querySelector('[data-sku-image]');
-    if(image)image.onclick=()=>{$('largeImage').src=m.image_data;$('largeImage').alt='SKU 历史证据图片';$('imageViewer').showModal();};
-    $('prev').disabled=productPage===0;
-    $('next').disabled=start+GROUPS_PER_PAGE>=groups.length;
-    $('pageInfo').textContent=`${Math.min(start+1,groups.length)}–${Math.min(start+GROUPS_PER_PAGE,groups.length)} / ${groups.length} 个 SKU`;
+    const g=s.groups.find(item=>item.id===selectedGroup);
+    $('groupDetail').innerHTML=g?`<div class="bar"><h3>${esc(g.id)} · ${esc(g.sku_count||g.members.length)} 个 SKU</h3><div class="group-actions">${skuGroupActions(g)}</div></div><p>店铺数 <b>${esc(g.shop_count||0)}</b> · 商品数 <b>${esc(g.product_count||0)}</b> · SKU 数 <b>${esc(g.sku_count||g.members.length)}</b> · 组内销量 <b>${esc(g.sales||0)}</b> · <span class="group-status">${esc(skuStatus(g))}</span></p>${g.manual_reason?`<aside><b>人工依据</b><p>${esc(g.manual_reason)}</p></aside>`:''}${g.members.slice().sort((a,b)=>b.sales-a.sales||skuMemberKey(a).localeCompare(skuMemberKey(b))).map(m=>renderSkuMember(s.members.find(item=>skuMemberKey(item)===skuMemberKey(m)),g)).join('')}`:'暂无符合条件的 SKU 分组';
+    $('snapshotInfo').innerHTML=`<p class="snapshot-meta"><span><b>日期区间</b>：${esc(s.start)} — ${esc(s.end)}</span><span><b>SKU 成员</b>：${esc(s.members.length)} 个 SKU</span><span><b>同款组</b>：${esc(s.groups.length)}</span></p>`;
     $('dirtyStatus').textContent=s.dirty?'未保存':'';
+    $('pageInfo').textContent=filtered.length?`${start+1}–${Math.min(start+GROUPS_PER_PAGE,filtered.length)} / ${filtered.length} 个 SKU 分组`:'0 / 0 个 SKU 分组';
+    $('prev').disabled=productPage===0;$('next').disabled=start+GROUPS_PER_PAGE>=filtered.length;
     updateSaveGate();
 }
+$('skuQuery').addEventListener('input',()=>{productPage=0;selectedGroup=null;renderSkuDraft();});
 
 function renderProducts() {
     if(currentSnapshot.member_kind==='sku')return renderSkuDraft();
     reviewControls.hidden=false;
+    reviewControls.querySelector('.review-tabs').hidden=false;
+    reviewControls.querySelector('.filter-panel').hidden=false;
+    skuReviewControls.hidden=true;
+    batchRow.hidden=false;
     const snapshot=currentSnapshot;
     productsByKey=new Map(snapshot.products.map(p=>[productKey(p),p]));
     groupsByProduct=new Map(snapshot.groups.flatMap(g=>g.members.map(m=>[productKey(m),g])));
@@ -477,6 +507,7 @@ function requestRemoval(index) {
     if(memberGroup(currentSnapshot.products[index]).members.length>1)$('removeDialog').showModal();
 }
 async function mutate(action,index,target=null) {
+    if(currentSnapshot.member_kind==='sku')return skuEdit(action,index,target);
     const p=currentSnapshot.products[index], source=memberGroup(p);
     return updateDraft({action,group:source.id,member:{shop_key:p.shop_key,offer_id:p.offer_id},target});
 }
@@ -517,12 +548,31 @@ async function removeMember() {
 async function joinCandidate() {
     if(candidateTarget&&await mutate('move',compareProduct,candidateTarget))$('compareDialog').close();
 }
-function openAdd() {addPage=0;$('addQuery').value='';renderAddResults();$('addDialog').showModal();}
+function openAdd() {
+    const sku=currentSnapshot?.member_kind==='sku';
+    addPage=0;
+    addDialog.querySelector('h2').textContent=sku?'组内新增 SKU':'组内新增商品';
+    addDialog.setAttribute('aria-label',sku?'组内新增 SKU':'组内新增商品');
+    addQuery.setAttribute('aria-label',sku?'搜索 SKU':'搜索商品');
+    addQuery.placeholder=sku?'商品名称、SKU 名称、商品编号、平台 SKU 编号、店铺或分组编号':'商品名称、编号或店铺';
+    addQuery.value='';
+    renderAddResults();
+    addDialog.showModal();
+}
 function renderAddResults() {
+    if(currentSnapshot.member_kind==='sku')return renderSkuAddResults();
     const q=$('addQuery').value.trim().toLocaleLowerCase();
     const matches=currentSnapshot.products.filter(p=>memberGroup(p).id!==selectedGroup&&[p.product_name,p.offer_id,p.shop_key,shopName(p)].some(v=>String(v||'').toLocaleLowerCase().includes(q)));
     $('addCount').textContent=`${matches.length} 个商品 · ${addPage+1} / ${Math.max(1,Math.ceil(matches.length/30))}`;
     $('addResults').innerHTML=matches.slice(addPage*30,addPage*30+30).map(p=>`<section class="search-item">${productPhoto(p)}<div class="member-info"><h4>${esc(p.product_name)} ${sourceIcon(p)}</h4><p>${esc(shopName(p))} · ${esc(p.offer_id)} · 销量 ${p.sales}</p><p>${esc(memberGroup(p).id)} · ${groupConfirmed(memberGroup(p))?'已确认':'待确认'}</p></div><button data-mutation onclick="addMember(${memberIndex(p)})">添加到当前组</button></section>`).join('')||'<p>没有匹配商品</p>';
+    $('addPrev').disabled=addPage===0;$('addNext').disabled=(addPage+1)*30>=matches.length;
+    $('addResults').scrollTop=0;refreshSourceLinks();
+}
+function renderSkuAddResults(){
+    const q=$('addQuery').value.trim().toLocaleLowerCase();
+    const matches=currentSnapshot.members.filter(m=>skuGroupFor(m)?.id!==selectedGroup&&[m.product_name,m.raw_sku_name,m.offer_id,m.sku_id,m.shop_key,skuShopName(m)].some(v=>String(v||'').toLocaleLowerCase().includes(q)));
+    $('addCount').textContent=`${matches.length} 个 SKU · ${addPage+1} / ${Math.max(1,Math.ceil(matches.length/30))}`;
+    $('addResults').innerHTML=matches.slice(addPage*30,addPage*30+30).map(m=>{const g=skuGroupFor(m);return `<section class="search-item">${productPhoto(m)}<div class="member-info"><h4>${esc(m.product_name||m.offer_id)} ${sourceIcon(m)}</h4><p>${esc(m.raw_sku_name||'（空）')} · ${esc(skuShopName(m))} · ${esc(m.offer_id)} · 平台 SKU ${esc(m.sku_id)} · 销量 ${esc(m.sales)}</p><p>${esc(g?.id||'')} · ${esc(skuStatus(g||{}))}</p></div><button data-mutation onclick="addMember(${skuMemberIndex(m)})">添加到当前组</button></section>`;}).join('')||'<p>没有匹配 SKU</p>';
     $('addPrev').disabled=addPage===0;$('addNext').disabled=(addPage+1)*30>=matches.length;
     $('addResults').scrollTop=0;refreshSourceLinks();
 }
