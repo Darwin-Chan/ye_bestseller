@@ -215,12 +215,14 @@ CREATE TABLE IF NOT EXISTS crawler_process (
 -- 本机采集段计时；不参与交换。没有记录的旧轮保持未知。
 CREATE TABLE IF NOT EXISTS elapsed_rounds (
     round_id INTEGER PRIMARY KEY,
-    history_known INTEGER NOT NULL CHECK (history_known IN (0, 1))
+    history_known INTEGER NOT NULL CHECK (history_known IN (0, 1)),
+    pending_execution TEXT
 );
 CREATE TABLE IF NOT EXISTS elapsed_segments (
     execution_id TEXT PRIMARY KEY,
     round_id INTEGER NOT NULL,
     process_started TEXT NOT NULL,
+    process_pid INTEGER,
     seconds REAL NOT NULL DEFAULT 0 CHECK (seconds >= 0),
     settled INTEGER NOT NULL DEFAULT 0 CHECK (settled IN (0, 1))
 );
@@ -780,6 +782,8 @@ _MIGRATIONS: tuple[_Migration, ...] = (
     _Migration("round_tally_index", _round_tally_index),
     _Migration("version_dedupe_index", _version_dedupe_index),
     _Migration("sku_image_dedupe_index", _sku_image_dedupe_index),
+    _add_column("elapsed_rounds", "pending_execution", "TEXT"),
+    _add_column("elapsed_segments", "process_pid", "INTEGER"),
     _add_column("crawler_process", "process_os_started", "TEXT"),
     _add_column("crawler_process", "browser_state", "TEXT NOT NULL DEFAULT 'UNKNOWN'"),
     _add_column("crawler_process", "browser_port", "INTEGER"),

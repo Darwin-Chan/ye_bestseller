@@ -285,7 +285,7 @@ def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *, elapsed_
                                 new_round=opened.created, clock=elapsed_clock)
 
         def check_execution():
-            segment.checkpoint()
+            segment.tick()
             rounds.ensure_workable(db, round_id, utcnow())
 
         stop_request.install(check_execution)
