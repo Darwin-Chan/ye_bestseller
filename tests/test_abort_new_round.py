@@ -220,6 +220,11 @@ class ExplicitNewRoundTests(unittest.TestCase):
             self.assertEqual(rounds.latest(db).reason.value, "STARTUP_FAILED")
             self.assertIsNone(db.crawler_process())
         self.assertFalse(single_instance.is_held(single_instance.CRAWLER_LOCK))
+        result = self.api.get_result()
+        self.assertEqual(result["reason"], "STARTUP_FAILED")
+        self.assertEqual(result["tag"], "启动失败")
+        self.assertNotIn("浏览器建立", result["note"], "初始化失败不能误归因浏览器")
+        self.assertIn("启动或初始化", result["note"])
         self.assertTrue(self.api.get_start()["start_allowed"])
         with patch.object(gui.subprocess, "Popen"):
             self.assertTrue(self.api.start_run(["D"])["ok"])
