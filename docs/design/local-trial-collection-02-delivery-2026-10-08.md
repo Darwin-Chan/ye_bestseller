@@ -38,7 +38,7 @@ HTTP/HTTPS 外部访问阻断，无页面 JS 错误；开始/过程/结果截图
 两轴报告及任务正文分别保存于证据区 `review-*-initial.md` / `review-*-final.md`，
 SHA-256 对账见 `review-sha256.txt`。两轴分别为 0 项未解决，均无剩余最高严重度问题。
 主 agent 截图复核另修正试采开始页误用正式周计划说明，实际页面失败断言后修复并通过。
-分段全量正在收尾，最终合计/对账/结论单独补入下节，审查报告不代替全量验收。
+分段全量已完成，最终合计/对账/结论见下节，审查报告不代替全量验收。
 
 主仓：`F:\AI\projects\bestseller`。
 02 隔离副本：`.scratch/sandboxes/local-trial-collection-impl/02/20261008-gui/bestseller/`。
@@ -56,5 +56,36 @@ SHA-256 对账见 `review-sha256.txt`。两轴分别为 0 项未解决，均无�
 - 永久保留：主仓证据中的逐段日志/summary、单文件日志、审查任务与报告、SHA-256、实际页面脚本及三页截图；不随副本删除。`.scratch` 不进 Git，不宣称已异地备份。
 - 可删除候选：无；本票不授权自动清理隔离副本。
 - 暂留待确认：02 副本作为分支交付源，待用户确认合并/归档后另行核验处置；继承 01 副本继续按 01 记录保留，不重写其处置。
-- 实际清理：隔离副本未执行；仅本票四个点名只读审查任务及结果在证据保存/哈希校验后按交接规范清除，未清共享任务池。
+- 实际清理：隔离副本未执行；仅本票六个点名只读审查任务及结果在证据保存/哈希校验后按交接规范清除，未清共享任务池。
 - 未创建：新虚拟环境、真实运行数据库、正式浏览器 profile、远程发布/上传及额外程序；无需处置上述未创建项。
+
+## 最终分段全量与补充复核
+
+首轮全量 1457/1457 对账一致，但仅 6/7 段 OK，结论 FAILED：刷新基准的简化配置缺少
+`local_trial` 字段，出现 1 项 ERROR。失败现场保留在证据区 `full-suite/`，不计为通过。
+提交 `a906fdb` 为基准简化配置补 `local_trial=False`，仍走真实 Api/SQLite 和原断言；
+`bench-red.log` 复现、`bench-green.log` 原有 2 项全部通过。补充独立 Standards/Spec
+复核各 0 项发现，报告 `review-standards-bench.md` / `review-spec-bench.md` 与哈希已归档。
+
+修复后重新完整串行运行，不使用 -f；证据 `full-suite-final/summary.txt` 及同目录 7 个逐段日志。
+进程退出码 **0**；summary 原文：
+
+```text
+分段全量测试 2026-10-08 19:10:25
+仓库：F:\AI\projects\bestseller\.scratch\sandboxes\local-trial-collection-impl\02\20261008-gui\bestseller
+传参：python tools/run_full_suite.py --log-dir F:\AI\projects\bestseller\.scratch\logs\tickets\local-trial-collection-impl\02\20261008-gui\full-suite-final
+
+test_exchange：65 项，OK，86.2s；日志 seg-01-test_exchange.log
+test_judgment_set：50 项，OK，42.6s；日志 seg-02-test_judgment_set.log
+test_plan_step：54 项，OK，24.5s；日志 seg-03-test_plan_step.log
+test_export：30 项，OK，25.2s；日志 seg-04-test_export.log
+test_git_channel：17 项，OK，12.6s；日志 seg-05-test_git_channel.log
+test_shops_sync：17 项，OK，11.8s；日志 seg-06-test_shops_sync.log
+其余段（88 文件）：1224 项，OK，455.4s；日志 seg-07-其余段(88_文件).log
+
+合计 1457 项（预期 1457，计数对账一致），总耗时 658.3s，段结果 7/7 段 OK，结论 OK
+```
+
+因此收尾口径为：1457 项（预期 1457），计数对账一致，总耗时 658.3s，7/7 段 OK，结论 OK。
+证据完整性清单见主仓证据 `evidence-sha256.json`，不含清单本身；证据未随 Git 提交或异地备份。
+本次只交付本地分支，不合并 main、不启动真实采集、不发布远程。
