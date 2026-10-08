@@ -91,6 +91,7 @@ _REASON_GLOSS = {
     "DAY_BOUNDARY": "当天采集撞上当日截止线中止",
     "DENY_EXCEEDED": "当天采集因被拒次数超限中止",
     "ABANDONED": "当天采集被中止（放弃）",
+    "STARTUP_FAILED": "当天采集启动或初始化时失败，未进入采集",
     "LEGACY_UNKNOWN": "当天采集的终态不详（旧数据）",
 }
 

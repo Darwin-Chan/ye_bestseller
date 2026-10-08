@@ -56,6 +56,12 @@ window.pywebview = { platform: "edgechromium", api: {
   },
   pause_run: async () => ({ok: true}),
   resume_run: async () => ({ok: true}),
+  prepare_abort: async () => {
+    window.__calls.push("prepare_abort"); return {ok: true, confirmation: "abort-round-7"};
+  },
+  confirm_abort: async (confirmation) => {
+    window.__calls.push(["confirm_abort", confirmation]); return {ok: true};
+  },
   abort_run: async () => { window.__calls.push("abort_run"); return {ok: true}; },
 }};
 """
@@ -87,6 +93,7 @@ window.pywebview = { platform: "edgechromium", api: {
     if (window.__gate) { await new Promise(resolve => { window.__hold = resolve; }); }
     return {
       running: true, manually_paused: pausedAtCall, has_round: true, round_id: 7,
+      can_resume: pausedAtCall, can_abort: true,
       started_hhmm: "10:00", elapsed_sec: 5, deny: 0, done_count: 0, total_count: 1,
       progress: 0, current_shop: "A01", done: [], todo: [{key: "A01", name: "店铺A"}],
     };
@@ -212,7 +219,7 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
             page.close()
 
     def test_start_page_offers_the_abort_entry_for_a_running_crawler(self):
-        """有采集在跑（可能是命令行起的）：启动页给中止入口，点了真的调 abort_run（工单 03）。"""
+        """有采集在跑（可能是命令行起的）：启动页给中止入口，确认后提交服务端冻结的授权（票 01）。"""
         page = self.open_page(crawler={"pid": 4321, "round_id": 7,
                                        "started_at": "2026-09-12T01:12:00+00:00"})
         try:
@@ -223,7 +230,11 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
             page.wait_for_selector("#confirmModal.show", timeout=5000)
             page.click("#confirmOk")
             page.wait_for_function(
-                "() => window.__calls.some(c => c === 'abort_run')", timeout=5000)
+                "() => window.__calls.some(c => c[0] === 'confirm_abort')", timeout=5000)
+            self.assertEqual(page.evaluate("window.__calls.filter(c => c[0] === 'confirm_abort')"),
+                             [["confirm_abort", "abort-round-7"]])
+            self.assertNotIn("abort_run", page.evaluate("window.__calls"),
+                             "页面不能绕过服务端冻结的中止确认授权")
         finally:
             page.close()
 

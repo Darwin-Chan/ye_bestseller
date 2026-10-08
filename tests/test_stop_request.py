@@ -203,12 +203,17 @@ class ProcessStopRuntimeTests(unittest.TestCase):
         """
         runtime = stop_request.ProcessStopRuntime(own_process=lambda: None)
 
-        with patch.object(browser_proc, "close_browser", return_value=None) as close:
-            effect = runtime.close_browser(stop_request.BoundBrowser(4242, 9222, None))
+        # 未知存活，或活着但原证明缺失：都不能据当前 PID 的证明推断原进程已退出。
+        for alive in (None, True):
+            with self.subTest(alive=alive), \
+                    patch.object(browser_proc, "close_browser", return_value=None) as close, \
+                    patch.object(browser_proc, "process_alive", return_value=alive), \
+                    patch.object(browser_proc, "process_creation_proof", return_value="current-proof"):
+                effect = runtime.close_browser(stop_request.BoundBrowser(4242, 9222, None))
 
-        close.assert_called_once_with(9222, launched_by_us=True, browser_pid=4242,
-                                      browser_os_started=None)
-        self.assertFalse(effect.ok, "对方拒绝关闭时如实上报，窗口据此进 cleanup_pending")
+                close.assert_called_once_with(9222, launched_by_us=True, browser_pid=4242,
+                                              browser_os_started=None)
+                self.assertFalse(effect.ok, "原创建证明缺失时保留 cleanup_pending，不猜测 PID 复用")
 
     def test_a_pid_taken_by_another_process_is_refused_and_the_handle_returned(self):
         """身份行记的创建证明与此刻同一 PID 上读到的不符：目标已被顶替，拒绝绑定。

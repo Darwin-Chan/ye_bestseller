@@ -319,7 +319,7 @@ class ProcessStopRuntime:
         if alive is False:
             return EffectResult(True)
         proof = browser_proc.process_creation_proof(browser.pid) if alive is True else None
-        if proof is not None and proof != browser.os_started:
+        if browser.os_started is not None and proof is not None and proof != browser.os_started:
             return EffectResult(True)
         return EffectResult(False, "browser_close_failed")
 
