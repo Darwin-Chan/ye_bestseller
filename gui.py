@@ -30,6 +30,7 @@ import logging
 import logging.handlers
 import os
 import sqlite3
+import secrets
 import subprocess
 import sys
 import threading
@@ -203,6 +204,7 @@ class Api:
         self.user_paused = False
         self._paused_round_id: int | None = None
         self._closing_requested = False
+        self._abort_confirmation: tuple[str, CloseSnapshot] | None = None
         # 停止编排（窗口、回执、超时强杀）在 stop_request 里；**冻结目标之后的处置也在那里**，
         # 界面只交一件事实：本界面拉起的那个子进程。晚绑定 lambda 让 begin 那一刻读一次
         # `self.proc` 并冻进绑定，此后窗口不再读这个可变字段（ADR-0024）。
@@ -669,6 +671,55 @@ class Api:
                 conn.close()
 
     @_collection_action
+    def prepare_abort(self) -> dict:
+        """Freeze the round and target before the page displays its confirmation."""
+        with self._lock:
+            snapshot = self.close_snapshot()
+            if snapshot.kind not in ("running", "paused", "aborting") or snapshot.round_id is None:
+                return {"ok": False, "error": "当前轮次或采集目标不可核实，请重新确认。"}
+            token = secrets.token_urlsafe(24)
+            self._abort_confirmation = (token, snapshot)
+            return {"ok": True, "confirmation": token, "round_id": snapshot.round_id}
+
+    @_collection_action
+    def confirm_abort(self, confirmation: str) -> dict:
+        """A page confirmation can only authorize its original round/target."""
+        with self._lock:
+            frozen = self._abort_confirmation
+            if (frozen is None or not isinstance(confirmation, str)
+                    or not secrets.compare_digest(confirmation, frozen[0])):
+                return {"ok": False, "error": "中止确认已失效，请重新确认。"}
+            expected = frozen[1]
+            current = self.close_snapshot()
+            if current.round_id != expected.round_id or current.kind == "unknown":
+                return {"ok": False, "error": "轮次或采集目标已变化，请重新确认中止。"}
+            if current.kind == "idle":
+                conn = self._open_conn()
+                try:
+                    settled = rounds.load(Database(conn), expected.round_id)
+                    if settled.reason is not None:
+                        return {"ok": True, "round_id": settled.id, "reason": settled.reason.value}
+                finally:
+                    conn.close()
+                return {"ok": False, "error": "原采集已退出但轮次未结束，请核实后重试。"}
+            if (current.target != expected.target
+                    and not (current.target is None and current.kind == "paused"
+                             and current.pause_phase == "paused")):
+                return {"ok": False, "error": "采集目标已变化，请重新确认中止。"}
+            return self.abort_run(expected_target=current.target,
+                                  expected_round_id=expected.round_id)
+
+    def _lock_abort_confirmation(self, conn, expected_target) -> bool:
+        """Serialize the frozen identity (including absence) and terminal write."""
+        conn.execute("BEGIN IMMEDIATE")
+        registered = crawler_identity.registered(conn)
+        if ((registered is not None and stop_request.StopTarget.of(registered) != expected_target)
+                or (expected_target is None and self.any_crawler_running())):
+            conn.rollback()
+            return False
+        return True
+
+    @_collection_action
     def abort_run(self, *, expected_target=None, expected_round_id=None) -> dict:
         """中止：先把轮次收尾为「人工放弃」，再等采集进程自己停下（ADR-0009）。
 
@@ -681,11 +732,16 @@ class Api:
             conn = self._open_conn()
             try:
                 db = Database(conn)
+                if expected_round_id is not None:
+                    # Confirmation binds even an absent target. Serialize its final
+                    # identity check and terminal write against CLI publications.
+                    if not self._lock_abort_confirmation(conn, expected_target):
+                        return {"ok": False, "error": "采集目标已变化，请重新确认中止。"}
                 status = self._stop_watch.status
                 if status.phase is not stop_request.StopPhase.IDLE:
                     # Promotion is authorized for the original frozen target only,
                     # including when that process has exited and cleanup remains.
-                    if (status.round_id is None or (expected_target is not None and
+                    if (status.round_id is None or (expected_round_id is not None and
                             (status.target != expected_target
                              or status.round_id != expected_round_id))):
                         return {"ok": False, "error": "停止目标已变化，请重新确认。"}
@@ -702,9 +758,9 @@ class Api:
                 # 这一处清理不是卫生，是语义：中止压过暂停——留下的暂停请求会让
                 # 采集进程把这次停止认领成「暂停」，日志与店铺备注就写错了原因。
                 identity = self.current_crawler(conn)
-                if expected_target is not None and (
+                if expected_round_id is not None and (
                         stop_request.StopTarget.of(identity) != expected_target
-                        or identity.round_id != expected_round_id):
+                        or (identity is not None and identity.round_id != expected_round_id)):
                     return {"ok": False, "error": "采集目标已变化，请重新确认关闭。"}
                 if self.round_id is None and identity is None:
                     return {"ok": True}  # 没起过任务、也没有采集在跑：不必连库
@@ -712,6 +768,8 @@ class Api:
                     return {"ok": False, "error": "暂时无法确认停止目标，请稍后重试。",
                             "retryable": True}
                 rid = self._round_to_abandon(db, identity)
+                if expected_round_id is not None and rid != expected_round_id:
+                    return {"ok": False, "error": "轮次已变化，请重新确认中止。"}
                 if rid is not None:
                     rounds.finish_if_open(db, rounds.load(db, rid), TerminalReason.ABANDONED,
                                           note="GUI 人工中止（放弃）")
@@ -817,6 +875,8 @@ class Api:
             if current.kind == "paused":
                 conn = self._open_conn()
                 try:
+                    if not self._lock_abort_confirmation(conn, current.target):
+                        return {"ok": False, "error": "采集目标已变化，请重新确认关闭。"}
                     db = Database(conn)
                     rounds.finish_if_open(db, rounds.load(db, expected.round_id),
                                           TerminalReason.ABANDONED,

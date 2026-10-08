@@ -158,6 +158,134 @@ class ExplicitNewRoundTests(unittest.TestCase):
             self.assertIsNone(rounds.latest(Database(conn)))
         self.assertTrue(self.api.get_start()["start_allowed"])
 
+    def test_public_new_browser_start_failure_does_not_leave_an_open_empty_round(self):
+        with closing(connect(self.db_path)) as conn:
+            intent = rounds.plan_new(Database(conn), rounds.RoundRequest(cst_date(), (
+                rounds.ShopScope('D', self.shops[-1].url, 'D'),)))
+        cfg = crawler_cfg(db_file=self.db_path, ensure_dirs=lambda: None)
+        def failure(*args, **kwargs):
+            self.assertTrue(single_instance.is_held(single_instance.CRAWLER_LOCK))
+            raise FileNotFoundError("test Edge executable missing")
+        with patch("bestseller_monitor.browser_pw.open_session", side_effect=failure):
+            with self.assertRaises(FileNotFoundError):
+                pipeline.run_round(cfg, [self.shops[-1]], new_intent=intent)
+        with closing(connect(self.db_path)) as conn:
+            db = Database(conn)
+            self.assertIsNone(rounds.active_round(db), "浏览器启动失败不能留下空进行中轮次")
+            failed = rounds.latest(db)
+            self.assertEqual(failed.reason.value, "STARTUP_FAILED")
+            self.assertIsNone(db.crawler_process())
+        self.assertTrue(self.api.get_start()["start_allowed"])
+        self.assertFalse(single_instance.is_held(single_instance.CRAWLER_LOCK))
+
+    def test_partial_browser_start_failure_keeps_owned_or_unknown_cleanup_gate(self):
+        for state in ("OWNED", "UNKNOWN"):
+            with self.subTest(state=state):
+                with closing(connect(self.db_path)) as conn:
+                    db = Database(conn)
+                    previous = db.crawler_process()
+                    if previous is not None:
+                        # Explicit fixture disposal, not a production cleanup claim.
+                        db.clear_crawler_process(target_pid=previous["pid"],
+                                                 target_started_at=previous["started_at"])
+                    intent = rounds.plan_new(db, rounds.RoundRequest(cst_date(), (
+                        rounds.ShopScope("D", self.shops[-1].url, "D"),)))
+                def failure(cfg, *, publish_browser):
+                    self.assertTrue(single_instance.is_held(single_instance.CRAWLER_LOCK))
+                    publish_browser(state, 9222, 9201 if state == "OWNED" else None,
+                                    "browser-proof" if state == "OWNED" else None)
+                    raise RuntimeError("test partial browser startup")
+                cfg = crawler_cfg(db_file=self.db_path, ensure_dirs=lambda: None)
+                with patch("bestseller_monitor.browser_pw.open_session", side_effect=failure):
+                    with self.assertRaises(RuntimeError):
+                        pipeline.run_round(cfg, [self.shops[-1]], new_intent=intent)
+                with closing(connect(self.db_path)) as conn:
+                    db = Database(conn)
+                    self.assertIsNone(rounds.active_round(db))
+                    self.assertEqual(rounds.latest(db).reason.value, "STARTUP_FAILED")
+                    self.assertEqual(db.crawler_process()["browser_state"], state)
+                self.assertFalse(single_instance.is_held(single_instance.CRAWLER_LOCK))
+                self.assertFalse(self.api.get_start()["start_allowed"])
+                self.assertFalse(self.api.start_run(["D"])["ok"])
+
+    def test_browser_start_failure_preserves_a_terminal_already_committed(self):
+        with closing(connect(self.db_path)) as conn:
+            intent = rounds.plan_new(Database(conn), rounds.RoundRequest(cst_date(), (
+                rounds.ShopScope("D", self.shops[-1].url, "D"),)))
+        def failure(cfg, *, publish_browser):
+            with closing(connect(self.db_path)) as conn:
+                db = Database(conn)
+                rounds.finish(db, rounds.active_round(db), rounds.TerminalReason.COMPLETED)
+            raise FileNotFoundError("test failed startup after competing terminal")
+        cfg = crawler_cfg(db_file=self.db_path, ensure_dirs=lambda: None)
+        with patch("bestseller_monitor.browser_pw.open_session", side_effect=failure):
+            with self.assertRaises(FileNotFoundError):
+                pipeline.run_round(cfg, [self.shops[-1]], new_intent=intent)
+        with closing(connect(self.db_path)) as conn:
+            self.assertEqual(rounds.latest(Database(conn)).reason, rounds.TerminalReason.COMPLETED)
+        self.assertTrue(self.api.get_start()["start_allowed"])
+
+    def test_paused_confirmation_rechecks_absent_target_at_sqlite_write_boundary(self):
+        import sqlite3
+        rid, process, death = self.running()
+        self.assertTrue(self.api.pause_run()["ok"])
+        death()
+        self.api.get_run()
+        prepared = self.api.prepare_abort()
+        self.assertTrue(prepared["ok"])
+        competitor = self.enterContext(closing(connect(self.db_path)))
+        raced = []
+        native_connect = sqlite3.connect
+        def trace(sql):
+            if (sql == "BEGIN IMMEDIATE" or sql.startswith("UPDATE rounds SET terminal_reason=")) and not raced:
+                raced.append(True)
+                Database(competitor).record_crawler_process(5432, rid,
+                    process_os_started="process-b", browser_state="BORROWED")
+                lock_b = single_instance.acquire(single_instance.CRAWLER_LOCK)
+                self.addCleanup(lock_b.release)
+        def traced_connect(*args, **kwargs):
+            conn = native_connect(*args, **kwargs)
+            conn.set_trace_callback(trace)
+            return conn
+        with patch.object(sqlite3, "connect", side_effect=traced_connect):
+            result = self.api.confirm_abort(prepared["confirmation"])
+        self.assertTrue(raced)
+        self.assertFalse(result["ok"], "暂停确认的空目标不能授权同轮后来登记的执行")
+        self.assertTrue(self.load_round(rid).in_progress)
+        self.assertEqual(Database(competitor).crawler_process()["pid"], 5432)
+        process.terminate.assert_not_called()
+
+    def test_native_paused_close_rechecks_target_at_sqlite_write_boundary(self):
+        import sqlite3
+        rid, process, death = self.running()
+        self.assertTrue(self.api.pause_run()["ok"])
+        death()
+        self.api.get_run()
+        expected = self.api.close_snapshot()
+        self.assertEqual(expected.kind, "paused")
+        competitor = self.enterContext(closing(connect(self.db_path)))
+        raced = []
+        native_connect = sqlite3.connect
+        def trace(sql):
+            if (sql == "BEGIN IMMEDIATE" or sql.startswith("UPDATE rounds SET terminal_reason=")) and not raced:
+                raced.append(True)
+                Database(competitor).record_crawler_process(5432, rid,
+                    process_os_started="process-b", browser_state="BORROWED")
+                lock_b = single_instance.acquire(single_instance.CRAWLER_LOCK)
+                self.addCleanup(lock_b.release)
+        def traced_connect(*args, **kwargs):
+            conn = native_connect(*args, **kwargs)
+            conn.set_trace_callback(trace)
+            return conn
+        with patch.object(sqlite3, "connect", side_effect=traced_connect):
+            result = self.api.begin_close(expected)
+        self.assertTrue(raced)
+        self.assertFalse(result["ok"], "正常关窗不能结束同轮后来执行")
+        self.assertTrue(self.load_round(rid).in_progress)
+        self.assertFalse(self.api.close_ready(expected))
+        self.assertEqual(Database(competitor).crawler_process()["pid"], 5432)
+        process.terminate.assert_not_called()
+
     def test_first_committed_terminal_wins_a_real_sqlite_write_race(self):
         rid = self.create_round()
         conn = connect(self.db_path)
@@ -311,6 +439,32 @@ class ExplicitNewRoundTests(unittest.TestCase):
         expect(page.locator("#activeRoundBanner")).to_contain_text("中止")
         self.assertTrue(self.load_round(rid).in_progress)
 
+
+    def test_real_page_old_abort_confirmation_cannot_stop_a_replacement(self):
+        from playwright.sync_api import expect
+        rid, process, death = self.running()
+        page = self.page()
+        page.locator("#abortForeignBtn").click()
+        expect(page.locator("#confirmModal")).to_have_class("show")
+        death()
+        with closing(connect(self.db_path)) as conn:
+            db = Database(conn)
+            rounds.finish(db, rounds.load(db, rid), rounds.TerminalReason.COMPLETED)
+            replacement = new_round(db, 'A', 'B', 'C', 'D')
+            db.record_crawler_process(pid=9876, round_id=replacement,
+                                      process_os_started='replacement-proof',
+                                      browser_state='NOT_STARTED')
+        self.api.proc = None
+        lock = single_instance.acquire(single_instance.CRAWLER_LOCK)
+        self.addCleanup(lock.release)
+        with patch("bestseller_monitor.browser_proc.bind_process") as bind:
+            page.locator("#confirmOk").click()
+            expect(page.locator("#confirmModal")).not_to_have_class("show")
+            page.wait_for_function("document.querySelector('#apiError').style.display !== 'none' || document.querySelector('#panel-result').classList.contains('active')")
+            self.assertTrue(self.load_round(replacement).in_progress,
+                            "A 的确认不能提交 B 的终态")
+            bind.assert_not_called()
+        self.assertEqual(self.load_round(rid).reason, rounds.TerminalReason.COMPLETED)
 
     def test_real_page_can_promote_pause_cleanup_to_abort_without_restart(self):
         from playwright.sync_api import expect
@@ -600,6 +754,35 @@ class ExplicitNewRoundTests(unittest.TestCase):
         with closing(connect(self.db_path)) as conn:
             self.assertEqual(Database(conn).crawler_process()["browser_state"], "OWNED")
 
+
+    def test_replacement_before_first_cleanup_keeps_original_browser_debt(self):
+        rid, process_a, death = self.running(owned=True)
+        self.assertTrue(self.api.abort_run()["ok"])
+        death()  # A failed its own browser cleanup, before the GUI's first tick.
+        b = self.create_round()
+        with closing(connect(self.db_path)) as conn:
+            db = Database(conn)
+            b_started = db.record_crawler_process(5432, b, process_os_started="process-b",
+                                                 browser_state="BORROWED")
+        lock_b = single_instance.acquire(single_instance.CRAWLER_LOCK)
+        self.addCleanup(lock_b.release)
+        process_b = MagicMock(pid=5432)
+        process_b.poll.return_value = None
+        self.api.proc = process_b
+        with patch("bestseller_monitor.browser_proc.close_browser", return_value=None) as close:
+            self.assertIsNotNone(self.api.get_result()["stopping"],
+                                 "首次清理前替换身份也不能抹除 A 的 OWNED 欠账")
+            close.assert_not_called()
+            process_b.terminate.assert_not_called()
+            with closing(connect(self.db_path)) as conn:
+                db = Database(conn)
+                self.assertEqual(db.crawler_process()["started_at"], b_started)
+                rounds.finish(db, rounds.load(db, b), rounds.TerminalReason.COMPLETED)
+                db.clear_crawler_process(target_pid=5432, target_started_at=b_started)
+            process_b.poll.return_value = 0
+            lock_b.release()
+            self.assertFalse(self.api.get_start()["start_allowed"], "B 已结束也不能掩盖 A 尚未收尾")
+        self.assertEqual(self.load_round(rid).reason, rounds.TerminalReason.ABANDONED)
 
     def test_replacement_cannot_discard_known_old_browser_cleanup_debt(self):
         rid, process_a, _ = self.running(owned=True)

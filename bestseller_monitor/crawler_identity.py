@@ -50,6 +50,11 @@ class CrawlerProcess:
                 "started_at": self.started_at, "note": self.note}
 
 
+def browser_cleanup_complete(state: str | None) -> bool:
+    """Positive evidence that this identity has no owned-browser cleanup debt."""
+    return state in ("NOT_STARTED", "BORROWED", "CLOSED")
+
+
 def is_running(*, own_alive: bool = False) -> bool:
     """有采集进程在跑吗。
 
@@ -84,7 +89,7 @@ def current(conn, *, own_alive: bool = False, own_pid: int | None = None,
     """
     who = registered(conn)
     if not is_running(own_alive=own_alive):
-        if who is not None and who.browser_state in ("NOT_STARTED", "BORROWED", "CLOSED"):
+        if who is not None and browser_cleanup_complete(who.browser_state):
             Database(conn).clear_crawler_process(
                 target_pid=who.pid, target_started_at=who.started_at)
         return None

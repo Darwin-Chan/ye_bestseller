@@ -527,17 +527,23 @@
   // 一次只问一件事：默认文案是中止本轮；带 opts 时换成那件事的文案与动作
   // （如逃生口确认，spec §6 降级表最后一行）。
   let confirmAction = null;
-  function openConfirm(opts) {
+  async function openConfirm(opts) {
     opts = opts || {};
+    let action = opts.action;
+    if (!action) {
+      const prepared = await callApi("prepare_abort");
+      if (!prepared || !prepared.ok) { if (prepared) showNotice(prepared.error); return; }
+      action = () => doAbort(prepared.confirmation);
+    }
     $("confirmTitle").textContent = opts.title || "确认终止本轮抓取？";
     $("confirmSub").textContent = opts.sub || "本轮将结束且不能继续；已抓取数据保留。收尾完成后，需明确点击开始才能新建。";
     $("confirmOk").textContent = opts.ok || "确定";
-    confirmAction = opts.action || null;
+    confirmAction = action;
     $("confirmModal").classList.add("show");
   }
   function closeConfirm() { $("confirmModal").classList.remove("show"); }
-  async function doAbort() {
-    const r = await callApi("abort_run");
+  async function doAbort(confirmation) {
+    const r = await callApi("confirm_abort", confirmation);
     if (!r || !r.ok) { if (r) showNotice(r.error); return; }
     stopPolling();
     const res = await queued(() => callApi("get_result"));
@@ -597,8 +603,7 @@
       const act = confirmAction;
       closeConfirm();
       confirmAction = null;
-      if (act) { await act(); return; }   // 弹窗问的那件事
-      await doAbort();
+      if (act) { await act(); }   // 只执行弹窗冻结的那件事，不回退到当前目标
     };
     $("resumeBtn").onclick = resumeRun;
     $("backBtn").onclick = () => switchTab("start");

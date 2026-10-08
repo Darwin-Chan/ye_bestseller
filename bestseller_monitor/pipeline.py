@@ -11,7 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
-from . import (browser_proc, browser_pw, click_listing, dedupe, detail, detail_visit, elapsed, plan_step, shop_progress,
+from . import (browser_proc, browser_pw, crawler_identity, click_listing, dedupe, detail, detail_visit, elapsed, plan_step, shop_progress,
                rounds, single_instance, stop_request, weekly_plan)
 from .guard import DenyTracker, RoundDenyExceeded, ShopDenyExceeded
 from .config import Config, Shop, load_shops
@@ -299,7 +299,8 @@ def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *,
         stop_request.install(check_execution)
         try:
             _run_pwcdp_round(db, cfg, round_id, work_shops,
-                             on_execution_end=segment.settle)
+                             on_execution_end=segment.settle,
+                             explicit_new=new_intent is not None)
         finally:
             segment.settle()
         _finalize_round(db, cfg, opened.round)
@@ -322,8 +323,7 @@ def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *,
     finally:
         stop_request.uninstall()
         identity = db.crawler_process()
-        cleanup_complete = identity is None or identity["browser_state"] in (
-            "NOT_STARTED", "BORROWED", "CLOSED")
+        cleanup_complete = identity is None or crawler_identity.browser_cleanup_complete(identity["browser_state"])
         if started_at is not None and cleanup_complete:
             db.clear_crawler_process(target_pid=os.getpid(), target_started_at=started_at)
             # Only clean facts published by this invocation.
@@ -417,7 +417,8 @@ def _finalize_round(db: Database, cfg: Config, run: Round) -> None:
 
 def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
                      shops: list[Shop], started_at: str | None = None, *,
-                     on_execution_end: Callable[[], bool] | None = None) -> None:
+                     on_execution_end: Callable[[], bool] | None = None,
+                     explicit_new: bool = False) -> None:
     if started_at is None:
         row = db.crawler_process()
         started_at = row["started_at"] if row is not None else None
@@ -431,7 +432,18 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
             browser_state=state, browser_port=port, browser_pid=browser_pid,
             browser_os_started=browser_os_started)
 
-    pw, br, page, ctx = browser_pw.open_session(cfg, publish_browser=publish)
+    try:
+        pw, br, page, ctx = browser_pw.open_session(cfg, publish_browser=publish)
+    except STOP_WITH_OUTCOME:
+        raise  # Preserve explicit stop and intervention semantics.
+    except Exception as exc:
+        if explicit_new:
+            # Retain the failed attempt as a real diagnostic, not an open empty
+            # round or a fictional user abort. Browser debt remains independent.
+            rounds.finish_if_open(db, rounds.load(db, round_id),
+                                  TerminalReason.STARTUP_FAILED,
+                                  note=f"浏览器建立失败，未进入采集：{exc}")
+        raise
     deny_tracker = DenyTracker(cfg.deny_window_minutes * 60)
     try:
         _run_listing_pw(db, cfg, round_id, shops, page, emit=emit, deny_tracker=deny_tracker)

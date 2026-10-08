@@ -19,7 +19,7 @@ from .db import (
     DayBoundaryReached,
     utcnow,
 )
-from . import stop_request
+from . import crawler_identity, stop_request
 
 _ROUND_COLUMNS = "id, run_date, terminal_reason, started_at, finished_at"
 
@@ -35,6 +35,7 @@ class TerminalReason(str, Enum):
     DAY_BOUNDARY = "DAY_BOUNDARY"
     DENY_EXCEEDED = "DENY_EXCEEDED"
     ABANDONED = "ABANDONED"
+    STARTUP_FAILED = "STARTUP_FAILED"
     LEGACY_UNKNOWN = "LEGACY_UNKNOWN"
 
 
@@ -273,7 +274,7 @@ def check_scope(db: Database, request: RoundRequest) -> None:
 def check_new(db: Database, request: RoundRequest) -> None:
     """Explicit new intent never resumes or silently terminates an open round."""
     identity = db.crawler_process()
-    if identity is not None and identity["browser_state"] not in ("NOT_STARTED", "BORROWED", "CLOSED"):
+    if identity is not None and not crawler_identity.browser_cleanup_complete(identity["browser_state"]):
         raise ScopeMismatch("原采集浏览器或身份收尾尚未核实，不能开始新轮；请先完成原目标收尾。")
     check_scope(db, request)
     current = active_round(db)

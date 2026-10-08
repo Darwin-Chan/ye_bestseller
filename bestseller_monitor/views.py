@@ -136,6 +136,9 @@ def _pacing_state(conn: sqlite3.Connection, round_id: int, *, now: str,
 
 
 _TERMINAL_TEXT = {
+    rounds.TerminalReason.STARTUP_FAILED: (
+        "启动失败", "本次新建在浏览器建立时失败，未进入采集；请核实收尾与配置后明确开始新轮。",
+    ),
     rounds.TerminalReason.COMPLETED: ("正常完成", "本轮正常完成。"),
     rounds.TerminalReason.DAY_BOUNDARY: (
         "跨天中止",

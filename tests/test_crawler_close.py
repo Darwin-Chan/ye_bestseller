@@ -95,7 +95,7 @@ class CrawlerCloseTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_paused_replacement_can_be_freshly_confirmed_as_running(self):
+    def test_paused_replacement_without_original_cleanup_proof_stays_blocked(self):
         self.running()
         runtime = stop_request.RecordingStopRuntime(alive=True)
         self.api._stop_watch = stop_request.StopWatch(runtime, now=self.clock)
@@ -122,11 +122,16 @@ class CrawlerCloseTests(unittest.TestCase):
             self.tasks.pop()()
         self.assertFalse(self.window.destroyed)
         self.assertFalse(self.window.close())
-        self.assertEqual(confirmations, 2, "fresh confirmation must describe the actual running target")
-        self.assertIn("采集正在进行中", self.messages[-1])
-        self.tasks.pop()()
-        self.assertTrue(self.window.destroyed)
-        self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
+        self.assertEqual(confirmations, 1, "unknown original cleanup cannot be discarded for a new target")
+        self.assertFalse(self.window.destroyed)
+        self.assertIsNone(self.terminal())
+        conn = connect(self.path)
+        try:
+            self.assertEqual(Database(conn).crawler_process()["pid"], 9999)
+        finally:
+            conn.close()
+        self.assertNotIn("terminate", [action for action, _ in runtime.actions])
+        self.assertNotIn("close_browser", [action for action, _ in runtime.actions])
 
     def test_changed_os_start_proof_during_wait_preserves_replacement_and_browser(self):
         self.running()
