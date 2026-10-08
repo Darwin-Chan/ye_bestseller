@@ -220,12 +220,16 @@ class CrawlerAlreadyRunning(RuntimeError):
     """已有采集进程在跑：同一时刻至多一个，由会话锁保证（见 single_instance）。"""
 
 
-def run_round(cfg: Config, shops: list[Shop], *, deviations=(), elapsed_clock: Callable[[], float] | None = None) -> None:
+def run_round(cfg: Config, shops: list[Shop], *, deviations=(),
+              elapsed_clock: Callable[[], float] | None = None,
+              new_intent: rounds.NewRoundIntent | None = None) -> None:
     """开始或续跑一轮。
 
     shops 是本次调用请求的店铺范围：今天已有进行中的轮次时范围必须一致，否则
     open() 拒绝；跨日则由 open() 先给旧轮按跨天中止收尾再新建。真正交给驱动的
     处理列表永远取自轮次自身，续跑不会因为配置变化而增删店铺。
+    GUI 的 new_intent 则只允许新建：取得采集锁后复核日期、完整范围与轮次高水位，
+    未结束轮或预检事实变化都拒绝，不沿用普通 CLI 的续跑/跨天新建规则。
 
     `deviations` 是这次范围相对本周计划的偏离（越权 / 计划外，判定与文案见
     `plan_step.plan_deviations`）：轮次打开后写进轮次备注与本机计划外账——空元组
@@ -241,12 +245,15 @@ def run_round(cfg: Config, shops: list[Shop], *, deviations=(), elapsed_clock: C
             "已有采集进程在运行：同一时刻只能跑一轮，等它结束或在界面里中止它。"
         )
     try:
-        _run_round_locked(cfg, shops, deviations, elapsed_clock=elapsed_clock)
+        _run_round_locked(cfg, shops, deviations, elapsed_clock=elapsed_clock,
+                          new_intent=new_intent)
     finally:
         lock.release()
 
 
-def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *, elapsed_clock: Callable[[], float] | None = None) -> None:
+def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *,
+                      elapsed_clock: Callable[[], float] | None = None,
+                      new_intent: rounds.NewRoundIntent | None = None) -> None:
     """拿到采集锁之后真正干活的部分。"""
     cfg.ensure_dirs()
     conn = connect(cfg.db_file)
@@ -257,7 +264,8 @@ def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *, elapsed_
             run_date=cst_date(),
             shops=tuple(ShopScope(shop.key, shop.url, shop.name) for shop in shops),
         )
-        opened = rounds.open(db, request)
+        opened = (rounds.open(db, request) if new_intent is None
+                  else rounds.open_new(db, request, new_intent))
         round_id = opened.round.id
         # 放行并上报（spec §6）：越权/计划外的店在轮次打开后立刻留痕（备注 + 本机账）。
         plan_step.record_deviations(db, opened.round, cfg.machine_id, deviations)
@@ -313,9 +321,13 @@ def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *, elapsed_
                 _report_late_stop(settled, outcome.round_end)
     finally:
         stop_request.uninstall()
-        db.clear_crawler_process(target_pid=os.getpid(), target_started_at=started_at)
-        # 消费过的停止请求只对这一个进程有效，走到这里就把它删掉（ADR-0009）。
-        db.clear_stop_request(target_pid=os.getpid(), target_started_at=started_at)
+        identity = db.crawler_process()
+        cleanup_complete = identity is None or identity["browser_state"] in (
+            "NOT_STARTED", "BORROWED", "CLOSED")
+        if started_at is not None and cleanup_complete:
+            db.clear_crawler_process(target_pid=os.getpid(), target_started_at=started_at)
+            # Only clean facts published by this invocation.
+            db.clear_stop_request(target_pid=os.getpid(), target_started_at=started_at)
         conn.close()
 
 

@@ -52,7 +52,7 @@ class LocalTrialGuiTests(unittest.TestCase):
         self.assertEqual(self.api.cfg.user_data_path, self.cfg.user_data_path)
         self.assertEqual(self.config.read_bytes(), before)
 
-    def test_launcher_runs_real_trial_cli_and_reopens_the_same_round(self):
+    def test_launcher_runs_real_trial_cli_but_reopen_is_not_pause_proof(self):
         import contextlib
         import io
         import sys
@@ -85,13 +85,14 @@ class LocalTrialGuiTests(unittest.TestCase):
                 "shop_key,shop_name,shop_url,pages,active,offer_list_url\n", encoding="utf-8")
             reopened = gui.Api(cfg=self.cfg, config_file=self.config, now=db.utcnow)
             self.assertTrue(reopened.set_local_trial(True)["ok"])
-            self.assertTrue(reopened.resume_run()["ok"])
+            self.assertFalse(reopened.resume_run()["ok"])
             self.assertEqual(reopened.get_run()["round_id"], first["round_id"])
         self.assertIn("--local-trial", commands[0])
         self.assertEqual(commands[0][commands[0].index("--config") + 1], str(self.config))
-        self.assertNotIn("--limit-shops", commands[1])
-        self.assertEqual([cfg.db_file for cfg in sessions], [self.root / "local-trial/data/bestseller.db"] * 2)
-        self.assertEqual([cfg.role for cfg in sessions], ["merge_only"] * 2)
+        self.assertEqual(len(commands), 1)
+        self.assertIn("--new-round-intent", commands[0])
+        self.assertEqual([cfg.db_file for cfg in sessions], [self.root / "local-trial/data/bestseller.db"])
+        self.assertEqual([cfg.role for cfg in sessions], ["merge_only"])
 
     def test_empty_or_stale_enabled_selection_never_launches(self):
         self.assertTrue(self.api.set_local_trial(True)["ok"])
@@ -261,7 +262,7 @@ class LocalTrialGuiTests(unittest.TestCase):
             self.assertFalse(self.api.set_local_trial(False)["ok"])
             self.assertTrue(self.api.get_run()["running"])
 
-    def test_reopened_trial_exposes_saved_scope_as_awaiting_resume(self):
+    def test_reopened_trial_exposes_saved_scope_without_resume_permission(self):
         from bestseller_monitor.db import Database
         from helpers import new_round
         path = self.root / "local-trial/data/bestseller.db"
@@ -270,7 +271,8 @@ class LocalTrialGuiTests(unittest.TestCase):
         self.assertTrue(self.api.set_local_trial(True)["ok"])
         view = self.api.get_run()
         self.assertEqual(view["round_id"], rid)
-        self.assertTrue(view["awaiting_resume"])
+        self.assertFalse(view["awaiting_resume"])
+        self.assertFalse(self.api.resume_run()["ok"])
         self.assertEqual([shop["key"] for shop in view["todo"]], ["A01"])
 
     def test_attaching_to_cli_trial_does_not_create_a_formal_database(self):

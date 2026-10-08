@@ -69,6 +69,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pages-per-shop", type=int, default=None, help="覆盖每家店翻页上限")
     p.add_argument("--max-detail", type=int, default=None, help="覆盖单轮详情预算（商品机会数）")
     p.add_argument("--limit-shops", type=str, default=None, help="逗号分隔的 shop_key 白名单")
+    p.add_argument("--new-round-intent", type=rounds.NewRoundIntent.from_json, default=None,
+                   help="GUI 明确新建的只读预检事实；持锁后重新核对，不隐式续跑")
     p.add_argument("--ignore-plan", action="store_true",
                    help="拉不到计划库且本地没有本周计划时仍开轮（自由采集 + 记账为计划外）")
     p.add_argument("--no-shuffle", action="store_true", help="不随机打乱店内商品顺序")
@@ -127,7 +129,7 @@ def main() -> int:
         if not prep.can_start:
             # 「默认拒绝开轮」拦的是新开轮：今天已有进行中的轮次就按轮次自身续跑
             # （逃生口开出来的那一轮也才续得下去）；真没路可走时给显式逃生口。
-            if rounds.active_round(db, cst_date()) is not None:
+            if args.new_round_intent is None and rounds.active_round(db, cst_date()) is not None:
                 free = True
                 print("\n>>> 拉不到计划库、本地也没有本周计划：继续跑今天已开的那一轮"
                       "（范围以轮次自身为准）。\n")
@@ -169,7 +171,7 @@ def main() -> int:
         print("本机清单里没有有效店铺（active=1）。")
         return EXIT_NOT_DONE
 
-    return _collect(cfg, shops, deviations=deviations)
+    return _collect(cfg, shops, deviations=deviations, new_intent=args.new_round_intent)
 
 
 def _run_local_trial(formal: Config, args: argparse.Namespace) -> int:
@@ -184,16 +186,16 @@ def _run_local_trial(formal: Config, args: argparse.Namespace) -> int:
             print(f"\n>>> 本机试采，不共享；数据库：{cfg.db_file}；日志：{cfg.logs_dir}。"
                   "沿用试采历史，同日已采商品可能跳过。\n")
             cfg.ensure_dirs()
-            return _run_collection(cfg, shops)
+            return _run_collection(cfg, shops, new_intent=args.new_round_intent)
     except (TrialUnavailable, OSError, ValueError, sqlite3.Error) as exc:
         print(f"\n>>> 本机试采无法开始：{exc}；请检查本机清单与隔离空间，不会回退到正式数据。\n")
         return EXIT_NOT_DONE
 
 
-def _collect(cfg: Config, shops, *, deviations=()) -> int:
+def _collect(cfg: Config, shops, *, deviations=(), new_intent=None) -> int:
     cfg.ensure_dirs()
     with _collection_logging(cfg):
-        return _run_collection(cfg, shops, deviations=deviations)
+        return _run_collection(cfg, shops, deviations=deviations, new_intent=new_intent)
 
 
 @contextmanager
@@ -221,10 +223,11 @@ def _collection_logging(cfg: Config):
         logger.setLevel(level)
 
 
-def _run_collection(cfg: Config, shops, *, deviations=()) -> int:
+def _run_collection(cfg: Config, shops, *, deviations=(), new_intent=None) -> int:
     sound.configure(cfg.alarm_on_intervention)
     try:
-        run_round(cfg, shops, deviations=deviations)
+        intent_args = {"new_intent": new_intent} if new_intent is not None else {}
+        run_round(cfg, shops, deviations=deviations, **intent_args)
     except CrawlerAlreadyRunning as exc:
         # 同一时刻至多一个采集进程：抢不到锁就说清楚，并用一个只表示这件事的退出码，
         # 界面据此提示原因（launcher 与调用方不会把它当成一轮正常结束）。

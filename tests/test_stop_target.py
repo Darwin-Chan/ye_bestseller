@@ -260,37 +260,30 @@ class BrowserCleanupRetryTests(unittest.TestCase):
         self.assertEqual(len(self._closes(runtime)), 1, "认不出的浏览器不动手")
         self.assertIsNotNone(self.db.crawler_process(), "没收口就不该清事实")
 
-    def test_the_cleanup_retry_gives_up_at_its_own_window(self):
-        """重试有上限：浏览器已经不在、绑定也核不出来时，相不能永远停着。
-
-        `browser_proc.close_browser` 要先 `bind_process`；PID 已经不存在时它永远回 `None`
-        （实跑核过：「无法绑定浏览器 PID …，拒绝关闭」）。那条路不设上限的话，窗口就永远停在
-        `cleanup_pending`，而界面在未收口的相里拒绝启动新的采集——机器这么卡住。
-        """
+    def test_cleanup_deadline_is_not_proof_of_browser_cleanup(self):
+        """票 01：时间不能代替原目标浏览器已安全收尾的正证据。"""
         watch, runtime = self._watch_at_the_deadline()
         watch.tick(self.conn)
-
-        self.clock.value += 4          # 收尾相自己那个窗口是 8 秒
+        self.clock.value += 4
         still = watch.tick(self.conn)
         self.assertEqual(still.phase, stop_request.StopPhase.CLEANUP_PENDING)
-        self.assertEqual(len(self._closes(runtime)), 2, "窗口之内要真的在重试")
-
+        self.assertEqual(len(self._closes(runtime)), 2)
         self.clock.value += 9
         status = watch.tick(self.conn)
+        self.assertEqual(status.phase, stop_request.StopPhase.CLEANUP_PENDING)
+        self.assertEqual(len(self._closes(runtime)), 3)
+        self.assertIsNotNone(self.db.crawler_process())
 
-        self.assertEqual(status.phase, stop_request.StopPhase.IDLE, "到上限就得放掉，不能永远停着")
-        self.assertEqual(len(self._closes(runtime)), 2, "过了上限不再动手")
-        self.assertIsNone(self.db.crawler_process(), "放弃之后才清事实")
-
-    def test_a_replaced_target_ends_the_old_retry_and_leaves_b_alone(self):
+    def test_a_replaced_target_preserves_old_cleanup_debt_and_leaves_b_alone(self):
         watch, runtime = self._watch_at_the_deadline()
         watch.tick(self.conn)
 
         b_started = self.db.record_crawler_process(pid=9201, round_id=2)
         status = watch.tick(self.conn)
 
-        self.assertEqual(status.phase, stop_request.StopPhase.IDLE)
-        self.assertEqual(len(self._closes(runtime)), 1, "B 接手之后不再重试")
+        self.assertEqual(status.phase, stop_request.StopPhase.CLEANUP_PENDING)
+        self.assertEqual(status.code, "target_replaced")
+        self.assertEqual(len(self._closes(runtime)), 1, "B 接手不能授权旧窗口处理 B")
         row = self.db.crawler_process()
         self.assertEqual((row["pid"], row["started_at"]), (9201, b_started))
 

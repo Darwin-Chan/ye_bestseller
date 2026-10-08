@@ -336,30 +336,37 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
     ov_products, ov_skus = _inventory_counts(conn, today)
     current = rounds.active_round(db, today)
     stale = None if current is not None else rounds.active_round(db)
-    # 今天已有进行中的轮次时，点「开始抓取」是续跑——范围以轮次自身为准（与 run.py
-    # 同一条规则），与闸门无关；所以闸门只锁「新建一轮」。
-    locked = state.plan_confirming or (plan.blocked and current is None)
-    if is_merge_only(cfg) and not trial:
-        # 本机不做采集：页首那句已经说清，这里不再给「点开始抓取会…」这类承诺
-        # （hint 只谈采集；库里留着进行中的轮次也不改这条）。
-        hint = ""
+    # 开始页仅表达新建；无终态旧轮不是「可暂停续跑」的证明。
+    locked = state.plan_confirming or plan.blocked
+    unfinished = current or stale
+    start_allowed = not locked and not (is_merge_only(cfg) and not trial)
+    if state.stopping:
+        hint = "上一次停止仍在核验或收尾，请等待收尾完成再明确开始新轮。"
+        start_allowed = False
     elif crawler is not None:
         hint = _crawler_hint(crawler)
-    elif current is not None:
-        hint = (f"轮次 #{current.id} 正在进行（{current.run_date}），"
-                "点「开始抓取」会按它的店铺范围续跑。")
-    elif stale is not None:
-        hint = (f"轮次 #{stale.id}（{stale.run_date}）已经跨天，不会再续跑；"
-                + ("本周计划还没确认，先新建不了新一轮。" if locked
-                   else "点「开始抓取」会新建一轮。"))
+        start_allowed = False
+    elif unfinished is not None:
+        hint = (f"轮次 #{unfinished.id}（{unfinished.run_date}）"
+                + ("已跨天，" if stale is not None else "")
+                + "尚未结束；开始页只新建轮次。"
+                "请先明确中止旧轮并等待收尾完成，再开始新轮。")
+        start_allowed = False
     else:
         hint = ""
+        try:
+            rounds.check_new(db, rounds.RoundRequest(today, tuple(
+                rounds.ShopScope(s.key, s.url, s.name) for s in shops)))
+        except rounds.ScopeMismatch as exc:
+            hint = str(exc)
+            start_allowed = False
     return {
         "ov": {"products": ov_products, "skus": ov_skus},
         "summary": _start_summary(conn, today),
         "shops": _start_shops(conn, shops, cfg, today, plan=plan),
         "total_shops": len(shops),
         "start_hint": hint,
+        "start_allowed": start_allowed,
         "plan_idle": idle,
         "plan_note": "\n".join(notes),
         "plan_gate": plan.blocked,
@@ -463,6 +470,8 @@ def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str,
             "running": state.crawler_running,
             "manually_paused": state.manually_paused,
             "has_round": False,
+            "can_resume": False,
+            "can_abort": False,
             "stopping": state.stopping,
             "stop_grace_sec": state.stop_grace_sec,
         }
@@ -480,6 +489,10 @@ def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str,
         "stop_grace_sec": state.stop_grace_sec,
         "has_round": True,
         "round_id": round_id,
+        "can_resume": (state.manually_paused and state.round_id == round_id
+                       and not state.crawler_running and not state.stopping
+                       and active.resumable_on(now)),
+        "can_abort": True,
         "started_hhmm": _fmt_hhmm(active.started_at),
         "elapsed_sec": timing.seconds,
         "elapsed_text": timing.text,
@@ -519,6 +532,8 @@ def result_view(conn: sqlite3.Connection, *, state: UiState, now: str,
     if run is None:
         return {
             "has_round": False,
+            "can_resume": False,
+            "can_abort": False,
             "stopping": state.stopping,
             "stop_grace_sec": state.stop_grace_sec,
         }

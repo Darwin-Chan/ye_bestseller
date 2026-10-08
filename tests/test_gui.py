@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import gui
 from bestseller_monitor import browser_proc, db, elapsed, plan_step, rounds, single_instance, \
@@ -58,6 +58,23 @@ def store_today_plan(db_path, *assignments):
         store_weekly_plan(Database(conn), weekly_plan.week_label(cst_date()), *assignments)
     finally:
         conn.close()
+
+
+def pause_for_resume(api, path, rid):
+    conn = connect(path)
+    try:
+        Database(conn).record_crawler_process(pid=4321, round_id=rid,
+                                            process_os_started="test-proof",
+                                            browser_state="NOT_STARTED")
+    finally:
+        conn.close()
+    proc = MagicMock(pid=4321)
+    proc.poll.return_value = None
+    api.proc = proc
+    api.round_id = rid
+    assert api.pause_run()["ok"]
+    proc.poll.return_value = 0
+    assert api.get_run()["can_resume"]
 
 
 class GuiPlanWiringTests(unittest.TestCase):
@@ -148,7 +165,7 @@ class GuiPlanWiringTests(unittest.TestCase):
         self.assertEqual(cached.status, plan_step.PrepStatus.READY_FROM_CACHE)
         with patch.object(Api, "_spawn_crawler") as spawn:
             self.assertTrue(api.start_run(["A01"])["ok"])
-            spawn.assert_called_once_with(["A01"])
+            spawn.assert_called_once_with(["A01"], new_intent=ANY)
 
     def test_start_run_is_refused_when_the_preparation_did_not_pass(self):
         api = self.api()
@@ -188,7 +205,7 @@ class GuiPlanWiringTests(unittest.TestCase):
             result = api.start_run(["A01"])
 
         self.assertTrue(result["ok"])
-        spawn.assert_called_once_with(["A01"])
+        spawn.assert_called_once_with(["A01"], new_intent=ANY)
         self.assertIn("未能确认最新", api.get_start()["plan_note"])
 
     def test_retry_prepare_runs_again_and_locks_the_page_while_it_does(self):
@@ -286,7 +303,7 @@ class GuiPlanWiringTests(unittest.TestCase):
         start = api.get_start()
 
         self.assertIn("纯汇总机", start["plan_note"])
-        self.assertEqual(start["start_hint"], "")
+        self.assertNotIn("会按它的店铺范围续跑", start["start_hint"])
 
     def test_a_degraded_preparation_marks_the_start_page_as_unconfirmed(self):
         """拉不到计划库、本地有那份：界面标注「未能确认最新」（spec §6 降级表）。"""
@@ -310,21 +327,23 @@ class GuiPlanWiringTests(unittest.TestCase):
         self.assertIn("未能确认最新", start["plan_note"])
         self.assertFalse(start["plan_locked"], "本地有那份：照常可采")
 
-    def test_start_run_resumes_todays_round_instead_of_blocking_without_a_plan(self):
-        """今天已有轮次（逃生口开出来的）：点开始是续跑——与 run.py 同一条规则，不拦。"""
+    def test_start_run_does_not_adopt_todays_round_without_a_plan(self):
         api = self.api()
         self.assertEqual(api.prepare().status, plan_step.PrepStatus.REFUSED)
         conn = connect(self.db_path)
         try:
-            new_round(Database(conn), "A01", run_date="2026-09-21")
+            rid = new_round(Database(conn), "A01", run_date="2026-09-21")
         finally:
             conn.close()
-
-        with patch.object(Api, "_spawn_crawler") as spawn:
+        with patch.object(gui.subprocess, "Popen") as spawn:
             result = api.start_run(["A01"])
-
-        self.assertTrue(result["ok"], "续跑不受闸门管（范围以轮次自身为准）")
-        spawn.assert_called_once_with(["A01"])
+        self.assertFalse(result["ok"])
+        spawn.assert_not_called()
+        conn = connect(self.db_path)
+        try:
+            self.assertTrue(rounds.load(Database(conn), rid).in_progress)
+        finally:
+            conn.close()
 
     def test_start_run_without_a_preparation_and_without_a_local_plan_is_refused(self):
         """准备没跑过、本地也没有本周计划：闸门照拦（不再是「让子进程去决定」）。"""
@@ -608,8 +627,9 @@ class GuiStopRequestTests(unittest.TestCase):
         self.assertIsNone(self._request_row())
         self.assertNotIn("stopping", result)
 
-    def test_a_leftover_stop_request_does_not_bite_the_next_run(self):
-        """旧请求只对写它时那个进程有效：新起的一轮不该被它停掉，也不必专门清它。"""
+    def test_leftover_owned_browser_debt_blocks_new_after_lock_release(self):
+        """锁已释放不等于收尾已完成：拥有的浏览器欠账仍阻止明确新建。"""
+        store_today_plan(self.db_path, ("A01", "m-test", 3))
         rid, started_at = self._running_crawler()
         self.api.proc = None
         self.lock.release()          # 采集进程已经走了，只剩表里那条请求
@@ -620,13 +640,14 @@ class GuiStopRequestTests(unittest.TestCase):
         finally:
             conn.close()
 
-        with patch.object(Api, "_spawn_crawler"):
+        with patch("gui.subprocess.Popen") as launch:
             result = self.api.start_run(["A01"])
 
-        self.assertTrue(result["ok"], result.get("error"))
-        self.assertIsNone(self.api._stop_watch.state, "新的一轮不该继承上一次的停止状态")
-        self.assertIsNotNone(self._request_row(),
-                             "惰性请求可以留着：认领按目标进程匹配，撞不上新进程")
+        self.assertFalse(result["ok"])
+        self.assertIn("收尾", result["error"])
+        launch.assert_not_called()
+        self.assertFalse(self.api.get_start()["start_allowed"])
+        self.assertIsNotNone(self._request_row(), "原目标收尾未核实，不能清掉停止请求")
 
     def test_force_acts_on_the_child_frozen_at_begin(self):
         """窗口打开之后界面又换了子进程句柄：被处置的必须是 begin 冻结的那一个。
@@ -746,12 +767,13 @@ class GuiRoundScopeTests(unittest.TestCase):
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM rounds").fetchone()[0], 0)
             finally:
                 conn.close()
-            spawn.assert_called_once_with(["A02"])
+            spawn.assert_called_once_with(["A02"], new_intent=ANY)
 
-    def test_start_run_reports_scope_mismatch_instead_of_merging(self):
+    def test_start_run_refuses_both_same_and_different_scope_of_unfinished_round(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "test.db"
             api = self._api(db_path)
+            store_today_plan(db_path, ("A01", "m-test", 3), ("A02", "m-test", 3))
             conn = connect(db_path)
             try:
                 rid = rounds.open(Database(conn), RoundRequest(
@@ -759,20 +781,14 @@ class GuiRoundScopeTests(unittest.TestCase):
                 )).round.id
             finally:
                 conn.close()
-
-            with patch.object(Api, "_spawn_crawler") as spawn:
-                self.assertTrue(api.start_run(["A01"])["ok"])
-                result = api.start_run(["A02"])
-
-            self.assertFalse(result["ok"])
-            self.assertIn("范围", result["error"])
-            spawn.assert_called_once_with(["A01"])
-            conn = connect(db_path)
-            try:
-                self.assertEqual(conn.execute("SELECT COUNT(*) FROM rounds").fetchone()[0], 1)
-                self.assertEqual(self._scope(db_path, rid), ["A01"])
-            finally:
-                conn.close()
+            with patch.object(gui.subprocess, "Popen") as spawn:
+                for keys in (["A01"], ["A02"]):
+                    result = api.start_run(keys)
+                    self.assertFalse(result["ok"])
+                    self.assertIn("中止", result["error"])
+                spawn.assert_not_called()
+            self.assertEqual(self._scope(db_path, rid), ["A01"])
+            self.assertIsNone(self._row(db_path, rid)["terminal_reason"])
 
     def test_start_page_reports_a_stale_round_without_touching_it(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -811,6 +827,7 @@ class GuiRoundScopeTests(unittest.TestCase):
             finally:
                 conn.close()
 
+            pause_for_resume(api, db_path, rid)
             with patch.object(Api, "_spawn_crawler") as spawn:
                 result = api.resume_run()
 
@@ -1413,6 +1430,7 @@ class GuiApiConstructionTests(unittest.TestCase):
         api = self.api(now=self.YESTERDAY_ISO,
                        shops=[Shop("A01", "店铺A", "https://A01.example/")])
 
+        pause_for_resume(api, self.path, round_id)
         with patch.object(Api, "_spawn_crawler") as spawn:
             result = api.resume_run()
 

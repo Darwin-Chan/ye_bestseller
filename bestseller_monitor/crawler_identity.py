@@ -84,7 +84,7 @@ def current(conn, *, own_alive: bool = False, own_pid: int | None = None,
     """
     who = registered(conn)
     if not is_running(own_alive=own_alive):
-        if who is not None:
+        if who is not None and who.browser_state in ("NOT_STARTED", "BORROWED", "CLOSED"):
             Database(conn).clear_crawler_process(
                 target_pid=who.pid, target_started_at=who.started_at)
         return None

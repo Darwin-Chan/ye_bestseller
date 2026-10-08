@@ -5,9 +5,10 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 
 from .db import (
@@ -67,6 +68,37 @@ class RoundRequest:
     @property
     def shop_keys(self) -> tuple[str, ...]:
         return tuple(sorted({shop.key for shop in self.shops}))
+
+
+@dataclass(frozen=True)
+class NewRoundIntent:
+    """Read-only GUI preflight facts, carried unchanged to the locked opener."""
+
+    request: RoundRequest
+    after_round: int
+
+    def to_json(self) -> str:
+        return json.dumps({"date": self.request.run_date, "after_round": self.after_round,
+                           "shops": [[s.key, s.url, s.name] for s in self.request.shops]},
+                          ensure_ascii=False)
+
+    @classmethod
+    def from_json(cls, value: str) -> NewRoundIntent:
+        try:
+            data = json.loads(value)
+            if (not isinstance(data, dict) or not isinstance(data["date"], str)
+                    or date.fromisoformat(data["date"]).isoformat() != data["date"]
+                    or type(data["after_round"]) is not int or data["after_round"] < 0
+                    or not isinstance(data["shops"], list) or not data["shops"]
+                    or any(not isinstance(s, list) or len(s) != 3
+                           or not all(isinstance(v, str) and v.strip() for v in s)
+                           for s in data["shops"])
+                    or len({s[0] for s in data["shops"]}) != len(data["shops"])):
+                raise ValueError()
+            return cls(RoundRequest(data["date"], tuple(ShopScope(*s) for s in data["shops"])),
+                       data["after_round"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("无效的新建轮次意图") from exc
 
 
 @dataclass(frozen=True)
@@ -139,16 +171,24 @@ def finish(db: Database, round: Round, reason: TerminalReason, *,
     current = row["terminal_reason"]
     if current is not None:
         if current == reason.value:
-            return round
+            return load(db, round.id)
         raise RoundAlreadyFinished(
             f"轮次 #{round.id} 已经是 {current}，不能改写成 {reason.value}"
         )
     finished_at = _utc_iso(now)
-    db.conn.execute(
-        "UPDATE rounds SET terminal_reason=?, finished_at=?, note=? WHERE id=?",
+    changed = db.conn.execute(
+        "UPDATE rounds SET terminal_reason=?, finished_at=?, note=? WHERE id=? "
+        "AND terminal_reason IS NULL",
         (reason.value, finished_at, _merged_note(row["note"], note), round.id),
     )
     db.conn.commit()
+    if changed.rowcount == 0:
+        current = load(db, round.id)
+        if current.reason is reason:
+            return current
+        raise RoundAlreadyFinished(
+            f"轮次 #{round.id} 已经是 {_reason_text(current.reason)}，不能改写成 {reason.value}"
+        )
     return Round(id=round.id, run_date=round.run_date,
                  shop_keys=round.shop_keys, reason=reason,
                  started_at=round.started_at, finished_at=finished_at)
@@ -228,6 +268,43 @@ def check_scope(db: Database, request: RoundRequest) -> None:
     current = active_round(db, request.run_date)
     if current is not None:
         _require_same_scope(current, request)
+
+
+def check_new(db: Database, request: RoundRequest) -> None:
+    """Explicit new intent never resumes or silently terminates an open round."""
+    identity = db.crawler_process()
+    if identity is not None and identity["browser_state"] not in ("NOT_STARTED", "BORROWED", "CLOSED"):
+        raise ScopeMismatch("原采集浏览器或身份收尾尚未核实，不能开始新轮；请先完成原目标收尾。")
+    check_scope(db, request)
+    current = active_round(db)
+    if current is not None:
+        raise ScopeMismatch(
+            f"轮次 #{current.id}（{current.run_date}）尚未结束；开始页只新建轮次。"
+            "请先明确中止旧轮并等待收尾完成，再开始新轮。"
+        )
+
+
+def plan_new(db: Database, request: RoundRequest) -> NewRoundIntent:
+    """Preflight does not create a round; a failed spawn leaves no empty round."""
+    check_new(db, request)
+    previous = latest(db)
+    return NewRoundIntent(request, previous.id if previous else 0)
+
+
+def open_new(db: Database, request: RoundRequest, intent: NewRoundIntent, *, now=None) -> OpenResult:
+    """Recheck under both collection lock and SQLite write transaction."""
+    db.conn.execute("BEGIN IMMEDIATE")
+    try:
+        previous = latest(db)
+        if (request.run_date != intent.request.run_date
+                or set(request.shops) != set(intent.request.shops)
+                or (previous.id if previous else 0) != intent.after_round):
+            raise ScopeMismatch("新建预检事实已变化，本次启动被拒绝；请重新确认后开始新轮。")
+        check_new(db, request)
+        return OpenResult(_create_round(db, request, _utc_iso(now)), created=True)
+    except Exception:
+        db.conn.rollback()
+        raise
 
 
 def _require_same_scope(current: Round, request: RoundRequest) -> None:

@@ -269,11 +269,11 @@ class Api:
         code = self.proc.poll()
         if code == single_instance.CRAWLER_BUSY_EXIT_CODE:
             return "已有采集进程在运行：本次启动被拒绝了，等它跑完再试。"
+        if code == 3:
+            return "新建或继续被拒绝：轮次预检事实或范围已变化，请检查旧轮并重新确认。"
         if self.cfg.local_trial:
             if code == 2:
                 return "本机试采启动被拒绝：请检查本机清单、选店与隔离路径，查看试采 logs/run.log。"
-            if code == 3:
-                return "本机试采范围与当日进行中轮次不同，请按原范围续跑。"
         if code == plan_step.PLAN_REFUSED_EXIT_CODE:
             return ("开轮前准备没通过：本次启动被拒绝了——本机没有可用的本周计划"
                     "（拉不到计划库、本地也没落库）。")
@@ -284,7 +284,7 @@ class Api:
         return views.UiState(
             round_id=self.round_id,
             crawler_running=self._own_crawler_alive(),
-            manually_paused=self.user_paused,
+            manually_paused=(self.user_paused and self._paused_round_id == self.round_id),
             stopping=self._stop_watch.state,
             stop_grace_sec=self._stop_watch.grace_sec,
             start_error=self._refused_start_message(),
@@ -402,17 +402,13 @@ class Api:
     def _plan_block_reason(self, db: Database) -> str | None:
         """闸门判定（ADR-0035）：本地没有本周计划就不开轮——与开始页同一处判定。
 
-        **纯汇总机先判**：角色是配置事实，这台机器不做采集。今天已有进行中的轮次不拦：
-        那是续跑，范围以轮次自身为准（与 run.py 同一条规则）。闸门拦的只是新开轮；子
-        进程 run.py 开跑前自己还会准备一次，那里有同样的判定与同一条退出码（它的拒绝
-        在这里也有文案，见 `_refused_start_message`）。
+        纯汇总机先判角色。开始页只表达新建，不借数据库旧轮跳过计划门禁；
+        子进程 run.py 开跑前还会准备并核验一次。普通 CLI 的续跑能力保持独立。
         """
         if self.cfg.local_trial:
             return None
         if is_merge_only(self.cfg):
             return plan_step.MERGE_ONLY_REFUSAL
-        if rounds.active_round(db, self._today()) is not None:
-            return None
         plan = plan_step.start_plan(db, self.cfg, self._current_week(), self._prep)
         return plan.reason if plan.blocked else None
 
@@ -473,9 +469,7 @@ class Api:
                     # 轮次由采集子进程创建，界面在这里随轮询认领它。
                     self.round_id = view["round_id"]
                 if self.cfg.local_trial:
-                    active = rounds.active_round(Database(conn), self._today())
-                    view["awaiting_resume"] = (active is not None and active.resumable_on(self._now())
-                                                and not view["running"] and not self._stop_watch.state)
+                    view["awaiting_resume"] = view.get("can_resume", False)
                 return self._collection_payload(view)
             finally:
                 conn.close()
@@ -499,12 +493,14 @@ class Api:
             other_space=self._formal_cfg.db_file if self.cfg.local_trial else None,
         )
 
-    def _spawn_crawler(self, keys: list[str] | None = None):
-        """拉起采集子进程；keys 为空表示「开始或续跑」，范围由子进程按轮次决定。
+    def _spawn_crawler(self, keys: list[str] | None = None, *, new_intent=None):
+        """拉起采集子进程；明确新建带意图，继续不带 keys、按原轮次范围。
 
         界面不发 `--ignore-plan`：逃生口只在命令行（ADR-0035）。
         """
         cmd = [_crawler_python(), str(PROJECT_ROOT / "run.py")]
+        if new_intent is not None:
+            cmd += ["--new-round-intent", new_intent.to_json()]
         if self.cfg.local_trial:
             cmd += ["--local-trial", "--config", str(self.config_file)]
         limit = ",".join(k for k in (keys or []) if k)
@@ -555,9 +551,9 @@ class Api:
                 # 判据是环境事实，不是「本界面记不记得自己拉过子进程」。
                 if self.current_crawler(conn) is not None:
                     return {"ok": False, "error": _BUSY_ERROR}
-                # 只读地问一句会不会被拒：今天已有轮次但范围不同就给出可读理由。
+                # 只读新建预检：任何未结束轮都须明确中止，不隐式收养或结束它。
                 # 轮次本身由采集子进程创建，启动失败不会留下空的「进行中」轮次。
-                rounds.check_scope(db, request)
+                new_intent = rounds.plan_new(db, request)
             except ScopeMismatch as exc:
                 return {"ok": False, "error": str(exc)}
             finally:
@@ -566,7 +562,7 @@ class Api:
             self.user_paused = False
             self._paused_round_id = None
             try:
-                self._spawn_crawler(keys)
+                self._spawn_crawler(keys, new_intent=new_intent)
             except Exception as exc:  # noqa: BLE001
                 return {"ok": False, "error": f"启动抓取失败：{exc}"}
             return {"ok": True}
@@ -595,9 +591,12 @@ class Api:
                     if stale is not None:
                         return {"ok": False, "error": (
                             f"轮次 #{stale.id}（{stale.run_date}）已经跨天，不能再续跑；"
-                            "请点「开始抓取」新建一轮。"
+                            "请先明确中止旧轮并等待收尾，再开始新轮。"
                         )}
                     return {"ok": False, "error": "没有进行中的轮次可继续。"}
+                if not self.user_paused or self._paused_round_id != current.id:
+                    return {"ok": False, "error": "没有本界面明确暂停并完成收尾的轮次可继续；"
+                            "数据库尚未结束不等于已暂停，请先明确中止旧轮。"}
                 if not current.resumable_on(self._now()):
                     return {"ok": False, "error": (
                         f"轮次 #{current.id}（{current.run_date}）现在不可续跑；"
@@ -679,11 +678,27 @@ class Api:
         停的可能是本界面拉起的子进程，也可能是别处起的（命令行、上一次界面留下的）。
         """
         with self._lock:
-            self.user_paused = False
             conn = self._open_conn()
             try:
-                self._stop_watch.tick(conn)
                 db = Database(conn)
+                status = self._stop_watch.status
+                if status.phase is not stop_request.StopPhase.IDLE:
+                    # Promotion is authorized for the original frozen target only,
+                    # including when that process has exited and cleanup remains.
+                    if (status.round_id is None or (expected_target is not None and
+                            (status.target != expected_target
+                             or status.round_id != expected_round_id))):
+                        return {"ok": False, "error": "停止目标已变化，请重新确认。"}
+                    settled = rounds.finish_if_open(
+                        db, rounds.load(db, status.round_id), TerminalReason.ABANDONED,
+                        note="GUI 人工中止（放弃）")
+                    self.user_paused = False
+                    self._stop_watch.begin(conn, stop_request.StopCommand(
+                        stop_request.StopKind.ABORT, status.target, status.round_id))
+                    return {"ok": True, "round_id": settled.id,
+                            "reason": settled.reason.value,
+                            "stopping": self._stop_watch.state}
+                self._stop_watch.tick(conn)
                 # 这一处清理不是卫生，是语义：中止压过暂停——留下的暂停请求会让
                 # 采集进程把这次停止认领成「暂停」，日志与店铺备注就写错了原因。
                 identity = self.current_crawler(conn)
@@ -700,6 +715,7 @@ class Api:
                 if rid is not None:
                     rounds.finish_if_open(db, rounds.load(db, rid), TerminalReason.ABANDONED,
                                           note="GUI 人工中止（放弃）")
+                self.user_paused = False
                 if identity is None:
                     return {"ok": True, "round_id": rid}   # 采集进程已经不在了
                 # 同一条身份行只读这一次：它是「正在跑的是谁」，也是这次停止的目标。
@@ -716,6 +732,8 @@ class Api:
                             "retryable": True, "code": str(exc)}
                 log.info("中止：轮次 #%s 已收尾为人工放弃，等采集进程自己停下。", rid)
                 return {"ok": True, "round_id": rid, "stopping": self._stop_watch.state}
+            except (sqlite3.Error, RuntimeError, ValueError) as exc:
+                return {"ok": False, "error": f"中止或收尾尚未完成：{exc}", "retryable": True}
             finally:
                 conn.close()
 

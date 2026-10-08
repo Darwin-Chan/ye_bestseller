@@ -191,7 +191,7 @@
   <div class="modal-mask"></div>
   <div class="modal-box">
     <div class="modal-title" id="confirmTitle">确认终止本轮抓取？</div>
-    <div class="modal-sub" id="confirmSub">已抓取数据已被存储，未抓取数据将被忽略。</div>
+    <div class="modal-sub" id="confirmSub">本轮将结束且不能继续；已抓取数据保留。收尾完成后，需明确点击开始才能新建。</div>
     <div class="modal-actions">
       <button class="btn ghost" id="confirmCancel">取消</button>
       <button class="btn danger" id="confirmOk">确定</button>
@@ -367,7 +367,7 @@
     const locked = !!d.plan_locked;
     $("selAllBtn").disabled = locked;
     $("selNoneBtn").disabled = locked;
-    $("startBtn").disabled = locked;
+    $("startBtn").disabled = locked || d.start_allowed === false;
     const total = d.total_shops;
     const rows = d.shops.map((s, i) => {
       const chk = s.default_checked ? "checked" : "";
@@ -489,17 +489,20 @@
       const stopping = d.stopping || null;
       $("rStopping").style.display = stopping ? "block" : "none";
       if (stopping) $("rStopping").textContent = stoppingText(d);
-      $("rPaused").style.display = (!stopping && (d.manually_paused || d.awaiting_resume)) ? "block" : "none";
+      $("rPaused").style.display = (!stopping && d.can_resume) ? "block" : "none";
       // 暂停态显示“继续”，运行态显示“暂停”；停止途中两个都不给点。
-      $("resumeBtn").style.display = (!stopping && (d.manually_paused || d.awaiting_resume)) ? "" : "none";
-      $("pauseBtn").style.display = (!stopping && !(d.manually_paused || d.awaiting_resume)) ? "" : "none";
-      $("abortBtn").disabled = !!stopping;
+      $("resumeBtn").style.display = (!stopping && d.can_resume) ? "" : "none";
+      $("pauseBtn").style.display = (!stopping && !d.can_resume) ? "" : "none";
+      $("abortBtn").disabled = !d.can_abort;
     } else {
+      $("resumeBtn").style.display = "none";
+      $("pauseBtn").style.display = "none";
+      $("abortBtn").disabled = true;
       $("rProgressLine").textContent = d.running ? "抓取进程正在启动…" : "本轮已结束，正在加载结果…";
     }
 
     // 结束判定：子进程结束且非暂停 -> 看结果
-    if (!d.running && !(d.manually_paused || d.awaiting_resume) && hasStartedRun) {
+    if (!d.running && !d.can_resume && !d.stopping && hasStartedRun) {
       stopPolling();
       // 已经在链上：这里直接取，不能再排队，否则等的是自己。
       const res = await callApi("get_result");
@@ -527,7 +530,7 @@
   function openConfirm(opts) {
     opts = opts || {};
     $("confirmTitle").textContent = opts.title || "确认终止本轮抓取？";
-    $("confirmSub").textContent = opts.sub || "已抓取数据已被存储，未抓取数据将被忽略。";
+    $("confirmSub").textContent = opts.sub || "本轮将结束且不能继续；已抓取数据保留。收尾完成后，需明确点击开始才能新建。";
     $("confirmOk").textContent = opts.ok || "确定";
     confirmAction = opts.action || null;
     $("confirmModal").classList.add("show");
