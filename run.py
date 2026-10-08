@@ -5,10 +5,11 @@
     python run.py --pages-per-shop 2       # 冒烟：每家店只翻 2 页（压过计划快照）
     python run.py --max-detail 60          # 冒烟：全轮最多 60 个详情页
     python run.py --limit-shops A01,A02    # 只处理指定店铺
+    python run.py --local-trial --limit-shops A01  # 本机试采，不共享；独立历史
     python run.py --ignore-plan            # 逃生口：拉不到计划库且本地没有本周计划时照开
                                            # （自由采集 + 记账为计划外；计划可用时不生效）
 
-开跑前先走一次「开轮前的一次准备」（spec §6，与界面打开时同一步，见
+正式采集开跑前先走一次「开轮前的一次准备」（spec §6，与界面打开时同一步，见
 `plan_step.prepare_week`）：拉计划库 → 同步店铺清单 → 确认/生成/发布本周计划 →
 把整周计划落进本机计划表 → 缺口检查告警（只告警不拦）。拉不到计划库、本地也没有
 本周计划时**默认拒绝开轮**（退出码 `plan_step.PLAN_REFUSED_EXIT_CODE`）——今天已有
@@ -16,18 +17,24 @@
 记账为计划外」运行。显式点名了归别台机器的店（`--limit-shops`）= 越权补采：**放行
 并上报**，记进轮次备注与本机计划外账（`plan_step.record_deviations`）。
 
-纯汇总机（`machine.role = merge_only`）不做采集：在碰采集清单与库之前就明确拒绝
+纯汇总机（`machine.role = merge_only`）默认不做正式采集：在碰采集清单与库之前就明确拒绝
 （退出码 2，文案 `plan_step.MERGE_ONLY_REFUSAL`）——这台机器上跑交换台。
 
-`--shops` 是人工冒烟的清单覆盖：开轮前的准备把它当作「本机清单副本」与计划库比对
+显式 `--local-trial` 不改角色：不准备共享计划，从本机启用清单选店，写入
+<data_dir 的上一级>/local-trial/{data,logs}，不进入正式分析或共享。沿用自己的
+轮次与历史，同日已采商品可能跳过；正式判断集共享仍照常。GUI 入口由另一票交付。
+
+`--shops` 是人工冒烟的清单覆盖：正式采集的开轮前准备把它当作「本机清单副本」与计划库比对
 （两边都变会停下不猜，单边变化可能被推送）——拿临时清单冒烟时留意这一点。
 """
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import logging
 import logging.handlers
 import sys
+import sqlite3
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -41,6 +48,9 @@ from bestseller_monitor.pipeline import (  # noqa: E402
     requested_round_shops,
     run_round,
 )
+from bestseller_monitor.collection_context import (  # noqa: E402
+    TrialUnavailable, for_collection, prepare_trial_storage, trial_shops,
+)
 from bestseller_monitor.rounds import ScopeMismatch  # noqa: E402
 from bestseller_monitor import plan_step, rounds, single_instance, sound  # noqa: E402
 
@@ -53,6 +63,8 @@ EXIT_NOT_DONE = 2
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", type=Path, default=ROOT / "config" / "config.toml")
+    p.add_argument("--local-trial", action="store_true",
+                   help="本机试采，不共享：独立保存并沿用试采历史；同日已采商品可能跳过")
     p.add_argument("--shops", type=Path, default=None, help="覆盖 config 中的店铺 CSV")
     p.add_argument("--pages-per-shop", type=int, default=None, help="覆盖每家店翻页上限")
     p.add_argument("--max-detail", type=int, default=None, help="覆盖单轮详情预算（商品机会数）")
@@ -89,6 +101,8 @@ def main() -> int:
     args = parse_args()
     cfg = Config.from_file(args.config, root=ROOT)
     cfg = apply_overrides(cfg, args)
+    if args.local_trial:
+        return _run_local_trial(cfg, args)
     # 纯汇总机不做采集（spec §6 降级表末行、§11）：在碰采集清单与库之前就拒绝——这台
     # 机器上没有采集清单是常态（不采 1688），库该由交换台开；这里一样都不动。
     if is_merge_only(cfg):
@@ -155,17 +169,57 @@ def main() -> int:
         print("本机清单里没有有效店铺（active=1）。")
         return EXIT_NOT_DONE
 
+    return _collect(cfg, shops, deviations=deviations)
+
+
+def _run_local_trial(formal: Config, args: argparse.Namespace) -> int:
+    try:
+        cfg = for_collection(formal, local_trial=True, config_file=args.config)
+        keys = ({s.strip() for s in args.limit_shops.split(",") if s.strip()}
+                if args.limit_shops is not None else None)
+        prepare_trial_storage(cfg)
+        shops = trial_shops(cfg, keys)
+        print(f"\n>>> 本机试采，不共享；数据库：{cfg.db_file}；日志：{cfg.logs_dir}。"
+              "沿用试采历史，同日已采商品可能跳过。\n")
+        return _collect(cfg, shops)
+    except (TrialUnavailable, OSError, ValueError, sqlite3.Error) as exc:
+        print(f"\n>>> 本机试采无法开始：{exc}；请检查本机清单与隔离空间，不会回退到正式数据。\n")
+        return EXIT_NOT_DONE
+
+
+def _collect(cfg: Config, shops, *, deviations=()) -> int:
     cfg.ensure_dirs()
     sound.configure(cfg.alarm_on_intervention)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        handlers=[
-            logging.StreamHandler(),
-            logging.handlers.RotatingFileHandler(cfg.logs_dir / "run.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8"),
-        ],
-    )
+    with _collection_logging(cfg):
+        return _run_collection(cfg, shops, deviations=deviations)
 
+
+@contextmanager
+def _collection_logging(cfg: Config):
+    """Own and close this CLI run's handlers; never reuse a formal log handler."""
+    logger = logging.getLogger()
+    previous, level = list(logger.handlers), logger.level
+    handlers = [logging.StreamHandler(), logging.handlers.RotatingFileHandler(
+        cfg.logs_dir / "run.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8")]
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    try:
+        for handler in previous:
+            logger.removeHandler(handler)
+        logger.setLevel(logging.INFO)
+        for handler in handlers:
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+        yield
+    finally:
+        for handler in handlers:
+            logger.removeHandler(handler)
+            handler.close()
+        for handler in previous:
+            logger.addHandler(handler)
+        logger.setLevel(level)
+
+
+def _run_collection(cfg: Config, shops, *, deviations=()) -> int:
     try:
         run_round(cfg, shops, deviations=deviations)
     except CrawlerAlreadyRunning as exc:

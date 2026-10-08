@@ -203,6 +203,8 @@ class Config:
     # 分析配置（config/analysis.toml）的路径：交换台判断集这半从它读判断缓存与账本的位置。
     # 与 config.toml 同目录（`from_file` 按配置路径推），只给路径、不在这里解析它的内容。
     analysis_config: pathlib.Path | None = None
+    # 显式采集入口派生，不从配置文件读取，不改变机器角色。
+    local_trial: bool = False
 
     @classmethod
     def from_file(cls, path: pathlib.Path, root: pathlib.Path | None = None) -> "Config":

@@ -438,6 +438,8 @@ def run_once(cfg, *, only: str | None = None, week: str | None = None,
     `store` 是图片库（None = 按配置现搭）；`emit` 收进度行（小窗口用）。
     退出码见模块 docstring。
     """
+    if getattr(cfg, "local_trial", False):
+        raise ValueError("本机试采上下文不得导出或交换；正式判断集请使用正式配置。")
     now = now or dt.datetime.now(CST)
     week = week or export.current_week()
     machine_id = str(cfg.machine_id)

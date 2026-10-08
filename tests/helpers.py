@@ -92,6 +92,7 @@ def crawler_cfg(**overrides):
         "base_url": "",
         "pages_per_shop_override": None,
         "plan_pages": None,
+        "local_trial": False,
         "alarm_on_intervention": False,
         "db_file": None,
         "shop_csv": None,
