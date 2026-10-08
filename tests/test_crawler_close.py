@@ -197,17 +197,176 @@ class CrawlerCloseTests(unittest.TestCase):
         self.tasks.pop()()
         self.assertTrue(self.window.destroyed)
 
-    def test_pause_is_kept_open_until_ticket_02(self):
+    def test_pause_cancel_continues_original_stop_without_page_polling(self):
         self.running()
         self.api.pause_run()
+        self.install(answer=False)
+        self.assertFalse(self.window.close())
+        self.assertIn("本轮正在暂停，采集进程正在停止", self.messages[0])
+        self.assertIsNone(self.terminal())
+        self.assertFalse(self.window.destroyed)
+        self.assertEqual(len(self.tasks), 1, "independent driver must continue original pause")
+        self.tasks.pop()()
+        self.assertFalse(self.process.alive)
+        self.assertFalse(self.window.destroyed)
+        self.assertIsNone(self.terminal())
+        self.assertTrue(self.api.get_run()["manually_paused"])
+
+    def test_fully_paused_with_lost_gui_memory_uses_confirmed_pause_association(self):
+        self.running()
+        self.api.pause_run()
+        self.process.alive = False
+        self.api.get_start()
+        self.api.round_id = None  # abort_run historically returns no-op success here
+        self.install(answer=True)
+        self.assertFalse(self.window.close())
+        self.assertIn("本轮已暂停", self.messages[0])
+        self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
+        self.tasks.pop()()
+        self.assertTrue(self.window.destroyed)
+
+    def test_pause_can_finish_during_confirmation_without_losing_round_authorization(self):
+        self.running()
+        self.api.pause_run()
+        def confirm(text):
+            self.process.alive = False
+            self.api.get_start()
+            return True
+        self.install(answer=confirm)
+        self.assertFalse(self.window.close())
+        self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
+        self.tasks.pop()()
+        self.assertTrue(self.window.destroyed)
+
+    def paused_cleanup(self):
+        self.running()
+        runtime = stop_request.RecordingStopRuntime(
+            alive=True, browser=stop_request.BoundBrowser(9201, 9222, "browser-proof"),
+            browser_state="OWNED")
+        runtime.fail_close = True
+        self.api._stop_watch = stop_request.StopWatch(runtime, now=self.clock)
+        self.assertTrue(self.api.pause_run()["ok"])
+        self.clock.advance(20)
+        self.api.get_start()
+        self.process.alive = False
+        return runtime
+
+    def test_pause_cleanup_confirm_keeps_exact_browser_and_original_deadline(self):
+        runtime = self.paused_cleanup()
+        self.api.round_id = None  # the original command is authoritative
+        before = list(runtime.actions)
+        def wait(seconds):
+            self.assertFalse(self.window.destroyed)
+            self.clock.advance(9)
+            runtime.fail_close = False
+        self.install(answer=True, wait=wait)
+        self.assertFalse(self.window.close())
+        self.assertIn("本轮正在完成暂停收尾", self.messages[0])
+        self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
+        self.tasks.pop()()
+        self.assertTrue(self.window.destroyed)
+        self.assertEqual(sum(a[0] == "bind" for a in runtime.actions), 1)
+        self.assertEqual(sum(a[0] == "terminate" for a in runtime.actions), 1)
+        browsers = [a[1] for a in runtime.actions if a[0] == "close_browser"]
+        self.assertTrue(browsers)
+        self.assertTrue(all(b == stop_request.BoundBrowser(9201, 9222, "browser-proof")
+                            for b in browsers))
+        self.assertEqual(before[0], runtime.actions[0])
+
+    def check_pause_declined(self, stage, *, dialog_failure=False):
+        runtime = None
+        if stage == "cleanup":
+            runtime = self.paused_cleanup()
+        else:
+            self.running()
+            self.api.pause_run()
+            if stage == "paused":
+                self.process.alive = False
+                self.api.get_start()
+        conn = connect(self.path)
+        try:
+            insert_inventory_rows(conn, [("A01", "offer1", "2026-10-08")])
+        finally:
+            conn.close()
+        def broken(text):
+            raise OSError("dialog failed")
+        self.install(answer=broken if dialog_failure else False,
+                     wait=(lambda seconds: setattr(runtime, "fail_close", False))
+                     if runtime else None)
+        self.assertFalse(self.window.close())
+        headings = {"stopping": "本轮正在暂停，采集进程正在停止",
+                    "cleanup": "本轮正在完成暂停收尾", "paused": "本轮已暂停"}
+        self.assertIn(headings[stage], self.messages[0])
+        self.assertIn("不可续跑", self.messages[0])
+        self.assertFalse(self.window.destroyed)
+        self.assertIsNone(self.terminal())
+        self.assertEqual(len(self.tasks), 0 if stage == "paused" else 1)
+        while self.tasks:
+            self.tasks.pop()()
+        self.assertIsNone(self.terminal())
+        self.assertFalse(self.window.destroyed)
+        self.assertTrue(self.api.get_run()["manually_paused"])
+        self.assertFalse(self.process.alive)
+        conn = connect(self.path)
+        try:
+            self.assertEqual(conn.execute("SELECT stock FROM inventory").fetchone()[0], 3)
+            self.assertIsNone(Database(conn).stop_request())
+        finally:
+            conn.close()
+        if runtime:
+            self.assertEqual(sum(a[0] == "bind" for a in runtime.actions), 1)
+            self.assertEqual(sum(a[0] == "terminate" for a in runtime.actions), 1)
+
+    def test_pause_stopping_dialog_failure_continues_original_pause(self):
+        self.check_pause_declined("stopping", dialog_failure=True)
+
+    def test_pause_cleanup_cancel_continues_original_cleanup(self):
+        self.check_pause_declined("cleanup")
+
+    def test_pause_cleanup_dialog_failure_continues_original_cleanup(self):
+        self.check_pause_declined("cleanup", dialog_failure=True)
+
+    def test_fully_paused_cancel_keeps_round_and_data(self):
+        self.check_pause_declined("paused")
+
+    def test_fully_paused_dialog_failure_keeps_round_and_data(self):
+        self.check_pause_declined("paused", dialog_failure=True)
+
+    def test_unknown_pause_cannot_abandon_arbitrary_unfinished_round(self):
+        self.running()
+        self.process.alive = False
+        # A pause without any owned live crawler cannot establish association.
+        self.api.round_id = None
+        self.assertTrue(self.api.pause_run()["ok"])
         self.install(answer=True)
         self.assertFalse(self.window.close())
         self.assertIsNone(self.terminal())
-        self.assertEqual(self.tasks, [])
         self.assertFalse(self.window.destroyed)
+        self.assertEqual(self.tasks, [])
+        self.assertIn("无法确认", self.messages[0])
 
-    def test_fully_paused_round_is_not_treated_as_empty(self):
+    def test_pause_without_live_owned_execution_does_not_authorize_gui_remembered_round(self):
         self.running()
+        self.process.alive = False
+        self.assertTrue(self.api.pause_run()["ok"])
+        self.install(answer=True)
+        self.assertFalse(self.window.close())
+        self.assertFalse(self.window.destroyed)
+        self.assertIsNone(self.terminal())
+        self.assertEqual(self.tasks, [])
+
+    def test_fully_paused_terminal_write_failure_keeps_pause_and_allows_retry(self):
+        self.running()
+        denied = True
+        def open_conn():
+            conn = connect(self.path)
+            def authorize(action, table, column, dbname, source):
+                return (sqlite3.SQLITE_DENY if denied and action == sqlite3.SQLITE_UPDATE
+                        and table == "rounds" else sqlite3.SQLITE_OK)
+            conn.set_authorizer(authorize)
+            return conn
+        self.api = gui_api(open_conn=open_conn, stop_clock=self.clock)
+        self.api.proc, self.api.round_id = self.process, self.rid
         self.api.pause_run()
         self.process.alive = False
         self.api.get_start()
@@ -215,6 +374,200 @@ class CrawlerCloseTests(unittest.TestCase):
         self.assertFalse(self.window.close())
         self.assertIsNone(self.terminal())
         self.assertFalse(self.window.destroyed)
+        self.assertEqual(self.tasks, [])
+        self.assertTrue(self.api.get_run()["manually_paused"])
+        self.assertIn("重试", self.messages[-1])
+        denied = False
+        self.window.close()
+        self.tasks.pop()()
+        self.assertTrue(self.window.destroyed)
+        self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
+
+    def test_paused_terminal_changes_during_confirmation_are_not_rewritten(self):
+        self.running()
+        self.api.pause_run()
+        self.process.alive = False
+        self.api.get_start()
+        def confirm(text):
+            conn = connect(self.path)
+            try:
+                rounds.finish_if_open(Database(conn), rounds.load(Database(conn), self.rid),
+                                      rounds.TerminalReason.COMPLETED)
+            finally:
+                conn.close()
+            return True
+        self.install(answer=confirm)
+        self.assertFalse(self.window.close())
+        self.assertFalse(self.window.destroyed)
+        self.assertEqual(self.tasks, [])
+        self.assertEqual(self.terminal(), rounds.TerminalReason.COMPLETED)
+        self.assertIn("重新确认", self.messages[-1])
+
+    def test_pause_confirm_keeps_committed_inventory(self):
+        self.running()
+        self.api.pause_run()
+        conn = connect(self.path)
+        try:
+            insert_inventory_rows(conn, [("A01", "offer1", "2026-10-08")])
+        finally:
+            conn.close()
+        self.install(answer=True)
+        self.window.close()
+        self.tasks.pop()()
+        self.assertTrue(self.window.destroyed)
+        self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
+        conn = connect(self.path)
+        try:
+            self.assertEqual(conn.execute("SELECT stock FROM inventory").fetchone()[0], 3)
+        finally:
+            conn.close()
+
+    def test_pause_upgrade_force_failure_never_rolls_back_to_resumable(self):
+        self.running()
+        self.api.pause_run()
+        self.process.fail_terminate = True
+        waits = 0
+        def wait(seconds):
+            nonlocal waits
+            waits += 1
+            self.clock.advance(20)
+            self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
+            self.assertFalse(self.api.get_run()["manually_paused"])
+            self.assertFalse(self.api.resume_run()["ok"])
+            if waits == 2:
+                self.assertFalse(self.window.destroyed)
+                self.process.fail_terminate = False
+            if waits > 3:
+                self.fail("must retry original stop")
+        self.install(answer=True, wait=wait)
+        self.window.close()
+        self.tasks.pop()()
+        self.assertTrue(self.window.destroyed)
+        self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
+
+    def test_paused_target_replacement_during_confirmation_is_not_abandoned(self):
+        self.running()
+        self.api.pause_run()
+        def confirm(text):
+            conn = connect(self.path)
+            try:
+                self.new_rid = self.rid  # a replacement may share the same round
+                Database(conn).record_crawler_process(pid=9999, round_id=self.new_rid,
+                                                      process_os_started="other-proof")
+            finally:
+                conn.close()
+            return True
+        self.install(answer=confirm)
+        self.assertFalse(self.window.close())
+        self.assertIsNone(self.terminal())
+        conn = connect(self.path)
+        try:
+            self.assertIsNone(rounds.load(Database(conn), self.new_rid).reason)
+        finally:
+            conn.close()
+        self.assertFalse(self.window.destroyed)
+        while self.tasks:
+            self.tasks.pop()()
+        self.assertTrue(self.process.alive)
+
+    def check_committed_abort_with_failed_pause_signal_cleanup(self, stage):
+        runtime = self.paused_cleanup() if stage == "cleanup" else None
+        if runtime is None:
+            self.running()
+            self.api.pause_run()
+            self.clock.advance(7)
+        conn = connect(self.path)
+        try:
+            insert_inventory_rows(conn, [("A01", "offer1", "2026-10-08")])
+        finally:
+            conn.close()
+        denied = True
+        def open_conn():
+            conn = connect(self.path)
+            def authorize(action, table, column, dbname, source):
+                return (sqlite3.SQLITE_DENY if denied and action == sqlite3.SQLITE_DELETE
+                        and table == "stop_requests" else sqlite3.SQLITE_OK)
+            conn.set_authorizer(authorize)
+            return conn
+        self.api._open_conn = open_conn  # real SQLite failure at the DB boundary
+        waits = 0
+        def wait(seconds):
+            nonlocal waits, denied
+            waits += 1
+            self.assertFalse(self.window.destroyed)
+            self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
+            self.assertFalse(self.api.resume_run()["ok"])
+            if waits == 2:
+                denied = False
+                self.clock.advance(2)
+                if runtime:
+                    runtime.fail_close = False
+            if waits > 3:
+                self.fail("must recover without another close or page polling")
+        self.install(answer=True, wait=wait)
+        self.assertFalse(self.window.close())
+        self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
+        self.assertFalse(self.window.destroyed)
+        self.assertEqual(len(self.tasks), 1)
+        self.tasks.pop()()  # only independent driver; no page polling/second close
+        self.assertTrue(self.window.destroyed)
+        self.assertFalse(self.process.alive)
+        self.assertEqual(waits, 2, "must keep retrying before DB recovery")
+        conn = connect(self.path)
+        try:
+            self.assertEqual(conn.execute("SELECT stock FROM inventory").fetchone()[0], 3)
+            self.assertIsNone(Database(conn).stop_request())
+        finally:
+            conn.close()
+        if runtime:
+            self.assertEqual(sum(a[0] == "bind" for a in runtime.actions), 1)
+            self.assertEqual(sum(a[0] == "terminate" for a in runtime.actions), 1)
+            self.assertTrue(all(a[1] == stop_request.BoundBrowser(9201, 9222, "browser-proof")
+                                for a in runtime.actions if a[0] == "close_browser"))
+
+    def test_pause_stopping_abandoned_then_db_failure_keeps_independent_driver(self):
+        self.check_committed_abort_with_failed_pause_signal_cleanup("stopping")
+
+    def test_pause_cleanup_abandoned_then_db_failure_keeps_independent_driver(self):
+        self.check_committed_abort_with_failed_pause_signal_cleanup("cleanup")
+
+    def test_pause_stopping_confirm_reuses_original_stop_window(self):
+        self.running()
+        self.assertTrue(self.api.pause_run()["ok"])
+        self.clock.advance(7)
+        waits = 0
+        def wait(seconds):
+            nonlocal waits
+            waits += 1
+            if waits > 1:
+                self.fail("pause upgrade restarted the original deadline")
+            self.clock.advance(2)
+        self.install(answer=True, wait=wait)
+        self.assertFalse(self.window.close())
+        self.assertIn("本轮正在暂停，采集进程正在停止", self.messages[0])
+        self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
+        self.assertIn("正在中止", self.window.title)
+        conn = connect(self.path)
+        try:
+            self.assertIsNone(Database(conn).stop_request())
+        finally:
+            conn.close()
+        self.tasks.pop()()
+        self.assertTrue(self.window.destroyed)
+        self.assertFalse(self.process.alive)
+
+    def test_fully_paused_confirm_writes_abandonment_without_process(self):
+        self.running()
+        self.api.pause_run()
+        self.process.alive = False
+        self.api.get_start()
+        self.install(answer=True)
+        self.assertFalse(self.window.close())
+        self.assertIn("本轮已暂停", self.messages[0])
+        self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
+        self.assertFalse(self.api.resume_run()["ok"])
+        self.tasks.pop()()
+        self.assertTrue(self.window.destroyed)
 
     def test_identity_registration_gap_is_not_authorized_for_force_stop(self):
         self.api.proc = self.process

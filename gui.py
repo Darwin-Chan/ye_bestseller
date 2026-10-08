@@ -163,6 +163,7 @@ class Api:
         self.round_id: int | None = None
         self.start_ts: float | None = None
         self.user_paused = False
+        self._paused_round_id: int | None = None
         self._closing_requested = False
         self._elapsed_base = 0.0
         self._run_start_ts: float | None = None
@@ -454,6 +455,7 @@ class Api:
             self.round_id = None
             self.start_ts = time.time()
             self.user_paused = False
+            self._paused_round_id = None
             self._elapsed_base = 0.0
             self._run_start_ts = time.time()
             try:
@@ -499,6 +501,7 @@ class Api:
             self.round_id = rid
             self.start_ts = time.time()
             self.user_paused = False
+            self._paused_round_id = None
             self._run_start_ts = time.time()
             try:
                 # 不带范围：子进程按「开始或续跑」处理，范围以轮次自身为准，
@@ -528,7 +531,8 @@ class Api:
                 db = Database(conn)
                 if not self._own_crawler_alive():
                     return {"ok": True}   # 本界面没有在跑的采集进程，没什么可暂停的
-                target = stop_request.StopTarget.of(crawler_identity.registered(conn))
+                identity = crawler_identity.registered(conn)
+                target = stop_request.StopTarget.of(identity)
                 if target is None:
                     if self._own_crawler_alive():
                         # 身份登记前没有浏览器副作用；只结束入口时冻结的 child。
@@ -540,7 +544,9 @@ class Api:
                 try:
                     self._stop_watch.begin(
                         conn, stop_request.StopCommand(
-                            stop_request.StopKind.PAUSE, target, self.round_id))
+                            stop_request.StopKind.PAUSE, target,
+                            identity.round_id))
+                    self._paused_round_id = self._stop_watch.status.round_id
                 except RuntimeError as exc:
                     return {"ok": False, "error": "暂时无法确认停止目标，请稍后重试。",
                             "retryable": True, "code": str(exc)}
@@ -603,16 +609,44 @@ class Api:
         with self._lock:
             conn = self._open_conn()
             try:
-                status = self._stop_watch.tick(conn)
+                status = self._stop_watch.status
+                promotion_error = None
+                if (status.kind is stop_request.StopKind.PAUSE
+                        and status.round_id is not None
+                        and rounds.load(Database(conn), status.round_id).reason
+                        is TerminalReason.ABANDONED):
+                    try:
+                        self._stop_watch.begin(conn, stop_request.StopCommand(
+                            stop_request.StopKind.ABORT, status.target, status.round_id))
+                    except Exception as exc:
+                        # Terminal is committed. Retry promotion on the same watch,
+                        # without consuming pause ACKs or resetting its deadlines.
+                        log.warning("人工放弃已提交，原暂停升级待重试：%s", exc)
+                        promotion_error = "database_unavailable"
+                status = self._stop_watch.status if promotion_error else self._stop_watch.tick(conn)
                 identity = self.current_crawler(conn)
                 target = stop_request.StopTarget.of(identity)
-                rid = identity.round_id if identity is not None else self.round_id
-                reason = rounds.load(Database(conn), rid).reason if rid is not None else None
+                rid = (identity.round_id if identity is not None else
+                       self._paused_round_id if self.user_paused
+                       and self._paused_round_id is not None else self.round_id)
                 if status.phase is not stop_request.StopPhase.IDLE:
-                    kind = "paused" if status.kind is stop_request.StopKind.PAUSE else "aborting"
-                    return CloseSnapshot(kind, target or status.target, status.round_id, status.code)
+                    if (status.round_id is None
+                            or (target is not None and target != status.target)):
+                        return CloseSnapshot("unknown", target, status.round_id, status.code)
+                    stop_reason = rounds.load(Database(conn), status.round_id).reason
+                    kind = ("paused" if status.kind is stop_request.StopKind.PAUSE
+                            and stop_reason is None else "aborting")
+                    phase = ("stopping" if self.any_crawler_running()
+                             and status.phase is not stop_request.StopPhase.CLEANUP_PENDING
+                             else "cleanup") if kind == "paused" else None
+                    return CloseSnapshot(kind, status.target, status.round_id,
+                                         promotion_error or status.code, phase)
+                reason = rounds.load(Database(conn), rid).reason if rid is not None else None
                 if self.user_paused and reason is None:
-                    return CloseSnapshot("paused", target, rid)
+                    if (self._paused_round_id is None or rid != self._paused_round_id
+                            or target is not None):
+                        return CloseSnapshot("unknown", target, rid)
+                    return CloseSnapshot("paused", round_id=rid, pause_phase="paused")
                 if self.any_crawler_running():
                     if target is None or rid is None:
                         return CloseSnapshot("unknown", target, rid)
@@ -626,7 +660,15 @@ class Api:
         """Freeze authorization, block GUI starts, reuse the existing abort entry."""
         with self._lock:
             current = self.close_snapshot()
-            if current.kind == "idle" and expected.target is not None:
+            if expected.kind == "paused":
+                # Only natural progression of this explicitly paused round is
+                # allowed; a replacement or a new terminal needs fresh review.
+                if (current.kind != "paused" or current.round_id != expected.round_id
+                        or (current.target != expected.target
+                            and not (current.target is None
+                                     and current.pause_phase == "paused"))):
+                    return {"ok": False, "error": "暂停轮次或采集目标已变化，请重新确认关闭。"}
+            elif current.kind == "idle" and expected.target is not None:
                 conn = self._open_conn()
                 try:
                     if rounds.load(Database(conn), expected.round_id).reason is None:
@@ -636,13 +678,37 @@ class Api:
             elif (current.target != expected.target or current.round_id != expected.round_id
                   or current.kind != expected.kind):
                 return {"ok": False, "error": "采集状态已变化，请重新确认关闭。"}
-            if current.kind in ("paused", "unknown"):
+            if current.kind == "paused":
+                conn = self._open_conn()
+                try:
+                    db = Database(conn)
+                    rounds.finish_if_open(db, rounds.load(db, expected.round_id),
+                                          TerminalReason.ABANDONED,
+                                          note="GUI 关窗人工中止（放弃）")
+                    if rounds.load(db, expected.round_id).reason is not TerminalReason.ABANDONED:
+                        return {"ok": False, "error": "轮次已结束，不能改写终态；请重新确认关闭。"}
+                    self.user_paused = False
+                    self._closing_requested = True
+                    status = self._stop_watch.status
+                    if status.phase is not stop_request.StopPhase.IDLE:
+                        try:
+                            self._stop_watch.begin(conn, stop_request.StopCommand(
+                                stop_request.StopKind.ABORT, status.target, expected.round_id))
+                        except Exception as exc:
+                            # Request accepted, not teardown completed. The independent
+                            # close driver retries this exact promotion via snapshots.
+                            log.warning("人工放弃已核实，停止请求清理待重试：%s", exc)
+                    return {"ok": True}
+                finally:
+                    conn.close()
+            if current.kind == "unknown":
                 return {"ok": False, "error": "暂时不能安全关闭，窗口保持打开。"}
             self._closing_requested = True
             if current.kind == "idle":
                 return {"ok": True}
             if (current.kind == "aborting"
                     and self._stop_watch.status.phase is not stop_request.StopPhase.IDLE):
+                # Snapshot reconciliation also retries a committed pause promotion.
                 return {"ok": True}
             return self.abort_run(expected_target=expected.target,
                                   expected_round_id=expected.round_id)
@@ -652,10 +718,12 @@ class Api:
         with self._lock:
             if self.close_snapshot().kind != "idle":
                 return False
-            if expected.target is not None:
+            if expected.target is not None or expected.kind == "paused":
                 conn = self._open_conn()
                 try:
-                    return rounds.load(Database(conn), expected.round_id).reason is not None
+                    reason = rounds.load(Database(conn), expected.round_id).reason
+                    return (reason is TerminalReason.ABANDONED if expected.kind == "paused"
+                            else reason is not None)
                 finally:
                     conn.close()
             return True

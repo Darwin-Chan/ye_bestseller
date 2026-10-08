@@ -403,6 +403,14 @@ class StopWatch:
                 raise RuntimeError("stop already targets another crawler")
             if command.kind is not StopKind.ABORT:
                 raise RuntimeError("stop already active")
+            if active.round_id != command.round_id:
+                raise RuntimeError("stop round changed")
+            # Promotion changes the reason only: retain capability, phase, browser,
+            # acknowledgment and deadlines, including exited-target cleanup.
+            Database(conn).clear_stop_request(target_pid=command.target.pid,
+                                             target_started_at=command.target.started_at)
+            self._in_flight = replace(self._in_flight, command=command)
+            return self.status
         current = crawler_identity.registered(conn)
         target = command.target
         if (current is None or current.pid != target.pid

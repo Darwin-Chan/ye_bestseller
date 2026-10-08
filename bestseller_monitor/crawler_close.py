@@ -17,6 +17,7 @@ class CloseSnapshot:
     target: StopTarget | None = None
     round_id: int | None = None
     error: str | None = None
+    pause_phase: str | None = None
 
 
 CONFIRM_TEXT = ("采集正在进行中。\n\n"
@@ -37,6 +38,7 @@ def install_close_guard(window, api, *, confirm, notify, title,
     working = False
     allow_close = False
     authorized = None
+    pause_driving = False
 
     def report(message):
         log.warning("关闭未完成：%s", message)
@@ -93,6 +95,42 @@ def install_close_guard(window, api, *, confirm, notify, title,
             with lock:
                 working = False
 
+    def continue_pause(original):
+        """Cancel keeps the original pause moving without a page/JS dependency."""
+        nonlocal pause_driving
+        if original.pause_phase == "paused":
+            return
+        with lock:
+            if pause_driving:
+                return
+            pause_driving = True
+
+        def drive():
+            nonlocal pause_driving
+            try:
+                while True:
+                    try:
+                        state = api.close_snapshot()
+                        if (state.kind not in ("paused", "aborting")
+                                or state.pause_phase == "paused"
+                                or state.round_id != original.round_id
+                                or (state.target is not None and state.target != original.target)):
+                            return
+                    except Exception:
+                        log.exception("暂停收尾暂不可核验；继续原暂停")
+                    wait(0.2)
+            except Exception:
+                log.exception("暂停独立收尾驱动失败；保留窗口与暂停状态")
+            finally:
+                with lock:
+                    pause_driving = False
+        try:
+            launch(drive)
+        except Exception:
+            with lock:
+                pause_driving = False
+            log.exception("无法启动暂停独立收尾；保留窗口与暂停状态")
+
     def on_closing():
         nonlocal confirming, working, allow_close, authorized
         with lock:
@@ -108,15 +146,19 @@ def install_close_guard(window, api, *, confirm, notify, title,
             if confirming or working:
                 return False
             confirming = True
+        state = None
         try:
             state = api.close_snapshot()
-            if state.kind == "paused":
-                report("本轮处于暂停或暂停收尾状态，请先中止本轮后再关闭。")
-                return False
             if state.kind == "unknown":
                 report("暂时无法确认采集身份，请稍后重试。")
                 return False
-            if state.kind == "running" and not confirm(CONFIRM_TEXT):
+            text = CONFIRM_TEXT
+            if state.kind == "paused":
+                heading = {"stopping": "本轮正在暂停，采集进程正在停止",
+                           "cleanup": "本轮正在完成暂停收尾",
+                           "paused": "本轮已暂停"}[state.pause_phase]
+                text = heading + "。\n\n" + CONFIRM_TEXT.split("\n\n", 1)[1]
+            if state.kind in ("running", "paused") and not confirm(text):
                 return False
             result = api.begin_close(state)
             if not result["ok"]:
@@ -144,5 +186,7 @@ def install_close_guard(window, api, *, confirm, notify, title,
         finally:
             with lock:
                 confirming = False
+            if state is not None and state.kind == "paused" and not working:
+                continue_pause(state)
 
     window.events.closing += on_closing
