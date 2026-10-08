@@ -50,7 +50,7 @@ from bestseller_monitor.rounds import (
     TerminalReason,
 )
 from bestseller_monitor import plan_step, rounds, weekly_plan
-from bestseller_monitor import browser_proc, crawler_identity
+from bestseller_monitor import crawler_identity
 from bestseller_monitor import single_instance
 from bestseller_monitor import shop_progress
 from bestseller_monitor import stop_request
@@ -231,11 +231,9 @@ class Api:
                     # Missing/ambiguous identity cannot authorize a context change.
                     if not target.db_file.exists():
                         return {"ok": False, "error": "其他模式的采集正在运行，不能切换模式。"}
-                    identity = crawler_identity.registered_in_file(target.db_file)
-                    source_identity = crawler_identity.registered_in_file(self.cfg.db_file)
-                    if (identity is None or source_identity is not None
-                            or not identity.process_os_started
-                            or browser_proc.process_creation_proof(identity.pid) != identity.process_os_started):
+                    identity = crawler_identity.verified_in_file(
+                        target.db_file, other_space=self.cfg.db_file)
+                    if identity.pid is None:
                         return {"ok": False, "error": "采集目标不明或其他模式正在运行，不能切换模式。"}
                 if enabled:
                     configured = load_shops(target.shop_csv, allow_empty=True)
@@ -504,25 +502,13 @@ class Api:
 
     def current_crawler(self, conn):
         """正在跑的采集进程身份；没有就返回 None（判据 + 顺手清残留在 crawler_identity）。"""
-        identity = crawler_identity.current(
+        return crawler_identity.current(
             conn,
             own_alive=self._own_crawler_alive(),
             own_pid=self.proc.pid if self.proc is not None else None,
             own_round_id=self.round_id,
+            other_space=self._formal_cfg.db_file if self.cfg.local_trial else None,
         )
-        if self.cfg.local_trial and self.any_crawler_running():
-            try:
-                other = crawler_identity.registered_in_file(self._formal_cfg.db_file)
-            except (OSError, sqlite3.Error):
-                return crawler_identity.CrawlerProcess(note="无法核验其他模式的进程身份")
-            if other is not None:
-                return crawler_identity.CrawlerProcess(note="其他模式有采集身份，无法安全确认试采目标")
-        if (self.cfg.local_trial and identity is not None and identity.pid is not None
-                and not self._own_crawler_alive()
-                and (not identity.process_os_started
-                     or browser_proc.process_creation_proof(identity.pid) != identity.process_os_started)):
-            return crawler_identity.CrawlerProcess(note="无法核验本机试采进程身份")
-        return identity
 
     def _spawn_crawler(self, keys: list[str] | None = None):
         """拉起采集子进程；keys 为空表示「开始或续跑」，范围由子进程按轮次决定。

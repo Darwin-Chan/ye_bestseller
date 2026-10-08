@@ -329,6 +329,7 @@
   }
 
   // ---------- 开始页 ----------
+  const formalSelectionLegend = $("selLegend").textContent;
   function refreshStart() { return queued(loadStart); }
 
   async function loadStart() {
@@ -340,6 +341,9 @@
     $("todaySummary").textContent = d.summary.started
       ? d.summary.text
       : "今天尚未开始，可勾选店铺后点「开始抓取」";
+    $("selLegend").textContent = d.local_trial
+      ? "本机试采：手动勾选本机启用店铺，不受周计划限制；页数沿用本机清单。历史保留，同日已采商品可能跳过。未勾选任意店铺时禁止开始。"
+      : formalSelectionLegend;
     $("activeRoundBanner").textContent = d.start_hint || "";
     $("activeRoundBanner").style.display = d.start_hint ? "block" : "none";
     // 本周计划的那件事（闸门、空手、未能确认最新等）；没有要说的就收起。

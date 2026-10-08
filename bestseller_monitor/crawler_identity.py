@@ -21,7 +21,7 @@ from pathlib import Path
 import sqlite3
 from dataclasses import dataclass
 
-from . import single_instance
+from . import browser_proc, single_instance
 from .db import Database
 
 
@@ -76,7 +76,7 @@ def registered(conn) -> CrawlerProcess | None:
 
 
 def current(conn, *, own_alive: bool = False, own_pid: int | None = None,
-            own_round_id: int | None = None) -> CrawlerProcess | None:
+            own_round_id: int | None = None, other_space: Path | None = None) -> CrawlerProcess | None:
     """现在是谁在跑：没人在跑返回 None；有身份行就给那一行；只有锁、没有行就用界面自己的子进程凑一个。
 
     `own_*` 是界面会话自己的事实（它拉起的那个子进程、它认领的轮次），只在 `own_alive`
@@ -88,9 +88,9 @@ def current(conn, *, own_alive: bool = False, own_pid: int | None = None,
             Database(conn).clear_crawler_process(
                 target_pid=who.pid, target_started_at=who.started_at)
         return None
-    if who is not None:
-        return who
-    return CrawlerProcess(pid=own_pid if own_alive else None, round_id=own_round_id)
+    identity = who if who is not None else CrawlerProcess(
+        pid=own_pid if own_alive else None, round_id=own_round_id)
+    return _verified(identity, other_space, own_alive=own_alive) if other_space is not None else identity
 
 
 def registered_in_file(path: Path) -> CrawlerProcess | None:
@@ -107,3 +107,41 @@ def registered_in_file(path: Path) -> CrawlerProcess | None:
         if table is None:
             return None
         return registered(conn)
+
+
+def _registration_may_be_live(identity: CrawlerProcess | None) -> bool:
+    if identity is None:
+        return False
+    if browser_proc.process_alive(identity.pid) is False:
+        return False
+    actual = browser_proc.process_creation_proof(identity.pid)
+    # A different known creation proof means the original process is gone
+    # (PID reuse). Missing proof is unknown, not permission to ignore it.
+    return not (actual is not None and identity.process_os_started is not None
+                and actual != identity.process_os_started)
+
+
+def _verified(identity: CrawlerProcess | None, other_space: Path, *, own_alive=False) -> CrawlerProcess:
+    try:
+        if _registration_may_be_live(registered_in_file(other_space)):
+            return CrawlerProcess(note="其他模式有采集身份，无法安全确认目标")
+    except (OSError, sqlite3.Error):
+        return CrawlerProcess(note="无法核验其他模式的进程身份")
+    if identity is None:
+        return CrawlerProcess(note="采集进程身份未知")
+    if own_alive:
+        return identity
+    if (identity.pid is None or not identity.process_os_started
+            or browser_proc.process_alive(identity.pid) is not True
+            or browser_proc.process_creation_proof(identity.pid) != identity.process_os_started):
+        return CrawlerProcess(note="无法核验采集进程身份")
+    return identity
+
+
+def verified_in_file(path: Path, *, other_space: Path) -> CrawlerProcess:
+    """Resolve a requested running space without modifying either database.
+
+    Caller has already observed the machine lock; a known, matching OS proof
+    and no live/unknown competing registration are needed to attach.
+    """
+    return _verified(registered_in_file(path), other_space)

@@ -18,6 +18,7 @@ class LocalTrialGuiTests(unittest.TestCase):
     def setUp(self):
         self.enterContext(frozen_clock())
         self.enterContext(isolated_locks())
+        self.enterContext(patch("bestseller_monitor.browser_proc.process_alive", return_value=True))
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.config = self.root / "config.toml"
         self.config.write_text(MINIMAL_CONFIG + 'role = "merge_only"\n', encoding="utf-8")
@@ -359,3 +360,81 @@ class LocalTrialGuiTests(unittest.TestCase):
                 error = self.api.get_run()["start_error"]
                 self.assertIn(expected, error)
                 self.assertNotIn("本周计划", error)
+
+    def test_dead_formal_registration_does_not_block_live_cli_trial_or_modify_formal(self):
+        from bestseller_monitor import single_instance, browser_proc
+        from bestseller_monitor.db import Database
+        from helpers import new_round
+        with closing(connect(self.cfg.db_file)) as formal:
+            fid = new_round(Database(formal), "A02")
+            Database(formal).record_crawler_process(9876, fid, process_os_started="dead-formal")
+            before = "\n".join(formal.iterdump())
+        path = self.root / "local-trial/data/bestseller.db"
+        with closing(connect(path)) as trial:
+            rid = new_round(Database(trial), "A01")
+            Database(trial).record_crawler_process(4321, rid, process_os_started="trial-proof")
+        lock = single_instance.acquire(single_instance.CRAWLER_LOCK)
+        self.addCleanup(lock.release)
+        cap = browser_proc.ProcessCapability(4321, 91, "trial-proof")
+        with patch.object(browser_proc, "process_alive", create=True,
+                          side_effect=lambda pid: False if pid == 9876 else True), \
+                patch.object(browser_proc, "process_creation_proof", side_effect=lambda pid: "trial-proof" if pid == 4321 else None), \
+                patch.object(browser_proc, "bind_process", return_value=cap), \
+                patch.object(browser_proc, "process_capability_alive", return_value=True):
+            self.assertTrue(self.api.set_local_trial(True)["ok"])
+            self.assertEqual(self.api.get_start()["crawler"]["pid"], 4321)
+            self.assertTrue(self.api.get_run()["running"])
+            self.assertTrue(self.api.pause_run()["ok"])
+            with closing(connect(path)) as trial:
+                self.assertEqual(Database(trial).stop_request()["target_pid"], 4321)
+            self.assertTrue(self.api.abort_run()["ok"])
+        with closing(connect(self.cfg.db_file)) as formal:
+            self.assertEqual("\n".join(formal.iterdump()), before)
+        with closing(connect(path)) as trial:
+            self.assertEqual(trial.execute("SELECT terminal_reason FROM rounds WHERE id=?", (rid,)).fetchone()[0], "ABANDONED")
+
+    def test_unverifiable_formal_registration_still_blocks_cli_trial_attachment(self):
+        from bestseller_monitor import single_instance, browser_proc
+        from bestseller_monitor.db import Database
+        from helpers import new_round
+        with closing(connect(self.cfg.db_file)) as formal:
+            rid = new_round(Database(formal), "A02")
+            Database(formal).record_crawler_process(9876, rid, process_os_started="formal-proof")
+        with closing(connect(self.root / "local-trial/data/bestseller.db")) as trial:
+            rid = new_round(Database(trial), "A01")
+            Database(trial).record_crawler_process(4321, rid, process_os_started="trial-proof")
+        lock = single_instance.acquire(single_instance.CRAWLER_LOCK)
+        self.addCleanup(lock.release)
+        with patch.object(browser_proc, "process_alive", create=True, return_value=None), \
+                patch.object(browser_proc, "process_creation_proof", side_effect=lambda pid: "trial-proof" if pid == 4321 else None):
+            self.assertFalse(self.api.set_local_trial(True)["ok"])
+        self.assertFalse(self.api.cfg.local_trial)
+
+    def test_live_conflicting_formal_identity_blocks_matching_trial_identity(self):
+        from bestseller_monitor import single_instance, browser_proc
+        from bestseller_monitor.db import Database
+        from helpers import new_round
+        for path, pid, proof in ((self.cfg.db_file, 9876, "formal-proof"),
+                                 (self.root / "local-trial/data/bestseller.db", 4321, "trial-proof")):
+            with closing(connect(path)) as conn:
+                rid = new_round(Database(conn), "A01")
+                Database(conn).record_crawler_process(pid, rid, process_os_started=proof)
+        lock = single_instance.acquire(single_instance.CRAWLER_LOCK)
+        self.addCleanup(lock.release)
+        with patch.object(browser_proc, "process_creation_proof", side_effect=lambda pid: "formal-proof" if pid == 9876 else "trial-proof"):
+            self.assertFalse(self.api.set_local_trial(True)["ok"])
+        self.assertFalse(self.api.cfg.local_trial)
+
+    def test_dead_trial_registration_with_matching_proof_cannot_authorize_attachment(self):
+        from bestseller_monitor import single_instance, browser_proc
+        from bestseller_monitor.db import Database
+        from helpers import new_round
+        with closing(connect(self.root / "local-trial/data/bestseller.db")) as conn:
+            rid = new_round(Database(conn), "A01")
+            Database(conn).record_crawler_process(4321, rid, process_os_started="old-proof")
+        lock = single_instance.acquire(single_instance.CRAWLER_LOCK)
+        self.addCleanup(lock.release)
+        with patch.object(browser_proc, "process_alive", return_value=False), \
+                patch.object(browser_proc, "process_creation_proof", return_value="old-proof"):
+            self.assertFalse(self.api.set_local_trial(True)["ok"])
+        self.assertFalse(self.api.cfg.local_trial)
