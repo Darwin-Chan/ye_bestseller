@@ -277,7 +277,7 @@ def _start_shops(conn: sqlite3.Connection, shops, cfg, today: str, *,
             # 默认勾选 = 本机份额（票据 06）里**今天还没采够**的（票据 17）：今日已采
             # 商品数 ≥ 页数×每页张数判「采够」，默认不勾、可手工勾上重采——同日去重
             # 只挡详情页，采够的店再来一遍只是白走列表页。越权店默认不勾、可显式勾上。
-            "default_checked": shop.key in plan.my_shops
+            "default_checked": (getattr(cfg, "local_trial", False) or shop.key in plan.my_shops)
             and products < pages * _CARDS_PER_PAGE,
             "plan_label": mark.label,
             "plan_mark": mark.text,
@@ -310,13 +310,15 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
     """
     today = cst_date(now)
     db = Database(conn)
-    plan = plan_step.start_plan(db, cfg, weekly_plan.week_label(today), state.prep)
+    trial = getattr(cfg, "local_trial", False)
+    plan = (plan_step.StartPlan(weekly_plan.week_label(today), cfg.machine_id) if trial
+            else plan_step.start_plan(db, cfg, weekly_plan.week_label(today), state.prep))
     idle = plan.local is not None and not plan.my_shops
     notes = []
     if state.plan_confirming:
         notes.append("正在确认本周计划…（拉计划库 → 同步清单 → 确认计划）："
                      "确认完这一页会自动更新。")
-    if is_merge_only(cfg):
+    if is_merge_only(cfg) and not trial:
         # 采集入口在这台机器上是被拒的（判定与命令行同源，见 plan_step.MERGE_ONLY_REFUSAL）：
         # 把话说在点「开始抓取」之前，而不是等人点了才知道。
         notes.append(plan_step.MERGE_ONLY_REFUSAL)
@@ -337,7 +339,7 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
     # 今天已有进行中的轮次时，点「开始抓取」是续跑——范围以轮次自身为准（与 run.py
     # 同一条规则），与闸门无关；所以闸门只锁「新建一轮」。
     locked = state.plan_confirming or (plan.blocked and current is None)
-    if is_merge_only(cfg):
+    if is_merge_only(cfg) and not trial:
         # 本机不做采集：页首那句已经说清，这里不再给「点开始抓取会…」这类承诺
         # （hint 只谈采集；库里留着进行中的轮次也不改这条）。
         hint = ""

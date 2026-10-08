@@ -29,6 +29,36 @@ class ProcessCapability:
     created: str
 
 
+def process_alive(pid: int) -> bool | None:
+    """Read OS liveness without a termination handle; denial is never death."""
+    if os.name != "nt":
+        return None
+    from ctypes import wintypes
+    try:
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.CloseHandle.restype = wintypes.BOOL
+        handle = kernel.OpenProcess(0x1000, False, int(pid))
+        if not handle:
+            # ERROR_INVALID_PARAMETER: PID no longer exists. Access denial/other
+            # failures are unknown and cannot authorize ignoring a registration.
+            return False if ctypes.get_last_error() == 87 else None
+        try:
+            code = wintypes.DWORD()
+            if not kernel.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return None
+            return int(code.value) == 259
+        finally:
+            kernel.CloseHandle(handle)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("查询进程存活失败（PID %s）：%s", pid, exc)
+        return None
+
+
 def process_creation_proof(pid: int) -> str | None:
     """Return the Windows creation FILETIME for pid, or None when unverifiable."""
     if os.name != "nt":

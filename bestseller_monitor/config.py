@@ -203,6 +203,8 @@ class Config:
     # 分析配置（config/analysis.toml）的路径：交换台判断集这半从它读判断缓存与账本的位置。
     # 与 config.toml 同目录（`from_file` 按配置路径推），只给路径、不在这里解析它的内容。
     analysis_config: pathlib.Path | None = None
+    # 显式采集入口派生，不从配置文件读取，不改变机器角色。
+    local_trial: bool = False
 
     @classmethod
     def from_file(cls, path: pathlib.Path, root: pathlib.Path | None = None) -> "Config":
@@ -354,8 +356,11 @@ def decode_shops_bytes(raw: bytes) -> str:
         return raw.decode("gbk", errors="replace")
 
 
-def load_shops(path: pathlib.Path) -> list[Shop]:
-    """读取 shops.csv；跳过空行与 # 注释行；url 去空格。"""
+def load_shops(path: pathlib.Path, *, allow_empty: bool = False) -> list[Shop]:
+    """读取 shops.csv；跳过空行与 # 注释行；url 去空格。
+
+    allow_empty 仅供试采恢复原轮次：允许有效表头无数据行，默认仍拒绝空清单。
+    """
     if not path.exists():
         raise FileNotFoundError(
             f"找不到店铺清单：{path}\n请复制 config/shops.example.csv 为 config/shops.csv 并填入真实店铺。"
@@ -394,5 +399,8 @@ def load_shops(path: pathlib.Path) -> list[Shop]:
                  offer_list_url=offer_list or None, pages=pages, active=active)
         )
     if not shops:
-        raise ValueError("shops.csv 中没有店铺。")
+        if not allow_empty:
+            raise ValueError("shops.csv 中没有店铺。")
+        if not {"shop_key", "shop_url"}.issubset(reader.fieldnames or []):
+            raise ValueError("shops.csv 缺少有效店铺表头。")
     return shops

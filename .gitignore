@@ -33,6 +33,7 @@ venv/
 
 # 1688 监控运行数据（不上传；真库 / 真 profile 在仓库外，路径见 config）
 /data/
+/local-trial/
 /output/
 /profiles/
 *.db

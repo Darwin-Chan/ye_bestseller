@@ -52,7 +52,7 @@ def refresh_api(db_file: Path, *, now: str = NOW, open_conn=None):
     """
     from gui import Api
 
-    return Api(cfg=SimpleNamespace(db_file=db_file, max_pages_per_shop=3),
+    return Api(cfg=SimpleNamespace(db_file=db_file, max_pages_per_shop=3, local_trial=False),
                shops=[], now=lambda: now, open_conn=open_conn)
 
 

@@ -21,11 +21,15 @@
 """
 from __future__ import annotations
 
+import contextlib
+import dataclasses
+import functools
 import ctypes
 import datetime as dt
 import logging
 import logging.handlers
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -36,6 +40,7 @@ import webview
 
 from bestseller_monitor.crawler_close import CloseSnapshot, install_close_guard
 
+from bestseller_monitor.collection_context import for_collection, prepare_trial_storage
 from bestseller_monitor.config import Config, Shop, is_merge_only, load_shops
 from bestseller_monitor.db import CST, Database, connect, cst_date, utcnow
 from bestseller_monitor.rounds import (
@@ -95,7 +100,7 @@ def _local_shops(cfg) -> list[Shop]:
     开始页说明白，而不是拿「找不到店铺清单」把人挡在门外。
     """
     try:
-        return [shop for shop in load_shops(cfg.shop_csv) if shop.active]
+        return [shop for shop in load_shops(cfg.shop_csv, allow_empty=is_merge_only(cfg)) if shop.active]
     except FileNotFoundError:
         if not is_merge_only(cfg):
             raise
@@ -123,6 +128,37 @@ def _configure_gui_logging(cfg=None) -> logging.Handler:
     return handler
 
 
+@contextlib.contextmanager
+def _trial_gui_logging(cfg):
+    """Keep trial migration/control logs out of previously installed formal handlers."""
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    for handler in handlers:
+        root.removeHandler(handler)
+    trial_handler = None
+    try:
+        trial_handler = _configure_gui_logging(cfg)
+        yield
+    finally:
+        if trial_handler is not None:
+            root.removeHandler(trial_handler)
+            trial_handler.close()
+        for handler in handlers:
+            root.addHandler(handler)
+        root.setLevel(level)
+
+
+def _collection_action(method):
+    @functools.wraps(method)
+    def call(self, *args, **kwargs):
+        with self._lock:
+            if self.cfg.local_trial:
+                with _trial_gui_logging(self.cfg):
+                    return method(self, *args, **kwargs)
+            return method(self, *args, **kwargs)
+    return call
+
+
 CLOSING_REFUSAL = "正在关闭程序，不能开始、续跑或暂停。"
 
 
@@ -134,7 +170,7 @@ class Api:
     """
 
     def __init__(self, cfg=None, *, now=utcnow, open_conn=None, shops=None,
-                 stop_clock=None):
+                 stop_clock=None, config_file=None):
         """构造 interface：配置、时刻、连接与店铺表都可以注入。
 
         `main()` 仍写 `Api()`——那时配置按项目默认位置读，「现在」取本机时间，
@@ -145,6 +181,9 @@ class Api:
         """
         self.cfg = cfg if cfg is not None else Config.from_file(
             PROJECT_ROOT / "config" / "config.toml", root=PROJECT_ROOT)
+        self._formal_cfg = self.cfg
+        self.config_file = (Path(config_file) if config_file is not None else PROJECT_ROOT / "config/config.toml").resolve()
+        self._formal_open_conn = open_conn
         self._now = now
         self._open_conn = open_conn if open_conn is not None else (
             lambda: connect(self.cfg.db_file))
@@ -173,6 +212,51 @@ class Api:
             runtime, now=stop_clock or time.time,
         )
 
+    def set_local_trial(self, enabled: bool) -> dict:
+        """Explicit storage selection; never change machine identity or formal tools."""
+        with self._lock:
+            if self._closing_requested or self.prepare_running():
+                return {"ok": False, "error": "正在关闭或准备，暂不能切换采集模式。"}
+            if self._own_crawler_alive() or self._stop_watch.status.phase is not stop_request.StopPhase.IDLE:
+                return {"ok": False, "error": "采集或停止仍在进行，不能切换模式。"}
+            if bool(enabled) == self.cfg.local_trial:
+                return {"ok": True}
+            try:
+                target = for_collection(self._formal_cfg, local_trial=bool(enabled),
+                                        config_file=self.config_file)
+                if self.any_crawler_running():
+                    # Only attach to an already running process in the requested space.
+                    # Missing/ambiguous identity cannot authorize a context change.
+                    if not target.db_file.exists():
+                        return {"ok": False, "error": "其他模式的采集正在运行，不能切换模式。"}
+                    identity = crawler_identity.verified_in_file(
+                        target.db_file, other_space=self.cfg.db_file)
+                    if identity.pid is None:
+                        return {"ok": False, "error": "采集目标不明或其他模式正在运行，不能切换模式。"}
+                if enabled:
+                    configured = load_shops(target.shop_csv, allow_empty=True)
+                    prepare_trial_storage(target)
+                    shops = [shop for shop in configured if shop.active]
+                else:
+                    shops = _local_shops(target)
+            except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+                return {"ok": False, "error": f"不能进入本机试采，不会回退正式采集：{exc}"}
+            self.cfg = target
+            self._open_conn = (lambda: connect(self.cfg.db_file)) if enabled or self._formal_open_conn is None else self._formal_open_conn
+            self.shops = shops
+            self.proc = None
+            self.round_id = None
+            self.user_paused = False
+            self._paused_round_id = None
+            return {"ok": True}
+
+    def _collection_payload(self, payload: dict) -> dict:
+        return {**payload, "local_trial": self.cfg.local_trial,
+                "collection_label": "本机试采，不共享" if self.cfg.local_trial else "正式采集",
+                "database": str(self.cfg.db_file),
+                "mode_switch_locked": self._own_crawler_alive() or (self.cfg.local_trial and self.any_crawler_running())
+                or self._stop_watch.status.phase is not stop_request.StopPhase.IDLE}
+
     # ---------- 基础 ----------
     def _today(self) -> str:
         """今天的北京日期；「现在」来自构造时注入的时刻，不读挂钟。"""
@@ -185,6 +269,11 @@ class Api:
         code = self.proc.poll()
         if code == single_instance.CRAWLER_BUSY_EXIT_CODE:
             return "已有采集进程在运行：本次启动被拒绝了，等它跑完再试。"
+        if self.cfg.local_trial:
+            if code == 2:
+                return "本机试采启动被拒绝：请检查本机清单、选店与隔离路径，查看试采 logs/run.log。"
+            if code == 3:
+                return "本机试采范围与当日进行中轮次不同，请按原范围续跑。"
         if code == plan_step.PLAN_REFUSED_EXIT_CODE:
             return ("开轮前准备没通过：本次启动被拒绝了——本机没有可用的本周计划"
                     "（拉不到计划库、本地也没落库）。")
@@ -222,6 +311,9 @@ class Api:
         失败只记日志：界面照常可用，闸门判定在 `_plan_block_reason`。返回结局供测试
         与日志用；意外异常返回 None。
         """
+        if self.cfg.local_trial:
+            self._prep_settled.set()
+            return None
         with self._lock:
             self._prep_confirming = True
             self._prep_started_at = time.time()
@@ -298,6 +390,8 @@ class Api:
         页面才会接着轮询、落定后自动更新。
         """
         with self._lock:
+            if self.cfg.local_trial:
+                return {"ok": True}
             if self._prep_confirming:
                 return {"ok": False, "error": "正在确认中：等这一次跑完。"}
             self._prep_confirming = True
@@ -313,6 +407,8 @@ class Api:
         进程 run.py 开跑前自己还会准备一次，那里有同样的判定与同一条退出码（它的拒绝
         在这里也有文案，见 `_refused_start_message`）。
         """
+        if self.cfg.local_trial:
+            return None
         if is_merge_only(self.cfg):
             return plan_step.MERGE_ONLY_REFUSAL
         if rounds.active_round(db, self._today()) is not None:
@@ -327,6 +423,9 @@ class Api:
         测试与基准注入了 shops= 就完全按注入的那份来。纯汇总机不采集：清单不是它的
         取数来源（没有那份文件也是正常态），构造时读到什么就留什么。
         """
+        if self.cfg.local_trial:
+            self.shops = [shop for shop in load_shops(self.cfg.shop_csv, allow_empty=True) if shop.active]
+            return
         if self._shops_injected or self.cfg.shop_csv is None:
             return
         if is_merge_only(self.cfg):
@@ -334,19 +433,21 @@ class Api:
         plan = plan_step.stored_plan(Database(conn), self._current_week())
         self.shops = plan_step.visible_shops(self.cfg, plan)
 
+    @_collection_action
     def get_start(self) -> dict:
         with self._lock:
             conn = self._open_conn()
             try:
                 self._stop_watch.tick(conn)
                 self._refresh_shops(conn)
-                return views.start_view(
+                return self._collection_payload(views.start_view(
                     conn, cfg=self.cfg, shops=self.shops, state=self._ui_state(),
-                    crawler=self.current_crawler(conn), now=self._now())
+                    crawler=self.current_crawler(conn), now=self._now()))
             finally:
                 conn.close()
 
     # ---------- 过程页 ----------
+    @_collection_action
     def get_run(self) -> dict:
         with self._lock:
             state = self._ui_state()
@@ -354,17 +455,28 @@ class Api:
                                    shop_progress.DEFAULT_MAX_ATTEMPTS)
             if state.start_error is not None:
                 # 子进程因「已有采集在跑」被拒：不碰数据库，直接说清原因。
-                return views.run_view(None, state=state, now=self._now(),
-                                     max_attempts=max_attempts)
+                return self._collection_payload(views.run_view(None, state=state, now=self._now(),
+                                     max_attempts=max_attempts))
             conn = self._open_conn()
             try:
                 self._stop_watch.tick(conn)
-                view = views.run_view(conn, state=self._ui_state(), now=self._now(),
+                state = self._ui_state()
+                if self.cfg.local_trial:
+                    identity = self.current_crawler(conn)
+                    if identity is not None and identity.round_id is not None:
+                        self.round_id = identity.round_id
+                    state = dataclasses.replace(self._ui_state(),
+                                                crawler_running=identity is not None and identity.pid is not None)
+                view = views.run_view(conn, state=state, now=self._now(),
                                     max_attempts=max_attempts)
                 if view.get("has_round"):
                     # 轮次由采集子进程创建，界面在这里随轮询认领它。
                     self.round_id = view["round_id"]
-                return view
+                if self.cfg.local_trial:
+                    active = rounds.active_round(Database(conn), self._today())
+                    view["awaiting_resume"] = (active is not None and active.resumable_on(self._now())
+                                                and not view["running"] and not self._stop_watch.state)
+                return self._collection_payload(view)
             finally:
                 conn.close()
 
@@ -384,6 +496,7 @@ class Api:
             own_alive=self._own_crawler_alive(),
             own_pid=self.proc.pid if self.proc is not None else None,
             own_round_id=self.round_id,
+            other_space=self._formal_cfg.db_file if self.cfg.local_trial else None,
         )
 
     def _spawn_crawler(self, keys: list[str] | None = None):
@@ -392,6 +505,8 @@ class Api:
         界面不发 `--ignore-plan`：逃生口只在命令行（ADR-0035）。
         """
         cmd = [_crawler_python(), str(PROJECT_ROOT / "run.py")]
+        if self.cfg.local_trial:
+            cmd += ["--local-trial", "--config", str(self.config_file)]
         limit = ",".join(k for k in (keys or []) if k)
         if limit:
             cmd += ["--limit-shops", limit]
@@ -405,6 +520,7 @@ class Api:
             creationflags=flags,
         )
 
+    @_collection_action
     def start_run(self, keys: list[str]) -> dict:
         """开始一轮（按勾选的店铺）；闸门没开或角色不许时不发子进程（ADR-0035）。"""
         with self._lock:
@@ -417,6 +533,10 @@ class Api:
                 reason = self._plan_block_reason(db)
                 if reason is not None:
                     return {"ok": False, "error": reason}
+                if self.cfg.local_trial:
+                    self._refresh_shops(conn)
+                    if not keys:
+                        return {"ok": False, "error": "试采范围为空，请手动选择启用的店铺。"}
                 by_key = {shop.key: shop for shop in self.shops}
                 missing = [key for key in keys if key not in by_key]
                 if missing:
@@ -451,12 +571,13 @@ class Api:
                 return {"ok": False, "error": f"启动抓取失败：{exc}"}
             return {"ok": True}
 
+    @_collection_action
     def resume_run(self) -> dict:
         """在“过程”页暂停后点击“继续”：重新拉起抓取，续跑本轮未完成店铺，并停留在过程页。"""
         with self._lock:
             if self._closing_requested:
                 return {"ok": False, "error": CLOSING_REFUSAL}
-            if is_merge_only(self.cfg):
+            if is_merge_only(self.cfg) and not self.cfg.local_trial:
                 # 续跑也是开采集（库里可能留着换角色 / 拷库带来的进行中轮次）：与开始页同一条拒绝。
                 return {"ok": False, "error": plan_step.MERGE_ONLY_REFUSAL}
             if self.any_crawler_running():
@@ -496,6 +617,10 @@ class Api:
                 return {"ok": False, "error": f"继续抓取失败：{exc}"}
             return {"ok": True, "round_id": rid}
 
+    def _note_paused(self) -> None:
+        self.user_paused = True
+
+    @_collection_action
     def pause_run(self) -> dict:
         """暂停：写下停止请求，采集进程在下一个检查点自己停下（ADR-0009）。
 
@@ -504,22 +629,27 @@ class Api:
         with self._lock:
             if self._closing_requested:
                 return {"ok": False, "error": CLOSING_REFUSAL}
-            self.user_paused = True
+            if not self.cfg.local_trial:
+                self.user_paused = True
             conn = self._open_conn()
             try:
                 # Reconcile any older target before selecting the current crawler.
                 # A replacement must settle the old watch without touching the new one.
                 self._stop_watch.tick(conn)
                 db = Database(conn)
-                if not self._own_crawler_alive():
+                identity = self.current_crawler(conn) if self.cfg.local_trial else crawler_identity.registered(conn)
+                if not self._own_crawler_alive() and not self.cfg.local_trial:
                     return {"ok": True}   # 本界面没有在跑的采集进程，没什么可暂停的
-                identity = crawler_identity.registered(conn)
+                if self.cfg.local_trial and identity is None:
+                    return {"ok": True}
                 target = stop_request.StopTarget.of(identity)
                 if target is None:
                     if self._own_crawler_alive():
                         # 身份登记前没有浏览器副作用；只结束入口时冻结的 child。
                         log.info("暂停：身份尚未登记，结束入口时冻结的子进程。")
                         self._kill_proc()
+                        if self.cfg.local_trial:
+                            self._note_paused()
                         return {"ok": True}
                     return {"ok": False, "error": "暂时无法确认停止目标，请稍后重试。",
                             "retryable": True}
@@ -532,11 +662,14 @@ class Api:
                 except RuntimeError as exc:
                     return {"ok": False, "error": "暂时无法确认停止目标，请稍后重试。",
                             "retryable": True, "code": str(exc)}
+                if self.cfg.local_trial:
+                    self._note_paused()
                 log.info("暂停：已写下停止请求（目标 PID %s），等它自己停下。", target.pid)
                 return {"ok": True, "stopping": self._stop_watch.state}
             finally:
                 conn.close()
 
+    @_collection_action
     def abort_run(self, *, expected_target=None, expected_round_id=None) -> dict:
         """中止：先把轮次收尾为「人工放弃」，再等采集进程自己停下（ADR-0009）。
 
@@ -560,7 +693,7 @@ class Api:
                     return {"ok": False, "error": "采集目标已变化，请重新确认关闭。"}
                 if self.round_id is None and identity is None:
                     return {"ok": True}  # 没起过任务、也没有采集在跑：不必连库
-                if identity is None and self.any_crawler_running():
+                if (identity is None or identity.pid is None) and self.any_crawler_running():
                     return {"ok": False, "error": "暂时无法确认停止目标，请稍后重试。",
                             "retryable": True}
                 rid = self._round_to_abandon(db, identity)
@@ -586,6 +719,7 @@ class Api:
             finally:
                 conn.close()
 
+    @_collection_action
     def close_snapshot(self) -> CloseSnapshot:
         """Actual close state; never infer pause solely from process disappearance."""
         with self._lock:
@@ -639,6 +773,7 @@ class Api:
             finally:
                 conn.close()
 
+    @_collection_action
     def begin_close(self, expected: CloseSnapshot) -> dict:
         """Freeze authorization, block GUI starts, reuse the existing abort entry."""
         with self._lock:
@@ -696,6 +831,7 @@ class Api:
             return self.abort_run(expected_target=expected.target,
                                   expected_round_id=expected.round_id)
 
+    @_collection_action
     def close_ready(self, expected: CloseSnapshot) -> bool:
         """A request succeeding is not completion; recheck just before destroy."""
         with self._lock:
@@ -740,6 +876,7 @@ class Api:
 
     # ---------- 停止：先请求，超时才强杀（ADR-0009） ----------
     # ---------- 结果页 ----------
+    @_collection_action
     def get_result(self) -> dict:
         with self._lock:
             conn = self._open_conn()
@@ -747,8 +884,8 @@ class Api:
                 self._stop_watch.tick(conn)
                 max_attempts = getattr(self.cfg, "max_attempts_per_page",
                                        shop_progress.DEFAULT_MAX_ATTEMPTS)
-                return views.result_view(conn, state=self._ui_state(), now=self._now(),
-                                        max_attempts=max_attempts)
+                return self._collection_payload(views.result_view(conn, state=self._ui_state(), now=self._now(),
+                                        max_attempts=max_attempts))
             finally:
                 conn.close()
 

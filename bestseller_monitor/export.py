@@ -738,6 +738,8 @@ def export(cfg, *, week: str | None = None, store: ImageStore | None = None) -> 
     与采集并行安全：快照走源库的只读事务（WAL 下不锁采集），包里记 `crawl_in_progress`。
     推送失败不下架任何东西：包留在 outbox，克隆退回远端状态，结果里带回原因。
     """
+    if getattr(cfg, "local_trial", False):
+        raise ValueError("本机试采上下文不得导出或交换；正式判断集请使用正式配置。")
     week = week or current_week()
     machine_id = str(cfg.machine_id)
     source = pathlib.Path(cfg.db_file)
