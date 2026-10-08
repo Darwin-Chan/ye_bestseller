@@ -116,7 +116,7 @@ class MatchingTests(unittest.TestCase):
         self.assertEqual(config.matching.concurrency, 3)
         self.assertNotIn('secret-value', repr(config))
         with self.assertRaises(ValueError):
-            AnalysisConfig(config.database, matching=MatchingConfig(config.database))
+            AnalysisConfig(config.database, matching=MatchingConfig(config.database), member_kind='product')
         with self.assertRaises(ValueError):
             MatchingConfig(self.config.cache, concurrency=0)
 

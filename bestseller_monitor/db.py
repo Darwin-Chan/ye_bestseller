@@ -11,11 +11,22 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 from . import click_events
-from .parse import DEFAULT_SKU_ID
+from .parse import DEFAULT_SKU_ID, sku_name_source
 
 log = logging.getLogger(__name__)
 
 SCHEMA = """
+-- 一次原子提交的完整集合：不从累计库存或按 SKU 替换的 snapshots 推断完整性。
+-- 只记录新观测，不回填/改写历史采集行；同秒重采也各自保留独立批次。
+CREATE TABLE IF NOT EXISTS sku_observation_batches (
+    id INTEGER PRIMARY KEY, shop_key TEXT NOT NULL, offer_id TEXT NOT NULL,
+    observed_at TEXT NOT NULL, observed_date TEXT NOT NULL,
+    product_name TEXT, product_url TEXT, skus_json TEXT NOT NULL,
+    main_image_url TEXT, main_image_hash TEXT, main_image_error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sku_observation_batches_date
+ON sku_observation_batches(shop_key,offer_id,observed_date,observed_at);
+
 CREATE TABLE IF NOT EXISTS product_image_assets (
     content_hash TEXT PRIMARY KEY, mime TEXT NOT NULL, content BLOB NOT NULL
 );
@@ -1455,7 +1466,9 @@ class Database:
             if not sku_name or stock is None or isinstance(stock, bool) or not isinstance(stock, int):
                 raise ValueError("成功快照的每个 SKU 都必须有名称和整数库存")
             sku_id = sku.get("sku_id")
+            id_source = sku.get("sku_id_source") or "platform"
             if sku_id is None or str(sku_id).strip() == "":
+                id_source = "derived"
                 sku_id = hashlib.sha1(
                     f"{offer_id}|{sku_name}".encode("utf-8")
                 ).hexdigest()[:16]
@@ -1481,9 +1494,11 @@ class Database:
                 "product_url": product_url,
                 "product_name": snapshot_name,
                 "sku_id": sku_id,
+                "sku_id_source": "system_default" if sku_id == DEFAULT_SKU_ID else id_source,
                 "sku_name": sku_name,
                 "sku_price": sku.get("sku_price"),
                 "sku_stock": stock,
+                "observation_complete": sku.get("observation_complete") is True,
                 "collected_at": collected_at,
                 "page_status": "成功",
                 "attempt": attempt,
@@ -1506,6 +1521,9 @@ class Database:
                 if 'content' in image:
                     self.conn.execute('INSERT OR IGNORE INTO product_image_assets VALUES (?, ?, ?)',
                                       (image['hash'], image['mime'], image['content']))
+            self._record_sku_observation(
+                normalized, collected_at, product_name=detail_name or snapshot_name,
+                image_url=image_url, image=image)
             self._write_sku_image_versions(normalized, collected_at,
                                            fill_hash=image.get('hash'))
             # 同一秒里的同一次观测只留一条（VERSION_DEDUPE_INDEX）：重复提交不整单回滚。
@@ -1540,6 +1558,29 @@ class Database:
         except Exception:
             self.conn.rollback()
             raise
+
+    def _record_sku_observation(self, rows, collected_at, *, product_name, image_url, image):
+        """在库存事务内保留返回成员、集合完整性来源与同次证据；旧行不回写。"""
+        skus = []
+        for row in rows:
+            evidence = row.get('sku_image_evidence') or {}
+            source = evidence.get('source')
+            image_hash = evidence.get('hash')
+            if source == SKU_IMAGE_FILLED:
+                image_hash = image.get('hash')
+            skus.append(dict(sku_id=row['sku_id'], sku_id_source=row['sku_id_source'], sku_name=row['sku_name'],
+                sku_stock=row['sku_stock'], sku_price=row['sku_price'],
+                name_source=sku_name_source(row['sku_id'], row['sku_name']),
+                observation_complete=row['observation_complete'],
+                image_hash=image_hash, image_url=evidence.get('url'),
+                image_error=evidence.get('error'), image_source=source))
+        first = rows[0]
+        self.conn.execute("""INSERT INTO sku_observation_batches
+            (shop_key,offer_id,observed_at,observed_date,product_name,product_url,skus_json,
+             main_image_url,main_image_hash,main_image_error) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (first['shop_key'], first['offer_id'], collected_at, cst_date(collected_at),
+             product_name, first['product_url'], json.dumps(skus, ensure_ascii=False),
+             image_url, image.get('hash'), image.get('error')))
 
     def _write_sku_image_versions(self, rows: list[dict], collected_at: str, *,
                                   fill_hash: str | None) -> None:

@@ -44,7 +44,7 @@ class MatchingControlTests(unittest.TestCase):
 
     def service(self, matching=None):
         """每次调用都代表一次重新启动：新进程、新内存、同一份磁盘文件。"""
-        return AnalysisService(AnalysisConfig(self.path, matching=matching), running=lambda: False)
+        return AnalysisService(AnalysisConfig(self.path, matching=matching, member_kind='product'), running=lambda: False)
 
     def matching(self, key_env='DEEPSEEK_API_KEY'):
         return MatchingConfig(Path(self.tmp.name)/'matching.sqlite', ModelConfig(key_env=key_env), mode='direct')

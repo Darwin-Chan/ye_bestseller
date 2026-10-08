@@ -270,7 +270,7 @@ class FloorServiceTests(unittest.TestCase):
 
     def service(self, min_score):
         matching = MatchingConfig(Path(self.tmp.name)/'matching.sqlite', mode='direct', min_score=min_score)
-        return AnalysisService(AnalysisConfig(self.path, matching=matching), running=lambda: False)
+        return AnalysisService(AnalysisConfig(self.path, matching=matching, member_kind='product'), running=lambda: False)
 
     def submit_pair(self):
         """跨店同名两件、图片各占一半（左右半白）：召回分只有名称双字＝2，够不着缺省下限 4。"""

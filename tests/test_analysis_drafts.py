@@ -32,7 +32,7 @@ class DraftPersistenceTests(unittest.TestCase):
 
     def open_service(self):
         """每次调用都代表一次重新启动：新进程、新内存、同一份磁盘文件。"""
-        return AnalysisService(AnalysisConfig(self.path), running=lambda: False)
+        return AnalysisService(AnalysisConfig(self.path, member_kind='product'), running=lambda: False)
 
     def submit(self, offer, day, stock, *, name, color='red'):
         submit_offer(self.db, offer, day, stock, name=name, color=color)

@@ -63,8 +63,10 @@ class LocalTrialExchangeTests(unittest.TestCase):
         self.assertEqual(world.conn.execute("SELECT DISTINCT shop_key FROM inventory ORDER BY shop_key").fetchall()[0][0], "A02")
         self.assertEqual(world.conn.execute("SELECT count(*) FROM inventory WHERE offer_id='99001'").fetchone()[0], 0)
         self.assertNotIn("TRIAL", {row["shop_key"] for row in service.coverage("2026-09-14")})
-        self.assertNotIn("99001", {row["offer_id"] for row in analysis["products"]})
-        self.assertTrue(analysis["products"])
+        self.assertEqual("sku", analysis["member_kind"])
+        self.assertNotIn("99001", {row["offer_id"] for row in analysis["members"]})
+        self.assertNotIn("TRIAL", {row["shop_key"] for row in analysis["members"]})
+        self.assertTrue(analysis["members"])
         self.assertFalse((world.root / "raw-m4").exists())
         self.assertEqual(world.store.uploaded, {})
         with contextlib.closing(connect(trial.db_file)) as conn:

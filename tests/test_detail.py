@@ -428,7 +428,8 @@ class ObserveHtmlTests(unittest.TestCase):
         self.assertIsNone(observation.failure)
         self.assertEqual(observation.payload["main_image_url"], "https://img/1.png")
         self.assertEqual(observation.payload["rows"],
-                         [{"sku_id": "red", "sku_name": "红色", "sku_price": 10.0,
+                         [{"sku_id": "red", "sku_id_source": "platform", "observation_complete": True,
+                      "sku_name": "红色", "sku_price": 10.0,
                            "sku_stock": 3, "sku_image_url": None}])
 
     def test_the_payload_rows_carry_the_sku_image_url(self):

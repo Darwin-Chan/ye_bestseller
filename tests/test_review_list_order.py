@@ -89,7 +89,7 @@ class ReviewOrderServiceTests(unittest.TestCase):
 
     def open_service(self):
         """一次「重开程序」：同一批磁盘文件、新的内存。"""
-        return AnalysisService(AnalysisConfig(self.path), running=lambda: False)
+        return AnalysisService(AnalysisConfig(self.path, member_kind='product'), running=lambda: False)
 
     def test_edit_confirm_and_withdraw_recompute_the_order(self):
         snapshot = self.service.start('2026-09-07', '2026-09-14')

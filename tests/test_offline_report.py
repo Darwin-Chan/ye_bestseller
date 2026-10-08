@@ -64,7 +64,7 @@ class ExportConfigurationTests(unittest.TestCase):
         self.assertEqual(AnalysisConfig.from_file(config).output, root / 'reports')
         config.write_text('[analysis]\ndatabase = "inventory.db"\n', encoding='utf-8')
         self.assertEqual(AnalysisConfig.from_file(config).output, (root / '../output').resolve())
-        default = AnalysisConfig(root / 'inventory.db')
+        default = AnalysisConfig(root / 'inventory.db', member_kind='product')
         self.assertEqual(default.output, Path(bestseller_monitor.__file__).resolve().parent.parent / 'output')
 
 
@@ -81,7 +81,7 @@ class ExportServiceTests(unittest.TestCase):
         self.submit('22', '2026-09-07', 50, name='云朵杯')
         self.submit('22', '2026-09-14', 40, name='云朵杯')
         self.out = Path(self.tmp.name) / 'output'
-        self.service = AnalysisService(AnalysisConfig(self.path, output=self.out), running=lambda: False)
+        self.service = AnalysisService(AnalysisConfig(self.path, output=self.out, member_kind='product'), running=lambda: False)
 
     def submit(self, offer, day, stock, *, name):
         submit_offer(self.db, offer, day, stock, name=name, color='red')

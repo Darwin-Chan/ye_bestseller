@@ -131,6 +131,9 @@ class DraftStore:
         for table, statement in _DECISION_TABLES.items():
             conn.execute(statement)
             self._add_machine_column(conn, table)
+        conn.execute("""CREATE TABLE IF NOT EXISTS analysis_draft_save_order (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            draft_id TEXT NOT NULL UNIQUE)""")
         conn.execute(_CONFLICT_DDL)
         self._add_resolved_column(conn)
         return conn
@@ -170,6 +173,7 @@ class DraftStore:
                     schema_version=excluded.schema_version, start=excluded.start,
                     end=excluded.end, payload=excluded.payload""",
                     (analysis_id, saved_at, SCHEMA_VERSION, start, end, document))
+                self._mark_saved(conn, analysis_id)
                 for table in _DECISION_TABLES:
                     conn.execute(f'DELETE FROM {table}')
                 conn.executemany('INSERT INTO manual_relations(members,confirmed,saved_at,machine_id)'
@@ -266,22 +270,53 @@ class DraftStore:
                          local=tuple(json.loads(row[6])), seen_at=row[7], resolved_at=row[8])
                 for row in rows]
 
+    @staticmethod
+    def _mark_saved(conn, analysis_id):
+        # 两代本地草稿共用保存次序；同秒保存/再次保存不能按随机 UUID 猜最新。
+        conn.execute('INSERT OR REPLACE INTO analysis_draft_save_order(draft_id) VALUES (?)',
+                     (analysis_id,))
+
+    def write_sku(self, payload):
+        """单独本地格式，不改旧草稿或商品人工账本，旧程序也不会读成商品。"""
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute("""CREATE TABLE IF NOT EXISTS sku_analysis_drafts (
+                    id TEXT PRIMARY KEY, saved_at TEXT NOT NULL, schema_version INTEGER NOT NULL,
+                    start TEXT NOT NULL, end TEXT NOT NULL, payload TEXT NOT NULL)""")
+                conn.execute("""INSERT INTO sku_analysis_drafts VALUES (?,?,?,?,?,?)
+                    ON CONFLICT(id) DO UPDATE SET saved_at=excluded.saved_at,payload=excluded.payload""",
+                    (payload['id'], payload['saved_at'], 2, payload['start'], payload['end'],
+                     json.dumps(payload, ensure_ascii=False)))
+                self._mark_saved(conn, payload['id'])
+        finally:
+            conn.close()
+
     def latest(self):
         if not self.path.exists():
             return None
         conn = self._connect()
         try:
-            row = conn.execute("""SELECT id,start,end,saved_at,schema_version
-                FROM analysis_drafts ORDER BY saved_at DESC, rowid DESC LIMIT 1""").fetchone()
+            rows = list(conn.execute('SELECT rowid AS legacy_order,id,start,end,saved_at,schema_version FROM analysis_drafts'))
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='sku_analysis_drafts'").fetchone():
+                rows += list(conn.execute('SELECT rowid AS legacy_order,id,start,end,saved_at,schema_version FROM sku_analysis_drafts'))
+            order = dict(conn.execute('SELECT draft_id,sequence FROM analysis_draft_save_order'))
+            row = max(rows, key=lambda r: (order.get(r['id'], 0), r['saved_at'], r['legacy_order'])) if rows else None
         finally:
             conn.close()
-        return dict(row) if row else None
+        return {key: row[key] for key in ('id', 'start', 'end', 'saved_at', 'schema_version')} if row else None
 
     def read(self, analysis_id):
         if not self.path.exists():
             return None
         conn = self._connect()
         try:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='sku_analysis_drafts'").fetchone():
+                sku = conn.execute('SELECT * FROM sku_analysis_drafts WHERE id=?', (analysis_id,)).fetchone()
+                if sku:
+                    if sku['schema_version'] != 2:
+                        raise ValueError('SKU 草稿版本不兼容，未做任何修改')
+                    return StoredDraft(json.loads(sku['payload']), sku['saved_at'])
             row = conn.execute("SELECT * FROM analysis_drafts WHERE id=?", (analysis_id,)).fetchone()
         finally:
             conn.close()

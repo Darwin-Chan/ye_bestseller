@@ -131,6 +131,11 @@ def extract_sku_rows(html_text: str) -> list[dict]:
 DEFAULT_SKU_ID = "default"
 DEFAULT_SKU_NAME = "默认(单规格)"
 
+
+def sku_name_source(sku_id, sku_name):
+    """系统保留默认行与真实同名 SKU 不混淆。"""
+    return 'system_default' if sku_id == DEFAULT_SKU_ID and sku_name == DEFAULT_SKU_NAME else 'observed'
+
 _SKU_MAP_EMPTY_RE = re.compile(r'"skuInfoMap"\s*:\s*\[\s*\]')
 _IS_SKU_OFFER_RE = re.compile(r'"isSkuOffer"\s*:\s*(true|false)', re.I)
 _SKU_TRADE_SUPPORTED_RE = re.compile(r'"skuTradeSupported"\s*:\s*(true|false)', re.I)
@@ -252,6 +257,7 @@ def _extract_default_sku(html_text: str) -> list[dict]:
         return []
     return [{
         "sku_id": DEFAULT_SKU_ID,
+        "observation_complete": True,
         "sku_name": DEFAULT_SKU_NAME,
         "sku_price": _single_spec_price(trade_model),
         "sku_stock": stock,
@@ -285,16 +291,22 @@ def extract_skus_from_html(html_text: str) -> list[dict]:
                 sku_id = hashlib.sha1(f"{name}".encode("utf-8")).hexdigest()[:16]
             rows.append({
                 "sku_id": str(sku_id),
+                "sku_id_source": "derived" if val.get("skuId") is None else "platform",
                 "sku_name": name,
                 "sku_price": price,
                 "sku_stock": stock,
                 "sku_image_url": _sku_image_for(name, image_map),
             })
     if rows:
+        # 只有整个结构化集合均被解析，才能证明成员集合完整。
+        for row in rows:
+            row["observation_complete"] = len(rows) == len(obj)
         return rows
     # 兜底：可见文本 / DOM 结构
     for r in extract_sku_rows(html_text):
         r["sku_id"] = hashlib.sha1(r["sku_name"].encode("utf-8")).hexdigest()[:16]
+        r["sku_id_source"] = "derived"
+        r["observation_complete"] = False  # 可见文本可能漏掉未加载/缺库存的 SKU。
         r["sku_image_url"] = None   # 文本行没有规格值来源，图一律空
         rows.append(r)
     if not rows:

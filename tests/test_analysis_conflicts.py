@@ -56,7 +56,7 @@ class ConflictViewCase(unittest.TestCase):
 
     def open_service(self):
         """一次「分析程序启动」：同一批磁盘文件、新的内存。"""
-        return AnalysisService(AnalysisConfig(self.path, **self.service_config()),
+        return AnalysisService(AnalysisConfig(self.path, **self.service_config(), member_kind='product'),
                                running=lambda: False)
 
     def versions(self, snapshot):
@@ -427,7 +427,7 @@ class ConflictBrowserTests(unittest.TestCase):
         self.stop_server()
         self.service = AnalysisService(AnalysisConfig(
             self.path, matching=MatchingConfig(cache, ModelConfig(model='deepseek-chat'),
-                                              mode='direct'), machine='m4'),
+                                              mode='direct'), machine='m4', member_kind='product'),
             running=lambda: self.running)
         self.server, self.thread = fixture.serve(self.service)
         self.addCleanup(patch.stopall)

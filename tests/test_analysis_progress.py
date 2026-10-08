@@ -86,7 +86,7 @@ class ProgressSeamTests(unittest.TestCase):
         patch('bestseller_monitor.matching.urlopen', side_effect=self.transport).start()
         self.service = AnalysisService(
             AnalysisConfig(self.path, matching=MatchingConfig(Path(self.tmp.name) / 'match.sqlite',
-                                                              mode='direct')),
+                                                              mode='direct'), member_kind='product'),
             running=lambda: False)
         self.jobs = []
         # 最后登记、最先跑：用例失败在半路时也要把闸门放行并等运行收尾，
@@ -164,7 +164,7 @@ class ProgressSeamTests(unittest.TestCase):
         blocked = Path(self.tmp.name) / 'cache-as-directory'
         blocked.mkdir()
         self.service = AnalysisService(
-            AnalysisConfig(self.path, matching=MatchingConfig(blocked, mode='direct')),
+            AnalysisConfig(self.path, matching=MatchingConfig(blocked, mode='direct'), member_kind='product'),
             running=lambda: False)
         accepted = self.start()
         final = self.wait_state(accepted['id'], states=('failed',))

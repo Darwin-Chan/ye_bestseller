@@ -747,7 +747,7 @@ class DecisionCarryCase(JudgmentSetCase):
         """一次「分析程序启动」：同一批磁盘文件、新的内存。"""
         return AnalysisService(AnalysisConfig(
             db, matching=MatchingConfig(cache, ModelConfig(model="deepseek-chat"), mode="direct"),
-            store=store, machine=machine), running=lambda: False)
+            store=store, machine=machine, member_kind='product'), running=lambda: False)
 
     def machine(self, name, products):
         """一台机器：库存库 + 缓存 + 账本 + 分析服务；`products` 是（商品号, 名称, 颜色）。"""

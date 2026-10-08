@@ -54,7 +54,7 @@ class StopSeamTests(unittest.TestCase):
                              name=f'杯子{index}', color='red')
         self.transport = self.use_transport()
         self.service = AnalysisService(
-            AnalysisConfig(self.path, matching=MatchingConfig(self.cache, mode='direct')),
+            AnalysisConfig(self.path, matching=MatchingConfig(self.cache, mode='direct'), member_kind='product'),
             running=lambda: False)
         self.jobs = []
         # 最后登记、最先跑：用例失败在半路时也要把闸门放行并等运行收尾，

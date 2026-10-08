@@ -191,7 +191,7 @@ class DecisionSourceTests(unittest.TestCase):
         self.service = self.open_service()
 
     def open_service(self, machine='m4'):
-        return AnalysisService(AnalysisConfig(self.path, machine=machine), running=lambda: False)
+        return AnalysisService(AnalysisConfig(self.path, machine=machine, member_kind='product'), running=lambda: False)
 
     def group_for(self, snapshot, offer):
         return next(g for g in snapshot['groups'] if any(m['offer_id'] == offer for m in g['members']))

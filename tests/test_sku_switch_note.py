@@ -100,7 +100,7 @@ class DraftCompatibilityTests(unittest.TestCase):
                         [(7, [('default', 'default', 100)]),
                          (10, [('red', '红色', 40)]),
                          (14, [('red', '红色', 30)])])
-        service = AnalysisService(AnalysisConfig(path), running=lambda: False)
+        service = AnalysisService(AnalysisConfig(path, member_kind='product'), running=lambda: False)
         snapshot = service.start('2026-09-07', '2026-09-14')
         service.save_draft(snapshot['id'])
         # 把存好的正文退回「没有这个键」的老样子：模拟票 07 之前保存的草稿。
@@ -114,7 +114,7 @@ class DraftCompatibilityTests(unittest.TestCase):
                        (json.dumps(payload), snapshot['id']))
         drafts.commit()
         # 重启读回：说明行的据照冻结库存补上，与全新跑一趟的结论一致。
-        restored = AnalysisService(AnalysisConfig(path), running=lambda: False).get(snapshot['id'])
+        restored = AnalysisService(AnalysisConfig(path, member_kind='product'), running=lambda: False).get(snapshot['id'])
         self.assertEqual(restored['products'][0]['shape_switches'],
                          [{'date': '2026-09-10', 'shape_before': True, 'shape_after': False}])
 
