@@ -47,6 +47,20 @@ class UiState:
     plan_waiting: bool = False
 
 
+def stop_failure_text(code: str) -> str:
+    """Stable StopWatch protocol codes become user-facing reasons only here."""
+    return {
+        "terminate_failed": "无法强制停止采集，请检查进程权限",
+        "target_unverifiable": "暂时无法核验原采集身份",
+        "database_unavailable": "数据库暂不可用",
+        "observation_failed": "暂时无法读取采集进程状态",
+        "browser_binding_unavailable": "暂时无法核验采集浏览器归属",
+        "browser_binding_changed": "采集浏览器绑定已变化，暂不处置",
+        "browser_close_failed": "采集已停止，浏览器收尾暂未完成",
+        "process_still_running": "原采集进程尚未停止",
+    }.get(code, "停止状态暂不可确认")
+
+
 # ---------- 渲染：事实 → 页面上的字符串 ----------
 
 def _fmt_hhmm(iso_utc: str | None) -> str:

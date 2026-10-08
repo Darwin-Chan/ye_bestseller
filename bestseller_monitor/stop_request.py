@@ -133,6 +133,7 @@ class StopStatus:
     target: StopTarget | None = None
     code: str | None = None
     retryable: bool = False
+    round_id: int | None = None
 
     @property
     def state(self) -> str | None:
@@ -376,7 +377,8 @@ class StopWatch:
         stop = self._in_flight
         return StopStatus(stop.phase, stop.command.kind, stop.command.target,
                           stop.code, stop.phase in (StopPhase.VERIFYING,
-                                                    StopPhase.CLEANUP_PENDING))
+                                                    StopPhase.CLEANUP_PENDING),
+                          stop.command.round_id)
 
     @property
     def state(self) -> str | None:

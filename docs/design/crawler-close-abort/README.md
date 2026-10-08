@@ -16,3 +16,7 @@
 | issues/03-cross-session-target-safety-and-final-acceptance.md | .scratch/crawler-close-abort/issues/03-cross-session-target-safety-and-final-acceptance.md |
 
 同一提交另含本会话已确认的需求澄清记录与 ADR-0048。其余会话或需求的文档、主仓既有修改、开发副本、证据日志及真实数据均不包含在本次提交中。
+
+## 分票交付记录
+
+- `01-delivery-2026-10-08.md`：01票实施与验收记录。暂停最终规则由02承接，整体验收由03承接；不将归档票快照视为实时状态。

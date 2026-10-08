@@ -857,7 +857,7 @@ class GuiSingleInstanceTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         lock.release.assert_called_once_with()
-        self.assertEqual(len(window.closing_handlers), 1, "关窗要接上告知回调")
+        self.assertEqual(len(window.closing_handlers), 1, "关窗要接上确认与收尾守卫")
 
     def test_the_window_waits_for_the_preparation_to_settle(self):
         """窗口等准备落定再建（ADR-0035）：建窗一定发生在准备落定之后。"""
@@ -935,23 +935,7 @@ class GuiSingleInstanceTests(unittest.TestCase):
         self.assertIn(f"<title>{gui.WINDOW_TITLE}</title>", page)
         self.assertIn(f"<h1>{gui.WINDOW_TITLE}</h1>", page)
 
-    def test_closing_warns_that_the_crawler_keeps_running(self):
-        api = SimpleNamespace(any_crawler_running=lambda: True)
-        with patch.object(gui, "_notify") as notify:
-            allowed = gui._warn_crawler_keeps_running(api)
 
-        self.assertTrue(allowed, "告知归告知，关窗不该被阻断")
-        self.assertIn("继续", notify.call_args.args[0])
-
-    def test_closing_says_nothing_when_nothing_is_running(self):
-        api = SimpleNamespace(any_crawler_running=lambda: False)
-        with patch.object(gui, "_notify") as notify, \
-                self.assertLogs("gui", level="INFO") as logged:
-            allowed = gui._warn_crawler_keeps_running(api)
-
-        self.assertTrue(allowed)
-        notify.assert_not_called()
-        self.assertIn("没有采集在跑", "\n".join(logged.output), "关窗动作要留底")
 
 
 class GuiCrawlerMutexTests(unittest.TestCase):

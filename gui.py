@@ -34,6 +34,8 @@ from pathlib import Path
 
 import webview
 
+from bestseller_monitor.crawler_close import CloseSnapshot, install_close_guard
+
 from bestseller_monitor.config import Config, Shop, is_merge_only, load_shops
 from bestseller_monitor.db import CST, Database, connect, cst_date, utcnow
 from bestseller_monitor.rounds import (
@@ -121,6 +123,9 @@ def _configure_gui_logging(cfg=None) -> logging.Handler:
     return handler
 
 
+CLOSING_REFUSAL = "正在关闭程序，不能开始、续跑或暂停。"
+
+
 class Api:
     """暴露给 pywebview 前端的方法。返回 JSON 可序列化的基本类型。
 
@@ -158,6 +163,7 @@ class Api:
         self.round_id: int | None = None
         self.start_ts: float | None = None
         self.user_paused = False
+        self._closing_requested = False
         self._elapsed_base = 0.0
         self._run_start_ts: float | None = None
         # 停止编排（窗口、回执、超时强杀）在 stop_request 里；**冻结目标之后的处置也在那里**，
@@ -411,6 +417,8 @@ class Api:
     def start_run(self, keys: list[str]) -> dict:
         """开始一轮（按勾选的店铺）；闸门没开或角色不许时不发子进程（ADR-0035）。"""
         with self._lock:
+            if self._closing_requested:
+                return {"ok": False, "error": CLOSING_REFUSAL}
             conn = self._open_conn()
             try:
                 self._stop_watch.tick(conn)
@@ -457,6 +465,8 @@ class Api:
     def resume_run(self) -> dict:
         """在“过程”页暂停后点击“继续”：重新拉起抓取，续跑本轮未完成店铺，并停留在过程页。"""
         with self._lock:
+            if self._closing_requested:
+                return {"ok": False, "error": CLOSING_REFUSAL}
             if is_merge_only(self.cfg):
                 # 续跑也是开采集（库里可能留着换角色 / 拷库带来的进行中轮次）：与开始页同一条拒绝。
                 return {"ok": False, "error": plan_step.MERGE_ONLY_REFUSAL}
@@ -504,6 +514,8 @@ class Api:
         这一跳不阻塞、也不杀进程：请求写完就返回，倒计时与超时兜底交给轮询。
         """
         with self._lock:
+            if self._closing_requested:
+                return {"ok": False, "error": CLOSING_REFUSAL}
             self.user_paused = True
             if self._run_start_ts is not None:
                 self._elapsed_base += time.time() - self._run_start_ts
@@ -537,7 +549,7 @@ class Api:
             finally:
                 conn.close()
 
-    def abort_run(self) -> dict:
+    def abort_run(self, *, expected_target=None, expected_round_id=None) -> dict:
         """中止：先把轮次收尾为「人工放弃」，再等采集进程自己停下（ADR-0009）。
 
         顺序是「先写终态、再停止进程」：终态本身就是停止信号，采集进程在下一个
@@ -554,6 +566,10 @@ class Api:
                 # 这一处清理不是卫生，是语义：中止压过暂停——留下的暂停请求会让
                 # 采集进程把这次停止认领成「暂停」，日志与店铺备注就写错了原因。
                 identity = self.current_crawler(conn)
+                if expected_target is not None and (
+                        stop_request.StopTarget.of(identity) != expected_target
+                        or identity.round_id != expected_round_id):
+                    return {"ok": False, "error": "采集目标已变化，请重新确认关闭。"}
                 if self.round_id is None and identity is None:
                     return {"ok": True}  # 没起过任务、也没有采集在跑：不必连库
                 if identity is None and self.any_crawler_running():
@@ -581,6 +597,68 @@ class Api:
                 return {"ok": True, "round_id": rid, "stopping": self._stop_watch.state}
             finally:
                 conn.close()
+
+    def close_snapshot(self) -> CloseSnapshot:
+        """Actual close state; never infer pause solely from process disappearance."""
+        with self._lock:
+            conn = self._open_conn()
+            try:
+                status = self._stop_watch.tick(conn)
+                identity = self.current_crawler(conn)
+                target = stop_request.StopTarget.of(identity)
+                rid = identity.round_id if identity is not None else self.round_id
+                reason = rounds.load(Database(conn), rid).reason if rid is not None else None
+                if status.phase is not stop_request.StopPhase.IDLE:
+                    kind = "paused" if status.kind is stop_request.StopKind.PAUSE else "aborting"
+                    return CloseSnapshot(kind, target or status.target, status.round_id, status.code)
+                if self.user_paused and reason is None:
+                    return CloseSnapshot("paused", target, rid)
+                if self.any_crawler_running():
+                    if target is None or rid is None:
+                        return CloseSnapshot("unknown", target, rid)
+                    kind = "aborting" if reason is TerminalReason.ABANDONED else "running"
+                    return CloseSnapshot(kind, target, rid)
+                return CloseSnapshot("idle", round_id=rid)
+            finally:
+                conn.close()
+
+    def begin_close(self, expected: CloseSnapshot) -> dict:
+        """Freeze authorization, block GUI starts, reuse the existing abort entry."""
+        with self._lock:
+            current = self.close_snapshot()
+            if current.kind == "idle" and expected.target is not None:
+                conn = self._open_conn()
+                try:
+                    if rounds.load(Database(conn), expected.round_id).reason is None:
+                        return {"ok": False, "error": "原采集已退出但轮次未结束，请核实后重试。"}
+                finally:
+                    conn.close()
+            elif (current.target != expected.target or current.round_id != expected.round_id
+                  or current.kind != expected.kind):
+                return {"ok": False, "error": "采集状态已变化，请重新确认关闭。"}
+            if current.kind in ("paused", "unknown"):
+                return {"ok": False, "error": "暂时不能安全关闭，窗口保持打开。"}
+            self._closing_requested = True
+            if current.kind == "idle":
+                return {"ok": True}
+            if (current.kind == "aborting"
+                    and self._stop_watch.status.phase is not stop_request.StopPhase.IDLE):
+                return {"ok": True}
+            return self.abort_run(expected_target=expected.target,
+                                  expected_round_id=expected.round_id)
+
+    def close_ready(self, expected: CloseSnapshot) -> bool:
+        """A request succeeding is not completion; recheck just before destroy."""
+        with self._lock:
+            if self.close_snapshot().kind != "idle":
+                return False
+            if expected.target is not None:
+                conn = self._open_conn()
+                try:
+                    return rounds.load(Database(conn), expected.round_id).reason is not None
+                finally:
+                    conn.close()
+            return True
 
     def _round_to_abandon(self, db, identity) -> int | None:
         """该收尾哪一轮：身份行里正在跑的 > 本界面记着的 > 今天进行中的。
@@ -726,15 +804,26 @@ def _announce_already_open() -> None:
             title=f"{WINDOW_TITLE}（正在启动）")
 
 
-def _warn_crawler_keeps_running(api) -> bool:
-    """关窗时如果采集还在跑，如实告知；返回 True 表示照常关闭。"""
-    if not api.any_crawler_running():
-        log.info("关闭界面：没有采集在跑。")
-        return True
-    log.info("关闭界面：采集仍在后台继续，重新打开界面可以看到进度并中止它。")
-    _notify("采集仍在后台继续。\n\n重新打开界面可以看到进度并中止它。",
-            title=f"{WINDOW_TITLE}（采集继续运行）")
-    return True
+def _confirm_crawler_close(text: str) -> bool:
+    """Cancellation is the safe default, including unattended/dialog-failure cases."""
+    if os.name != "nt" or os.environ.get("BESTSELLER_NO_DIALOG", "").strip() == "1":
+        log.warning("无法交互确认关窗，按取消处理。")
+        return False
+    try:
+        # OK/Cancel, warning, default button 2, foreground/topmost.
+        answer = ctypes.windll.user32.MessageBoxW(
+            None, text, f"{WINDOW_TITLE}（确认中止并关闭）", 0x1 | 0x30 | 0x100 | 0x10000 | 0x40000)
+        return answer == 1
+    except Exception:
+        log.exception("关窗确认框无法显示，按取消处理")
+        return False
+
+
+def _install_close_guard(window, api, *, confirm=None, notify=None, launch=None,
+                         wait=time.sleep):
+    install_close_guard(window, api, confirm=confirm or _confirm_crawler_close,
+                        notify=notify or _notify, title=WINDOW_TITLE,
+                        launch=launch, wait=wait)
 
 
 def main() -> int:
@@ -767,7 +856,7 @@ def main() -> int:
             height=_default_window_height(),
             min_size=(960, 720),
         )
-        window.events.closing += lambda: _warn_crawler_keeps_running(api)
+        _install_close_guard(window, api)
         webview.start(debug=False)
     finally:
         lock.release()
