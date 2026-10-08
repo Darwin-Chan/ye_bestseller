@@ -21,7 +21,7 @@
 5. native close guard 通过公开 Api 实测四阶段默认取消／确认中止及等待收尾；不把既有关闭测试冒充新增验收。只替换 OS 进程／浏览器副作用与时钟，不 mock 轮次／停止业务实现。
 6. 普通 CLI 未带新建意图时保留既有 scope/日期及外部浏览器连接契约；GUI 的开始和继续不能借 CLI 旧默认行为隐式收养未终态旧轮。完整暂停续跑、身份验证、手动 Edge 与遗留处置界面仍属票 02–06。
 
-## 逐项自动验收映射（最终复审／全量待填写）
+## 逐项自动验收映射（最终审查／全量待填写）
 
 下列用例均在 `tests/test_abort_new_round.py`，相关普通 CLI／试采／停止／关窗回归另见测试汇总。
 
@@ -63,11 +63,11 @@
 
 ### Standards
 
-初审无硬性违例；一个 P3 资格判定重复已处理，独立复审待进行。原报告：`docs/reviews/issues-08-11-ticket01-initial-standards-2026-10-08.md`。
+初审无硬性违例；一个 P3 资格判定重复已处理。daaf0e2 复审发现一项 P2：CONTEXT 强制停止词条与 ADR-0024 仍宣称替换／有限超时即结束；已同步词条并追加 2026-10-09 替代说明，保留旧 ADR 正文。最新候选复核待进行。原报告：`docs/reviews/issues-08-11-ticket01-initial-standards-2026-10-08.md`。
 
 ### Spec
 
-初审三个发现（P1 旧页面授权、P2 启动空轮、P1 首次清理前丢欠账）已按 TDD 修复，独立复审待进行。原报告：`docs/reviews/issues-08-11-ticket01-initial-spec-2026-10-08.md`。
+初审三个发现（P1 旧页面授权、P2 启动空轮、P1 首次清理前丢欠账）已按 TDD 修复。daaf0e2 复审新增一项 P2：浏览器路径不存在时真实会话无资源也发布 UNKNOWN；已用真实公共 run_round、真实 open_session、临时 SQLite 红→绿修复（40）。仅全部资源真实清理才发布 CLOSED，失败清理继续 UNKNOWN；最新候选复核待进行。原报告：`docs/reviews/issues-08-11-ticket01-initial-spec-2026-10-08.md`。
 
 ## 本票分段全量
 
@@ -86,3 +86,12 @@
 - **永久保留证据**：`F:\AI\projects\bestseller\.scratch\logs\tickets\issues-08-11\01\20261008-postmerge`，以及工单引用的固定历史诊断材料，不随副本清理丢失。
 - **暂留待确认**：`F:\AI\projects\bestseller\.scratch\sandboxes\issues-08-11\01\20261008-ticket01-implementation`（ownership 失败现场）；`F:\AI\projects\bestseller\.scratch\sandboxes\issues-08-11\01\20261008-ticket01-implementation-2\bestseller`（先前合并冲突现场）。尚未删除，后续先核对归属、独有材料与授权。
 - **可删除候选**：无。**实际清理**：未执行副本或历史证据清理。初审两份交接任务已点名收取并清理；复审亦只清本次点名交接目录，结果保存到主仓证据及本分支审查报告。
+
+
+## 复审修复证据补充（2026-10-09）
+
+- daaf0e2 两轴原报告保存在本分支 `docs/reviews/issues-08-11-ticket01-rereview-{standards,spec}-2026-10-09.md`，主仓证据 39 前缀副本与哈希；两轴问题分别处理，不合并重排。
+- 40-red 是真实产品红灯，40-green 是同一公共接缝绿灯。新增文件最新 36 条通过，真实生命周期 24 条通过；另回归 mutex 6、接线 17、P1 31，合计 114 条。精确日志见 `42-rereview-repair-regressions.json`。先前 335 条记录仍保留，不伪称同一候选全量。
+- 生命周期四条历史断言从“确已清理仍 UNKNOWN”迁移为 CLOSED，原错误、确切终止对象、清理顺序断言不变；41 旧预期失败日志保留。新增真实会话失败清理保护是回归绿灯，不虚称新的红→绿。成功 UNKNOWN／借用浏览器事实未放宽。
+- 11-A08／启动失败附加映射：`test_real_missing_browser_startup_releases_cleanup_gate_for_explicit_retry`；无法清理附加保护：`test_failed_establishment_cleanup_keeps_unknown_until_resources_are_gone`。
+- 已完成复审的两份 daaf0e2 交接目录仅按任务 ID 核验边界后清理，结果及证据保留；副本与历史材料未删除。

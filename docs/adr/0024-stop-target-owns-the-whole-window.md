@@ -1,6 +1,6 @@
 # 0024. 停止目标拥有整个停止窗口
 
-- 状态：已采用并实现（**删除清单已走完**，2026-09-19：`_LegacyRuntime`、`forget()`、`begin(kind, target)` 与 `begin` 的 `conn=None` 跳过校验通道都已删；见 [IS-55](../../.scratch/1688-inventory-snapshot/issues/55-is-55.md) 与 [规格](../../.scratch/stop-runtime-shape/spec.md)。`_kill_proc` 那条「暂停」窄例外按本条保留。**规格里的强制序列第 5 步此前没有落点**，2026-09-19 补齐：`CLEANUP_PENDING` 声明了「只在没有 B/未知接手、且原 browser binding 仍精确时重试」，实际却从不重试——走到这一步时进程已被证明退出，下一次 tick 必然判 `GONE`，而 `GONE` 的短路在 deadline 之前。现在把还欠着的那个浏览器冻结进 `StopInFlight.pending_browser`，由 `tick` 在短路之前重试，重试给一个与协作停止窗口同长的上限（不设上限的话，`close_browser` 对已经不存在的 PID 永远回 `None`，窗口会永远停在 `cleanup_pending`，而界面在未收口的相里拒绝启动新采集）；见 [规格](../../.scratch/cleanup-retry/spec.md)）
+- 状态：部分被 2026-10-09 的票 01 收尾决策替代（见文末）；以下历史记录保留。原状态：已采用并实现（**删除清单已走完**，2026-09-19：`_LegacyRuntime`、`forget()`、`begin(kind, target)` 与 `begin` 的 `conn=None` 跳过校验通道都已删；见 [IS-55](../../.scratch/1688-inventory-snapshot/issues/55-is-55.md) 与 [规格](../../.scratch/stop-runtime-shape/spec.md)。`_kill_proc` 那条「暂停」窄例外按本条保留。**规格里的强制序列第 5 步此前没有落点**，2026-09-19 补齐：`CLEANUP_PENDING` 声明了「只在没有 B/未知接手、且原 browser binding 仍精确时重试」，实际却从不重试——走到这一步时进程已被证明退出，下一次 tick 必然判 `GONE`，而 `GONE` 的短路在 deadline 之前。现在把还欠着的那个浏览器冻结进 `StopInFlight.pending_browser`，由 `tick` 在短路之前重试，重试给一个与协作停止窗口同长的上限（不设上限的话，`close_browser` 对已经不存在的 PID 永远回 `None`，窗口会永远停在 `cleanup_pending`，而界面在未收口的相里拒绝启动新采集）；见 [规格](../../.scratch/cleanup-retry/spec.md)）
 - 日期：2026-09-15
 
 ## 背景
@@ -84,3 +84,21 @@ process proof，force 期间要持有一个很短的 SQLite 写事务；DB busy 
 
 完整状态矩阵、interface、测试与删除清单见
 [`.scratch/stop-target/spec.md`](../../.scratch/stop-target/spec.md)。
+
+
+## 2026-10-09：票 01 对旧收尾规则的替代
+
+现行依据为已确认的 [issues-08-11 决策](../design/issues-08-11-grill-decisions-2026-10-08.md)
+及联合 spec 的票 01；不是重新提出产品决策。仅替代本文“gone/replaced 即结束旧 operation”、
+“浏览器欠账有限重试超时可放行”和“B 接手即丢弃原欠账”规则，历史正文保留以说明原权衡。
+
+- 停止开始即冻结原目标的进程证明、浏览器归属与收尾事实；目标被替换不授权操作后来执行或其浏览器，
+  也不能证明原目标已安全收尾。原目标的已知欠账保留，不能以当前身份覆盖或时间流逝消账。
+- 原采集仍活着时不能先关闭其浏览器；仅精确核验原采集退出、原浏览器安全收尾、必要身份清理及互斥释放
+  全部成立后开放用户明确新建。已结束原轮也不能绕过这道门禁，收尾完成不会自动新建。
+- 未知、核验失败、清理失败或超时继续阻塞并可见；不按裸 PID、端口或镜像名猜授权。
+  明确无资源或真实会话全部资源已清理则不是未知欠账；借用的用户浏览器不得关闭。
+
+仍延续原目标贯穿停止窗口、compare-and-* 身份清理、协作优先和强制阶段的准确证明边界。
+代价是不能靠有限等待保证自动脱困，无法核验的欠账仍待人工处置；换取不误关后来执行、不假称收尾完成。
+票 02–07 的完整暂停续跑、手动浏览器入口及联合验收不在本次替代范围。

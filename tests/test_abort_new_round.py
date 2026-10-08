@@ -178,6 +178,30 @@ class ExplicitNewRoundTests(unittest.TestCase):
         self.assertTrue(self.api.get_start()["start_allowed"])
         self.assertFalse(single_instance.is_held(single_instance.CRAWLER_LOCK))
 
+    def test_real_missing_browser_startup_releases_cleanup_gate_for_explicit_retry(self):
+        with closing(connect(self.db_path)) as conn:
+            intent = rounds.plan_new(Database(conn), rounds.RoundRequest(cst_date(), (
+                rounds.ShopScope("D", self.shops[-1].url, "D"),)))
+        cfg = crawler_cfg(db_file=self.db_path, ensure_dirs=lambda: None,
+                          start_browser=True, attach_port=9222,
+                          chrome_path=Path(self.tmp) / "missing-edge.exe")
+        with patch("bestseller_monitor.browser_pw.subprocess.Popen") as spawn, \
+                patch("playwright.sync_api.sync_playwright") as playwright:
+            with self.assertRaises(FileNotFoundError):
+                pipeline.run_round(cfg, [self.shops[-1]], new_intent=intent)
+            spawn.assert_not_called()
+            playwright.assert_not_called()
+        with closing(connect(self.db_path)) as conn:
+            db = Database(conn)
+            failed = rounds.latest(db)
+            self.assertEqual(failed.reason.value, "STARTUP_FAILED")
+            self.assertIsNone(db.crawler_process(), "没有启动资源不能留下无法清偿的浏览器欠账")
+        self.assertFalse(single_instance.is_held(single_instance.CRAWLER_LOCK))
+        self.assertTrue(self.api.get_start()["start_allowed"])
+        with patch.object(gui.subprocess, "Popen"):
+            self.assertTrue(self.api.start_run(["D"])["ok"])
+        self.assertEqual(self.load_round(failed.id).reason.value, "STARTUP_FAILED")
+
     def test_partial_browser_start_failure_keeps_owned_or_unknown_cleanup_gate(self):
         for state in ("OWNED", "UNKNOWN"):
             with self.subTest(state=state):

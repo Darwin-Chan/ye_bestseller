@@ -156,12 +156,15 @@ def open_session(cfg: Config, *, publish_browser=None):
         return resources.pw, resources.br, resources.page, resources.ctx
     except BaseException:
         log.warning("浏览器会话建立失败（阶段 %s，端口 %s）。", stage, resources.port)
-        _cleanup(resources)
+        clean = _cleanup(resources)
         if publish_browser is not None and not resources.publication_failed:
+            # Only exact resource cleanup proves that this invocation owes no
+            # browser cleanup. A failed/unknown cleanup must remain blocked.
+            state = "CLOSED" if clean else "UNKNOWN"
             try:
-                publish_browser("UNKNOWN", resources.port, None, None)
+                publish_browser(state, None if clean else resources.port, None, None)
             except Exception as exc:  # noqa: BLE001 - preserve the establishment error
-                log.warning("发布浏览器 UNKNOWN 状态失败：%s", exc)
+                log.warning("发布浏览器 %s 状态失败：%s", state, exc)
         _release_if_clean(resources)
         raise
 
