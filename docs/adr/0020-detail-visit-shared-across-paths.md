@@ -1,6 +1,6 @@
 # 0020. 详情访问只有一处规则：deny 账目并进 guard，两条路共用同一次「打开之后怎么安顿」
 
-- 状态：已接受（一处结论被 [ADR-0029](0029-intervention-evidence-in-one-place.md) 更正：「补采的 punish 信号比改前多认一种」不成立，那条兜底分支对任何输入都到不了，`punished` 形参已整个撤掉；文末「已知没做完的一件事」随之撤回，改记为有意的盲区）
+- 状态：已接受（2026-10-05 重开并实施候选 06；原有详情访问结论保留）
 - 日期：2026-09-14
 
 ## 背景
@@ -107,3 +107,22 @@
 相关词汇见 [CONTEXT.md](../../CONTEXT.md) 的「详情观测」「补采」「跳过」；来源是
 `docs/reviews/architecture-review-2026-09-13-r2.html` 候选 04，规格在
 `.scratch/detail-access/spec.md`。
+
+## 候选 06 重开（2026-10-05）
+
+本 ADR 中“补采撞店铺阈值会把该店记为未完成”的原有取舍被重开。重开不是因为已经有现场生产复现；
+而是因为当前实现把“榜单已经完整保存”与“详情阶段仍有剩余工作”写进同一个 `list_status`，详情阶段
+中断会覆盖榜单完整性事实，并影响续跑是否重扫榜单和 GUI 分组。
+
+本次重开只重新审视店铺阶段事实，不改变本 ADR 关于详情访问、deny 账目、阈值和失败记录的其它结论。
+新的事实模型与转换规则记录在 `.scratch/shop-progress-complete-listing/grill.md` 与 `spec.md`，并已按 tickets 实施：
+榜单完整性独立保留，详情中断只改变详情阶段，完整榜单在同轮续跑中不再重新遍历。
+
+实施后的转换规则：
+
+- `list_status` 只表示榜单完整性；`完成` 表示整店榜单遍历已完整保存，榜单阶段中断仍按 ADR-0006 保持残缺榜单只增不减。
+- `detail_status` 表示详情阶段的 `未开始`、`进行中`、`中断` 或 `完成`；详情停止保存 `detail_note`，不得覆盖 `list_status='完成'`。
+- 店铺进度 module 以 `pending_offers()` 计算 `remaining_work`，并派生 `next_action`：`listing`、`detail` 或 `none`。
+- `_run_listing_pw()` 仅对榜单未完成店铺调用榜单 adapter；`_finalize_round()` 只有在榜单完整且无可继续详情工作时才进行既有轮次终态判断。
+- GUI `done`/`todo` 由同一 projection 生成；榜单完整但详情中断的店铺显示为 `listing_complete=True`、`next_action='detail'`。
+- 这次仍不扩展到页级断点续跑、通用状态机、销量分析或相邻候选。

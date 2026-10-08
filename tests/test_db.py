@@ -429,6 +429,64 @@ class DbTests(unittest.TestCase):
             conn.close()
             legacy_tmp.cleanup()
 
+    def test_connect_migrates_legacy_shop_rounds_without_losing_listing_fact(self):
+        legacy_tmp = tempfile.TemporaryDirectory()
+        db_path = Path(legacy_tmp.name) / "legacy-shop-rounds.db"
+        raw = sqlite3.connect(db_path)
+        raw.execute("""
+            CREATE TABLE rounds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                note TEXT,
+                detail_budget_limit INTEGER,
+                run_date TEXT,
+                terminal_reason TEXT
+            )
+        """)
+        raw.execute("""
+            CREATE TABLE shop_rounds (
+                round_id INTEGER NOT NULL,
+                shop_key TEXT NOT NULL,
+                shop_url TEXT NOT NULL,
+                shop_name TEXT NOT NULL,
+                list_status TEXT NOT NULL DEFAULT '待处理',
+                list_pages_read INTEGER DEFAULT 0,
+                offer_count INTEGER DEFAULT 0,
+                list_note TEXT,
+                PRIMARY KEY (round_id, shop_key)
+            )
+        """)
+        raw.execute("INSERT INTO rounds(id, started_at, run_date) VALUES (1, ?, ?)",
+                    ("2026-10-05T00:00:00+00:00", "2026-10-05"))
+        raw.execute("INSERT INTO shop_rounds(round_id, shop_key, shop_url, shop_name, list_status) "
+                    "VALUES (1, 'A01', 'https://a.example/', '店铺A', '完成')")
+        raw.commit()
+        raw.close()
+
+        conn = connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT list_status, detail_status, detail_note FROM shop_rounds "
+                "WHERE round_id=1 AND shop_key='A01'"
+            ).fetchone()
+            self.assertEqual(tuple(row), ("完成", "未开始", None))
+        finally:
+            conn.close()
+            legacy_tmp.cleanup()
+
+    def test_complete_listing_cannot_be_downgraded_by_listing_failure(self):
+        rid = new_round(self.db, ("A01", "https://a.example/", "店铺A"))
+        self.db.save_shop_offers(
+            rid, "A01", "https://a.example/", "店铺A",
+            [(1, "111", "https://detail.1688.com/offer/111.html", "商品", "")], 1)
+        self.db.mark_listing_failure(rid, "A01", "详情阶段错误不应覆盖榜单")
+        row = self.conn.execute(
+            "SELECT list_status, list_note FROM shop_rounds WHERE round_id=? AND shop_key='A01'",
+            (rid,),
+        ).fetchone()
+        self.assertEqual((row["list_status"], row["list_note"]), ("完成", None))
+
     def test_resume_same_round_and_shop_complete_preserved(self):
         rid = new_round(self.db, ("A01", "https://a.example/", "店铺A"))
         self.db.save_shop_offers(

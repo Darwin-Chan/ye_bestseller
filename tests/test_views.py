@@ -361,12 +361,35 @@ class RunViewTests(ViewsTestCase):
         view = views.run_view(self.conn, state=self.state, now=NOW)
 
         self.assertEqual((view["done_count"], view["total_count"], view["progress"]), (1, 2, 0.5))
-        self.assertEqual(view["todo"], [{"key": "A02", "name": "店铺B"}])
+        self.assertEqual(view["todo"], [{
+            "key": "A02", "name": "店铺B", "listing_complete": False,
+            "detail_status": "未开始", "remaining_work": 0,
+            "next_action": "listing", "note": None,
+        }])
         self.assertEqual(view["current_shop"], "A02", "未完成店铺里最近有事件的那家")
         self.assertEqual(view["deny"], 1)
         done = view["done"][0]
         self.assertEqual((done["key"], done["name"], done["products"], done["skus"], done["deny"]),
                          ("A01", "店铺A", 1, 2, 1))
+        self.assertEqual((done["listing_complete"], done["detail_status"], done["next_action"]),
+                         (True, "完成", "none"))
+
+    def test_progress_page_distinguishes_complete_listing_from_interrupted_detail(self):
+        round_id = new_round(self.db, ("A01", "https://A01.example/", "店铺A"), run_date=TODAY)
+        self.db.save_shop_offers(
+            round_id, "A01", "https://A01.example/", "店铺A",
+            [(1, "11", "https://detail.1688.com/offer/11.html", "商品11", "")], 1)
+        from bestseller_monitor import shop_progress
+        shop_progress.mark_detail_interrupted(self.db, round_id, "A01", "详情预算耗尽")
+
+        view = views.run_view(self.conn, state=self.state, now=NOW)
+
+        self.assertEqual(view["done"], [])
+        self.assertEqual(view["todo"], [{
+            "key": "A01", "name": "店铺A", "listing_complete": True,
+            "detail_status": "中断", "remaining_work": 1,
+            "next_action": "detail", "note": "详情预算耗尽",
+        }])
 
     def test_progress_page_carries_the_ui_session_facts(self):
         state = views.UiState(crawler_running=True, manually_paused=True,
@@ -402,7 +425,11 @@ class ResultViewTests(ViewsTestCase):
         self.assertEqual(view["duration_text"], "10 分")
         self.assertEqual((view["done_count"], view["total_count"]), (1, 2))
         self.assertEqual((view["products_total"], view["skus_total"]), (1, 2))
-        self.assertEqual(view["todo"], [{"key": "A02", "name": "店铺B"}])
+        self.assertEqual(view["todo"], [{
+            "key": "A02", "name": "店铺B", "listing_complete": False,
+            "detail_status": "未开始", "remaining_work": 0,
+            "next_action": "listing", "note": None,
+        }])
         self.assertEqual(view["done"][0]["key"], "A01")
 
     def test_result_page_uses_current_elapsed_time_while_the_round_is_still_open(self):

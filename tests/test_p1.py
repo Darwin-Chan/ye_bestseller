@@ -304,15 +304,16 @@ class P1Tests(unittest.TestCase):
 
         self.assertEqual(crawled, ["A02"])
         self.assertEqual(tracker.shop_count("A01"), 2, "越界的这一次也记进账目")
-        rows = {row["shop_key"]: row["list_status"] for row in self.conn.execute(
-            "SELECT shop_key, list_status FROM shop_rounds WHERE round_id=?", (round_id,))}
-        self.assertEqual(rows["A01"], "失败",
-                         "补采撞阈值的那家店记为未完成（续跑时会接着补它）")
-        self.assertEqual(rows["A02"], "完成", "跳过 A01 之后这一轮接着跑 A02")
-        note = self.conn.execute(
-            "SELECT list_note FROM shop_rounds WHERE round_id=? AND shop_key='A01'",
-            (round_id,)).fetchone()["list_note"]
-        self.assertIn("deny", note, "原因写得出来，续跑的人知道为什么停")
+        rows = {row["shop_key"]: row for row in self.conn.execute(
+            "SELECT shop_key, list_status, detail_status, list_note, detail_note "
+            "FROM shop_rounds WHERE round_id=?", (round_id,))}
+        self.assertEqual(rows["A01"]["list_status"], "完成",
+                         "详情阈值不能覆盖已经完整保存的榜单")
+        self.assertEqual(rows["A01"]["detail_status"], "中断")
+        self.assertIsNone(rows["A01"]["list_note"])
+        self.assertIn("deny", rows["A01"]["detail_note"],
+                      "详情中断原因写得出来，续跑的人知道为什么停")
+        self.assertEqual(rows["A02"]["list_status"], "完成", "跳过 A01 之后这一轮接着跑 A02")
 
     def test_failed_offer_with_many_skus_triggers_failure_rate_pause(self):
         round_id = new_round(self.db)
@@ -342,7 +343,7 @@ class P1Tests(unittest.TestCase):
         for offer_id in map(str, range(2, 11)):
             self.db.mark_failure(round_id, "A01", offer_id, 1, "解析失败")
 
-        pipeline._finalize_round(self.db, crawler_cfg(), rounds.load(self.db, round_id))
+        pipeline._finalize_round(self.db, crawler_cfg(max_attempts_per_page=1), rounds.load(self.db, round_id))
 
         row = self.conn.execute(
             "SELECT terminal_reason, note FROM rounds WHERE id=?", (round_id,)
@@ -853,6 +854,59 @@ class P1Tests(unittest.TestCase):
             pipeline._run_listing_pw(self.db, cfg, round_id, shops, MagicMock())
 
         self.assertEqual(events, [("list", "A01"), ("retry", "A01"), ("list", "A02")])
+
+
+    def test_complete_listing_survives_detail_stop_and_resume_skips_listing(self):
+        """完整榜单与详情阶段独立：详情中断后续跑不重扫榜单。"""
+        round_id = new_round(self.db)
+        shop = Shop("A01", "店铺A", "https://shop-a.example/")
+        self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        offers = [(1, "11", "https://detail.1688.com/offer/11.html", "商品11", "10")]
+        cfg = crawler_cfg()
+        listing_calls = []
+
+        def crawl(*args, **kwargs):
+            listing_calls.append(kwargs["round_id"])
+            return offers, 1
+
+        with patch.object(click_listing, "crawl_store_by_click", side_effect=crawl), \
+             patch.object(pipeline, "_capture_pending_offers",
+                          side_effect=ShopDenyExceeded("详情 deny 达到店铺阈值")):
+            pipeline._run_listing_pw(self.db, cfg, round_id, [shop], MagicMock())
+
+        row = self.conn.execute(
+            "SELECT list_status, detail_status, detail_note FROM shop_rounds "
+            "WHERE round_id=? AND shop_key=?", (round_id, shop.key),
+        ).fetchone()
+        self.assertEqual(row["list_status"], "完成")
+        self.assertEqual(row["detail_status"], "中断")
+        self.assertIn("详情 deny", row["detail_note"])
+        self.assertEqual(listing_calls, [round_id])
+
+        def finish_pending(db, cfg, human, rid, offers, capture):
+            for offer in offers:
+                db.submit_inventory_snapshot(
+                    round_id=rid, shop_key=offer["shop_key"],
+                    shop_url=offer["shop_url"], shop_name=offer["shop_name"],
+                    offer_id=offer["offer_id"], product_url=offer["product_url"],
+                    list_title=offer["list_title"], detail_title="商品11",
+                    main_image_url=None,
+                    sku_rows=[{"sku_id": "s1", "sku_name": "标准", "sku_stock": 5}],
+                    collected_at=utcnow(), attempt=1,
+                )
+
+        with patch.object(click_listing, "crawl_store_by_click",
+                          side_effect=AssertionError("完整榜单续跑不应重扫")), \
+             patch.object(pipeline, "_capture_pending_offers", side_effect=finish_pending):
+            pipeline._run_listing_pw(self.db, cfg, round_id, [shop], MagicMock())
+
+        row = self.conn.execute(
+            "SELECT list_status, detail_status, detail_note FROM shop_rounds "
+            "WHERE round_id=? AND shop_key=?", (round_id, shop.key),
+        ).fetchone()
+        self.assertEqual(row["list_status"], "完成")
+        self.assertEqual(row["detail_status"], "完成")
+        self.assertIsNone(row["detail_note"])
 
 
 if __name__ == "__main__":

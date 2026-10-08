@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS shop_rounds (
     list_pages_read INTEGER DEFAULT 0,
     offer_count INTEGER DEFAULT 0,
     list_note TEXT,
+    detail_status TEXT NOT NULL DEFAULT '未开始',
+    detail_note TEXT,
     PRIMARY KEY (round_id, shop_key)
 );
 
@@ -738,6 +740,8 @@ _MIGRATIONS: tuple[_Migration, ...] = (
     _add_column("products", "last_seen_at", "TEXT"),
     _add_column("products", "main_image_url", "TEXT"),
     _add_column("shop_rounds", "list_note", "TEXT"),
+    _add_column("shop_rounds", "detail_status", "TEXT NOT NULL DEFAULT '未开始'"),
+    _add_column("shop_rounds", "detail_note", "TEXT"),
     _add_column("rounds", "detail_budget_limit", "INTEGER"),
     _add_column("rounds", "run_date", "TEXT"),
     _add_column("rounds", "terminal_reason", "TEXT"),
@@ -1227,7 +1231,8 @@ class Database:
         )
         self.conn.execute(
             "UPDATE shop_rounds SET list_status='完成', list_pages_read=?, offer_count=?, "
-            "list_note=NULL WHERE round_id=? AND shop_key=?",
+            "list_note=NULL, detail_status='未开始', detail_note=NULL "
+            "WHERE round_id=? AND shop_key=?",
             (pages_read, len(rows), round_id, shop_key),
         )
         self.conn.commit()
@@ -1236,7 +1241,8 @@ class Database:
     def mark_listing_failure(self, round_id: int, shop_key: str, note: str) -> None:
         """记录列表页失败；保留店铺为未完成状态，供同轮续跑。"""
         self.conn.execute(
-            "UPDATE shop_rounds SET list_status='失败', list_note=? WHERE round_id=? AND shop_key=?",
+            "UPDATE shop_rounds SET list_status='失败', list_note=? "
+            "WHERE round_id=? AND shop_key=? AND list_status!='完成'",
             (note, round_id, shop_key),
         )
         self.conn.commit()

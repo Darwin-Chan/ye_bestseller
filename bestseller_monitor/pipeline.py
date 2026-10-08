@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from . import (browser_proc, browser_pw, click_listing, dedupe, detail, detail_visit, plan_step,
+from . import (browser_proc, browser_pw, click_listing, dedupe, detail, detail_visit, plan_step, shop_progress,
                rounds, single_instance, stop_request, weekly_plan)
 from .guard import DenyTracker, RoundDenyExceeded, ShopDenyExceeded
 from .config import Config, Shop, load_shops
@@ -355,10 +355,15 @@ def _capture_pending_offers(db: Database, cfg: Config, human: Humanizer, round_i
 
 def _finalize_round(db: Database, cfg: Config, run: Round) -> None:
     round_id = run.id
-    incomplete = db.incomplete_listings(round_id)
+    pending = shop_progress.shops_needing_work(db, round_id, cfg.max_attempts_per_page)
+    incomplete = [progress for progress in pending if not progress.listing_complete]
     if incomplete:
-        keys = ", ".join(row["shop_key"] for row in incomplete)
+        keys = ", ".join(progress.shop_key for progress in incomplete)
         raise RoundPauseRequired(f"榜单阶段未完成：{keys}；请检查存档页面后续跑")
+    detail_pending = [progress for progress in pending if progress.listing_complete]
+    if detail_pending:
+        keys = ", ".join(progress.shop_key for progress in detail_pending)
+        raise RoundPauseRequired(f"详情阶段未完成：{keys}；请继续补采后续跑")
     tally = db.round_tally(round_id)
     click_fail = tally.click_card_failures        # 点击后未得到商品编号的卡片
     attempted = tally.discovered + click_fail
@@ -408,14 +413,20 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
         browser_pw.close_session(pw, br, publish_browser=publish)
 
 
-def _record_shop_stop(db: Database, round_id: int, shop: Shop, exc: BaseException) -> bool:
-    """店里某一段停止的收尾：如实记未完成（文案来自 `_STOP_OUTCOMES`）。
+def _record_shop_stop(db: Database, round_id: int, shop: Shop, exc: BaseException,
+                      *, listing_complete: bool) -> bool:
+    """Record a classified stop against the stage that actually stopped.
 
-    交回「要不要接着跑下一家店」：只跳过单店的那种（`StopScope.SHOP`）接着跑，
-    整轮级的由调用方原样上抛。
+    A detail stop must not downgrade a complete listing.  Listing-stage stops
+    retain the existing append-only incomplete-listing semantics.
     """
     outcome = stop_outcome(exc)
-    _record_incomplete_listing(db, round_id, shop, outcome.shop_note.format(exc=exc))
+    note = outcome.shop_note.format(exc=exc)
+    if listing_complete:
+        shop_progress.mark_detail_interrupted(db, round_id, shop.key, note)
+        log.warning("店铺 %s 详情阶段中断（榜单仍完整）：%s", shop.key, note)
+    else:
+        _record_incomplete_listing(db, round_id, shop, note)
     if outcome.ladder_log:
         log.log(outcome.log_level, outcome.ladder_log.format(exc=exc))
     return outcome.scope is StopScope.SHOP
@@ -423,15 +434,16 @@ def _record_shop_stop(db: Database, round_id: int, shop: Shop, exc: BaseExceptio
 
 def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop], page,
                     emit=None, deny_tracker=None) -> None:
-    done = db.completed_listing_keys(round_id)
+    done = shop_progress.listing_complete_keys(db, round_id)
     human = Humanizer(cfg)
     # 主动停顿的配额账本也是整轮一个：点击路径与逐店补采共用（ADR-0038）。
     pacing = Pacing(cfg, human, emit=emit)
     for shop in shops:
         # 每家店开始之前先问轮次：跨天收尾发生在还没动这家店的干净点上。
         rounds.ensure_workable(db, round_id, utcnow())
+        listing_complete = shop.key in done
         try:
-            if shop.key in done:
+            if listing_complete:
                 log.info("店铺 %s 本轮已完成榜单，跳过列表", shop.key)
             else:
                 listing_page = click_listing.PlaywrightListing(page, shop, cfg, human)
@@ -443,12 +455,14 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
                          shop.key, len(offers), pages_read)
                 db.save_shop_offers(round_id, shop.key, shop.url, shop.name,
                                     offers, pages_read)
+                listing_complete = True
             # 补采也在这一层收尾：补采命中 deny 到阈值时同样是「这家店到此为止」。
             _retry_shop_pending_pw(db, cfg, round_id, shop, page, human, emit=emit,
                                    deny_tracker=deny_tracker, pacing=pacing)
         except STOP_WITH_OUTCOME as exc:
-            # 该店如实记为未完成；整轮级的停止原样上抛、跳过单店的那种接着跑下一家。
-            if not _record_shop_stop(db, round_id, shop, exc):
+            # 停止只影响实际所在阶段；完整榜单不能被详情停止覆盖。
+            if not _record_shop_stop(db, round_id, shop, exc,
+                                     listing_complete=listing_complete):
                 raise
             continue
         except ListingLoadFailed as exc:
@@ -467,13 +481,17 @@ def _retry_shop_pending_pw(db: Database, cfg: Config, round_id: int, shop: Shop,
     """
     offers = _pending_detail_offers(db, round_id, cfg, shop_key=shop.key)
     if not offers:
+        shop_progress.mark_detail_complete(db, round_id, shop.key)
         return
+    shop_progress.mark_detail_started(db, round_id, shop.key)
     log.info("店铺 %s 榜单完成后立即补抓 %s 个失败商品", shop.key, len(offers))
     _capture_pending_offers(
         db, cfg, human, round_id, offers,
         lambda offer: _capture_one_pw(db, cfg, human, round_id, offer, page, emit=emit,
                                       deny_tracker=deny_tracker, pacing=pacing),
     )
+    if not list(db.pending_offers(round_id, cfg.max_attempts_per_page, shop_key=shop.key)):
+        shop_progress.mark_detail_complete(db, round_id, shop.key)
 
 
 def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, offer, page,

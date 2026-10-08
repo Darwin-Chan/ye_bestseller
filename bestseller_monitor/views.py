@@ -16,7 +16,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from . import click_events, pacing, plan_step, rounds, weekly_plan
+from . import click_events, pacing, plan_step, rounds, shop_progress, weekly_plan
 from .config import effective_pages_limit, is_merge_only
 from .crawler_identity import CrawlerProcess
 from .db import CST, Database, RoundTally, cst_date
@@ -381,34 +381,32 @@ def _shop_span(conn: sqlite3.Connection, round_id: int,
 
 
 def _shop_breakdown(conn: sqlite3.Connection, round_id: int,
-                    tally: RoundTally) -> tuple[list[dict], list[dict]]:
-    """本轮各店的（已完成明细、未完成清单），按店铺编号排序。
-
-    每店的商品数/SKU 行数从整轮 tally 里切片取（`RoundTally.shop()`）：口径在
-    数据层一处定义，且不给每家店各跑一遍查询（IS-38 的护栏）。
-    """
-    done_rows = conn.execute(
-        "SELECT * FROM shop_rounds WHERE round_id=? AND list_status='完成' ORDER BY shop_key",
-        (round_id,),
-    ).fetchall()
-    todo_rows = conn.execute(
-        "SELECT * FROM shop_rounds WHERE round_id=? AND list_status!='完成' ORDER BY shop_key",
-        (round_id,),
-    ).fetchall()
+                    tally: RoundTally,
+                    max_attempts: int = shop_progress.DEFAULT_MAX_ATTEMPTS) -> tuple[list[dict], list[dict]]:
+    """本轮各店的（已完成明细、待处理清单），共享店铺阶段投影。"""
+    db = Database(conn)
     done = []
-    for row in done_rows:
-        shop_key = row["shop_key"]
+    todo = []
+    for progress in shop_progress.all_shops(db, round_id, max_attempts):
+        shop_key = progress.shop_key
         one = tally.shop(shop_key)
         deny, duration = _shop_span(conn, round_id, shop_key)
-        done.append({
-            "key": shop_key,
-            "name": row["shop_name"],
-            "products": one.success_offers,
-            "skus": one.success_skus,
-            "duration": _fmt_minutes(duration),
-            "deny": deny,
-        })
-    todo = [{"key": row["shop_key"], "name": row["shop_name"]} for row in todo_rows]
+        if not progress.needs_work:
+            done.append({
+                "key": shop_key,
+                "name": progress.shop_name,
+                "products": one.success_offers,
+                "skus": one.success_skus,
+                "duration": _fmt_minutes(duration),
+                "deny": deny,
+                **shop_progress.display(progress),
+            })
+        else:
+            todo.append({
+                "key": shop_key,
+                "name": progress.shop_name,
+                **shop_progress.display(progress),
+            })
     return done, todo
 
 
@@ -436,7 +434,8 @@ def _round_counts(conn: sqlite3.Connection, round_id: int) -> tuple[int, int]:
     return total, deny
 
 
-def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str) -> dict:
+def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str,
+             max_attempts: int = shop_progress.DEFAULT_MAX_ATTEMPTS) -> dict:
     """过程页取数：本轮进度、各店明细、当前处理中的店。
 
     `state.start_error` 已置位（子进程被拒）时不读数据库，`conn` 可以传 None。
@@ -454,7 +453,7 @@ def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str) -> di
         }
     round_id = active.id
     tally = Database(conn).round_tally(round_id)
-    done, todo = _shop_breakdown(conn, round_id, tally)
+    done, todo = _shop_breakdown(conn, round_id, tally, max_attempts)
     total, deny = _round_counts(conn, round_id)
     pacing_remaining, pacing_paused = _pacing_state(
         conn, round_id, now=now, running=state.crawler_running)
@@ -492,7 +491,8 @@ def _refused_start(message: str) -> dict:
 
 # ---------- 结果页 ----------
 
-def result_view(conn: sqlite3.Connection, *, state: UiState, now: str) -> dict:
+def result_view(conn: sqlite3.Connection, *, state: UiState, now: str,
+                max_attempts: int = shop_progress.DEFAULT_MAX_ATTEMPTS) -> dict:
     """结果页取数：最近一轮（或本界面认领的那一轮）的终态、总量与未完成店铺。"""
     db = Database(conn)
     run = (rounds.load(db, state.round_id) if state.round_id is not None
@@ -510,7 +510,7 @@ def result_view(conn: sqlite3.Connection, *, state: UiState, now: str) -> dict:
         # 即便抓取进程已经停下也仍可续跑，所以用当前已抓时长。
         duration = state.elapsed_sec
     tally = db.round_tally(round_id)
-    done, todo = _shop_breakdown(conn, round_id, tally)
+    done, todo = _shop_breakdown(conn, round_id, tally, max_attempts)
     total, deny = _round_counts(conn, round_id)
     products_total, skus_total = tally.success_offers, tally.success_skus
     tag, note = _terminal_text(run.reason)

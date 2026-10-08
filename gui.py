@@ -45,6 +45,7 @@ from bestseller_monitor.rounds import (
 from bestseller_monitor import plan_step, rounds, weekly_plan
 from bestseller_monitor import crawler_identity
 from bestseller_monitor import single_instance
+from bestseller_monitor import shop_progress
 from bestseller_monitor import stop_request
 from bestseller_monitor import views
 
@@ -352,13 +353,17 @@ class Api:
     def get_run(self) -> dict:
         with self._lock:
             state = self._ui_state()
+            max_attempts = getattr(self.cfg, "max_attempts_per_page",
+                                   shop_progress.DEFAULT_MAX_ATTEMPTS)
             if state.start_error is not None:
                 # 子进程因「已有采集在跑」被拒：不碰数据库，直接说清原因。
-                return views.run_view(None, state=state, now=self._now())
+                return views.run_view(None, state=state, now=self._now(),
+                                     max_attempts=max_attempts)
             conn = self._open_conn()
             try:
                 self._stop_watch.tick(conn)
-                view = views.run_view(conn, state=self._ui_state(), now=self._now())
+                view = views.run_view(conn, state=self._ui_state(), now=self._now(),
+                                    max_attempts=max_attempts)
                 if view.get("has_round"):
                     # 轮次由采集子进程创建，界面在这里随轮询认领它。
                     self.round_id = view["round_id"]
@@ -611,7 +616,10 @@ class Api:
             conn = self._open_conn()
             try:
                 self._stop_watch.tick(conn)
-                return views.result_view(conn, state=self._ui_state(), now=self._now())
+                max_attempts = getattr(self.cfg, "max_attempts_per_page",
+                                       shop_progress.DEFAULT_MAX_ATTEMPTS)
+                return views.result_view(conn, state=self._ui_state(), now=self._now(),
+                                        max_attempts=max_attempts)
             finally:
                 conn.close()
 
