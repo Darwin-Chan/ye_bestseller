@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 from playwright.sync_api import Error as PlaywrightError
 
 from bestseller_monitor import (browser_pw, click_listing, detail, detail_visit,
-                                guard, pipeline, rounds)
+                                guard, pipeline, rounds, shop_progress)
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import (
     CST,
@@ -861,7 +861,8 @@ class P1Tests(unittest.TestCase):
         round_id = new_round(self.db)
         shop = Shop("A01", "店铺A", "https://shop-a.example/")
         self.db.add_shop(round_id, shop.key, shop.url, shop.name)
-        offers = [(1, "11", "https://detail.1688.com/offer/11.html", "商品11", "10")]
+        offers = [(1, "11", "https://detail.1688.com/offer/11.html", "商品11", "10"),
+                  (2, "22", "https://detail.1688.com/offer/22.html", "商品22", "20")]
         cfg = crawler_cfg()
         listing_calls = []
 
@@ -882,9 +883,20 @@ class P1Tests(unittest.TestCase):
         self.assertEqual(row["detail_status"], "中断")
         self.assertIn("详情 deny", row["detail_note"])
         self.assertEqual(listing_calls, [round_id])
+        progress = shop_progress.project(self.db, round_id, shop.key, cfg.max_attempts_per_page)
+        self.assertEqual((progress.listing_complete, progress.detail_status,
+                          progress.remaining_work, progress.next_action),
+                         (True, "中断", 2, "detail"))
+        self.assertEqual(self.db.round_tally(round_id).handled, 0)
 
         def finish_pending(db, cfg, human, rid, offers, capture):
             for offer in offers:
+                if offer["offer_id"] == "22":
+                    db.mark_skipped(rid, offer["shop_key"], offer["shop_url"], offer["shop_name"],
+                                    offer["offer_id"], offer["product_url"], offer["list_title"])
+                    progress = shop_progress.project(db, rid, shop.key, cfg.max_attempts_per_page)
+                    self.assertEqual((progress.remaining_work, progress.next_action), (0, "none"))
+                    continue
                 db.submit_inventory_snapshot(
                     round_id=rid, shop_key=offer["shop_key"],
                     shop_url=offer["shop_url"], shop_name=offer["shop_name"],
@@ -894,6 +906,8 @@ class P1Tests(unittest.TestCase):
                     sku_rows=[{"sku_id": "s1", "sku_name": "标准", "sku_stock": 5}],
                     collected_at=utcnow(), attempt=1,
                 )
+                progress = shop_progress.project(db, rid, shop.key, cfg.max_attempts_per_page)
+                self.assertEqual((progress.remaining_work, progress.next_action), (1, "detail"))
 
         with patch.object(click_listing, "crawl_store_by_click",
                           side_effect=AssertionError("完整榜单续跑不应重扫")), \
@@ -907,6 +921,14 @@ class P1Tests(unittest.TestCase):
         self.assertEqual(row["list_status"], "完成")
         self.assertEqual(row["detail_status"], "完成")
         self.assertIsNone(row["detail_note"])
+
+        progress = shop_progress.project(self.db, round_id, shop.key, cfg.max_attempts_per_page)
+        self.assertEqual((progress.listing_complete, progress.detail_status,
+                          progress.remaining_work, progress.next_action),
+                         (True, "完成", 0, "none"))
+        tally = self.db.round_tally(round_id)
+        self.assertEqual((tally.discovered, tally.handled, tally.success_offers, tally.success_skus),
+                         (2, 2, 1, 1))
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ from bestseller_monitor.db import (
     connect,
     cst_date,
 )
-from bestseller_monitor import db
+from bestseller_monitor import db, shop_progress
 from helpers import new_round, product_picture
 from bestseller_monitor.parse import DEFAULT_SKU_ID, DEFAULT_SKU_NAME
 
@@ -518,10 +518,27 @@ class DbTests(unittest.TestCase):
         self.db.mark_failure(rid, "A01", "111", attempt=1, note="测试失败")
         pending = list(self.db.pending_offers(rid, max_attempts=2))
         self.assertEqual([r["offer_id"] for r in pending], ["111", "222"])
+        self.assertEqual(self.db.round_tally(rid).handled, 0)
+        progress = shop_progress.project(self.db, rid, "A01", max_attempts=2)
+        self.assertEqual((progress.remaining_work, progress.next_action), (2, "detail"))
 
         self.db.mark_failure(rid, "A01", "111", attempt=2, note="第二次失败")
         pending = list(self.db.pending_offers(rid, max_attempts=2))
         self.assertEqual([r["offer_id"] for r in pending], ["222"])
+        tally = self.db.round_tally(rid)
+        self.assertEqual((tally.handled, tally.failed_offers, tally.success_offers), (0, 2, 0))
+        progress = shop_progress.project(self.db, rid, "A01", max_attempts=2)
+        self.assertEqual((progress.remaining_work, progress.next_action), (1, "detail"))
+        self.db.mark_skipped(
+            rid, "A01", "https://a.example/", "店铺A", "222",
+            "https://detail.1688.com/offer/222.html", "商品2",
+        )
+        progress = shop_progress.project(self.db, rid, "A01", max_attempts=2)
+        self.assertEqual((progress.remaining_work, progress.next_action, progress.detail_status),
+                         (0, "none", "完成"))
+        tally = self.db.round_tally(rid)
+        self.assertEqual((tally.handled, tally.failed_offers, tally.success_offers), (1, 1, 0),
+                         "无可尝试工作不代表所有商品已成功或跳过")
 
     def test_success_clears_failure_and_counts(self):
         rid = new_round(self.db)
@@ -549,6 +566,17 @@ class DbTests(unittest.TestCase):
         tally = self.db.round_tally(rid)
         self.assertEqual((tally.discovered, tally.handled), (1, 1))
         self.assertEqual(tally.failed_offers, 0)
+        self.assertEqual((tally.success_offers, tally.success_skus), (1, 1))
+        self.assertEqual(list(self.db.pending_offers(rid, max_attempts=3)), [])
+        before = [tuple(row) for row in self.conn.execute(
+            "SELECT * FROM snapshots WHERE round_id=?", (rid,))]
+        self.db.mark_skipped(
+            rid, "A01", "https://a.example/", "店铺A", "111",
+            "https://detail.1688.com/offer/111.html", "商品",
+        )
+        self.assertEqual([tuple(row) for row in self.conn.execute(
+            "SELECT * FROM snapshots WHERE round_id=?", (rid,))], before,
+            "已有成功快照，不追加跳过或改写原记录")
 
     def test_offer_counts_are_per_offer_not_per_sku(self):
         rid = new_round(self.db)
@@ -557,7 +585,7 @@ class DbTests(unittest.TestCase):
             (i, str(i), f"https://detail.1688.com/offer/{i}.html", f"商品{i}", "")
             for i in range(1, 11)
         ]
-        self.db.save_shop_offers(rid, "A01", "https://a.example/", "店铺A", offers, 1)
+        self.db.save_shop_offers(rid, "A01", "https://a.example/", "店铺A", offers + [offers[0]], 1)
         self.db.submit_inventory_snapshot(
             round_id=rid,
             shop_key="A01",
@@ -575,10 +603,24 @@ class DbTests(unittest.TestCase):
             collected_at="2026-09-04T00:00:00+00:00",
             attempt=1,
         )
+        # 同 SKU 再提交是替换；新 SKU 追加，旧 SKU 保留，商品仍只算一个。
+        self.db.submit_inventory_snapshot(
+            round_id=rid, shop_key="A01", shop_url="https://a.example/", shop_name="店铺A",
+            offer_id="1", product_url="https://detail.1688.com/offer/1.html",
+            list_title="商品1", detail_title="商品1详情", main_image_url=None,
+            sku_rows=[{"sku_id": "1:0", "sku_name": "规格0", "sku_stock": 90},
+                      {"sku_id": "1:10", "sku_name": "规格10", "sku_stock": 80}],
+            collected_at="2026-09-04T01:00:00+00:00", attempt=2,
+        )
         for offer_id in map(str, range(2, 11)):
             self.db.mark_failure(rid, "A01", offer_id, 1, "解析失败")
         tally = self.db.round_tally(rid)
         self.assertEqual((tally.discovered, tally.handled), (10, 1))
+
+        self.assertEqual((tally.success_offers, tally.success_skus), (1, 11))
+        self.assertEqual(tally.failed_offers, 9)
+        self.assertEqual([r["offer_id"] for r in self.db.pending_offers(rid, max_attempts=3)],
+                         list(map(str, range(2, 11))))
 
 
     def test_round_tally_counts_every_question_in_one_place(self):
@@ -611,6 +653,18 @@ class DbTests(unittest.TestCase):
             collected_at="2026-09-04T00:00:00+00:00", attempt=1,
         )
 
+        self.db.mark_skipped(rid, "A01", "https://a.example/", "店铺A", "88",
+                             "https://detail.1688.com/offer/88.html", "商品88")
+        before = [tuple(row) for row in self.conn.execute(
+            "SELECT * FROM snapshots WHERE round_id=? ORDER BY id", (rid,))]
+        for oid in ("99", "88"):
+            self.db.mark_skipped(rid, "A01", "https://a.example/", "店铺A", oid,
+                                 f"https://detail.1688.com/offer/{oid}.html", f"商品{oid}")
+        self.assertEqual([tuple(row) for row in self.conn.execute(
+            "SELECT * FROM snapshots WHERE round_id=? ORDER BY id", (rid,))], before,
+            "孤儿成功/跳过也阻止重复写入；守卫不要求榜单存在")
+        self.assertEqual([r["offer_id"] for r in self.db.pending_offers(rid, max_attempts=2)],
+                         ["33", "44"], "孤儿快照不能成为待补采榜单商品")
         tally = self.db.round_tally(rid)
 
         self.assertEqual(tally.discovered, 4, "商品数按榜单行去重")
@@ -618,7 +672,61 @@ class DbTests(unittest.TestCase):
         self.assertEqual(tally.failed_offers, 2, "失败 + 只有榜单行没抓到的")
         self.assertEqual(tally.success_offers, 1)
         self.assertEqual(tally.success_skus, 2, "只有榜单行里那个商品的 SKU 行")
-        self.assertEqual(tally.orphans, 1, "有快照、无榜单行：单列出来，不算成功商品")
+        self.assertEqual(tally.orphans, 2, "有快照、无榜单行：单列出来，不算成功商品")
+
+    def test_handled_results_are_isolated_by_round_shop_and_offer(self):
+        """其它轮/店/商品的成功或跳过不排除本作用域 pending，也不拦跳过写入。"""
+        for index, status in enumerate(("成功", "跳过")):
+            with self.subTest(status=status):
+                old = new_round(self.db, "A01", run_date=f"2026-09-{10 + index * 2:02d}")
+                current = new_round(self.db, "A01", "A02",
+                                    run_date=f"2026-09-{11 + index * 2:02d}")
+                sources = ((old, "A01", "11"), (current, "A02", "11"),
+                           (current, "A01", "22"))
+                for rid, key, oid in sources:
+                    self.db.add_shop(rid, key, f"https://{key}.example/", f"店铺{key}")
+                    self.db.remember_shop_offer(
+                        rid, key, f"https://{key}.example/", f"店铺{key}",
+                        (1, oid, f"https://detail.1688.com/offer/{oid}.html", f"商品{oid}", ""),
+                    )
+                    if status == "成功":
+                        self.db.submit_inventory_snapshot(
+                            round_id=rid, shop_key=key, shop_url=f"https://{key}.example/",
+                            shop_name=f"店铺{key}", offer_id=oid,
+                            product_url=f"https://detail.1688.com/offer/{oid}.html",
+                            list_title=f"商品{oid}", detail_title=f"商品{oid}", main_image_url=None,
+                            sku_rows=[{"sku_id": "s1", "sku_name": "标准", "sku_stock": 5}],
+                            collected_at="2026-09-10T00:00:00+00:00", attempt=1,
+                        )
+                    else:
+                        self.db.mark_skipped(
+                            rid, key, f"https://{key}.example/", f"店铺{key}", oid,
+                            f"https://detail.1688.com/offer/{oid}.html", f"商品{oid}",
+                        )
+                self._remember(current, (2, "11", "https://detail.1688.com/offer/11.html",
+                                         "商品11", ""))
+                self.assertEqual([(r["shop_key"], r["offer_id"]) for r in
+                                  self.db.pending_offers(current, max_attempts=2)], [("A01", "11")])
+                self.assertEqual([r["offer_id"] for r in self.db.pending_offers(
+                    current, max_attempts=2, shop_key="A01")], ["11"])
+                self.assertEqual(list(self.db.pending_offers(
+                    current, max_attempts=2, shop_key="A02")), [])
+                tally = self.db.round_tally(current)
+                self.assertEqual((tally.discovered, tally.handled), (3, 2))
+                self.assertEqual(tally.shop("A01").handled, 1)
+                self.assertEqual(self.db.round_tally(old).handled, 1)
+                self.db.mark_skipped(
+                    current, "A01", "https://a.example/", "店铺A", "11",
+                    "https://detail.1688.com/offer/11.html", "商品11",
+                )
+                self.assertEqual(self.conn.execute(
+                    "SELECT COUNT(*) FROM snapshots WHERE round_id=? AND shop_key=? "
+                    "AND offer_id=? AND page_status='跳过'", (current, "A01", "11")
+                ).fetchone()[0], 1, "其它作用域的处理记录不能拦住本作用域写入")
+                tally = self.db.round_tally(current)
+                self.assertEqual((tally.handled, tally.success_offers, tally.success_skus),
+                                 (3, 2 if status == "成功" else 0, 2 if status == "成功" else 0))
+                self.assertEqual(list(self.db.pending_offers(current, max_attempts=2)), [])
 
     def test_round_tally_can_be_asked_per_shop(self):
         rid = new_round(self.db, "A01", "A02")
@@ -1218,10 +1326,21 @@ class DbTests(unittest.TestCase):
             rid, "A", "https://a.example/", "店铺A", "111",
             "https://detail.1688.com/offer/111.html", "商品",
         )
-        # 跳过是已处理结果：计入成功、不算失败
+        # 跳过是已处理结果：计入已处理，不算成功库存或失败
         tally = self.db.round_tally(rid)
         self.assertEqual((tally.discovered, tally.handled), (1, 1))
         self.assertEqual(tally.failed_offers, 0)
+        self.assertEqual((tally.success_offers, tally.success_skus), (0, 0))
+        self.assertEqual(list(self.db.pending_offers(rid, max_attempts=2)), [])
+        self.assertFalse(self.db.inventory_exists("A", "111", cst_date()))
+        self.assertFalse(self.db.inventory_exists_by_name("A", "商品", cst_date()))
+        self.db.mark_skipped(
+            rid, "A", "https://a.example/", "店铺A", "111",
+            "https://detail.1688.com/offer/111.html", "商品",
+        )
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM snapshots WHERE round_id=?", (rid,)
+        ).fetchone()[0], 1, "重复跳过不追加快照")
 
     def test_skip_is_not_inventory_evidence(self):
         rid = new_round(self.db)
@@ -1247,6 +1366,18 @@ class DbTests(unittest.TestCase):
             [row["offer_id"] for row in self.db.pending_offers(rid, max_attempts=2)],
             ["111"],
         )
+        self.assertEqual(self.db.round_tally(rid).handled, 0)
+        self.db.mark_skipped(
+            rid, "A", "https://a.example/", "店铺A", "111",
+            "https://detail.1688.com/offer/111.html", "商品",
+        )
+        self.assertEqual(self.db.round_tally(rid).handled, 1,
+                         "失败快照不阻止合法跳过")
+        self.assertEqual(list(self.db.pending_offers(rid, max_attempts=2)), [])
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM snapshots WHERE round_id=? AND page_status='跳过'", (rid,)
+        ).fetchone()[0], 1)
+
 
     def test_find_offer_id_by_name_unique_vs_ambiguous(self):
         rid = new_round(self.db)

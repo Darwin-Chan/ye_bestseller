@@ -22,7 +22,7 @@
 - ② 界面状态：开轮前准备运行态、已抓时长段计时（`#prep-owner` / `#elapsed`）；
 - ⑤ 工具边界：工具列表页装配收归 `listing`、诊断对账工具走生产读口
   （`#tool-page` / `#tool-reads`）；
-- 8 条 Worth exploring 的其余各条（`#tx-seam`、`#image-evidence`、`#handled-predicate`、
+- 8 条 Worth exploring 的其余各条（`#tx-seam`、`#image-evidence`、
   `#page-contract`、`#plan-owner`、`#judgment-paths`、`#launcher-spec`），以及报告
   「看过但不列入」附录各条。
 
@@ -36,3 +36,14 @@
 - 各条都仍是真实摩擦，不是被否决：真要捡起时按项目现行流程走
   （grill-with-docs → to-spec → to-tickets → implement），报告卡片自带 file:line 与证据、
   可直接当种子——③④ 两组已按这条流程走通，可作样板。
+
+## 2026-10-08：仅恢复并实施 handled-predicate
+
+用户本次授权恢复 `#handled-predicate`，按 grill-with-docs → to-spec → to-tickets → implement 推进。
+已实施：计数、补采排除与跳过写入守卫直接复用单一内部已处理快照判据。
+三处原先同值，无生产分叉证据；不改变成功/跳过/失败分类、成功库存判据、孤儿集合口径、
+公开 interface 或候选 06 的店铺阶段及同轮续跑模型。
+
+相关单文件 143 项通过；隔离分段全量 1388 项、7/7 段 OK，计数对账一致。Standards 在已核对范围内无硬违反或需整改气味，Spec 无发现；两轴审查完成，读取边界保留在交付记录。
+决定、规格与验收证据见[交付记录](../design/handled-predicate-delivery-2026-10-08.md)。
+其余上述挂起项及「看过但不列入」附录各条保持原状态。

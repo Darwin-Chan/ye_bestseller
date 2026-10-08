@@ -791,15 +791,16 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-# 「已处理」「成功库存快照」两个判据只在这一处写下来；下面两条计数查询都拼它（表别名一律 `s`）。
-_TALLY_HANDLED_WHEN = "s.page_status IN ('成功', '跳过')"
+# 已处理快照的状态判据：计数、补采排除、跳过守卫共用，快照别名固定为内部的 `s`。
+# 各查询自行限定轮次/店铺/商品与集合范围；成功库存快照另有独立判据。
+_HANDLED_SNAPSHOT_WHEN = "s.page_status IN ('成功', '跳过')"
 _TALLY_SUCCESS_WHEN = "s.page_status='成功' AND s.sku_id IS NOT NULL"
 
 
 def _tally_columns() -> str:
     """本轮计数的三列：已处理、成功商品、成功 SKU 行。"""
     return ("COUNT(DISTINCT CASE WHEN "
-            f"{_TALLY_HANDLED_WHEN} THEN s.offer_id END) AS handled, "
+            f"{_HANDLED_SNAPSHOT_WHEN} THEN s.offer_id END) AS handled, "
             "COUNT(DISTINCT CASE WHEN "
             f"{_TALLY_SUCCESS_WHEN} THEN s.offer_id END) AS success_offers, "
             f"SUM(CASE WHEN {_TALLY_SUCCESS_WHEN} THEN 1 ELSE 0 END) AS success_skus")
@@ -1256,13 +1257,13 @@ class Database:
 
     def pending_offers(self, round_id: int, max_attempts: int,
                        shop_key: str | None = None) -> Iterator[sqlite3.Row]:
-        sql = """
+        sql = f"""
         SELECT so.* FROM shop_offers so
         WHERE so.round_id = :rid
           AND NOT EXISTS (
             SELECT 1 FROM snapshots s
             WHERE s.round_id = so.round_id AND s.shop_key = so.shop_key
-              AND s.offer_id = so.offer_id AND s.page_status IN ('成功', '跳过')
+              AND s.offer_id = so.offer_id AND {_HANDLED_SNAPSHOT_WHEN}
           )
           AND COALESCE((
             SELECT MAX(s2.attempt) FROM snapshots s2
@@ -1755,8 +1756,8 @@ class Database:
         但不会成为同日去重证据，也不算失败。
         """
         existing = self.conn.execute(
-            "SELECT 1 FROM snapshots WHERE round_id=? AND shop_key=? AND offer_id=? "
-            "AND page_status IN ('成功', '跳过') LIMIT 1",
+            "SELECT 1 FROM snapshots s WHERE s.round_id=? AND s.shop_key=? AND s.offer_id=? "
+            f"AND {_HANDLED_SNAPSHOT_WHEN} LIMIT 1",
             (round_id, shop_key, offer_id),
         ).fetchone()
         if existing is not None:
