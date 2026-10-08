@@ -47,3 +47,15 @@ Used by `/wayfinder`. The **map** is a file with one **child** file per ticket.
 - **Frontier**: scan `.scratch/<effort>/issues/` for files that are open, unblocked, and unclaimed; first by number wins.
 - **Claim**: set `Status: claimed` and save before any work.
 - **Resolve**: append the answer under an `## Answer` heading, set `Status: resolved`, then append a context pointer (gist + link) to the map's Decisions-so-far in `map.md`.
+
+## Ticket closure: sandbox and evidence disposition
+
+Before setting an implementation ticket to its terminal status, read
+[隔离副本与证据收尾规范](../ops/隔离副本与证据收尾规范.md) and append its
+`目录与证据处置` checklist to the ticket. Record the main repository, every sandbox,
+the evidence location, and the keep / deletion-candidate / pending decision for each
+artifact. Use `未创建` or `无` explicitly when no sandbox or evidence was produced.
+
+A ticket may close with a sandbox retained, but unresolved retention must state a reason
+and follow-up condition. A deletion candidate is not deletion authorization. Historical
+closed tickets are not rewritten; apply this checklist to newly closed tickets.

@@ -29,6 +29,13 @@
 - **别的机器的记录包**：解压到 `.scratch/inbox/<包名>/` 再读；怎么记录、怎么读见
   `docs/ops/问题记录与打包.md`。
 
+## 隔离副本与收尾（2026-10-08 起）
+
+- 新隔离副本统一建在主仓 `.scratch/sandboxes/<feature>/<ticket>/bestseller/`；并行或重跑增加运行层级，叶子目录仍叫 `bestseller`。不在 `F:\AI` 或 `projects` 第一层新建项目测试目录。
+- 创建/重用隔离副本、在副本中跑测试、关闭工单或准备清理副本时，先读 [隔离副本与证据收尾规范](docs/ops/隔离副本与证据收尾规范.md)。
+- 票证据写入**主仓** `.scratch/logs/tickets/<feature>/<ticket>/`，诊断输出写主仓 `.scratch/tool-output/`；副本跑全量时显式传主仓绝对路径 `--log-dir`，不依赖副本内默认目录。
+- 工单关闭前记录副本路径、证据路径及“保留 / 可删除 / 暂留待确认”清单；“可删除”只是候选，实际删除仍需授权、核验边界与保留材料，不按目录年龄或 `.scratch` 名称自动清理。
+
 ## 收尾：分段跑全量测试（2026-09-24 起）
 
 implement 类流程收尾要跑一次全量（「single test files regularly, the full test suite once at
@@ -40,8 +47,8 @@ the end」）。全量改为**分段跑**：6 个长尾文件各自一个进程�
 python tools/run_full_suite.py
 ```
 
-- 跑法沿用既有惯例：隔离副本（目录名 `bestseller`、补 `config/*.toml` 与 `shops.csv`）里
-  从仓库根运行；日志落 `--log-dir`（默认 `.scratch/logs/full-suite/<时间戳>/`），验收记录
+- 跑法沿用既有惯例：按上节统一位置创建隔离副本（目录名 `bestseller`、补测试专用 `config/*.toml` 与 `shops.csv`）里
+  从副本根运行；显式传主仓票证据绝对路径 `--log-dir`（见上节规范），验收记录
   抄 `summary.txt` 里的「合计 / 对账 / 结论」行，逐段日志与它同目录。
 - 重段名单在 `tools/run_full_suite.py` 的 `HEAVY_MODULES`。刷新方法：全量加 `--durations 0`
   把逐用例耗时按模块聚合、从大到小取。依据、实测与合规对账见
