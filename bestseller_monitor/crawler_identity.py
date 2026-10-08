@@ -16,6 +16,9 @@
 """
 from __future__ import annotations
 
+from contextlib import closing
+from pathlib import Path
+import sqlite3
 from dataclasses import dataclass
 
 from . import single_instance
@@ -88,3 +91,19 @@ def current(conn, *, own_alive: bool = False, own_pid: int | None = None,
     if who is not None:
         return who
     return CrawlerProcess(pid=own_pid if own_alive else None, round_id=own_round_id)
+
+
+def registered_in_file(path: Path) -> CrawlerProcess | None:
+    """Read another collection space without creating or migrating its database.
+
+    A missing database/identity table means no registration, not permission to stop.
+    Invalid or inaccessible databases remain errors so callers fail closed.
+    """
+    if not path.exists():
+        return None
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        table = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='crawler_process'").fetchone()
+        if table is None:
+            return None
+        return registered(conn)

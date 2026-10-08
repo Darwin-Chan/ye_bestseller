@@ -66,7 +66,9 @@
 <div class="wrap">
   <header>
     <h1>1688 畅销品监控 · 库存数据抓取</h1>
+    <button class="btn ghost sm" id="trialModeBtn">进入本机试采</button>
   </header>
+  <div class="banner warn" id="collectionMode" role="status">正式采集</div>
 
   <div class="banner err" id="apiError" style="display:none"></div>
 
@@ -236,11 +238,45 @@
     try {
       const value = await api[name](...args);
       clearApiError();
+      renderCollectionMode(value);
       return value;
     } catch (err) {
       showApiError(name, err);
       return null;
     }
+  }
+
+  let localTrial = false;
+  function renderCollectionMode(d) {
+    if (!d || !d.collection_label) return;
+    localTrial = !!d.local_trial;
+    $("collectionMode").textContent = d.collection_label
+      + (localTrial ? " · 历史保留；同日已采商品可能跳过。正式交换与判断集共享不受影响。" : "");
+    $("trialModeBtn").textContent = localTrial ? "返回正式采集" : "进入本机试采";
+    $("trialModeBtn").disabled = !!d.mode_switch_locked;
+  }
+  async function changeCollectionMode() {
+    await queued(async () => {
+      const r = await callApi("set_local_trial", !localTrial);
+      if (!r || !r.ok) { if (r) showNotice(r.error); return; }
+      stopPolling();
+      if (prepTimer) { clearTimeout(prepTimer); prepTimer = null; }
+      if (resStopTimer) { clearTimeout(resStopTimer); resStopTimer = null; }
+      closeConfirm();
+      hasStartedRun = false;
+      showTab("start");
+      await loadStart();
+      const d = await callApi("get_run");
+      if (d && d.local_trial && d.has_round) {
+        hasStartedRun = true;
+        showTab("run");
+        polling = true;
+        await refreshOnce();
+      } else if (d && d.local_trial) {
+        const result = await callApi("get_result");
+        if (result && result.has_round) { renderResult(result); showTab("result"); }
+      }
+    });
   }
 
   const STEP_ORDER = ["start", "run", "result"];
@@ -448,17 +484,17 @@
       const stopping = d.stopping || null;
       $("rStopping").style.display = stopping ? "block" : "none";
       if (stopping) $("rStopping").textContent = stoppingText(d);
-      $("rPaused").style.display = (!stopping && d.manually_paused) ? "block" : "none";
+      $("rPaused").style.display = (!stopping && (d.manually_paused || d.awaiting_resume)) ? "block" : "none";
       // 暂停态显示“继续”，运行态显示“暂停”；停止途中两个都不给点。
-      $("resumeBtn").style.display = (!stopping && d.manually_paused) ? "" : "none";
-      $("pauseBtn").style.display = (!stopping && !d.manually_paused) ? "" : "none";
+      $("resumeBtn").style.display = (!stopping && (d.manually_paused || d.awaiting_resume)) ? "" : "none";
+      $("pauseBtn").style.display = (!stopping && !(d.manually_paused || d.awaiting_resume)) ? "" : "none";
       $("abortBtn").disabled = !!stopping;
     } else {
       $("rProgressLine").textContent = d.running ? "抓取进程正在启动…" : "本轮已结束，正在加载结果…";
     }
 
     // 结束判定：子进程结束且非暂停 -> 看结果
-    if (!d.running && !d.manually_paused && hasStartedRun) {
+    if (!d.running && !(d.manually_paused || d.awaiting_resume) && hasStartedRun) {
       stopPolling();
       // 已经在链上：这里直接取，不能再排队，否则等的是自己。
       const res = await callApi("get_result");
@@ -468,7 +504,11 @@
     scheduleNextTick();
   }
 
-  async function pauseRun() { await callApi("pause_run"); await tickRun(); }
+  async function pauseRun() {
+    const r = await callApi("pause_run");
+    if (!r || !r.ok) { if (r) showNotice(r.error); return; }
+    await tickRun();
+  }
   async function resumeRun() {
     const r = await callApi("resume_run");
     if (!r) return;
@@ -489,7 +529,8 @@
   }
   function closeConfirm() { $("confirmModal").classList.remove("show"); }
   async function doAbort() {
-    await callApi("abort_run");
+    const r = await callApi("abort_run");
+    if (!r || !r.ok) { if (r) showNotice(r.error); return; }
     stopPolling();
     const res = await queued(() => callApi("get_result"));
     if (res && res.has_round) { renderResult(res); switchTab("result"); }
@@ -536,6 +577,7 @@
   function init() {
     api = window.pywebview.api;
     // 事件处理器包一层：onclick 会把事件对象当第一个参数传进来，不能让它冒充参数
+    $("trialModeBtn").onclick = changeCollectionMode;
     $("startBtn").onclick = () => startRun();
     $("retryPrepBtn").onclick = retryPrepare;
     $("pauseBtn").onclick = pauseRun;

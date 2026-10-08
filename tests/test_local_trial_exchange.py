@@ -5,6 +5,7 @@ import sqlite3
 import unittest
 from unittest.mock import patch
 
+import gui
 from bestseller_monitor import export
 from bestseller_monitor.analysis import AnalysisConfig, AnalysisService
 from bestseller_monitor.collection_context import for_collection
@@ -25,7 +26,12 @@ class LocalTrialExchangeTests(unittest.TestCase):
         cfg = Config.from_file(config, root=root).replace(
             db_file=world.db_path, exchange_root=world.root,
             analysis_config=world.analysis_path)
-        trial = for_collection(cfg, local_trial=True, config_file=config)
+        cfg.shop_csv.write_text("shop_key,shop_name,shop_url,pages,active,offer_list_url\n"
+                                "TRIAL,测试店,https://trial.example/,3,1,\n", encoding="utf-8")
+        api = gui.Api(cfg=cfg, config_file=config)
+        self.assertTrue(api.set_local_trial(True)["ok"])
+        trial = api.cfg
+        self.assertEqual(trial.db_file, for_collection(cfg, local_trial=True, config_file=config).db_file)
         with contextlib.closing(connect(trial.db_file)) as conn:
             db = Database(conn)
             for day, stock in [("2026-09-14", 9), ("2026-09-15", 8)]:
