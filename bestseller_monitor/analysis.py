@@ -591,6 +591,14 @@ class AnalysisService:
             snapshot = copy.deepcopy(stored.payload)
             from .sku_drafts import restore_curve_boundaries
             restore_curve_boundaries(snapshot, calculate_inventory)
+            # Older SKU drafts already freeze sufficient names/source evidence.
+            # Enrich only missing fields, never read live inventory or regroup.
+            from .sku_codes import code_evidence
+            for member in snapshot['members']:
+                if 'merchant_codes' not in member:
+                    member.update(code_evidence(member))
+            for group in snapshot['groups']:
+                group.setdefault('manual_membership', bool(group.get('confirmed') or group.get('adjusted') or group.get('excluded_group')))
             refresh_sku(snapshot)
             snapshot['limitations'] = ['无有效编码／编码歧义的图文判断尚未开放；多候选比较与跨机共享尚未开放']
             return snapshot

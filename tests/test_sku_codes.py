@@ -278,6 +278,28 @@ class MerchantCodeTests(unittest.TestCase):
         self.assertTrue(self.group_for(returned, b)["excluded_group"])
         self.assertNotEqual(self.group_for(returned, a)["id"], self.group_for(returned, b)["id"])
 
+    def test_pre_ticket04_saved_sku_result_restores_codes_without_live_inventory(self):
+        from bestseller_monitor.analysis import AnalysisService
+        self.seed("红 # a #")
+        result = self.service.start("2026-09-07", "2026-09-14")
+        self.service.confirm_groups(result["id"], [result["groups"][0]["id"]])
+        result = self.service.save_and_view(result["id"])
+        # Public storage fixture: prior ticket's frozen SKU result, not product cache.
+        for member in result["members"]:
+            for field in ("merchant_code", "merchant_codes", "code_ambiguous", "code_source", "evidence_rule", "grouping_basis"):
+                member.pop(field, None)
+        for group in result["groups"]:
+            for field in ("manual_membership", "manual_members", "merchant_codes", "grouping_basis"):
+                group.pop(field, None)
+        self.service.store.write_sku(result)
+        self.conn.close(); self.path.unlink()
+        restored = AnalysisService(self.service.config, running=lambda: False).get(result["id"])
+        self.assertEqual("A", restored["members"][0]["merchant_code"])
+        self.assertEqual(["A"], restored["groups"][0]["merchant_codes"])
+        self.assertEqual("人工归组", restored["groups"][0]["grouping_basis"])
+        self.assertTrue(restored["groups"][0]["confirmed"])
+        self.assertEqual(10, restored["groups"][0]["sales"])
+
     def test_manual_override_clears_unfinished_matching_notices(self):
         a = self.seed("无码")
         b = self.seed("蓝 #A#", shop="B01")
