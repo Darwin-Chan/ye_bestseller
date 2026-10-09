@@ -330,7 +330,7 @@ def plan_new(db: Database, request: RoundRequest) -> NewRoundIntent:
     return NewRoundIntent(request, previous.id if previous else 0)
 
 
-def open_resume(db: Database, request: RoundRequest, intent: ResumeRoundIntent, *, now=None) -> OpenResult:
+def open_resume(db: Database, request: RoundRequest, intent: ResumeRoundIntent, *, now) -> OpenResult:
     """Locked explicit resume never adopts another round, creates, or ends one."""
     db.conn.execute("BEGIN IMMEDIATE")
     try:
@@ -338,7 +338,7 @@ def open_resume(db: Database, request: RoundRequest, intent: ResumeRoundIntent, 
         recent = latest(db)
         active = _active_rounds(db)
         snapshot = RoundRequest(current.run_date, scope_shops(db, current.id))
-        if (not current.resumable_on(now or utcnow())
+        if (not current.resumable_on(now)
                 or recent is None or recent.id != intent.round_id
                 or len(active) != 1 or active[0].id != intent.round_id
                 or request.run_date != snapshot.run_date

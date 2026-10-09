@@ -298,7 +298,7 @@ class PauseResumeTests(unittest.TestCase):
         with patch('bestseller_monitor.browser_pw.open_session') as browser:
             with self.assertRaises(rounds.ScopeMismatch):
                 pipeline.run_round(cfg, self.shops[-1:], resume_intent=wrong)
-            with patch.object(rounds, "utcnow", return_value=(datetime.fromisoformat(self.api._now()) + timedelta(days=1)).isoformat()):
+            with patch.object(pipeline, "utcnow", return_value=(datetime.fromisoformat(self.api._now()) + timedelta(days=1)).isoformat()):
                 with self.assertRaises(rounds.ScopeMismatch):
                     pipeline.run_round(cfg, self.shops, resume_intent=intent)
             with closing(connect(self.path)) as conn:
@@ -376,3 +376,36 @@ class PauseResumeTests(unittest.TestCase):
         with patch.object(gui.subprocess, 'Popen') as spawn:
             self.assertFalse(self.api.resume_run()['ok'])
             spawn.assert_not_called()
+
+    def test_locked_resume_domain_uses_callers_clock_not_wall_clock(self):
+        self.assertTrue(self.api.pause_run()['ok']); self.settle()
+        with closing(connect(self.path)) as conn:
+            intent = rounds.plan_resume(Database(conn), self.rid, now=self.api._now())
+        cfg = crawler_cfg(db_file=self.path, ensure_dirs=lambda: None)
+        with patch.object(rounds, 'utcnow', side_effect=AssertionError('domain reads wall clock')):
+            with patch('bestseller_monitor.browser_pw.open_session', side_effect=OSError('offline unavailable')):
+                with self.assertRaises(OSError):
+                    pipeline.run_round(cfg, self.shops, resume_intent=intent)
+
+    def test_locked_resume_refuses_replacement_round_after_gui_preflight(self):
+        self.assertTrue(self.api.pause_run()['ok']); self.settle()
+        with patch.object(gui.subprocess, 'Popen') as spawn:
+            self.assertTrue(self.api.resume_run()['ok'])
+        intent = self.command_intent(spawn)
+        replacement = []
+        def replace_at_lock():
+            self.assertTrue(single_instance.is_held(single_instance.CRAWLER_LOCK))
+            with closing(connect(self.path)) as conn:
+                db = Database(conn)
+                rounds.finish(db, rounds.load(db, self.rid), rounds.TerminalReason.ABANDONED)
+                replacement.append(rounds.open(db, intent.request).round.id)
+        cfg = crawler_cfg(db_file=self.path, ensure_dirs=replace_at_lock)
+        with patch('bestseller_monitor.browser_pw.open_session') as browser:
+            with self.assertRaises(rounds.ScopeMismatch):
+                pipeline.run_round(cfg, self.shops, resume_intent=intent)
+            browser.assert_not_called()
+        with closing(connect(self.path)) as conn:
+            db = Database(conn)
+            self.assertEqual(rounds.latest(db).id, replacement[0])
+            self.assertIsNone(rounds.load(db, replacement[0]).reason)
+            self.assertEqual(rounds.load(db, self.rid).reason, rounds.TerminalReason.ABANDONED)

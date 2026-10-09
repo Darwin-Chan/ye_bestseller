@@ -282,7 +282,7 @@ def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *,
             shops=tuple(ShopScope(shop.key, shop.url, shop.name) for shop in shops),
         )
         if resume_intent is not None:
-            opened = rounds.open_resume(db, request, resume_intent)
+            opened = rounds.open_resume(db, request, resume_intent, now=utcnow())
         elif new_intent is not None:
             opened = rounds.open_new(db, request, new_intent)
         else:
