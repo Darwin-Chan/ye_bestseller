@@ -331,3 +331,19 @@ class ManualEdgeTests(unittest.TestCase):
         page.wait_for_function("document.querySelector('#browserFacts').textContent.includes('占用')")
         self.assertEqual(self.os.starts[0].root,str(root))
         self.assertEqual(self.api.get_start()['summary']['rounds'],0)
+
+    def test_unknown_browser_with_same_profile_blocks_public_open_and_start(self):
+        import json
+        from bestseller_monitor.dedicated_browser import BrowserRuntime
+        self.store_plan()
+        processes=[{'name':'unfamiliar-chromium.exe','pid':77,'parent':0,
+                    'cmd':f'"C:/Other Browser/unfamiliar-chromium.exe" "--user-data-dir={self.cfg.user_data_path}"'}]
+        response=SimpleNamespace(returncode=0,stdout=json.dumps({'processes':processes,'ports':[]}).encode('utf-8'))
+        api=gui.Api(config_file=self.config,browser_runtime=BrowserRuntime(),now=lambda:'2026-10-09T04:00:00+00:00')
+        with patch('bestseller_monitor.dedicated_browser.subprocess.run',return_value=response), \
+                patch('bestseller_monitor.dedicated_browser.subprocess.Popen') as create:
+            self.assertEqual(api.get_start()['browser']['state'],'occupied')
+            self.assertTrue(api.open_login_browser()['reused'])
+            self.assertFalse(api.start_run(['A'])['ok'])
+            create.assert_not_called()
+            self.assertEqual(api.get_start()['summary']['rounds'],0)

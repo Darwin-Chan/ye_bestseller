@@ -85,11 +85,11 @@ $t=@(Get-NetTCPConnection -State Listen -ErrorAction Stop | ForEach-Object {
             names = {'msedge.exe', 'chrome.exe', Path(settings.executable).name.lower()}
             unknown = False
             for proc in processes:
-                if proc['name'].lower() not in names:
-                    continue
                 cmd = proc['cmd']
+                known_browser = proc['name'].lower() in names
                 if not cmd:
-                    unknown = True
+                    if known_browser:
+                        unknown = True
                     continue
                 args = _windows_args(cmd)
                 profile = _profile_arg(args)
@@ -98,7 +98,7 @@ $t=@(Get-NetTCPConnection -State Listen -ErrorAction Stop | ForEach-Object {
                         unknown = True
                     elif os.path.normcase(str(Path(profile).resolve())) == os.path.normcase(settings.profile):
                         return Facts('occupied', '实际进程仍占用专用数据目录。')
-                elif any(a.startswith('--type=') for a in args):
+                elif known_browser and any(a.startswith('--type=') for a in args):
                     # A surviving child without a readable browser ancestor may
                     # still hold profile files after the last window closed.
                     parent = by_pid.get(proc['parent'])
