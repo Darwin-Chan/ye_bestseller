@@ -284,9 +284,12 @@ class ManualEdgeTests(unittest.TestCase):
         text = self.config.read_text('utf-8').replace('profiles/account1_edge',daily.as_posix())
         self.config.write_text(text,'utf-8')
         with patch.dict(os.environ, {'LOCALAPPDATA':str(self.tmp/'日常 AppData')}):
-            api = gui.Api(config_file=self.config,browser_runtime=self.os)
-            self.assertIn('日常', api.open_login_browser()['error'])
-            self.assertFalse(api.start_run(['A'])['ok'])
+            from bestseller_monitor.dedicated_browser import BrowserRuntime
+            api = gui.Api(config_file=self.config,browser_runtime=BrowserRuntime())
+            with patch('bestseller_monitor.dedicated_browser.BrowserRuntime.observe') as observe:
+                self.assertIn('日常', api.open_login_browser()['error'])
+                self.assertFalse(api.start_run(['A'])['ok'])
+                observe.assert_not_called()
             self.assertEqual(self.os.starts, [])
 
     def test_gui_cdp_creation_mismatch_never_uses_or_closes_foreign_browser(self):

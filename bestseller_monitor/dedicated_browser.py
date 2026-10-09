@@ -162,6 +162,10 @@ class DedicatedBrowser:
 
     def status(self):
         with self._lock:
+            error = self.configuration_error()
+            if error:
+                return {**dataclasses.asdict(self.settings), 'state': 'failed',
+                        'message': error, 'retry': RETRY, 'can_start': False}
             try:
                 fact = self.runtime.observe(self.settings)
                 state, message = fact.state, fact.message
