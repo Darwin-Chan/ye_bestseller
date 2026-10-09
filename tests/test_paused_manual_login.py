@@ -440,4 +440,3 @@ class _SleepClock:
     def sleep(self, seconds):
         self.now += seconds
         self.on_sleep()
-
