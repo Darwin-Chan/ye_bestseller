@@ -45,8 +45,8 @@ class LocalTrialExchangeTests(unittest.TestCase):
         world.publish("m3", [("A03", day) for day in DAYS])
         world.judged("m4", "m2", "m3")
         world.analysis_config()
-        world.judgments_local(rows=(("formal-local", "sig-local"),))
-        world.judged_publish("m2", rows=(("formal-remote", "sig-remote"),))
+        world.judgments_local()
+        world.judged_publish("m2", rows=(("formal-remote", world.contract),))
         trial = self.seed_trial(world)
         with contextlib.closing(connect(trial.db_file)) as conn:
             before = "\n".join(conn.iterdump())
@@ -58,8 +58,9 @@ class LocalTrialExchangeTests(unittest.TestCase):
         self.assertIsNotNone(world.judged_local_bytes("m4"))
         self.assertIsNotNone(world.judged_local_bytes("m2"))
         with contextlib.closing(sqlite3.connect(world.cache)) as cache:
-            self.assertEqual(cache.execute("SELECT pair FROM judgments ORDER BY pair").fetchall(),
-                             [("formal-local",), ("formal-remote",)])
+            self.assertEqual(
+                sorted(cache.execute("SELECT machine_id FROM judgments").fetchall()),
+                [("m2",), ("m4",)], "正式线两边的判断都在（本机的 + 收进 m2 的）")
         self.assertEqual(world.conn.execute("SELECT DISTINCT shop_key FROM inventory ORDER BY shop_key").fetchall()[0][0], "A02")
         self.assertEqual(world.conn.execute("SELECT count(*) FROM inventory WHERE offer_id='99001'").fetchone()[0], 0)
         self.assertNotIn("TRIAL", {row["shop_key"] for row in service.coverage("2026-09-14")})

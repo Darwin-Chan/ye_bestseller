@@ -1104,15 +1104,20 @@ class LegacyCoexistenceTests(SkuSharingCase):
         self.exchange = self.repo.parent
 
     def seed_legacy_cache(self, cache, machine="m1"):
-        """按规格预置一行旧判断（够发布器有内容可发；本测试不消费它）。"""
-        from bestseller_monitor.matching import prepare_cache
+        """按规格预置一行旧判断（够发布器有内容可发；本测试不消费它）。
+
+        `pair` 要按程序的口径铸（两端证据版本的摘要）——issue 06 票 04 的自洽门禁
+        会逐行验它，拿假串当 pair 的包属于「坏包」，整包会被拒。
+        """
+        from bestseller_monitor.matching import digest, prepare_cache
         conn = sqlite3.connect(cache)
         try:
             with conn:
                 prepare_cache(conn, machine)
                 conn.execute("INSERT OR REPLACE INTO judgments(pair,signature,machine_id,"
                              "evidence_a,evidence_b,result) VALUES(?,?,?,?,?,?)",
-                             ("pair-legacy", "sig-legacy", machine, "ev-a", "ev-b",
+                             (digest(sorted(["ev-a", "ev-b"])), "sig-legacy", machine,
+                              "ev-a", "ev-b",
                               json.dumps({"same": True, "confidence": .9}, ensure_ascii=False)))
         finally:
             conn.close()
@@ -1147,10 +1152,11 @@ class LegacyCoexistenceTests(SkuSharingCase):
 
         # 旧版本程序再发布一次（有新内容）：只动它自己的文件，新文件一个字节不改。
         self.seed_legacy_cache(legacy_cache, machine="m1")
+        from bestseller_monitor.matching import digest as _digest
         with closing(sqlite3.connect(legacy_cache)) as conn:
             conn.execute("INSERT OR REPLACE INTO judgments(pair,signature,machine_id,"
                          "evidence_a,evidence_b,result) VALUES(?,?,?,?,?,?)",
-                         ("pair-legacy-2", "sig-legacy", "m1", "ev-c", "ev-d",
+                         (_digest(sorted(["ev-c", "ev-d"])), "sig-legacy", "m1", "ev-c", "ev-d",
                           json.dumps({"same": False, "confidence": .9}, ensure_ascii=False)))
             conn.commit()
         republish = judgment_set.publish(self.exchange, "m1", cache=legacy_cache,
@@ -1163,7 +1169,8 @@ class LegacyCoexistenceTests(SkuSharingCase):
         # 旧版本的另一台机器来收：只收旧判断；不会触碰（也读不懂）新文件。
         m2_cache, m2_store = self.root / "m2-cache.sqlite", self.root / "m2-drafts.sqlite"
         outcome = judgment_set.collect(self.exchange, "m2", cache=m2_cache, store=m2_store)
-        self.assertFalse(outcome.failed)
+        self.assertFalse(outcome.failed,
+                         [(r.machine, r.failure) for r in outcome.results] or outcome.failure)
         (collected,) = outcome.results
         self.assertFalse(collected.failed, collected.failure)
         self.assertGreaterEqual(collected.added["judgments"], 1)
