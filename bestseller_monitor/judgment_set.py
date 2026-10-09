@@ -39,6 +39,27 @@
 内容摘要、包格式版本、模型署名与证据版本摘要、各表行数与新增数。周报与逐次流水照这一份
 说话，日志里报的数都能对回账上的同一行；重复收取时这些列从账里回放，口径与首次一致。
 
+**门禁**（票 04、spec §4）：读包先过两道；不过的**整包拒绝、一条不导**（`failure` 报出
+原因，不许静默部分导入）：
+
+- **格式**：包元数据里的格式版本与本机认的那版（`FORMAT_VERSION`）不一致 → 拒。
+- **自洽摘要**：包内每一行验自己——证据行的版本 = 内容（名称 + 图片哈希）的摘要、判断行的
+  版本对 = 两端证据版本的摘要（与写行时同一段口径，`matching.version`／`matching.digest`）
+  → 有一条对不上就拒。只验包自己，**不拿本机数据判对不对**：本机还没收到某条证据版本
+  不是坏包，是「判断先到、数据后到」（ADR-0039 决策 8），照收。
+
+过了的包再按**本机当前分析契约**逐行记门禁回执（票 04）：
+
+- 判断行署名 ≠ 本机当前分析署名（分析消费只认同署名，`signature_of_model` 从分析配置推，
+  由交换台传进来）→ 照收留档、记 `gated_out`（署名不符），不驱动当前分析；
+- 判断行的证据版本在本机无从着落（包里的证据行与本机证据索引里都没有这条版本）→ 同样
+  `gated_out`（证据版本没有着落）——留档待数据到齐，不是拒收；
+- 契约读不出（没传署名）→ 如实记「未评估」，不猜。
+
+门禁回执（gated/gated_out 数量与原因、所对的契约署名）随导入账留存：重复收取按账回放，
+口径与首次一致；格式与自洽拒绝发生在写账之前，拒绝过的包不会在账上留下«导入过»的样子。
+报告里导入数、gated_out 数与当前采纳数三者分列（`current_adoption`），谁也不冒充谁。
+
 **顺序**：两条通道互不设先后——判断集先到就先收下、闲置待用（引用的商品/版本本机还没有
 也不报错，键是内容摘要，本机算出来的对得上就命中），数据到齐后自然生效。谁还没建库、
 还没发布过判断集、库没 clone 下来，都只给可读提示，不挡别家的收取。
@@ -411,7 +432,9 @@ _LEDGER_DDL = f"""CREATE TABLE IF NOT EXISTS {LEDGER_TABLE} (
     snapshot_version TEXT NOT NULL DEFAULT '',
     format_version TEXT NOT NULL DEFAULT '',
     model_summary TEXT NOT NULL DEFAULT '{{}}',
-    evidence_summary TEXT NOT NULL DEFAULT '{{}}')"""
+    evidence_summary TEXT NOT NULL DEFAULT '{{}}',
+    contract_signature TEXT NOT NULL DEFAULT '',
+    gate_summary TEXT NOT NULL DEFAULT '{{}}')"""
 
 # 票 03 的审计列：老缓存库的导入账一次性补上（ALTER 每缺一列补一列，老行按默认值补齐）。
 _LEDGER_PROVENANCE_COLUMNS = (
@@ -420,6 +443,12 @@ _LEDGER_PROVENANCE_COLUMNS = (
     ("format_version", "TEXT NOT NULL DEFAULT ''"),
     ("model_summary", "TEXT NOT NULL DEFAULT '{}'"),
     ("evidence_summary", "TEXT NOT NULL DEFAULT '{}'"),
+)
+
+# 票 04 的门禁回执列：老账按默认值补（空契约 + 空摘要 = 这段回执没记过，报告如实说）。
+_LEDGER_GATE_COLUMNS = (
+    ("contract_signature", "TEXT NOT NULL DEFAULT ''"),
+    ("gate_summary", "TEXT NOT NULL DEFAULT '{}'"),
 )
 
 # 摘要里最多留几种值（行数最多的前几名）：摘要用来看「这是一份什么口径的包」，不是逐行复刻。
@@ -470,6 +499,11 @@ class CollectResult:
     `recorded` 说有没有新记一笔）。`note` 是「还没建库/没发布过」这类可读说明——不是失败，
     别家照收。`unreachable` 标记失败出在**通道**（这本拉不动）而不是包本身——交换台
     周报按它分退出码，与采集侧「通道没拉成」/「有包没导成」两档同规。
+
+    门禁回执（票 04、spec §4）：`gate_summary` 是这份包判断行的门禁分类计数
+    （`gated_out` 总量与三个原因各自的行数；重复收取时从账里回放，口径与首次一致），
+    `contract_signature` 是当时对着判的那份本机契约署名（空 = 读不出，门禁未评估）。
+    格式与自洽拒绝的包走 `failure`，不会在账上留下回执。
     """
 
     machine: str
@@ -487,10 +521,19 @@ class CollectResult:
     source_commit: str = ""      # 收下这份包时来源库 HEAD 的短哈希
     snapshot_version: str = ""   # 这趟收取看到的来源清单版本（plan 提交短哈希；读不到时为空）
     remote: str = ""             # 来源库的远端地址（只作识别，不参与判法）
+    # 票 04 的门禁回执（同上，从账里回放）：
+    gate_summary: dict = dataclasses.field(default_factory=dict)
+    contract_signature: str = ""
 
     @property
     def failed(self) -> bool:
         return self.failure is not None
+
+    @property
+    def gated_out(self) -> int:
+        """这份包里保留但挂出当前消费的判断行数（署名不符 + 证据版本没有着落）。"""
+        return (self.gate_summary.get("signature", 0)
+                + self.gate_summary.get("evidence_version", 0))
 
     @property
     def adopted(self) -> dict[str, int]:
@@ -536,11 +579,11 @@ COLLECT_STATE_NOT_READY = "receive_channel_not_ready"
 class SourceAdoption:
     """一个来源在本机的**采用读数**（票 03、spec §3 的 adopted）：每个数都从实际库现读。
 
-    `judgments` 是缓存里来源为该机器、且签名落在**本机分析署名**下的判断行数。本机分析
-    署名 = 本机自己写过的行的署名（分析消费缓存正是按它读，`matching` 的口径）——同署名的
-    外来行会在分析里直接命中。本机还没跑过分析（缓存里没有本机自己写的行）时是 `None`
-    = 未评估：采用数不能拿导入数冒充，也不伪造零。换过模型配置的机器，历次写过的署名都
-    在这个集合里（旧署名是否仍属当前契约，随门禁口径收紧）。`decisions` 是本机账本里
+    `judgments` 是缓存里来源为该机器、署名等于**本机当前分析契约署名**、且两端证据版本在
+    本机证据索引里有着落的判断行数（票 04 收紧：不再数「本机历次写过的全部署名」——换过
+    模型配置的机器，旧署名下的行不会驱动当前分析；证据版本没有着落的行与门禁同一口径，
+    同样不算）。本机还没有过当前署名下的分析（本机自己写的行里没有契约那个署名）时是
+    `None` = 未评估：采用数不能拿导入数冒充，也不伪造零。`decisions` 是本机账本里
     来源为该机器、当前在效的决定行数（已确认的关系、单独成组、排除对；撤回过的中间态
     不驱动分析，不算）。
     """
@@ -555,18 +598,27 @@ class SourceAdoption:
 
 
 def current_adoption(cache: str | pathlib.Path, store: str | pathlib.Path, machine_id: str,
-                     sources: tuple[str, ...] | list[str]) -> tuple[SourceAdoption, ...]:
-    """现读本机两个库，给每个来源算一份采用读数（票 03）：导入条数与当前采用分开列的口径。
+                     sources: tuple[str, ...] | list[str], *,
+                     contract_signature: str = "") -> tuple[SourceAdoption, ...]:
+    """现读本机两个库，给每个来源算一份采用读数（票 03；口径票 04 收紧）：导入条数与当前采用分开列。
 
-    判断侧看缓存：本机自己写过的行的署名，就是本机分析认的署名；同署名的外来行会在分析
-    里直接命中（零模型调用），异署名只留存参考、不驱动本机分组。本机一条自己写的行都没有
-    = 还没跑过分析，判断侧记 `None`（未评估）。决定侧看账本：并入本机账本的决定就是分析
-    使用的硬约束，按行的来源机器数；账本还不存在时各来源都是 0。
+    判断侧看缓存，两层口径（票 04、spec §4「当前分析契约」）：
+
+    - **署名**：分析消费只认本机当前配置的署名（`matching` 的命中查询按它读），契约署名
+      由交换台从分析配置推、传进来（`collect` 与这里同一份）；署名对不上的行是 gated_out
+      （留存参考，不驱动当前分析），不算采用。
+    - **证据版本有着落**：行两端的证据版本要在本机证据索引（`evidence` 表）里找得到——
+      收包时证据行随包同行、本机判过的成员也会落下证据行，正常行都满足；找不到的行是
+      门禁口径里「证据版本没有着落」的那些，不算采用（与门禁同一口径）。
+
+    本机还没有过当前署名下的分析（自己写的行里没有契约那个署名）= `None`（未评估）——
+    采用口径还没有；跑过一次当前配置的分析之后它自然生效。决定侧看账本：并入本机账本的
+    决定就是分析使用的硬约束，按行的来源机器数；账本还不存在时各来源都是 0。
     """
     cache = pathlib.Path(cache)
     store = pathlib.Path(store)
     sources = list(sources)
-    signatures: set[str] = set()
+    local_signatures: set[str] = set()
     adopted_by_source: dict[str, int] = {}
     if cache.exists():
         with contextlib.closing(_connect_ro(cache)) as conn:
@@ -575,16 +627,19 @@ def current_adoption(cache: str | pathlib.Path, store: str | pathlib.Path, machi
             # 老形状（判断表还没有署名列）算「分析还没留下署名证据」：未评估，不去升它。
             if "judgments" in tables and "signature" in {
                     row[1] for row in conn.execute("PRAGMA table_info(judgments)")}:
-                signatures = {str(row[0]) for row in conn.execute(
+                local_signatures = {str(row[0]) for row in conn.execute(
                     "SELECT DISTINCT signature FROM judgments WHERE machine_id=?",
                     (machine_id,))}
-                if signatures and sources:
+                if (sources and contract_signature
+                        and contract_signature in local_signatures):
                     marks = ", ".join("?" * len(sources))
-                    signature_marks = ", ".join("?" * len(signatures))
                     adopted_by_source = {str(machine): int(count) for machine, count in conn.execute(
-                        f"SELECT machine_id, COUNT(*) FROM judgments "
-                        f"WHERE machine_id IN ({marks}) AND signature IN ({signature_marks}) "
-                        "GROUP BY machine_id", (*sources, *sorted(signatures)))}
+                        f"SELECT machine_id, COUNT(*) FROM judgments j "
+                        f"WHERE machine_id IN ({marks}) AND signature=? "
+                        "AND EXISTS (SELECT 1 FROM evidence e WHERE e.version = j.evidence_a) "
+                        "AND EXISTS (SELECT 1 FROM evidence e WHERE e.version = j.evidence_b) "
+                        "GROUP BY machine_id", (*sources, contract_signature))}
+    evaluated = bool(contract_signature) and contract_signature in local_signatures
     decisions = Counter()
     if store.exists():
         ledger = DraftStore(store, machine_id).ledger()
@@ -597,7 +652,7 @@ def current_adoption(cache: str | pathlib.Path, store: str | pathlib.Path, machi
             decisions[pair[2] if len(pair) > 2 else ""] += 1
     return tuple(
         SourceAdoption(machine=machine, decisions=decisions[machine],
-                       judgments=(adopted_by_source.get(machine, 0) if signatures else None))
+                       judgments=(adopted_by_source.get(machine, 0) if evaluated else None))
         for machine in sources)
 
 
@@ -621,19 +676,21 @@ def judged_repos(exchange_root: str | pathlib.Path,
 def collect(exchange_root: str | pathlib.Path, machine_id: str, cache: str | pathlib.Path,
             store: str | pathlib.Path, *, now: dt.datetime | None = None,
             sources: tuple[tuple[str, pathlib.Path], ...] | None = None,
-            snapshot_version: str = "") -> CollectOutcome:
+            snapshot_version: str = "", contract_signature: str = "") -> CollectOutcome:
     """把交换区里别的机器的判断集收进本机（spec §3、§7）：决定进账本，判断进缓存。
 
-    对名单里每本 `judged-<机器>` pull 一次，读它 HEAD 里那份包，按内容摘要幂等导入：
-    **先并人工决定**（不冲突即生效、冲突写进本机冲突账，票 04），**后导判断**（三类表
-    逐行 `INSERT OR IGNORE`，本机已有的行不动）+ 导入账，各自一个事务、失败全回滚。
-    一家拉不动、没发布过、包坏了都只记那一家，别家照收。`now` 是账上的收到时刻（UTC），
-    缺省取现在。
+    对名单里每本 `judged-<机器>` pull 一次，读它 HEAD 里那份包，先过格式与自洽门禁
+    （不过的整包拒绝、一条不导，票 04），再按内容摘要幂等导入：**先并人工决定**（不冲突
+    即生效、冲突写进本机冲突账，票 04），**后导判断**（三类表逐行 `INSERT OR IGNORE`，
+    本机已有的行不动）+ 导入账，各自一个事务、失败全回滚。一家拉不动、没发布过、包坏了
+    都只记那一家，别家照收。`now` 是账上的收到时刻（UTC），缺省取现在。
 
     `sources` 是名单：给了就按它收（票 02——交换台先按来源清单把本地克隆接入好，被阻断
     的来源根本不在名单里，这里就不会去读它的包）；缺省仍按交换区里实际存在的 `judged-*`
     枚举（老口径，直接调本函数时用）。`snapshot_version` 是这趟收取看到的来源清单版本
     （票 03：交换台传 plan 提交的短哈希，落进导入账；读不到时留空）。
+    `contract_signature` 是本机当前分析契约的署名（票 04：交换台从分析配置推、
+    `matching.signature_of_model` 同一口径；落进导入账的门禁回执，空 = 读不出，门禁未评估）。
     """
     root = pathlib.Path(exchange_root)
     cache = pathlib.Path(cache)
@@ -653,7 +710,8 @@ def collect(exchange_root: str | pathlib.Path, machine_id: str, cache: str | pat
     try:
         return CollectOutcome(tuple(
             _collect_one(conn, path, machine=machine, machine_id=machine_id, store=store,
-                         now=now, snapshot_version=snapshot_version)
+                         now=now, snapshot_version=snapshot_version,
+                         contract_signature=contract_signature)
             for machine, path in sources))
     finally:
         conn.close()
@@ -670,9 +728,9 @@ def _connect_cache(cache: pathlib.Path, machine_id: str) -> sqlite3.Connection:
 
 
 def _add_ledger_columns(conn: sqlite3.Connection) -> None:
-    """老缓存库的导入账一次性补上票 03 的审计列：已存在的老行按默认值补齐。"""
+    """老缓存库的导入账一次性补上票 03/票 04 的列：已存在的老行按默认值补齐。"""
     present = {row[1] for row in conn.execute(f"PRAGMA table_info({LEDGER_TABLE})")}
-    for name, declaration in _LEDGER_PROVENANCE_COLUMNS:
+    for name, declaration in _LEDGER_PROVENANCE_COLUMNS + _LEDGER_GATE_COLUMNS:
         if name not in present:
             conn.execute(f"ALTER TABLE {LEDGER_TABLE} ADD COLUMN {name} {declaration}")
 
@@ -700,7 +758,8 @@ def _incoming_decisions(sliced: dict) -> dict:
 
 def _collect_one(conn: sqlite3.Connection, repo: pathlib.Path, *,
                  machine: str, machine_id: str, store: pathlib.Path,
-                 now: dt.datetime | None, snapshot_version: str = "") -> CollectResult:
+                 now: dt.datetime | None, snapshot_version: str = "",
+                 contract_signature: str = "") -> CollectResult:
     rel = f"{repo.name}/{PACKAGE_REL}"
     if not (repo / ".git").exists():
         return CollectResult(machine, rel, note=(
@@ -718,11 +777,17 @@ def _collect_one(conn: sqlite3.Connection, repo: pathlib.Path, *,
             f"{repo.name} 还没发布过判断集（HEAD 里没有 {PACKAGE_REL}）：那台机器发布之后"
             "重跑即可收到。"))
 
+    # 门禁第一二道（票 04、spec §4）：格式与包内自洽——不过的整包拒绝、一条不导，也不写账。
     try:
         with _open_bytes(published) as package:
+            meta = read_package_meta(package)
+            if meta["format_version"] != FORMAT_VERSION:
+                return CollectResult(machine, rel, failure=_format_failure(meta["format_version"]))
             digest = package_digest(package)
             sliced = _read_package_rows(package)
-            meta = read_package_meta(package)
+            problems = _consistency_problems(sliced)
+            if problems:
+                return CollectResult(machine, rel, failure=_consistency_failure(problems))
         decisions = _incoming_decisions(sliced)          # 形状不对的包：算这本读不出来
     except (sqlite3.Error, OSError, KeyError, ValueError, TypeError) as exc:
         return CollectResult(machine, rel, failure=(
@@ -751,15 +816,21 @@ def _collect_one(conn: sqlite3.Connection, repo: pathlib.Path, *,
                              imported_at=known["imported_at"],
                              source_commit=known["source_commit"],
                              snapshot_version=known["snapshot_version"],
-                             remote=remote)
+                             remote=remote,
+                             gate_summary=json.loads(known["gate_summary"]),
+                             contract_signature=known["contract_signature"])
 
     imported_at = (now or dt.datetime.now(dt.timezone.utc)).isoformat(timespec="seconds")
+    # 门禁第三道（票 04、spec §4）：按本机当前契约给每条判断行记分类——这只是一份回执
+    # （照收留档），不拦导入；契约读不出时如实记「未评估」。已收过的包不走这里（上面回放）。
+    gates = _classify_gates(sliced, contract_signature=contract_signature,
+                            established=_established_versions(conn, sliced))
     # 先并人工决定（本机账本），后导判断与记导入账：并决定逐行幂等、冲突账按内容去重，
     # 所以后一步失败时重跑等价于首次；而账里记下的包，一定连决定都并过了——不会被
-    # 「已经收过」挡住一份没并进去的账本。
+    # 「已经收过」挡住一份没并进去的账本。冲突行随行带上来包的来源提交（票 04）。
     try:
         merge = DraftStore(store, machine_id).merge_incoming(
-            decisions, source=machine, seen_at=imported_at)
+            decisions, source=machine, seen_at=imported_at, source_commit=source_commit)
     except sqlite3.Error as exc:
         return CollectResult(machine, rel, digest=digest, failure=(
             f"人工决定没能并进本机账本（{store}）：{exc}\n"
@@ -779,13 +850,14 @@ def _collect_one(conn: sqlite3.Connection, repo: pathlib.Path, *,
             conn.execute(
                 f"INSERT INTO {LEDGER_TABLE}(digest, source_machine, package_rel, imported_at, "
                 "rows_total, rows_added, rows_detail, source_commit, snapshot_version, "
-                "format_version, model_summary, evidence_summary) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "format_version, model_summary, evidence_summary, contract_signature, "
+                "gate_summary) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (digest, machine, rel, imported_at, sum(rows.values()), sum(added.values()),
                  json.dumps({name: [rows[name], added[name]] for name in rows},
                             ensure_ascii=False),
                  source_commit, snapshot_version, meta["format_version"],
-                 model_summary, evidence_summary))
+                 model_summary, evidence_summary, contract_signature,
+                 json.dumps(gates, ensure_ascii=False, sort_keys=True)))
     except sqlite3.Error as exc:
         conn.rollback()
         return CollectResult(machine, rel, digest=digest, failure=(
@@ -793,7 +865,101 @@ def _collect_one(conn: sqlite3.Connection, repo: pathlib.Path, *,
     return CollectResult(machine, rel, digest=digest, rows=rows, added=added,
                          conflicts=merge.conflicts, imported_at=imported_at,
                          source_commit=source_commit, snapshot_version=snapshot_version,
-                         remote=remote)
+                         remote=remote, gate_summary=gates,
+                         contract_signature=contract_signature)
+
+
+def _format_failure(found: str) -> str:
+    """格式门禁的拒绝说明（票 04、spec §4）：点名两个版本号——对不上就得说清对的是哪版。"""
+    return (f"包格式本机认不了（包里写的是 {found}、本机支持 {FORMAT_VERSION}）："
+            "整包没收、一条没导——升级程序收到支持的格式、或让对方按本机支持的格式重发一版。")
+
+
+def _consistency_problems(sliced: dict) -> list[str]:
+    """包内自洽校验（票 04、spec §4）：逐行验「摘要是不是它自己内容的摘要」。
+
+    只验包自己，**不拿本机数据判**——本机还没有某条证据版本不是坏包，那是「判断先到、
+    数据后到」（ADR-0039 决策 8），照收。摘要口径与写行时同源：证据行的 version =
+    `matching.version`（名称 + 图片哈希），判断行的 pair = `matching.digest`（两端证据
+    版本排序后取摘要，与 `_suggest` 铸 pair 同一处口径）。列缺了或有一条对不上都算问题。
+    """
+    problems: list[str] = []
+    names, rows = sliced["evidence"]
+    missing = [column for column in ("version", "name", "image_hash") if column not in names]
+    if missing:
+        problems.append("证据表缺列 " + "、".join(missing))
+    else:
+        index = {name: position for position, name in enumerate(names)}
+        stale = [row for row in rows if str(row[index["version"]]) != matching.version(
+            {"product_name": row[index["name"]], "image_hash": row[index["image_hash"]]})]
+        if stale:
+            example = str(stale[0][index["version"]])[:12]
+            problems.append(f"{len(stale)} 条证据的版本与内容对不上（例如 {example}…）")
+    names, rows = sliced["judgments"]
+    missing = [column for column in ("pair", "signature", "evidence_a", "evidence_b")
+               if column not in names]
+    if missing:
+        problems.append("判断表缺列 " + "、".join(missing))
+    else:
+        index = {name: position for position, name in enumerate(names)}
+        stale = [row for row in rows if str(row[index["pair"]]) != matching.digest(
+            sorted([row[index["evidence_a"]], row[index["evidence_b"]]]))]
+        if stale:
+            example = str(stale[0][index["pair"]])[:12]
+            problems.append(f"{len(stale)} 条判断的版本对摘要与内容对不上（例如 {example}…）")
+    return problems
+
+
+def _consistency_failure(problems: list[str]) -> str:
+    """自洽门禁的拒绝说明（票 04、spec §4）：坏包整包拒绝，不许静默部分导入。"""
+    return ("包内没有通过自洽校验（" + "；".join(problems) + "）：整包没收、一条没导——"
+            "这个包坏了或被改过，让对方重发一版。")
+
+
+def _established_versions(conn: sqlite3.Connection, sliced: dict) -> set[str]:
+    """「有着落」的证据版本（票 04 的门禁口径）：包里的证据行 ∪ 本机证据索引里的。
+
+    判断行两端的证据版本都落在其中才算过了证据版本这一关；找不到的不是坏包（自洽那关
+    另验），是本机还不认识这条证据版本——行照收留档（追溯、转发都在），记 gated_out，
+    数据到齐后自然生效。
+    """
+    names, rows = sliced["evidence"]
+    known: set[str] = set()
+    if "version" in names:
+        index = names.index("version")
+        known = {str(row[index]) for row in rows if row[index]}
+    return known | {str(row[0]) for row in conn.execute("SELECT version FROM evidence")
+                    if row[0]}
+
+
+def _classify_gates(sliced: dict, *, contract_signature: str,
+                    established: set[str]) -> dict:
+    """给包里每条判断行记门禁分类（票 04、spec §4）：gated / gated_out / 未评估。
+
+    - 署名与本机当前契约不符 → gated_out（`signature`）——分析消费只认同署名，这行照收
+      留档，但不驱动当前分析；
+    - 两端证据版本有一条在本机无从着落 → gated_out（`evidence_version`）——同样留档；
+    - 契约读不出（空署名）→ `unevaluated`：不猜哪边，如实记账；
+    - 其余 → `gated`（对当前消费可用的那部分）。
+
+    署名不符先判、证据版本后判：一行只进一类，四类之和 = 包里判断行总数。
+    """
+    names, rows = sliced["judgments"]
+    index = {name: position for position, name in enumerate(names)}
+    summary = {"gated": 0, "signature": 0, "evidence_version": 0, "unevaluated": 0}
+    for row in rows:
+        if contract_signature and str(row[index["signature"]] or "") != contract_signature:
+            summary["signature"] += 1
+            continue
+        if (str(row[index["evidence_a"]] or "") not in established
+                or str(row[index["evidence_b"]] or "") not in established):
+            summary["evidence_version"] += 1
+            continue
+        if contract_signature:
+            summary["gated"] += 1
+        else:
+            summary["unevaluated"] += 1
+    return summary
 
 
 def _read_package_rows(package: sqlite3.Connection) -> dict[str, tuple[tuple[str, ...], list[tuple]]]:

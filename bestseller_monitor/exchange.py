@@ -40,8 +40,13 @@
   都只给可读提示，不中止其余步骤。票 03 起每份包在导入账里记全审计身份（来源提交、清单
   版本、格式与署名/证据摘要、行数），逐次流水与周报报的是同一份（任务 ID、来源名、远端、
   提交、包相对路径、摘要、计数）；整趟汇总状态 ok / partial_failure /
-  receive_channel_not_ready；周报里导入数与当前采纳分列（采纳从本机库现读，本机没跑过
-  分析记「未评估」，不拿导入数冒充）。
+  receive_channel_not_ready。票 04 起读包先过**格式与包内自洽门禁**（不过的整包拒绝、
+  一条不导，报告点名原因），过了的按**本机当前契约**（分析配置的模型署名，
+  `judgment_paths` 从 [matching] 推）逐行记**门禁回执**：署名不符或证据版本没有着落的
+  判断行照收留档、记 gated_out、不驱动当前分析（契约读不出记「未评估」）；冲突行的
+  双方来源、**来源提交**与时刻进本机冲突账。周报里导入数、gated_out 数与当前采纳
+  分列：采纳从本机库现读（判断按本机当前分析署名下、证据版本有着落的缓存行，本机还没
+  在当前署名下跑过分析记「未评估」，不拿导入数冒充）。
 - **报告**：`<交换区根>/报告/<年>-W<周>.md`——**一周一份、同周重跑重写同一份**，
   内容是**状态累积**（从计划表、本机库、交换区、幂等账与冲突账现读）而不是两次运行
   日志相加；开头「本次运行」行说明这一次具体做了什么。逐次流水在 `logs/exchange.log`。
@@ -79,6 +84,7 @@ from bestseller_monitor.config import ROLE_GLOSS, ROLE_MERGE_ONLY, is_merge_only
 from bestseller_monitor.db import CST, Database, connect
 from bestseller_monitor.git_channel import ChannelError, GitChannel
 from bestseller_monitor.image_store import ImageStoreError
+from bestseller_monitor.matching import ModelConfig, signature_of_model
 
 log = logging.getLogger(__name__)
 
@@ -173,10 +179,16 @@ class ConflictEntry:
 
 @dataclasses.dataclass(frozen=True)
 class JudgmentPaths:
-    """判断集这半要的两个库：判断缓存与人工决定账本（都在本机，路径从分析配置读）。"""
+    """判断集这半要的两个库（都在本机，路径从分析配置读）+ 本机当前分析契约的署名。
+
+    `signature` 是门禁与采纳的当前口径（票 04）：从 [matching] 的模型三件推
+    （`matching.signature_of_model`，与分析消费认的署名同一口径）；读不出、怪值时是
+    空串——门禁与采纳如实记「未评估」，不把读不出的配置当成某个署名。
+    """
 
     cache: pathlib.Path
     store: pathlib.Path
+    signature: str = ""
 
 
 # 分析配置里两个键的默认值（与 `AnalysisConfig.from_file` 同口径）：相对路径以配置文件
@@ -187,12 +199,14 @@ ANALYSIS_STORE_DEFAULT = "analysis-drafts.sqlite"
 
 
 def judgment_paths(cfg) -> tuple[JudgmentPaths | None, str | None]:
-    """从分析配置（`config/analysis.toml`）读判断集的两个库路径；读不出给一句可读说明。
+    """从分析配置（`config/analysis.toml`）读判断集的两个库路径与本机当前契约署名；读不出给一句可读说明。
 
     只读 `[matching]` 与 `[analysis]` 两节里的 cache／store、不整份加载分析配置——模型段、
     视觉段或库里别的东西写错都不该拦住交换台（与 `config.machine_id_of` 那条「只读一个键」
-    的口径同规）。路径规则跟 `AnalysisConfig.from_file` 一致：相对路径以配置文件所在目录
-    为基准、缺省名同上（那两个默认值写在这里，是因为交换台不整份加载分析配置）。
+    的口径同规）。契约署名（票 04）从 [matching] 的模型三件推：模型段写坏了只让署名留空
+    （门禁与采纳记「未评估」），同样不拦住交换台——那是分析那半启动时才报的错。
+    路径规则跟 `AnalysisConfig.from_file` 一致：相对路径以配置文件所在目录为基准、缺省名
+    同上（那两个默认值写在这里，是因为交换台不整份加载分析配置）。
 
     读不出（文件不在、读不动、没有 `[matching]` 一节）回 `(None, 说明)`：判断集这半整趟
     没做，检查段的注记与报告第三节都用这一句说明——不折成失败（那是上机阶段的事）。
@@ -219,7 +233,24 @@ def judgment_paths(cfg) -> tuple[JudgmentPaths | None, str | None]:
         return resolved if resolved.is_absolute() else (base / resolved)
 
     return JudgmentPaths(cache=resolve(matching.get("cache") or ANALYSIS_CACHE_DEFAULT),
-                         store=resolve(store or ANALYSIS_STORE_DEFAULT)), None
+                         store=resolve(store or ANALYSIS_STORE_DEFAULT),
+                         signature=_contract_signature(matching)), None
+
+
+def _contract_signature(matching: dict) -> str:
+    """本机当前分析契约的署名（票 04）：从 [matching] 的模型三件推，与分析的消费同源。
+
+    缺省值与 `AnalysisConfig.from_file` 同规（`ModelConfig(**matching.get('model', {}))`，
+    没有 [matching.vision] 就没有视觉模型）——分析程序会用的那份配置，这里推出来的就是
+    同一个署名。读不出、怪值时给空串：门禁与采纳如实记「未评估」，不去猜一个署名。
+    """
+    try:
+        model = ModelConfig(**dict(matching.get("model") or {}))
+        vision = ModelConfig(**dict(matching["vision"])) if "vision" in matching else None
+        return signature_of_model(model.endpoint, model.model,
+                                  vision.model if vision else None)
+    except (AttributeError, TypeError, ValueError):
+        return ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -586,7 +617,8 @@ def run_once(cfg, *, only: str | None = None, week: str | None = None,
                 store=judgments.store,
                 now=now.astimezone(dt.timezone.utc),   # 账上的收到时刻按 UTC 记（票 03 的口径）
                 sources=source_prep.collect_sources(),
-                snapshot_version=source_prep.snapshot_version)
+                snapshot_version=source_prep.snapshot_version,
+                contract_signature=judgments.signature)   # 门禁的当前契约口径（票 04）
             for text in _judgment_collect_texts(judgment_collect):
                 say(f"收取：{text}")
             state, failed_sources = _receive_state(source_prep, judgment_collect)
@@ -705,7 +737,8 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
             try:
                 adoption = judgment_set.current_adoption(
                     judgments.cache, judgments.store, machine_id,
-                    [result.machine for result in judgment_collect.results])
+                    [result.machine for result in judgment_collect.results],
+                    contract_signature=judgments.signature)   # 当前契约口径（票 04）
             except sqlite3.Error as exc:
                 log.warning("采用读数读不出来（%s）：%s", judgments.cache, exc)
     todo = _todo(machine_id=machine_id, week=week, plan_of_shop=plan_of_shop, gaps=gaps,
@@ -1258,11 +1291,13 @@ def _judgment_section(outcome: RunOutcome) -> list[str]:
     out.append(_judgment_adopt_row(outcome))
     out += _judgment_conflict_rows(outcome)
     out.append("- 口径：逐级分开记账——来源已声明/已发现 → 已接入（含「已接入但当前没有"
-               "判断集包」）→ 包已发现/已接收 → 已导入 → 门禁（gated/gated_out 暂记"
-               "未评估，不让导入数冒充）→ 冲突 → 采纳；导入数不是采用数（采纳从本机库"
-               "现读）。判断集走 judged-<机器> 这条独立通道（spec §3）；同内容重复发布/"
-               "重复收取都是空操作；人工决定不冲突即生效、冲突只记不动两边的决定，"
-               "在分析页面上裁决（冲突账只增不自动消解，这里只列本周记下的）")
+               "判断集包」）→ 包已发现/已接收 → 已导入 → 门禁（格式/自洽不过 = 整包拒"
+               "绝；署名不符或证据版本没有着落的判断行照收留档、记 gated_out、不驱动"
+               "当前分析）→ 冲突 → 采纳；导入数不是采用数（采纳从本机库现读）。判断集"
+               "走 judged-<机器> 这条独立通道（spec §3）；同内容重复发布/重复收取都是"
+               "空操作；人工决定不冲突即生效、冲突只记不动两边的决定（双方来源、来源"
+               "提交与时刻都留档），在分析页面上裁决（冲突账只增不自动消解，这里只列"
+               "本周记下的）")
     return out + [""]
 
 
@@ -1305,10 +1340,34 @@ def _collect_identity(result: judgment_set.CollectResult) -> str:
     return "；".join(parts)
 
 
+def _gate_text(result: judgment_set.CollectResult) -> str:
+    """这份包的门禁回执（票 04）：gated_out 数量与原因、未评估——接在计数行后面（带前导「；」）。
+
+    没记过门禁的老账（票 04 之前收的）如实说「未记录」，不冒充 0。契约读得出时不显示
+    「未评估」；一个判断行都没有的包只剩「gated_out 0 条」这一句，照样如实列。
+    """
+    summary = result.gate_summary
+    if not summary:
+        return "；门禁未记录（这份包在票 04 之前收过）"
+    details = []
+    if summary.get("signature"):
+        details.append(f"署名不符 {summary['signature']}")
+    if summary.get("evidence_version"):
+        details.append(f"证据版本没有着落 {summary['evidence_version']}")
+    parts = []
+    if result.gated_out or not summary.get("unevaluated"):
+        parts.append(f"门禁 gated_out {result.gated_out} 条"
+                     + (f"（{'、'.join(details)}）" if details else ""))
+    if summary.get("unevaluated"):
+        parts.append(f"未评估 {summary['unevaluated']} 条（本机没有可用的分析署名）")
+    return "；" + "；".join(parts)
+
+
 def _judgment_collect_texts(collect: judgment_set.CollectOutcome) -> list[str]:
     """收取结果每个来源一句（没有可收的、整趟没做成也是一句）：报告与逐次流水共用。
 
-    收下与已收过的两类带上审计身份（票 03）：包路径、来源提交、内容摘要、远端地址。
+    收下与已收过的两类带上审计身份（票 03：包路径、来源提交、内容摘要、远端地址）与
+    门禁回执（票 04：gated_out 数量与原因、未评估）——每个数都能对回导入账上的同一行。
     """
     if collect.failure is not None:
         return [f"没做成（{_first_line(collect.failure)}）"]
@@ -1324,11 +1383,12 @@ def _judgment_collect_texts(collect: judgment_set.CollectOutcome) -> list[str]:
         elif result.note is not None:
             texts.append(f"{name} 没有判断集可收 —— {result.note}")
         elif result.skipped:
-            texts.append(f"{name} —— 已收过（{_judgment_counts(result.rows)}；无变化）；"
-                         f"{_collect_identity(result)}")
+            texts.append(f"{name} —— 已收过（{_judgment_counts(result.rows)}；无变化）"
+                         f"{_gate_text(result)}；{_collect_identity(result)}")
         else:
             texts.append(f"{name} —— {_judgment_counts(result.rows)}"
-                         f"（新增 {sum(result.added.values()):,} 行）；{_collect_identity(result)}")
+                         f"（新增 {sum(result.added.values()):,} 行）{_gate_text(result)}"
+                         f"；{_collect_identity(result)}")
     return texts
 
 
@@ -1361,12 +1421,13 @@ def _judgment_collect_rows(outcome: RunOutcome) -> list[str]:
 
 
 def _judgment_adopt_row(outcome: RunOutcome) -> str:
-    """「采纳」一行（票 03 的口径）：导入数不是采用数——采用从本机库现读。
+    """「采纳」一行（票 03 的口径、票 04 收紧）：导入数不是采用数——采用从本机库现读。
 
-    判断侧算本机分析署名下的缓存行（本机分析消费的正是这些行），本机还没跑过分析
-    （缓存里没有本机自己写的行）记「未评估」，不拿导入数冒充、不伪造零；决定侧算本机
-    账本里在效的行（已确认的关系、单独成组、排除对，ADR-0039 判据 2 的「采纳」）。这行
-    是**当前状态**：同周重跑读到的是同一份，不是「这趟新增了几条」。
+    判断侧算**本机当前分析署名**下、且证据版本在本机有着落的缓存行（分析消费的正是这些
+    行；换过模型配置后旧署名下的行不算了）；本机还没有当前署名下的判断（本机自己写的
+    行里没有契约那个署名）记「未评估」，不拿导入数冒充、不伪造零；决定侧算本机账本里
+    在效的行（已确认的关系、单独成组、排除对，ADR-0039 判据 2 的「采纳」）。这行是
+    **当前状态**：同周重跑读到的是同一份，不是「这趟新增了几条」。
     """
     collect = outcome.judgment_collect
     if collect is None or not collect.results:
@@ -1380,11 +1441,13 @@ def _judgment_adopt_row(outcome: RunOutcome) -> str:
             judged = "未评估" if info.judgments is None else f"{info.judgments} 条"
             return f"{info.machine} 判断 {judged}、人工决定 {info.decisions} 条"
         return ("- 采纳：" + "；".join(counts(info) for info in adopted)
-                + "（判断 = 本机分析署名下的缓存行；人工决定 = 本机账本在效的行）")
+                + "（判断 = 本机当前分析署名下、证据版本有着落的缓存行；"
+                "人工决定 = 本机账本在效的行）")
     if not outcome.judgment_adoption[0].evaluated:
-        return ("- 采纳：判断 未评估（本机还没跑过分析——先在缓存里闲置待用，跑过一次"
-                "分析后这里才有采用口径）· 人工决定 0 条在效")
-    return "- 采纳：没有（判断都不在本机分析署名下；账本里没有这些来源的在效决定）"
+        return ("- 采纳：判断 未评估（本机还没有当前分析署名下的判断——先在缓存里闲置待用；"
+                "跑过一次当前配置的分析后这里才有采用口径）· 人工决定 0 条在效")
+    return ("- 采纳：没有（判断都不在本机当前分析署名下、或证据版本对不上；"
+            "账本里没有这些来源的在效决定）")
 
 
 # 冲突三类的人话（spec §6）：键就是 `analysis_store` 那三个类别名，不在这里重拼字符串。
@@ -1402,7 +1465,7 @@ def _judgment_conflict_rows(outcome: RunOutcome) -> list[str]:
     """「冲突」每笔一行：点名双方（谁的什么 vs 谁的什么）与商品；没有就如实写「没有」。
 
     列的是**本周记下的**那些（与采集侧「冲突」按周同规）；往次的冲突留着账里、在分析
-    页面上看——口径行说明这一点。
+    页面上看——口径行说明这一点。外来那侧随行带上包的来源提交（票 04，记过才显示）。
     """
     conflicts = outcome.judgment_conflicts
     if not conflicts:
@@ -1413,8 +1476,9 @@ def _judgment_conflict_rows(outcome: RunOutcome) -> list[str]:
         incoming = _decision_side(conflict.incoming)
         local = "、".join(_decision_side(content) for content in conflict.local)
         members = "、".join(conflict.members)
+        packed = f"；外来包提交 {conflict.source_commit}" if conflict.source_commit else ""
         rows.append(f"- 冲突：{kind} —— 外来的 {incoming} vs 本机的 {local}"
-                    f"（商品 {members}；在分析页面上裁决）")
+                    f"（商品 {members}{packed}；在分析页面上裁决）")
     return rows
 
 

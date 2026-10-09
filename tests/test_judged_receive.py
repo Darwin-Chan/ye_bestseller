@@ -453,10 +453,13 @@ class RunOnceWiringTests(unittest.TestCase, SourceWorldMixin):
         self.assertIn("还没发布过判断集", report, "空远端库：已接入、没有包——不是失败")
 
     def minimal_world(self):
-        """票 03 的最小判断/证据包：m4 发布 1 条判断 + 2 条证据，清单点名它。"""
+        """票 03 的最小判断/证据包：m4 发布 1 条判断 + 2 条证据（成员索引行随行），清单点名它。
+
+        行在本机当前契约署名下（票 04：采纳口径按契约现读）；包内自洽（pair 与证据版本
+        都由 `judged_publish` 按 `matching` 的口径生成）。
+        """
         self.world.judged("m4")
-        self.world.judged_publish("m4", rows=(("m4-pair", "sig-a"),),
-                                  evidence=(("id-1", "ev-1"), ("id-2", "ev-2")))
+        self.world.judged_publish("m4", rows=(("m4-pair", self.world.contract),))
         self.publish_snapshot(self.source("m4"))
 
     def ledger_digest(self) -> str:
@@ -507,31 +510,67 @@ class RunOnceWiringTests(unittest.TestCase, SourceWorldMixin):
         self.assertIn("收取结果：ok", text)
 
     def test_adopted_counts_read_the_local_stores_not_the_imported_count(self):
-        """票 03：本机跑过分析（有本机署名的行）后，采纳按本机分析署名下的缓存行现读。"""
+        """票 03：本机跑过分析（有本机当前契约署名下的行）后，采纳按契约署名下的缓存行现读。"""
         self.minimal_world()
-        self.world.judgments_local(rows=(("local-pair", "sig-a"),))
+        self.world.judgments_local()
 
         outcome = self.world.run(only="collect")
 
         self.assertEqual(outcome.exit_code, 0, outcome.failures)
         self.assertIn("- 采纳：m4 判断 1 条、人工决定 0 条"
-                      "（判断 = 本机分析署名下的缓存行；人工决定 = 本机账本在效的行）",
+                      "（判断 = 本机当前分析署名下、证据版本有着落的缓存行；"
+                      "人工决定 = 本机账本在效的行）",
                       self.world.report())
 
     def test_a_mismatched_signature_is_not_adopted(self):
-        self.minimal_world()
-        self.world.judgments_local(rows=(("local-pair", "sig-other"),))
+        self.world.judged("m4")
+        self.world.judged_publish("m4", rows=(("m4-pair", "sig-other"),))
+        self.publish_snapshot(self.source("m4"))
+        self.world.judgments_local()
 
         outcome = self.world.run(only="collect")
 
         self.assertEqual(outcome.exit_code, 0, outcome.failures)
-        self.assertIn("- 采纳：没有（判断都不在本机分析署名下；账本里没有这些来源的在效决定）",
+        self.assertIn("- 采纳：没有（判断都不在本机当前分析署名下、或证据版本对不上；"
+                      "账本里没有这些来源的在效决定）",
                       self.world.report())
+
+    def test_a_mismatched_signature_is_imported_but_reported_as_gated_out(self):
+        """票 04：异署名行照收留档（追溯、转发都在），门禁回执记 gated_out——不是失败。"""
+        self.world.judged("m4")
+        self.world.judged_publish("m4", rows=(("m4-pair", "sig-other"),))
+        self.publish_snapshot(self.source("m4"))
+
+        outcome = self.world.run(only="collect")
+
+        self.assertEqual(outcome.exit_code, 0, outcome.failures)
+        result = outcome.judgment_collect.results[0]
+        self.assertFalse(result.failed, result.failure)
+        self.assertEqual(result.added.get("judgments"), 1, "照收留档")
+        self.assertEqual(result.gated_out, 1)
+        report = self.world.report()
+        self.assertIn("- 收取：judged-m4 —— 判断 1 条", report)
+        self.assertIn("；门禁 gated_out 1 条（署名不符 1）；", report)
+
+    def test_an_unsupported_package_format_is_rejected_and_named_in_the_report(self):
+        """票 04：格式门禁不过的包整包拒绝——报告与待办点名原因，缓存与账本一个字不动。"""
+        self.minimal_world()
+        self.world.tamper_judged("m4", lambda conn: conn.execute(
+            "UPDATE judgment_meta SET value='v9' WHERE key='format_version'"))
+
+        outcome = self.world.run(only="collect")
+
+        self.assertEqual(outcome.exit_code, 2, "包格式认不了 = 本机没做成事")
+        report = self.world.report()
+        self.assertIn("- 收取：judged-m4 这本没收成（包格式本机认不了"
+                      "（包里写的是 v9、本机支持 v2）", report)
+        self.assertNotIn("judged-m4 —— 判断", report, "不许显示成导入成功")
+        self.assertIn("judged-m4 的判断集没导成（见第三节）", todo_of(report))
 
     def test_one_broken_package_among_sources_shows_partial_failure(self):
         """票 03：多来源一挂一好——好的照收，汇总如实记 partial_failure、点名没成的那家。"""
         self.world.judged("m4", "m5")
-        self.world.judged_publish("m4", rows=(("m4-pair", "sig-a"),))
+        self.world.judged_publish("m4", rows=(("m4-pair", self.world.contract),))
         self.world.publish_broken_judged("m5")
         self.publish_snapshot(self.source("m4"), self.source("m5"))
 
@@ -557,7 +596,7 @@ class RunOnceWiringTests(unittest.TestCase, SourceWorldMixin):
 
     def test_a_blocked_source_asks_for_a_look_while_the_others_still_collect(self):
         self.world.judged("m4", "m5")
-        self.world.judged_publish("m4", rows=(("pair-1", "sig-1"),))
+        self.world.judged_publish("m4", rows=(("pair-1", self.world.contract),))
         (self.exchange / "judged-m5" / "stray.txt").write_text("残迹", encoding="utf-8")
         self.publish_snapshot(self.source("m4"), self.source("m5"))
 
@@ -589,7 +628,7 @@ class RunOnceWiringTests(unittest.TestCase, SourceWorldMixin):
 
     def test_a_stale_plan_still_collects_known_sources_with_a_warning(self):
         self.world.judged("m4")
-        self.world.judged_publish("m4", rows=(("pair-1", "sig-1"),))
+        self.world.judged_publish("m4", rows=(("pair-1", self.world.contract),))
         self.publish_snapshot(self.source("m4"))
         self.box.must("pull", cwd=self.exchange / "plan")     # plan 克隆先拿到快照
         (self.box.tmp / _PLAN_PATHS["remote"]).rename(self.box.tmp / "plan-gone")
