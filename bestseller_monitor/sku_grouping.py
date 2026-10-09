@@ -56,6 +56,16 @@ def _group_member_ids(group: dict) -> list[str]:
     return [identity(member) for member in group["members"]]
 
 
+def _grouping_basis(group: dict, present: list[dict]) -> str:
+    if group.get("excluded_group"):
+        return "人工排除"
+    if group.get("manual_membership"):
+        return "人工归组"
+    if any(member.get("matching_state") == "pending_candidates" for member in present):
+        return "暂时独立（待候选比较）"
+    return "同码归组" if group["merchant_codes"] else "暂时独立"
+
+
 def summarize_group(group: dict, members: dict[str, dict]) -> None:
     present = [members[key] for key in _group_member_ids(group) if key in members]
     for member in present:
@@ -82,7 +92,7 @@ def summarize_group(group: dict, members: dict[str, dict]) -> None:
     group["sku_count"] = len(present)
     group["merchant_codes"] = sorted({m.get("merchant_code") for m in present} - {None})
     group["code_conflict"] = len(group["merchant_codes"]) > 1 and any("商家编码" in m.get("evidence_changes", []) for m in present)
-    group["grouping_basis"] = "人工排除" if group.get("excluded_group") else ("人工归组" if group.get("manual_membership") else ("同码归组" if group["merchant_codes"] else "暂时独立"))
+    group["grouping_basis"] = _grouping_basis(group, present)
     group["added_members"] = [dict(shop_key=m["shop_key"], offer_id=m["offer_id"], sku_id=m["sku_id"]) for m in present if m.get("added_to_group")]
     group["evidence_changed"] = any(m.get("evidence_changes") for m in present)
     group["status"] = "人工排除" if group.get("excluded_group") else ("已确认" if group.get("confirmed") else "待确认")
@@ -312,6 +322,8 @@ def apply_codes(snapshot: dict) -> None:
         code = member.get("merchant_code")
         member["candidate_groups"] = []
         if key in protected:
+            member["matching_state"] = "manual"
+            member["matching_note"] = ""
             member["grouping_basis"] = "人工排除" if any(g.get("excluded_group") and key in _group_member_ids(g) for g in anchors) else "人工归组"
             continue
         member["grouping_basis"] = "同码归组" if code else "暂时独立"
@@ -327,6 +339,7 @@ def apply_codes(snapshot: dict) -> None:
             target["confirmed"] = False
             member["added_to_group"] = True
         elif len(targets) > 1:
+            member["grouping_basis"] = "暂时独立（待候选比较）"
             member["candidate_groups"] = [g["id"] for g in targets]
             member["matching_state"] = "pending_candidates"
             member["matching_note"] = "多个候选，无法确定归属；候选比较尚未开放"

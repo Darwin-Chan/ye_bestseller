@@ -65,6 +65,8 @@ class MerchantCodeTests(unittest.TestCase):
         evidence = next(m for m in result["members"] if m["shop_key"] == "C01")
         self.assertEqual(ids, set(evidence["candidate_groups"]))
         self.assertIn("多个候选", evidence["matching_note"])
+        self.assertEqual("暂时独立（待候选比较）", evidence["grouping_basis"])
+        self.assertEqual("暂时独立（待候选比较）", self.group_for(result, new)["grouping_basis"])
         self.assertEqual(1, self.group_for(result, new)["sku_count"])
         self.service.save_draft(result["id"])
         from bestseller_monitor.analysis import AnalysisService
@@ -314,6 +316,7 @@ class MerchantCodeTests(unittest.TestCase):
         self.service.save_draft(result["id"])
         again = self.service.start("2026-09-07", "2026-09-14")
         self.assertTrue(self.group_for(again, a)["confirmed"])
+        self.assertTrue(all(m["matching_state"] == "manual" for m in again["members"]))
 
 
 class MerchantCodeBrowserTests(unittest.TestCase):
@@ -434,3 +437,23 @@ class MerchantCodeBrowserTests(unittest.TestCase):
         import os
         if os.environ.get("SKU04_ARTIFACTS"):
             offline.screenshot(path=str(__import__("pathlib").Path(os.environ["SKU04_ARTIFACTS"]) / "offline-code-report.png"), full_page=True)
+
+    def test_multiple_candidates_show_independent_basis_in_browser(self):
+        from playwright.sync_api import expect
+        for day, stock in [("2026-09-07", 100), ("2026-09-14", 80)]:
+            self.observe(day, [dict(sku_id="other", sku_name="蓝 #A#", sku_stock=stock)], shop="B01")
+        first = self.service.start("2026-09-07", "2026-09-14")
+        member = dict(shop_key="B01", offer_id="11", sku_id="other")
+        self.service.edit_group(first["id"], "remove", first["groups"][0]["id"], member)
+        self.service.save_draft(first["id"])
+        for day, stock in [("2026-09-07", 100), ("2026-09-14", 80)]:
+            self.observe(day, [dict(sku_id="candidate", sku_name="新 #A#", sku_stock=stock)], shop="C01")
+        result = self.service.start("2026-09-07", "2026-09-14")
+        self.open_snapshot(result)
+        self.page.locator("#skuQuery").fill("candidate")
+        expect(self.page.locator("#products [data-sku-group]")).to_have_count(1)
+        expect(self.page.locator(".sku-evidence-card")).to_contain_text("暂时独立（待候选比较）")
+        expect(self.page.locator(".sku-evidence-card")).to_contain_text("候选组")
+        expect(self.page.locator(".sku-evidence-card")).not_to_contain_text("同码归组")
+        expect(self.page.locator("#groupDetail .sku-group-summary")).to_contain_text("暂时独立（待候选比较）")
+        self.retain("pending-candidates")
