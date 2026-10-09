@@ -129,6 +129,11 @@ class ElapsedLifecycleTests(unittest.TestCase):
 
             self.collect(cfg, clock, pause_after_request(100, 20, 120))
             process.alive = False
+            # 真实界面按约 2 秒轮询一次：先经公共接口观察到采集进程已退出、旧的暂停停止窗口
+            # 结清，之后才可能有同轮续跑。issues-08-11 对 ADR-0024 的替代明确「目标被替换不能
+            # 证明原目标已收尾」——跳过这次观察、直接让新执行顶掉身份行，界面就无法结清旧窗口
+            # （那正是新政策要保留的可见欠账），此处模拟的是真实轮询这一步。
+            self.assertIsNone(api.get_run()["stopping"])
             conn = connect(cfg.db_file)
             try:
                 rid = rounds.active_round(Database(conn)).id
