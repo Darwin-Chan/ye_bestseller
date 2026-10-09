@@ -26,7 +26,7 @@ from bestseller_monitor.config import ROLE_MERGE_ONLY
 from bestseller_monitor.db import CST
 from bestseller_monitor.git_channel import GitChannel
 from tests.git_repos import GitSandbox, WorldTemplate
-from test_exchange import RUN_AT, WEEK, ConsoleWorld, _plan_template, todo_of
+from test_exchange import ConsoleWorld, todo_of
 
 # 固定生成时刻：它进快照正文（生成记录），但不参与「无变化」判定。
 STAMP = dt.datetime(2026, 10, 9, 21, 0, tzinfo=CST)
@@ -231,6 +231,27 @@ class RefreshTests(RefreshCase):
         self.assertTrue(result.failed)
         self.assertIn(judged_sources.TOKEN_ENV, result.failure)
 
+    def test_a_confirmed_shrink_is_published(self):
+        """维护人确认后（`confirm_shrink`）才按新的发：上一版被替换成减少后的清单。"""
+        self.refresh(FakeProvider([_gitee("judged-m1"), _gitee("judged-m2")]))
+
+        result = self.refresh(FakeProvider([_gitee("judged-m1")]), confirm_shrink=True)
+
+        self.assertTrue(result.published, result.failure)
+        self.assertFalse(result.held)
+        self.assertEqual(self.machines(), ["m1"])
+        self.assertEqual(self.commits(), 2)
+
+    def test_a_broken_previous_snapshot_is_not_overwritten(self):
+        """上一版读不动 = 不覆盖、不猜：坏文件绝不能静默关掉缩减保护。"""
+        self.box.commit_push(self.plan, {judged_sources.SNAPSHOT_REL: b"not a manifest at all"})
+
+        result = self.refresh(FakeProvider([_gitee("judged-m1")]))
+
+        self.assertTrue(result.failed)
+        self.assertIn(judged_sources.SNAPSHOT_REL, result.failure)
+        self.assertEqual(self.commits(), 1, "坏文件原样留着，没有拿候选盖掉它")
+
 
 class GiteeApiTests(unittest.TestCase):
     """Gitee API 客户端的公开口：翻页、认证在头里、失败语义——都经替身传输。"""
@@ -379,6 +400,14 @@ class ExchangeWiringTests(unittest.TestCase):
         self.assertIn("- 来源清单：没刷新（来源查询没成（连接超时）", report)
         self.assertIn("判断来源清单没刷新", todo_of(report))
 
+    def test_a_non_maintainer_report_carries_no_source_row(self):
+        world = ConsoleWorld(self)                  # m1：没配 owner，不是来源维护机
+        outcome = world.run()
+
+        self.assertEqual(outcome.exit_code, 0, outcome.failures)
+        self.assertNotIn("来源清单", world.report(), "恒定事实不进周报：非维护机不记这行")
+        self.assertIsNotNone(outcome.source_refresh.note)
+
     def test_a_maintainer_without_the_plan_clone_is_named_in_the_check(self):
         import shutil
         shutil.rmtree(self.world.root / "plan")
@@ -388,6 +417,21 @@ class ExchangeWiringTests(unittest.TestCase):
         self.assertEqual(outcome.exit_code, 2, "维护机发不出清单 = 本机没做成事")
         self.assertIn("来源维护机", "\n".join(outcome.check.notes))
         self.assertIn("- 来源清单：没刷新", self.world.report())
+
+    def test_a_confirmed_shrink_publishes_through_the_task(self):
+        """确认出口真的通到刷新：同一件事，不加确认保留、加了确认按新的发。"""
+        first = self.world.run(source_provider=self.provider("judged-m1", "judged-m2"))
+        self.assertEqual(first.exit_code, 0, first.failures)
+
+        second = self.world.run(source_provider=self.provider("judged-m1"),
+                                confirm_shrink=True)
+
+        self.assertEqual(second.exit_code, 0, second.failures)
+        self.assertEqual([s["machine_id"] for s in self.snapshot()["sources"]], ["m1"])
+
+    def test_the_cli_exposes_the_confirmation_flag(self):
+        self.assertTrue(exchange.parse_args(["--confirm-source-shrink"]).confirm_source_shrink)
+        self.assertFalse(exchange.parse_args([]).confirm_source_shrink)
 
     def test_the_snapshot_refresh_is_wired_only_into_the_exchange_task(self):
         """来源刷新只接在交换任务里：包内别的模块一个字都不引用它（结构护栏）。"""

@@ -338,8 +338,7 @@ def _judgment_check_notes(cfg, notes: list[str], *, root: pathlib.Path,
                      "（上机清单第 14 步）。")
     if not judgment_set.judged_repos(root, exclude=machine_id):
         notes.append("交换区里没有别的 judged 库：判断集的收取这趟没有可收的。")
-    if str(getattr(cfg, "gitee_owner", "") or "").strip() \
-            and not (root / plan_step.PLAN_REPO_DIR).is_dir():
+    if _source_owner(cfg) and not (root / plan_step.PLAN_REPO_DIR).is_dir():
         notes.append(f"本机是来源维护机（配了 machine.gitee_owner），但 plan 库还没 clone 到 "
                      f"{root / plan_step.PLAN_REPO_DIR}：刷新判断来源清单那一步会点名它"
                      "（上机清单第 9 / 11 步）。")
@@ -365,24 +364,31 @@ def _self_crawled_days(db: Database, week: str, machine_id: str,
     return tuple(out)
 
 
-def _refresh_sources(cfg, *, machine_id: str, now: dt.datetime, provider, say
-                     ) -> judged_sources.RefreshResult:
+def _source_owner(cfg) -> str:
+    """本机配置的可信 owner（空 = 本机不是来源维护机）：只读一个键，两处消费共用一处口径。"""
+    return str(cfg.gitee_owner or "").strip()
+
+
+def _refresh_sources(cfg, *, machine_id: str, now: dt.datetime, provider, confirm_shrink: bool,
+                     say) -> judged_sources.RefreshResult:
     """维护机在任务启动时经 Gitee API 刷新并发布判断来源清单（票 01、ADR-0052）。
 
     只由 `run_once` 调——打开交换窗口（`Api.state`）与启动分析都不走它，因此天然不触发。
     没配 `machine.gitee_owner` 的机器是「不是维护机」的可读说明（不是失败）；配了 owner 但
-    `provider` 为空时现搭一个真实 Gitee 客户端（token 只从环境变量读）。
+    `provider` 为空时现搭一个真实 Gitee 客户端（token 只从环境变量读）。`confirm_shrink` 是
+    维护人对「来源减少 / 远端地址变化」的显式确认（`--confirm-source-shrink`）。
     """
-    owner = str(getattr(cfg, "gitee_owner", "") or "")
-    if not owner.strip():
+    owner = _source_owner(cfg)
+    if not owner:
         say("刷新判断来源清单：跳过（本机不是来源维护机）")
-    else:
-        say("刷新判断来源清单…")
-        if provider is None:
-            provider = judged_sources.provider_from_config(owner)
+        return judged_sources.refresh(cfg.exchange_root, owner="", generator=machine_id,
+                                      provider=provider, now=now)
+    say("刷新判断来源清单…")
+    if provider is None:
+        provider = judged_sources.provider_from_config(owner)
     result = judged_sources.refresh(cfg.exchange_root, owner=owner, generator=machine_id,
-                                    provider=provider, now=now)
-    say(_source_refresh_line(result))
+                                    provider=provider, now=now, confirm_shrink=confirm_shrink)
+    say("来源清单：" + _source_text(result))
     return result
 
 
@@ -466,13 +472,14 @@ def _ledger_row(conn: sqlite3.Connection, path: pathlib.Path):
 def run_once(cfg, *, only: str | None = None, week: str | None = None,
              now: dt.datetime | None = None, store=None,
              emit: Callable[[str], None] | None = None,
-             source_provider=None) -> RunOutcome:
+             source_provider=None, confirm_shrink: bool = False) -> RunOutcome:
     """一次运行：刷新来源清单 → 检查 → 导出 → 发布判断集 → 拉取 → 汇总 → 收取判断集 → 报告。
 
     `only` 取 `ONLY_EXPORT` / `ONLY_MERGE` / `ONLY_PUBLISH` / `ONLY_COLLECT` 之一，
     只跑那个动作（None = 整趟）；`week` 默认本周（补历史指定周窗口，导出与报告都按它走）；
     `store` 是图片库（None = 按配置现搭）；`emit` 收进度行（小窗口用）。
     `source_provider` 是来源查询的接缝（票 01）：None = 现搭真实 Gitee 客户端；测试注入替身。
+    `confirm_shrink` 是维护人对来源减少 / 远端地址变化的显式确认（`--confirm-source-shrink`）。
     退出码见模块 docstring。
     """
     if getattr(cfg, "local_trial", False):
@@ -502,7 +509,8 @@ def run_once(cfg, *, only: str | None = None, week: str | None = None,
         # ---- 判断来源清单（票 01、ADR-0052）：维护机在任务启动时刷新并发布 ----
         # 只在这里做：打开交换窗口（`Api.state`）与启动分析都不走 run_once，因此天然不触发。
         source_refresh = _refresh_sources(cfg, machine_id=machine_id, now=now,
-                                          provider=source_provider, say=say)
+                                          provider=source_provider,
+                                          confirm_shrink=confirm_shrink, say=say)
 
         # ---- 导出这半：导出（纯汇总机跳过）· 发布判断集（与角色档位无关，spec §9）----
         export_result: export.ExportResult | None = None
@@ -731,12 +739,8 @@ def _source_text(result: judged_sources.RefreshResult) -> str:
     return f"{count} 个来源 → plan @ {result.commit}"
 
 
-def _source_refresh_line(result: judged_sources.RefreshResult) -> str:
-    return "来源清单：" + _source_text(result)
-
-
 def _source_row(outcome: RunOutcome) -> str:
-    """报告第三节的「来源清单」一行：只在实际交换任务里刷过才有（`source_refresh` 非空）。"""
+    """报告第三节的「来源清单」一行：只在实际交换任务里刷过、且本机是维护机时才有。"""
     return f"- 来源清单：{_source_text(outcome.source_refresh)}"
 
 
@@ -981,7 +985,8 @@ def _todo(*, machine_id, week, plan_of_shop, gaps, conflicts, missing, pulls, ex
         items.append("判断来源清单没刷新（见第三节）：token / 网络 / plan 克隆修好后重跑一次")
     elif source_refresh is not None and source_refresh.held:
         items.append("判断来源清单有来源减少或远端地址变化（见第三节）：核对 token 权限与库是否"
-                     "真被删/改名，确认无误后重跑并显式确认这次变化")
+                     "真被删/改名，确认无误后跑 `python exchange.py --confirm-source-shrink` "
+                     "按新的发布")
 
     return tuple(items) if items else ("没有待办：本周干净",)
 
@@ -1049,9 +1054,12 @@ def _judgment_section(outcome: RunOutcome) -> list[str]:
 
     发布与收取那几行从**这一趟**的结果读（没跑或没有可发的如实写）；冲突那行从**本机
     冲突账**现读、切在本周（账是累计的，重复收取时结果里不复现，票 04 的口径）。
+    来源清单那一行（票 01）也记在这里：它是判断集的输入（收谁），与本节的发布收取是同一件事。
     """
     out = ["## 三、判断集"]
-    if outcome.source_refresh is not None:
+    # 来源清单这一行只在它是本机做的事时才出现：维护机（配了 owner）刷了/没刷成都记；
+    # 「本机不是来源维护机」是恒定事实、不是状态，收进报告只会每周重复一句噪声。
+    if outcome.source_refresh is not None and outcome.source_refresh.note is None:
         out.append(_source_row(outcome))
     if outcome.judgments is None:
         # 没配分析配置：判断集这半整趟没做——如实写一句，不折成失败（那是上机阶段的事）
