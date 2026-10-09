@@ -538,6 +538,49 @@ class DecisionMergeTests(SkuSharingCase):
         self.assertEqual([], self.ledger()["excluded_skus"], "同一台机器的新话覆盖旧话")
         self.assertEqual(1, len(self.groups()))
 
+    def test_a_clashing_self_update_retires_nothing(self):
+        """审查 B1：同源同集让位只能在确认不矛盾之后——矛盾时先删会让共享行永久丢失。"""
+        first = sku_identity({"shop_key": "S", "offer_id": "1", "sku_id": "s1"})
+        second = sku_identity({"shop_key": "S", "offer_id": "1", "sku_id": "s2"})
+        third = sku_identity({"shop_key": "S", "offer_id": "1", "sku_id": "s3"})
+        self.merge("m1", groups=[self.group_row([first, second, third], group_id="g-1")])
+        # m2 的局部保存行（保存侧是本地权威、静默写入）：账本成为 {s1,s2,s3}(m1)+{s1,s2}(m2)。
+        DraftStore(self.store, "m2").write_sku(
+            {"id": "d1", "saved_at": "2026-10-09T00:00:00+00:00",
+             "start": "2026-09-07", "end": "2026-09-14",
+             "members": [{"shop_key": "S", "offer_id": "1", "sku_id": "s1"},
+                         {"shop_key": "S", "offer_id": "1", "sku_id": "s2"}]},
+            decisions={"groups": [{"members": sorted([[first, "v1"], [second, "v1"]]),
+                                   "confirmed": False, "excluded": False,
+                                   "group_id": "g-1", "machine_id": ""}],
+                       "excluded_skus": [], "excluded_pairs": []})
+        before = sorted(json.dumps(row["members"], ensure_ascii=False)
+                        for row in self.groups())
+        self.merge("m1", groups=[self.group_row([first, second, third], group_id="g-1")])
+        after = sorted(json.dumps(row["members"], ensure_ascii=False)
+                       for row in self.groups())
+        self.assertEqual(before, after, "矛盾时两边都不动：同源同集行不许先被删")
+        self.assertTrue(self.conflicts(), "矛盾照记")
+
+    def test_a_clashing_exclusion_self_update_retires_nothing(self):
+        """B1 同规：排除身份行的同源让位也不许抢在冲突判定之前执行。"""
+        first = sku_identity({"shop_key": "S", "offer_id": "1", "sku_id": "s1"})
+        second = sku_identity({"shop_key": "S", "offer_id": "1", "sku_id": "s2"})
+        self.merge("m1", excluded_skus=[[first, "m1"]])
+        DraftStore(self.store, "m2").write_sku(
+            {"id": "d2", "saved_at": "2026-10-09T00:00:00+00:00",
+             "start": "2026-09-07", "end": "2026-09-14",
+             "members": [{"shop_key": "S", "offer_id": "1", "sku_id": "s1"},
+                         {"shop_key": "S", "offer_id": "1", "sku_id": "s2"}]},
+            decisions={"groups": [{"members": sorted([[first, "v1"], [second, "v1"]]),
+                                   "confirmed": False, "excluded": False,
+                                   "group_id": "g-2", "machine_id": ""}],
+                       "excluded_skus": [], "excluded_pairs": []})
+        before = self.ledger()["excluded_skus"]
+        self.merge("m1", excluded_skus=[[first, "m1"]])
+        self.assertEqual(before, self.ledger()["excluded_skus"], "矛盾时先不动本机一侧")
+        self.assertTrue(self.conflicts(), "矛盾照记")
+
     def test_two_element_exclusion_rows_stamp_the_channel_source(self):
         """审查发现的边界：只带两端的排除行（[身份]／[a, b]）不能把第二端当来源机器。"""
         self.merge("m1", excluded_pairs=[["s1", "s2"]], excluded_skus=[["s3"]])
@@ -716,6 +759,7 @@ class CrossMachineCase(unittest.TestCase):
         return sku_sharing.collect(self.exchange, machine_id,
                                    cache=self.service.config.matching.cache,
                                    store=self.service.config.store, now=STAMP)
+
 
 class CrossMachineTests(CrossMachineCase):
     """端到端：复用、人工决定回放、局部保护、拆组混码、证据变化与同族补员。"""

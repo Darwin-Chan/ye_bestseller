@@ -359,9 +359,9 @@ class DraftStore:
                     local_contents = sorted((_format_sku_entry(item) for item in entry["local"]),
                                             key=lambda content: json.dumps(content, sort_keys=True,
                                                                            ensure_ascii=False))
-                    _, fresh = _insert_sku_conflict(conn, known, kind=entry["kind"],
-                                                    incoming=incoming, local_contents=local_contents,
-                                                    seen_at=seen_at)
+                    _, fresh, _, _ = _insert_sku_conflict(
+                        conn, known, kind=entry["kind"], incoming=incoming,
+                        local_contents=local_contents, seen_at=seen_at)
                     recorded += fresh
             return recorded
         finally:
@@ -811,15 +811,16 @@ def _insert_sku_conflict(conn, known, *, kind, incoming, local_contents, seen_at
 
     `incoming` 与 `local_contents` 都是格式化后的内容；摘要按内容算，`known` 是调用方
     已读到的既有摘要集合（新记的同步补进，同一批里重复也不再算新记）。返回
-    `(摘要, 这次是否新记)`——同一条重复遇到只核对不重记。
+    `(摘要, 这次是否新记, 冲突牵涉的身份, 本地侧来源机器)`——同一条重复遇到只核对不重记，
+    调用方直接拿这些字段组装 `Conflict`，不再重算。
     """
     conflict_digest = _digest({'kind': kind, 'incoming': incoming, 'local': local_contents})
-    if conflict_digest in known:
-        return conflict_digest, False
-    known.add(conflict_digest)
     members = sorted({member for content in [incoming, *local_contents]
                       for member, _ in content['members']})
     machines = sorted({content['machine'] for content in local_contents})
+    if conflict_digest in known:
+        return conflict_digest, False, members, machines
+    known.add(conflict_digest)
     conn.execute(
         f'INSERT INTO {SKU_CONFLICT_TABLE}(digest,kind,members,incoming_machine,incoming,'
         'local_machines,local,seen_at) VALUES(?,?,?,?,?,?,?,?)',
@@ -827,7 +828,7 @@ def _insert_sku_conflict(conn, known, *, kind, incoming, local_contents, seen_at
          incoming['machine'], json.dumps(incoming, ensure_ascii=False),
          json.dumps(machines, ensure_ascii=False),
          json.dumps(local_contents, ensure_ascii=False), seen_at))
-    return conflict_digest, True
+    return conflict_digest, True, members, machines
 
 
 def _format_sku_entry(entry):
@@ -969,10 +970,8 @@ class _SkuLedgerMerge:
         # 同一成员集就是同一条决定：版本只是内容刷新，不作第二行并存（否则重复行会越积越多）。
         same = [other for other in self.local['groups']
                 if {member for member, _ in other['members']} == idents]
-        if same:
-            if any(source_of(other, '') != source for other in same):
-                return                             # 别的机器已记过同一决定：先到者保留，幂等跳过
-            self._retire_groups(same)              # 同一台机器在更新自己（版本/确认/排除）
+        if same and any(source_of(other, '') != source for other in same):
+            return                                 # 别的机器已记过同一决定：先到者保留，幂等跳过
         opponents, superseded = [], []
         for other in self.local['groups']:
             other_idents = {member for member, _ in other['members']}
@@ -1002,6 +1001,9 @@ class _SkuLedgerMerge:
         if opponents:
             self._conflict_kinds(opponents, content)
             return
+        # 让位只在不矛盾时才执行：矛盾时两边都不动（先删会让共享行永久丢失，审查 B1）。
+        if same:
+            self._retire_groups(same)              # 同一台机器在更新自己（版本/确认/排除）
         self._retire(superseded)
         self._adopt('sku_manual_groups',
                     'INSERT OR IGNORE INTO sku_manual_groups'
@@ -1015,11 +1017,8 @@ class _SkuLedgerMerge:
         source = _sku_exclusion_source(entry, self.source)
         content = _sku_exclusion_content([ident, source])
         current = [other for other in self.local['excluded_skus'] if other[0] == ident]
-        if current:
-            if all(_sku_exclusion_source(other, '') == source for other in current):
-                self._retire([('sku', other) for other in current])
-            else:
-                return
+        if current and not all(_sku_exclusion_source(other, '') == source for other in current):
+            return
         rows = [row for row in self.local['groups']
                 if ident in {member for member, _ in row['members']}]
         opponents = [(CONFLICT_GROUP_VS_EXCLUSION,
@@ -1028,6 +1027,7 @@ class _SkuLedgerMerge:
         if opponents:
             self._conflict_kinds(opponents, content)
             return
+        self._retire([('sku', other) for other in current])   # 让位在确认无矛盾之后（审查 B1）
         self._retire([('group', row) for row in rows])
         self._adopt('sku_excluded_skus',
                     'INSERT OR IGNORE INTO sku_excluded_skus(identity,saved_at,machine_id)'
@@ -1041,11 +1041,8 @@ class _SkuLedgerMerge:
         content = _sku_pair_content([left, right, source])
         current = [other for other in self.local['excluded_pairs']
                    if {other[0], other[1]} == {left, right}]
-        if current:
-            if all(_sku_pair_source(other, '') == source for other in current):
-                self._retire([('pair', other) for other in current])
-            else:
-                return
+        if current and not all(_sku_pair_source(other, '') == source for other in current):
+            return
         rows = [row for row in self.local['groups']
                 if {left, right} <= {member for member, _ in row['members']}]
         opponents = [(CONFLICT_GROUP_VS_EXCLUSION,
@@ -1054,6 +1051,7 @@ class _SkuLedgerMerge:
         if opponents:
             self._conflict_kinds(opponents, content)
             return
+        self._retire([('pair', other) for other in current])  # 让位在确认无矛盾之后（审查 B1）
         self._retire([('group', row) for row in rows])
         self._adopt('sku_excluded_pairs',
                     'INSERT OR IGNORE INTO sku_excluded_pairs(pair_a,pair_b,saved_at,machine_id)'
@@ -1087,13 +1085,11 @@ class _SkuLedgerMerge:
             self._conflict(kind, incoming, local_contents)
 
     def _conflict(self, kind, incoming, local_contents):
-        conflict_digest, recorded = _insert_sku_conflict(
+        conflict_digest, recorded, members, machines = _insert_sku_conflict(
             self.conn, self.known, kind=kind, incoming=incoming,
             local_contents=local_contents, seen_at=self.seen_at)
         self.conflicts.append(Conflict(
-            digest=conflict_digest, kind=kind,
-            members=tuple(sorted({member for content in [incoming, *local_contents]
-                                  for member, _ in content['members']})),
+            digest=conflict_digest, kind=kind, members=tuple(members),
             incoming_machine=incoming['machine'], incoming=incoming,
-            local_machines=tuple(sorted({content['machine'] for content in local_contents})),
+            local_machines=tuple(machines),
             local=tuple(local_contents), seen_at=self.seen_at, recorded=recorded))
