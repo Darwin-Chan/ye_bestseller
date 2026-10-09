@@ -270,6 +270,8 @@ def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *,
                       new_intent: rounds.NewRoundIntent | None = None,
                       resume_intent: rounds.ResumeRoundIntent | None = None) -> None:
     """拿到采集锁之后真正干活的部分。"""
+    from .dedicated_browser import verify_gui_settings
+    verify_gui_settings(cfg)
     cfg.ensure_dirs()
     conn = connect(cfg.db_file)
     db = Database(conn)

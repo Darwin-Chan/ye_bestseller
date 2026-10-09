@@ -1,5 +1,6 @@
 """Local trial through the public GUI API and the actual CLI boundary."""
 from contextlib import closing
+from browser_facts import FreeBrowserOS
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,6 +19,7 @@ class LocalTrialGuiTests(unittest.TestCase):
     def setUp(self):
         self.enterContext(frozen_clock())
         self.enterContext(isolated_locks())
+        self.enterContext(patch("bestseller_monitor.dedicated_browser.BrowserRuntime", FreeBrowserOS))
         self.enterContext(patch("bestseller_monitor.browser_proc.process_alive", return_value=True))
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.config = self.root / "config.toml"
@@ -27,7 +29,7 @@ class LocalTrialGuiTests(unittest.TestCase):
             "A01,店一,https://a.example/,3,1,\n"
             "A02,店二,https://b.example/,4,1,\n", encoding="utf-8")
         self.cfg = Config.from_file(self.config, root=self.root)
-        self.api = gui.Api(cfg=self.cfg, config_file=self.config, now=db.utcnow)
+        self.api = gui.Api(browser_runtime=FreeBrowserOS(), cfg=self.cfg, config_file=self.config, now=db.utcnow)
 
     def test_explicit_trial_has_one_isolated_context_on_all_three_pages(self):
         before = self.config.read_bytes()
@@ -83,7 +85,7 @@ class LocalTrialGuiTests(unittest.TestCase):
             # Runtime settings remain reloadable; saved scope survives disabled CSV rows.
             (self.root / "shops.csv").write_text(
                 "shop_key,shop_name,shop_url,pages,active,offer_list_url\n", encoding="utf-8")
-            reopened = gui.Api(cfg=self.cfg, config_file=self.config, now=db.utcnow)
+            reopened = gui.Api(browser_runtime=FreeBrowserOS(), cfg=self.cfg, config_file=self.config, now=db.utcnow)
             self.assertTrue(reopened.set_local_trial(True)["ok"])
             self.assertFalse(reopened.resume_run()["ok"])
             self.assertEqual(reopened.get_run()["round_id"], first["round_id"])
@@ -149,7 +151,7 @@ class LocalTrialGuiTests(unittest.TestCase):
         from helpers import new_round
         from test_gui import StopClock
         clock = StopClock()
-        self.api = gui.Api(cfg=self.cfg, config_file=self.config, now=db.utcnow, stop_clock=clock)
+        self.api = gui.Api(browser_runtime=FreeBrowserOS(), cfg=self.cfg, config_file=self.config, now=db.utcnow, stop_clock=clock)
         with closing(connect(self.cfg.db_file)) as formal:
             formal_id = new_round(Database(formal), "A01")
         self.assertTrue(self.api.set_local_trial(True)["ok"])

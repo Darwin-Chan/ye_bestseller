@@ -85,6 +85,8 @@ _click_text_in_frames = listing.click_text_in_frames
 
 def open_session(cfg: Config, *, publish_browser=None):
     global _session
+    from .dedicated_browser import verify_gui_settings
+    verify_gui_settings(cfg)
     _clear_pending_before_open()
     from playwright.sync_api import sync_playwright
 
@@ -136,6 +138,13 @@ def open_session(cfg: Config, *, publish_browser=None):
         if resources.br is None:
             raise RuntimeError(
                 f"无法连接浏览器调试端口 {resources.port}（{last_exc}）")
+
+        if getattr(cfg, 'gui_browser_settings', None) is not None:
+            state, pid, proof = _browser_publication(resources)
+            if state != 'OWNED':
+                resources.br = None
+                # No context/page/navigation on a redirected or unknown instance.
+                raise RuntimeError('浏览器创建归属无法核实，拒绝采集，不接管已有实例。')
 
         stage = "context"
         if not resources.br.contexts:

@@ -1,4 +1,5 @@
 """轮次采集时长：只通过公开生命周期与持久化读取验证。"""
+from browser_facts import FreeBrowserOS
 import tempfile
 import sqlite3
 import unittest
@@ -92,7 +93,7 @@ class ElapsedTests(unittest.TestCase):
                 conn.close()
             from gui import Api
             clock.advance(80)
-            api = Api(cfg=cfg, shops=[], open_conn=lambda: connect(path))
+            api = Api(browser_runtime=FreeBrowserOS(), cfg=cfg, shops=[], open_conn=lambda: connect(path))
             self.assertEqual(api.get_result()["duration_text"], "12 秒")
             self.assertEqual(api.get_result()["elapsed_sec"], 12)
 

@@ -1,4 +1,5 @@
 import dataclasses
+from browser_facts import FreeBrowserOS
 import logging
 import sqlite3
 import tempfile
@@ -44,7 +45,7 @@ def gui_api(*, shops=(), now=None, db_path=None, open_conn=None, stop_clock=None
     """
     if open_conn is None and db_path is not None:
         open_conn = lambda: connect(db_path)  # noqa: E731 - 工厂按调用次开新连接
-    return Api(cfg=crawler_cfg(max_pages_per_shop=3, **cfg),
+    return Api(browser_runtime=FreeBrowserOS(), cfg=crawler_cfg(max_pages_per_shop=3, **cfg),
                shops=list(shops),
                now=now or utcnow,
                open_conn=open_conn,
@@ -98,7 +99,7 @@ class GuiPlanWiringTests(unittest.TestCase):
         values = dict(shop_csv=self.shop_csv, db_file=self.db_path,
                       exchange_root=self.dir / "exchange", max_pages_per_shop=2)
         values.update(cfg)
-        return Api(cfg=crawler_cfg(**values),
+        return Api(browser_runtime=FreeBrowserOS(), cfg=crawler_cfg(**values),
                    now=lambda: self.NOW, open_conn=lambda: connect(self.db_path))
 
     def store_plan(self, *assignments):

@@ -80,6 +80,7 @@
 
   <!-- 开始 -->
   <div class="panel active" id="panel-start">
+    <div class="card"><button class="btn ghost" id="loginBrowserBtn">打开专用 Edge / 登录 1688</button> <button class="btn ghost" id="refreshBrowserBtn">刷新浏览器状态</button><p id="browserFacts"></p><p class="muted">专用数据目录独立于日常 Edge，不复制 Cookie。浏览器打开不代表账号已登录。登录后请自行关闭手动窗口，再刷新并明确开始采集。</p></div>
     <div class="card">
       <div class="grid" style="grid-template-columns:repeat(3,1fr)">
         <div class="stat"><div class="l">今日已抓取商品</div><div class="n" id="stProducts">0</div></div>
@@ -336,6 +337,10 @@
   async function loadStart() {
     const d = await callApi("get_start");
     if (!d) return;
+    if (d.browser) {
+      $("browserFacts").textContent = "配置：" + d.browser.source + "；专用目录：" + d.browser.profile + "；" + d.browser.message + " " + d.browser.retry;
+      $("loginBrowserBtn").disabled = !d.browser.can_open || d.browser.state === "opening";
+    }
     $("stProducts").textContent = d.ov.products.toLocaleString();
     $("stSkus").textContent = d.ov.skus.toLocaleString();
     $("stRounds").textContent = d.summary.rounds;
@@ -611,6 +616,13 @@
     api = window.pywebview.api;
     // 事件处理器包一层：onclick 会把事件对象当第一个参数传进来，不能让它冒充参数
     $("trialModeBtn").onclick = changeCollectionMode;
+    $("loginBrowserBtn").onclick = async () => {
+      $("loginBrowserBtn").disabled = true;
+      const r = await callApi("open_login_browser");
+      if (r && !r.ok) showNotice(r.error);
+      await refreshStart();
+    };
+    $("refreshBrowserBtn").onclick = () => refreshStart();
     $("startBtn").onclick = () => startRun();
     $("retryPrepBtn").onclick = retryPrepare;
     $("pauseBtn").onclick = pauseRun;

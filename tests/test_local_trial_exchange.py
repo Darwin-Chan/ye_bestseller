@@ -1,4 +1,5 @@
 """Trial history cannot enter formal analysis or actual local Git/image outputs."""
+from browser_facts import FreeBrowserOS
 import contextlib
 import gzip
 import sqlite3
@@ -28,7 +29,7 @@ class LocalTrialExchangeTests(unittest.TestCase):
             analysis_config=world.analysis_path)
         cfg.shop_csv.write_text("shop_key,shop_name,shop_url,pages,active,offer_list_url\n"
                                 "TRIAL,测试店,https://trial.example/,3,1,\n", encoding="utf-8")
-        api = gui.Api(cfg=cfg, config_file=config)
+        api = gui.Api(browser_runtime=FreeBrowserOS(), cfg=cfg, config_file=config)
         self.assertTrue(api.set_local_trial(True)["ok"])
         trial = api.cfg
         self.assertEqual(trial.db_file, for_collection(cfg, local_trial=True, config_file=config).db_file)

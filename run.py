@@ -34,6 +34,7 @@ from contextlib import contextmanager
 import logging
 import logging.handlers
 import sys
+import json
 import sqlite3
 from pathlib import Path
 
@@ -63,6 +64,7 @@ EXIT_NOT_DONE = 2
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", type=Path, default=ROOT / "config" / "config.toml")
+    p.add_argument("--gui-browser-settings", default=None, help=argparse.SUPPRESS)
     p.add_argument("--local-trial", action="store_true",
                    help="本机试采，不共享：独立保存并沿用试采历史；同日已采商品可能跳过")
     p.add_argument("--shops", type=Path, default=None, help="覆盖 config 中的店铺 CSV")
@@ -104,7 +106,21 @@ def apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
 
 def main() -> int:
     args = parse_args()
-    cfg = Config.from_file(args.config, root=ROOT)
+    browser_contract = getattr(args, 'gui_browser_settings', None)
+    if browser_contract is not None:
+        from bestseller_monitor.dedicated_browser import Settings, verify_gui_settings
+        try:
+            expected = Settings(**json.loads(browser_contract))
+            if Path(expected.source).resolve() != args.config.resolve():
+                raise ValueError('配置来源与界面快照不一致')
+            cfg = Config.from_file(args.config, root=Path(expected.root))
+            cfg = cfg.replace(gui_browser_settings=browser_contract)
+            verify_gui_settings(cfg)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            print(f'GUI 专用浏览器启动被拒绝：{exc}')
+            return EXIT_NOT_DONE
+    else:
+        cfg = Config.from_file(args.config, root=ROOT)
     cfg = apply_overrides(cfg, args)
     if args.local_trial:
         return _run_local_trial(cfg, args)

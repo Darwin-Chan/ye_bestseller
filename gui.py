@@ -56,6 +56,7 @@ from bestseller_monitor import single_instance
 from bestseller_monitor import shop_progress
 from bestseller_monitor import stop_request
 from bestseller_monitor import views
+from bestseller_monitor.dedicated_browser import DedicatedBrowser
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -171,7 +172,7 @@ class Api:
     """
 
     def __init__(self, cfg=None, *, now=utcnow, open_conn=None, shops=None,
-                 stop_clock=None, config_file=None):
+                 stop_clock=None, config_file=None, browser_runtime=None):
         """构造 interface：配置、时刻、连接与店铺表都可以注入。
 
         `main()` 仍写 `Api()`——那时配置按项目默认位置读，「现在」取本机时间，
@@ -180,10 +181,11 @@ class Api:
         `stop_clock` 是停止窗口用的时钟（默认挂钟）：用例给它一个能推进的时钟，
         就能把 8 秒 / 10 秒那两段窗口走到点，而不必去改私有状态。
         """
-        self.cfg = cfg if cfg is not None else Config.from_file(
-            PROJECT_ROOT / "config" / "config.toml", root=PROJECT_ROOT)
+        source = Path(config_file) if config_file is not None else PROJECT_ROOT / "config/config.toml"
+        self.cfg = cfg if cfg is not None else Config.from_file(source)
         self._formal_cfg = self.cfg
         self.config_file = (Path(config_file) if config_file is not None else PROJECT_ROOT / "config/config.toml").resolve()
+        self._browser = DedicatedBrowser(self.cfg, self.config_file, runtime=browser_runtime)
         self._formal_open_conn = open_conn
         self._now = now
         self._open_conn = open_conn if open_conn is not None else (
@@ -441,11 +443,50 @@ class Api:
                 self._stop_watch.tick(conn)
                 self._refresh_shops(conn)
                 self._consume_resume_ack(Database(conn))
-                return self._collection_payload(views.start_view(
+                view = self._collection_payload(views.start_view(
                     conn, cfg=self.cfg, shops=self.shops, state=self._ui_state(),
                     crawler=self.current_crawler(conn), now=self._now()))
+                view["browser"] = self._browser.status()
+                view["browser"]["can_open"] = self._login_refusal(conn) is None and view["browser"]["state"] not in ("failed", "unknown", "port_busy", "opening")
+                reason = self._browser.start_error()
+                if reason:
+                    view["start_allowed"] = False
+                    view["browser_error"] = reason
+                    if not view.get("start_hint"):
+                        view["start_hint"] = reason
+                return view
             finally:
                 conn.close()
+
+    def _login_refusal(self, conn):
+        if self._closing_requested:
+            return CLOSING_REFUSAL
+        if is_merge_only(self.cfg):
+            return "纯汇总机不允许打开采集专用 Edge。"
+        if self._stop_watch.status.phase is not stop_request.StopPhase.IDLE:
+            return "停止或收尾仍在进行，请稍后刷新重试。"
+        if self.current_crawler(conn) is not None:
+            return "采集或身份验证等待中，不能另开手动浏览器。"
+        if self.user_paused:
+            return "本入口仅用于开始页；暂停后的登录入口尚未开放。"
+        return None
+
+    def open_login_browser(self):
+        with self._lock:
+            conn = self._open_conn()
+            try:
+                self._stop_watch.tick(conn)
+                reason = self._login_refusal(conn)
+                if reason:
+                    return {"ok": False, "error": reason}
+                # Reserve while the API gate is locked; OS creation itself must
+                # not block refresh, close or a duplicate click.
+                reserved = self._browser.reserve_open()
+            finally:
+                conn.close()
+        if reserved is not None:
+            return reserved
+        return self._browser.finish_open()
 
     # ---------- 过程页 ----------
     @_collection_action
@@ -509,13 +550,15 @@ class Api:
 
         界面不发 `--ignore-plan`：逃生口只在命令行（ADR-0035）。
         """
-        cmd = [_crawler_python(), str(PROJECT_ROOT / "run.py")]
+        cmd = [_crawler_python(), str(PROJECT_ROOT / "run.py"), "--config", str(self.config_file)]
+        if new_intent is not None:
+            cmd += ["--gui-browser-settings", self._browser.settings.to_json()]
         if new_intent is not None:
             cmd += ["--new-round-intent", new_intent.to_json()]
         if resume_intent is not None:
             cmd += ["--resume-round-intent", resume_intent.to_json()]
         if self.cfg.local_trial:
-            cmd += ["--local-trial", "--config", str(self.config_file)]
+            cmd += ["--local-trial"]
         limit = ",".join(k for k in (keys or []) if k)
         if limit:
             cmd += ["--limit-shops", limit]
@@ -523,7 +566,7 @@ class Api:
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         self.proc = subprocess.Popen(
             cmd,
-            cwd=str(PROJECT_ROOT),
+            cwd=self._browser.settings.root,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=flags,
@@ -571,6 +614,9 @@ class Api:
                 return {"ok": False, "error": str(exc)}
             finally:
                 conn.close()
+            reason = self._browser.start_error()
+            if reason:
+                return {"ok": False, "error": reason, "retryable": True}
             self.round_id = None
             self.user_paused = False
             self._paused_round_id = None
@@ -1132,7 +1178,11 @@ def main() -> int:
         _announce_already_open()
         return 0
     try:
-        api = Api()
+        try:
+            api = Api()
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            _notify(f"配置错误，不能打开采集界面：{exc}\n请修正本机配置后重新打开。")
+            return 2
         _configure_gui_logging(api.cfg)
         # 窗口等「开轮前准备」落定再建（ADR-0035）：开始页画出来时默认勾选就已经是
         # 本机份额那份（份额里今天已采够的默认不勾，票据 17）。等待上限 30 秒；等不到

@@ -205,6 +205,8 @@ class Config:
     analysis_config: pathlib.Path | None = None
     # 显式采集入口派生，不从配置文件读取，不改变机器角色。
     local_trial: bool = False
+    # GUI-only frozen browser contract; CLI external connection remains unchanged.
+    gui_browser_settings: str | None = None
 
     @classmethod
     def from_file(cls, path: pathlib.Path, root: pathlib.Path | None = None) -> "Config":
@@ -217,7 +219,7 @@ class Config:
                 f"请复制 {path.with_name('config.example.toml')} 为 {path}，"
                 "再改成本机的值（machine.machine_id、运行目录与交换区根）。"
             ) from None
-        root = root or pathlib.Path(path).resolve().parent.parent
+        root = pathlib.Path(root or pathlib.Path(path).resolve().parent.parent).resolve()
 
         def p(*keys: str) -> pathlib.Path:
             cur: object = raw
@@ -256,7 +258,7 @@ class Config:
             git_access=_access("git_access", machine.get("git_access")),
             cos_access=_access("cos_access", machine.get("cos_access")),
             user_data_path=p("browser", "user_data_path"),
-            chrome_path=str(browser.get("chrome_path", "")),
+            chrome_path=str((root / str(browser["chrome_path"])).resolve()) if browser.get("chrome_path") else "",
             driver=_driver(browser.get("driver")),
             start_browser=bool(browser.get("start_browser", True)),
             attach_port=int(browser.get("attach_port", 9222)),
