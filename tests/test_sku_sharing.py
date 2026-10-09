@@ -1127,13 +1127,20 @@ class LegacyCoexistenceTests(SkuSharingCase):
         import bestseller_monitor
         root = Path(bestseller_monitor.__file__).resolve().parents[1]
         for ref in ("main", "origin/main"):     # 功能树里有本地 main；隔离副本克隆里是 origin/main
-            done = subprocess.run(["git", "-C", str(root), "diff", "--quiet", ref, "--",
+            # 这一步有意读出样例台沙箱、对本检出（真实仓库）跑 git：沙箱屏蔽的本机
+            # 全局配置里正有它成立靠的两样——safe.directory（属主校验，本仓 .git 属
+            # 沙箱账号）与 core.autocrlf（CRLF 工作树按它归一到 LF）；命令级只放行
+            # 这两项，其余仍走沙箱口径。
+            done = subprocess.run(["git", "-C", str(root), "-c", "safe.directory=*",
+                                   "-c", "core.autocrlf=true",
+                                   "diff", "--quiet", ref, "--",
                                    "bestseller_monitor/judgment_set.py"], capture_output=True)
             if done.returncode in (0, 1):
                 break
         self.assertIn(done.returncode, (0, 1), "找不到 main/origin/main 作比较基准")
         self.assertEqual(0, done.returncode,
-                         "judgment_set.py 与已部署（main）有差异，先确认部署版本再谈旧版本实测")
+                         "judgment_set.py 与已部署（main）有差异，先确认部署版本再谈旧版本实测"
+                         f"（git 输出：{done.stderr.decode('utf-8', 'replace').strip()}）")
 
     def test_legacy_publish_and_collect_leave_the_new_file_untouched(self):
         from bestseller_monitor import judgment_set
