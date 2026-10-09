@@ -34,8 +34,15 @@ class ModelWork:
         if self.conn is not None:
             self.conn.close()
 
+    def _key(self, branch, context):
+        return digest(dict(branch=branch, context=context))
+
+    def _signature(self, rule):
+        cfg = self.config
+        return digest({**signature_parts(cfg), "rule": rule}) if cfg and cfg.mode != "disabled" else None
+
     def record(self, branch, context, members, state, **fields):
-        key = digest(dict(branch=branch, context=context))
+        key = self._key(branch, context)
         task = dict(branch=branch, context=context, members=sorted(members), state=state,
                     completed=state.startswith("completed_"), retryable=state in RETRYABLE,
                     reason=LABELS[state], **fields)
@@ -43,21 +50,20 @@ class ModelWork:
         return key
 
     def failure_reason(self, branch, context):
-        task = self.tasks[digest(dict(branch=branch, context=context))]
+        task = self.tasks[self._key(branch, context)]
         return task.get("error", task["reason"])
 
     def completed_result(self, branch, context, rule):
-        cfg = self.config
-        signature = digest({**signature_parts(cfg), "rule": rule}) if cfg and cfg.mode != "disabled" else None
-        old = self.previous.get(digest(dict(branch=branch, context=context)))
+        signature = self._signature(rule)
+        old = self.previous.get(self._key(branch, context))
         if old and old["completed"] and (signature is None or old.get("signature") == signature):
             return old["result"]
         return None
 
     def execute(self, branch, context, members, rule, cache_key, call):
         cfg = self.config
-        signature = digest({**signature_parts(cfg), "rule": rule}) if cfg and cfg.mode != "disabled" else None
-        key = digest(dict(branch=branch, context=context))
+        signature = self._signature(rule)
+        key = self._key(branch, context)
         old = self.previous.get(key)
         result = self.completed_result(branch, context, rule)
         cached = result is not None
@@ -129,4 +135,3 @@ class ModelWork:
                 notes = list(dict.fromkeys(t["reason"] for t in own if not t["completed"]))
                 if notes:
                     member["matching_note"] = member.get("matching_note", "") + "；" + "；".join(notes)
-

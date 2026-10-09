@@ -397,6 +397,19 @@ class SkuRecoveryTests(unittest.TestCase):
             self.assertEqual(before["candidate_groups"], member["candidate_groups"])
             self.assertEqual("recommended", member["matching_state"])
             self.assertEqual(1, len(self.recommend_calls))
+        from dataclasses import replace
+        config = self.service.config
+        calls = len(self.calls)
+        self.service.config = replace(config, matching=None)
+        missing = self.service.retry_matching(first["id"])
+        member = self.evidence(missing, b)
+        self.assertEqual(self.group_for(first, b)["id"], self.group_for(missing, b)["id"])
+        self.assertEqual(before["recommendation"]["reason"], member["recommendation"]["reason"])
+        self.assertEqual(before["candidate_groups"], member["candidate_groups"])
+        self.assertEqual("recommended", member["matching_state"])
+        self.assertEqual(1, len(self.recommend_calls))
+        self.assertEqual(calls, len(self.calls))
+        self.service.config = config
         self.service.save_draft(first["id"])
         saved = AnalysisService(self.service.config, running=lambda: False).get(first["id"])
         self.assertEqual(before["recommendation"]["reason"], self.evidence(saved, b)["recommendation"]["reason"])

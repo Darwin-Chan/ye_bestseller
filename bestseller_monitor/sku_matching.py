@@ -44,6 +44,7 @@ def apply(snapshot, config, *, stop=None, reload_manual=None, previous_snapshot=
 
 
 def _apply(snapshot, config, work, *, stop=None, reload_manual=None, previous_snapshot=None):
+    from .sku_recommendations import apply as apply_recommendations, preserve_history
     snapshot["limitations"] = list(LIMITATIONS)
     members = {identity(m): m for m in snapshot["members"]}
     groups = list(snapshot["groups"])
@@ -173,7 +174,6 @@ def _apply(snapshot, config, work, *, stop=None, reload_manual=None, previous_sn
             continue  # the unencoded side will join this coded anchor instead
         if not all(_legal(snapshot, member, members[other]) and frozenset((key, other)) not in negative for other in target_ids):
             continue
-        from .sku_recommendations import preserve_history
         retained = (key in failed_members and valid_history(key, target)
                     and preserve_history(snapshot, member, previous_members[key], target, work))
         ref = source["members"].pop()
@@ -185,6 +185,5 @@ def _apply(snapshot, config, work, *, stop=None, reload_manual=None, previous_sn
                           matching_note="图文依据：" + "; ".join(e["reason"] for edge, e in positive.items() if key in edge and any(other in edge for other in target_ids)))
         target["image_grouping"] = True
         moved.add(key)
-    from .sku_recommendations import apply as apply_recommendations
     apply_recommendations(snapshot, config, stop=stop, reload_manual=reload_manual, work=work)
     _finish(snapshot)

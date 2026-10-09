@@ -60,6 +60,17 @@ def _context(snapshot, member, groups):
                                           excluded_skus=sorted(snapshot.get("excluded_skus", []))))
 
 
+def _audit(result, cached, key):
+    return dict(result, cached=cached, context=key, rule=RULE_VERSION)
+
+
+def _record_recommendation(member, result, cached, key, groups, note):
+    member.update(recommendation=_audit(result, cached, key),
+                  multiple_candidates=True, candidate_groups=[g["id"] for g in groups],
+                  matching_state="recommended", grouping_basis="多候选推荐（未人工确认）",
+                  matching_note=note)
+
+
 def preserve_history(snapshot, member, previous, target, work):
     """Keep a valid audit trail, without treating an unknown new alternative as unique."""
     audit = previous.get("recommendation")
@@ -71,10 +82,8 @@ def preserve_history(snapshot, member, previous, target, work):
     if key != audit.get("context") or work.completed_result("recommendation", context, RULE_VERSION) is None:
         return False
     result, cached = work.execute("recommendation", context, [identity(member)], RULE_VERSION, key, None)
-    member.update(recommendation=dict(result, cached=cached, context=key, rule=RULE_VERSION),
-                  multiple_candidates=True, candidate_groups=[g["id"] for g in groups],
-                  matching_state="recommended", grouping_basis="多候选推荐（未人工确认）",
-                  matching_note="多个候选；保留有效历史推荐加入 "+target["id"]+"："+result["reason"])
+    _record_recommendation(member, result, cached, key, groups,
+                           "多个候选；保留有效历史推荐加入 "+target["id"]+"："+result["reason"])
     return True
 
 
@@ -112,16 +121,17 @@ def apply(snapshot, config, *, stop=None, reload_manual=None, work):
         target = next((g for g in current if g["id"] == selected), None)
         if selected is not None and target is None:
             continue
-        member["recommendation"] = dict(result, cached=cached, context=key, rule=RULE_VERSION)
-        member["multiple_candidates"] = True
-        member["candidate_groups"] = [g["id"] for g in current]
         if target is None:
-            member.update(matching_state="pending_candidates", matching_note="多个候选，无法确定归属；未选择归属："+result["reason"])
+            member.update(recommendation=_audit(result, cached, key), multiple_candidates=True,
+                          candidate_groups=[g["id"] for g in current],
+                          matching_state="pending_candidates",
+                          matching_note="多个候选，无法确定归属；未选择归属："+result["reason"])
         else:
             source = next(g for g in snapshot["groups"] if any(identity(r) == identity(member) for r in g["members"]))
             target["members"].append(source["members"].pop())
             target["confirmed"] = False
             target["image_grouping"] = True
-            member.update(matching_state="recommended", added_to_group=True, grouping_basis="多候选推荐（未人工确认）",
-                          matching_note="多个候选；推荐加入 "+target["id"]+"："+result["reason"])
+            member["added_to_group"] = True
+            _record_recommendation(member, result, cached, key, current,
+                                   "多个候选；推荐加入 "+target["id"]+"："+result["reason"])
     refresh(snapshot)
