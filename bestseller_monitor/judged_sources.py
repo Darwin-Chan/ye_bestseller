@@ -442,7 +442,7 @@ class PreparedSources:
     没有任何可用来源（「接收通道未就绪」的原因）——不能表现成「没有新判断集」。
     `local_only` 是交换区里清单外已有的 judged 库（快照语义：不删克隆，照收）。
     `snapshot_version` 是读清单时计划库 HEAD 的短哈希（票 03：落进导入账的「清单版本」；
-    计划库还没克隆时为空）。
+    计划库没有克隆或还没有提交时为空）。
     """
 
     machine_id: str
@@ -496,7 +496,7 @@ def prepare_sources(exchange_root: str | pathlib.Path, *, machine_id: str) -> Pr
             warnings.append(f"计划库这次拉不动（{exc}）：\n"
                             "改用本机上一版来源清单（可能不是最新）——只处理已有且匹配的来源，"
                             "不新建克隆；通道恢复后重跑一次。")
-        # 票 03：读清单这一刻的计划库提交 = 这次消费的「清单版本」（stale 时就是本机那版）。
+        # 票 03：读清单这一刻的计划库提交 = 这次收取看到的「清单版本」（stale 时就是本机那版）。
         snapshot_version = channel.head_or_none() or ""
         previous = _read_snapshot(channel)
         if previous.state == "absent":

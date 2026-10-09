@@ -256,11 +256,12 @@ class RunOutcome:
     judgment_publish: judgment_set.PublishResult | None = None
     judgment_collect: judgment_set.CollectOutcome | None = None
     judgment_conflicts: tuple = ()
-    # 票 03：这次运行的 ID（收取日志与报告共用）、收取那半的汇总状态
-    # （ok / partial_failure / receive_channel_not_ready；None = 这趟没收取）与各来源的
-    # 当前采纳读数（从本机库现读：导入数不是采用数）。
+    # 票 03：这次运行的 ID（收取日志与报告共用）、收取那半的汇总状态与没成名单
+    # （ok / partial_failure / receive_channel_not_ready；state 为 None = 这趟没收取）、
+    # 以及各来源的当前采纳读数（从本机库现读：导入数不是采用数）。
     task_id: str = ""
     judgment_collect_state: str | None = None
+    judgment_collect_failed: tuple = ()
     judgment_adoption: tuple = ()
     # 判断来源清单（票 01、ADR-0052）：维护机（m4）在任务启动时刷新并发布的结果。None =
     # 这一趟没走刷新（例如 fatal 提前返回）。非维护机是「没配 owner」的可读说明，不是失败。
@@ -578,8 +579,8 @@ def run_once(cfg, *, only: str | None = None, week: str | None = None,
             for line in _source_prep_lines(source_prep):
                 say(line)
             # 票 03：这趟收取的任务 ID 与读到的清单版本——逐次流水与报告说的是同一份。
-            say(f"收取别的机器的判断集（任务 {task_id}；来源清单 "
-                f"{source_prep.snapshot_version or '无'}）…")
+            say(f"收取别的机器的判断集（任务 "
+                f"{_collect_task_text(task_id, source_prep.snapshot_version)}）…")
             judgment_collect = judgment_set.collect(
                 cfg.exchange_root, machine_id, cache=judgments.cache,
                 store=judgments.store,
@@ -626,16 +627,18 @@ def _judgment_publish_line(result: judgment_set.PublishResult) -> str:
 
 
 def _receive_state(source_prep, collect) -> tuple[str, tuple[str, ...]]:
-    """收取那半的汇总状态与没成的来源名单（票 03、spec §2）。
+    """收取那半的汇总状态与没成的名单（票 03、spec §2）。
 
-    receive_channel_not_ready（没有任何可用来源，票 02 沿用）> partial_failure（有来源
-    没成：接入被阻断/跳过，或收取拉不动/没导成）> ok。整趟绝不能显示全部成功——这正是
-    2026-09-24 那类误导的落点。
+    receive_channel_not_ready（没有任何可用来源，票 02 沿用）> partial_failure（有东西
+    没成：整趟没收成、接入被阻断/跳过，或收取拉不动/没导成）> ok。整趟绝不能显示全部
+    成功——这正是 2026-09-24 那类误导的落点。
     """
+    if source_prep is not None and not source_prep.ready:
+        return judgment_set.COLLECT_STATE_NOT_READY, ()
     failed: list[str] = []
+    if collect is not None and collect.failure is not None:
+        failed.append(f"整趟没做成（{_first_line(collect.failure)}）")
     if source_prep is not None:
-        if not source_prep.ready:
-            return judgment_set.COLLECT_STATE_NOT_READY, ()
         failed += [entry.repo for entry in source_prep.entries if entry.blocked or entry.skipped]
     if collect is not None:
         failed += [f"{judgment_set.REPO_PREFIX}{result.machine}"
@@ -646,10 +649,19 @@ def _receive_state(source_prep, collect) -> tuple[str, tuple[str, ...]]:
 
 
 def _receive_state_text(state: str, failed: tuple[str, ...]) -> str:
-    """汇总状态的人话（报告「- 收取结果：」与进度行共用）：partial_failure 点名没成的来源。"""
+    """汇总状态的人话（报告「- 收取结果：」与进度行共用）：partial_failure 点名没成的。"""
     if state == judgment_set.COLLECT_STATE_PARTIAL_FAILURE:
-        return "partial_failure —— 没成的来源：" + "、".join(failed)
+        return "partial_failure —— 没成：" + "、".join(failed)
     return state
+
+
+def _collect_task_text(task_id: str, snapshot_version: str) -> str:
+    """收取任务的正文（报告「- 收取任务：」与逐次流水共用一处）：任务 ID + 清单版本。
+
+    清单版本读不到（计划库没有克隆、或还没有任何提交）时如实写「无」，不装成读到过。
+    """
+    return (f"{task_id}；来源清单 "
+            + (snapshot_version or "无（计划库没有克隆或还没有提交）"))
 
 
 def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_result,
@@ -685,9 +697,10 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
     # 票 03：收取那半的汇总状态与各来源的当前采纳读数（采纳从本机库现读；读不出来只落
     # 日志、报告如实记「未评估」——交换台不能因为一个附带的读而停摆）。
     collect_state: str | None = None
+    collect_failed: tuple = ()
     adoption: tuple = ()
     if judgment_collect is not None and judgments is not None:
-        collect_state, _ = _receive_state(source_prep, judgment_collect)
+        collect_state, collect_failed = _receive_state(source_prep, judgment_collect)
         if judgment_collect.results:
             try:
                 adoption = judgment_set.current_adoption(
@@ -737,7 +750,7 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
         judgment_publish=judgment_publish, judgment_collect=judgment_collect,
         judgment_conflicts=judgment_conflicts, source_refresh=source_refresh,
         source_prep=source_prep, task_id=task_id, judgment_collect_state=collect_state,
-        judgment_adoption=adoption)
+        judgment_collect_failed=collect_failed, judgment_adoption=adoption)
 
 
 def _judgment_conflicts(judgments, machine_id: str, *, week: str) -> tuple:
@@ -1320,19 +1333,15 @@ def _judgment_collect_texts(collect: judgment_set.CollectOutcome) -> list[str]:
 
 
 def _judgment_collect_task_row(outcome: RunOutcome) -> str:
-    """「收取任务」一行（票 03）：任务 ID 与这趟读的来源清单版本（plan 提交的短哈希）。
-
-    计划库还没克隆时清单版本为空——如实写「无」，不装成读到过。
-    """
+    """「收取任务」一行（票 03）：任务 ID 与这趟读到的来源清单版本（plan 提交的短哈希）。"""
     version = outcome.source_prep.snapshot_version if outcome.source_prep is not None else ""
-    return (f"- 收取任务：{outcome.task_id}；来源清单 "
-            + (version if version else "无（计划库没克隆，按本地枚举收）"))
+    return "- 收取任务：" + _collect_task_text(outcome.task_id, version)
 
 
 def _judgment_collect_state_row(outcome: RunOutcome) -> str:
     """「收取结果」一行（票 03、spec §2）：ok / partial_failure / receive_channel_not_ready。"""
-    _, failed = _receive_state(outcome.source_prep, outcome.judgment_collect)
-    return "- 收取结果：" + _receive_state_text(outcome.judgment_collect_state, failed)
+    return ("- 收取结果："
+            + _receive_state_text(outcome.judgment_collect_state, outcome.judgment_collect_failed))
 
 
 def _judgment_publish_row(outcome: RunOutcome) -> str:

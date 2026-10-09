@@ -427,7 +427,11 @@ _SUMMARY_CAP = 5
 
 
 def _summarize(values: list[str]) -> dict:
-    """一列值聚合成 {值: 行数}（按行数从多到少、同数按值排序）；种类超上限时归一条 `*`。"""
+    """一列值聚合成 {值: 行数}（按行数从多到少、同数按值排序）。
+
+    种类超上限时只留前几名，多出来的种类归一条 `"*": 其余种类数`（注意存的是**种类数**，
+    不是行数——摘要用来看「这是一份什么口径的包」，不是逐行复刻）。
+    """
     counts = Counter(value for value in values if value)
     ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
     out = {value: count for value, count in ordered[:_SUMMARY_CAP]}
@@ -481,7 +485,7 @@ class CollectResult:
     note: str | None = None
     # 票 03 的审计身份（日志与周报照它说「这份包从哪来」；重复收取时从账里回放）：
     source_commit: str = ""      # 收下这份包时来源库 HEAD 的短哈希
-    snapshot_version: str = ""   # 这趟收取读的来源清单版本（plan 提交短哈希；无清单 = 空）
+    snapshot_version: str = ""   # 这趟收取看到的来源清单版本（plan 提交短哈希；读不到时为空）
     remote: str = ""             # 来源库的远端地址（只作识别，不参与判法）
 
     @property
@@ -532,11 +536,13 @@ COLLECT_STATE_NOT_READY = "receive_channel_not_ready"
 class SourceAdoption:
     """一个来源在本机的**采用读数**（票 03、spec §3 的 adopted）：每个数都从实际库现读。
 
-    `judgments` 是缓存里来源为该机器、且签名落在**本机分析署名**下的判断行数——本机分析
-    消费缓存正是按署名读（`matching` 的口径），所以这些行就是当前契约下会被采用的行；
-    本机还没跑过分析（缓存里没有本机自己写的行）时是 `None` = 未评估——采用数不能拿
-    导入数冒充，也不伪造零。`decisions` 是本机账本里来源为该机器、当前在效的决定行数
-    （已确认的关系、单独成组、排除对；撤回过的中间态不驱动分析，不算）。
+    `judgments` 是缓存里来源为该机器、且签名落在**本机分析署名**下的判断行数。本机分析
+    署名 = 本机自己写过的行的署名（分析消费缓存正是按它读，`matching` 的口径）——同署名的
+    外来行会在分析里直接命中。本机还没跑过分析（缓存里没有本机自己写的行）时是 `None`
+    = 未评估：采用数不能拿导入数冒充，也不伪造零。换过模型配置的机器，历次写过的署名都
+    在这个集合里（旧署名是否仍属当前契约，随门禁口径收紧）。`decisions` 是本机账本里
+    来源为该机器、当前在效的决定行数（已确认的关系、单独成组、排除对；撤回过的中间态
+    不驱动分析，不算）。
     """
 
     machine: str
@@ -552,10 +558,10 @@ def current_adoption(cache: str | pathlib.Path, store: str | pathlib.Path, machi
                      sources: tuple[str, ...] | list[str]) -> tuple[SourceAdoption, ...]:
     """现读本机两个库，给每个来源算一份采用读数（票 03）：导入条数与当前采用分开列的口径。
 
-    判断侧看缓存：本机自己写的行带的署名，就是本机分析实际使用的署名；同署名的外来行
-    会在分析里直接命中（零模型调用），异署名只留存参考、不驱动本机分组。本机一条自己
-    写的行都没有 = 还没跑过分析，判断侧记 `None`（未评估）。决定侧看账本：并入本机账本
-    的决定就是分析使用的硬约束，按行的来源机器数；账本还不存在时各来源都是 0。
+    判断侧看缓存：本机自己写过的行的署名，就是本机分析认的署名；同署名的外来行会在分析
+    里直接命中（零模型调用），异署名只留存参考、不驱动本机分组。本机一条自己写的行都没有
+    = 还没跑过分析，判断侧记 `None`（未评估）。决定侧看账本：并入本机账本的决定就是分析
+    使用的硬约束，按行的来源机器数；账本还不存在时各来源都是 0。
     """
     cache = pathlib.Path(cache)
     store = pathlib.Path(store)
@@ -626,8 +632,8 @@ def collect(exchange_root: str | pathlib.Path, machine_id: str, cache: str | pat
 
     `sources` 是名单：给了就按它收（票 02——交换台先按来源清单把本地克隆接入好，被阻断
     的来源根本不在名单里，这里就不会去读它的包）；缺省仍按交换区里实际存在的 `judged-*`
-    枚举（老口径，直接调本函数时用）。`snapshot_version` 是这趟收取读的来源清单版本
-    （票 03：交换台传 plan 提交的短哈希，落进导入账；无清单时留空）。
+    枚举（老口径，直接调本函数时用）。`snapshot_version` 是这趟收取看到的来源清单版本
+    （票 03：交换台传 plan 提交的短哈希，落进导入账；读不到时留空）。
     """
     root = pathlib.Path(exchange_root)
     cache = pathlib.Path(cache)

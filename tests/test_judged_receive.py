@@ -495,9 +495,9 @@ class RunOnceWiringTests(unittest.TestCase, SourceWorldMixin):
         self.assertEqual(outcome.exit_code, 0, outcome.failures)
         text = "\n".join(lines)
         plan_head = GitChannel(self.exchange / "plan").head()
-        self.assertIn(f"任务 {outcome.task_id}", text)
-        self.assertIn("本机 m1", text, "接收机 machine_id")
-        self.assertIn(f"；来源清单 {plan_head}", text, "清单版本")
+        self.assertTrue(outcome.task_id.startswith("m1-"), "任务 ID 带接收机 machine_id")
+        self.assertIn(f"收取别的机器的判断集（任务 {outcome.task_id}；来源清单 {plan_head}）",
+                      text, "任务 ID 与清单版本")
         self.assertIn("收取：judged-m4 —— 判断 1 条 · 视觉描述 0 条 · 证据 2 条 · 人工决定 0 条"
                       "（新增 3 行）", text, "来源名与各类数量")
         self.assertIn(f"包 judged-m4/{PACKAGE_REL}", text, "包相对路径")
@@ -540,7 +540,20 @@ class RunOnceWiringTests(unittest.TestCase, SourceWorldMixin):
         self.assertEqual(outcome.exit_code, 2, "包读不出来 = 本机没做成事")
         report = self.world.report()
         self.assertIn("- 收取：judged-m4 —— 判断 1 条", report, "好的来源照收")
-        self.assertIn("- 收取结果：partial_failure —— 没成的来源：judged-m5", report)
+        self.assertIn("- 收取结果：partial_failure —— 没成：judged-m5", report)
+
+    def test_a_whole_run_collect_failure_is_not_reported_as_ok(self):
+        """整趟没收成（缓存打不开、谁都没收）时，汇总状态绝不许显示 ok。"""
+        self.minimal_world()
+        self.world.cache.mkdir()                     # 缓存路径被占成目录：判断缓存打不开
+
+        outcome = self.world.run(only="collect")
+
+        self.assertEqual(outcome.exit_code, 2, "判断缓存打不开 = 本机没做成事")
+        report = self.world.report()
+        self.assertIn("- 收取：没做成（", report)
+        self.assertIn("- 收取结果：partial_failure —— 没成：整趟没做成（", report)
+        self.assertNotIn("- 收取结果：ok", report)
 
     def test_a_blocked_source_asks_for_a_look_while_the_others_still_collect(self):
         self.world.judged("m4", "m5")
@@ -554,7 +567,7 @@ class RunOnceWiringTests(unittest.TestCase, SourceWorldMixin):
         report = self.world.report()
         self.assertIn("judged-m5 被阻断", report)
         self.assertIn("judged-m5 没接入", todo_of(report))
-        self.assertIn("- 收取结果：partial_failure —— 没成的来源：judged-m5", report,
+        self.assertIn("- 收取结果：partial_failure —— 没成：judged-m5", report,
                       "票 03：一挂一好不许显示全部成功")
         results = {result.machine: result for result in outcome.judgment_collect.results}
         self.assertEqual(sorted(results), ["m4"], "被阻断的来源不进收取名单：不读它的包")
