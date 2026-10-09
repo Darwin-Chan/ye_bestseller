@@ -17,3 +17,23 @@
 父规格覆盖：T01、T02、T04、T05（解析／歧义分流）、T07（提码）、T08（无图有效码）、T12（人工拆组）、T13、T14、T15、T16、T17、T26（编码搜索）、T29（歧义／依据）。详尽命令、退出结果、审查和全量对账见主仓票 04 与 `.scratch/logs/tickets/sku-grouping/04/` 证据。
 
 无码与歧义图文判定属于 05、多候选模型比较属于 06，当前明确提示未开放，不伪装确定非同款；已有无码人工归属保留。不增加相似度、模型重试、包装换算或跨机发布格式。整体 SKU 方案尚未全部上线。
+
+## 收尾验证与审查
+
+- 实现提交：`b3a0213`；旧冻结 SKU 草稿编码兼容：`f06b78f`；双轴审查修复：`276e740`。本票起点与前票提交分离，未合并或推送。
+- 最终针对性测试：`python -m unittest test_sku_codes test_sku_grouping test_sku_drafts test_sku_ranking -v`，58 tests，36.884s，OK，exit 0。包括真实 Edge 与断网离线报告；商家编码测试共 22 项。
+- Python compileall、实际页面脚本 `node --check`、`git diff --check` 均 exit 0。仓库未配置独立类型检查器，不宣称已运行类型检查。
+- 安全 clone 收尾：待测提交 `276e740c233c5361b673f48d9fcc7fb3ce730858`；9 个本票变化文件逐项 SHA256 与功能树一致，配置 12 项写入路径均在副本下，未复制生产库或登录态。
+- 分段全量：1567 项（预期 1567，计数对账一致），总耗时 749.5s，7/7 段 OK，结论 OK，exit 0。第一次收尾全量一次通过；早期定向失败／TDD 红灯仍保留原证据，不改写为通过。
+
+### Standards
+
+初审 2 项（最高 P2）：保存恢复的额外 False 字段破坏契约；人工绑定重放的匹配状态不一致。修复并独立复验 37 项通过，复审确定问题 0、启发式 0。
+
+### Spec
+
+初审 1 项 P3：多候选独立成员错误显示同码归组。修复为暂时独立待比较并增加真实浏览器回归，独立复验 19 项通过，复审确定问题 0。两轴报告分别保存，不合并重排。
+
+证据主仓位置：`F:\AI\projects\bestseller\.scratch\logs\tickets\sku-grouping\04\20261009-implementation`（红绿／定向、截图、复审、配置与来源哈希）与 `F:\AI\projects\bestseller\.scratch\logs\tickets\sku-grouping\04\20261009-full`（7 段、summary 与退出码）。证据被 Git 忽略，提交不构成异地备份。
+
+功能树 `F:\AI\projects\bestseller\.scratch\sandboxes\sku-grouping\02\bestseller` 保留给后续票。本票测试 clone `F:\AI\projects\bestseller\.scratch\sandboxes\sku-grouping\04\full-20261009\bestseller` 可列为删除候选但本次未删除，删除仍需授权／占用及独有材料检查。只清理本轮审查交接残留，原文与任务已归档并校验。
