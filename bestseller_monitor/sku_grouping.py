@@ -345,15 +345,20 @@ def shareable_decisions(snapshot: dict) -> dict:
 def apply_shared(snapshot: dict, ledger: dict) -> tuple[int, list[dict]]:
     """把 SKU 账本里的共享决定套到当前快照（票 08 的回放口）：本地草稿回放之后、编码规则之前。
 
-    本地人工主张（草稿回放出来的手动组、确认组、排除）永不被覆盖：账本行与本地主张
-    矛盾时不应用、返回一条回放冲突（由调用方记进 SKU 冲突账）；兼容或已生效的不重复应用。
+    本地人工主张（草稿回放出来的手动组、确认组、排除）永不被覆盖。三类局面：
 
-    应用语义与 `apply_saved` 同一套规矩：成员与证据版本在本机对得上才保留 `confirmed`，
-    版本对不上（或成员不齐）整组未确认并在成员上标「与共享决定时的证据不一致」；
-    组 ID 随行（撞了本地已有 ID 就避让）——推荐语境摘要靠它跨机对上。返回（应用行数, 冲突）。
+    - **同族**：本地该组就是同一条共享行（成员集 ⊆ 行的成员集、排除旗标一致）——在场子集
+      已建立就跳过；成员后来到齐（同一行的在场子集先应用、分片数据补上）或行的成员集
+      扩大（来源机在同一条决定上增员）就把余下在场成员补进本地组（成员不重绑、确认按
+      下面同一套规矩重算）——不是矛盾。
+    - **矛盾**：同一条行与本地主张对不上（成员分属不同组、组 vs 排除、旗标相反）——
+      不应用、返回一条回放冲突（由调用方记进 SKU 冲突账），本地一个字不动。
+    - **无主张**：按行建立人工组（组 ID 随行、撞了本地已有 ID 就避让）。
 
-    每条冲突的形状：`{'kind': …, 'incoming': 行, 'local': [本地主张, …]}`，行是
-    `{side, members, confirmed?, excluded?, machine}`；格式化与记账在 `analysis_store`。
+    应用语义与 `apply_saved` 同一套规矩：成员与证据版本在本机全对得上才保留 `confirmed`，
+    版本对不上（或成员不齐）整组未确认并在成员上标「与共享决定时的证据不一致」。
+    返回（应用行数, 冲突）；每条冲突的形状：`{'kind': …, 'incoming': 行, 'local': [本地主张, …]}`，
+    行是 `{side, members, confirmed?, excluded?, machine}`；格式化与记账在 `analysis_store`。
     """
     from .analysis_store import CONFLICT_DIFFERENT_GROUPS, CONFLICT_GROUP_VS_EXCLUSION
     from .sku_matching import evidence_version
@@ -388,98 +393,124 @@ def apply_shared(snapshot: dict, ledger: dict) -> tuple[int, list[dict]]:
                                           key=lambda entry: json.dumps(entry, sort_keys=True,
                                                                        ensure_ascii=False))})
 
-    for row in sorted(ledger.get("groups", []),
-                      key=lambda item: json.dumps(item["members"], ensure_ascii=False)):
+    def bind_row_group(row, pairs, keys, present, target) -> None:
+        """把共享行的在场成员绑成 target 人工组：成员迁移、版本与确认同一套规矩。"""
+        for key in present:
+            ref = members[key]
+            source_group = group_of.get(key)
+            if source_group is not None and source_group is not target:
+                source_group["members"] = [r for r in source_group["members"] if identity(r) != key]
+                if not source_group["members"]:
+                    snapshot["groups"].remove(source_group)
+            if group_of.get(key) is not target:
+                target["members"].append({"shop_key": ref["shop_key"], "offer_id": ref["offer_id"],
+                                          "sku_id": ref["sku_id"]})
+            group_of[key] = target
+        if row.get("excluded"):
+            target["excluded_group"] = True
+            target["manual_reason"] = "人工排除"
+            excluded_skus.update(present)
+        exact = len(present) == len(keys)
+        versions_ok = exact and all(version == evidence_version(members[key])
+                                    for key, version in pairs)
+        target["confirmed"] = bool(row.get("confirmed")) and versions_ok
+        for key, version in pairs:
+            if key in members and version != evidence_version(members[key]):
+                members[key]["evidence_changes"] = sorted(
+                    set(members[key].get("evidence_changes", []) + ["与共享决定时的证据不一致"]))
+        bind_manual_members(snapshot, target, confirmed=target["confirmed"])
+
+    def apply_group_row(row) -> bool:
+        """一条共享人工组行：同族补员/跳过、无主张建组、矛盾记冲突。"""
         pairs = [(str(member), version) for member, version in row["members"]]
         keys = [member for member, _ in pairs]
         present = [key for key in keys if key in members]
         if not present:
-            continue                                   # 成员一个都还没到：等数据到了再来
+            return False                               # 成员一个都还没到：等数据到了再来
         claim_groups = {}
         for key in present:
             group = group_of.get(key)
             if claimed(group):
                 claim_groups.setdefault(group["id"], group)
         excluded_local = [key for key in present if key in excluded_skus]
+        target = None
         if claim_groups or excluded_local:
-            bound_sets = {gid: set(group.get("manual_members") or _group_member_ids(group))
-                          for gid, group in claim_groups.items()}
-            settled = (not excluded_local and len(claim_groups) == 1
-                       and set(present) <= next(iter(bound_sets.values())) <= set(keys))
-            if settled:
-                continue                               # 本地已按同一条（或它的在场子集）建立：跳过
-            local_entries = [local_group_entry(group) for group in claim_groups.values()]
-            local_entries += [local_sku_entry(key) for key in excluded_local]
-            kind = (CONFLICT_GROUP_VS_EXCLUSION
-                    if excluded_local or any(g.get("excluded_group") for g in claim_groups.values())
-                    else CONFLICT_DIFFERENT_GROUPS)
-            conflict(kind, incoming(row), local_entries)
-            continue
-        group = _new_group(members[present[0]], group_id=str(row.get("group_id") or "") or None,
-                           excluded=bool(row.get("excluded")),
-                           existing_ids=(g["id"] for g in snapshot["groups"]))
-        group["members"] = []                          # 成员统一在下面逐个搬进来
-        snapshot["groups"].append(group)
-        for key in present:
-            ref = members[key]
-            source_group = group_of.get(key)
-            if source_group is not None and source_group is not group:
-                source_group["members"] = [r for r in source_group["members"] if identity(r) != key]
-                if not source_group["members"]:
-                    snapshot["groups"].remove(source_group)
-            group["members"].append({"shop_key": ref["shop_key"], "offer_id": ref["offer_id"],
-                                     "sku_id": ref["sku_id"]})
-            group_of[key] = group
-        if row.get("excluded"):
-            group["excluded_group"] = True
-            group["manual_reason"] = "人工排除"
-            excluded_skus.update(present)
-        exact = len(present) == len(keys)
-        versions_ok = exact and all(version == evidence_version(members[key])
-                                    for key, version in pairs)
-        group["confirmed"] = bool(row.get("confirmed")) and versions_ok
-        for key, version in pairs:
-            if key in members and version != evidence_version(members[key]):
-                members[key]["evidence_changes"] = sorted(
-                    set(members[key].get("evidence_changes", []) + ["与共享决定时的证据不一致"]))
-        bind_manual_members(snapshot, group, confirmed=group["confirmed"])
-        applied += 1
+            single = not excluded_local and len(claim_groups) == 1
+            local = next(iter(claim_groups.values())) if single else None
+            bound = (set(local.get("manual_members") or _group_member_ids(local))
+                     if local is not None else set())
+            # 同族＝本地该组是这条行（或它更宽/更窄的同源版本）：界 ⊆ 行 是「先窄后宽」，
+            # 行 ⊆ 界 是「本地已把这条行并进更大的组」（来源机自己更新的旧话也算这类）。
+            same_lineage = (single and bool(row.get("excluded")) == bool(local.get("excluded_group"))
+                            and (bound <= set(keys) or set(keys) <= bound))
+            if same_lineage and set(present) <= bound:
+                return False                           # 本地已按同一条（或它的在场子集）建立：跳过
+            if same_lineage:
+                target = local                         # 同族扩员：余下在场成员补进本地组
+            else:
+                local_entries = [local_group_entry(group) for group in claim_groups.values()]
+                local_entries += [local_sku_entry(key) for key in excluded_local]
+                kind = (CONFLICT_GROUP_VS_EXCLUSION
+                        if excluded_local or any(g.get("excluded_group")
+                                                 for g in claim_groups.values())
+                        else CONFLICT_DIFFERENT_GROUPS)
+                conflict(kind, incoming(row), local_entries)
+                return False
+        if target is None:
+            target = _new_group(members[present[0]], group_id=str(row.get("group_id") or "") or None,
+                                excluded=bool(row.get("excluded")),
+                                existing_ids=(g["id"] for g in snapshot["groups"]))
+            target["members"] = []                     # 成员统一在 bind_row_group 里逐个搬进来
+            snapshot["groups"].append(target)
+        bind_row_group(row, pairs, keys, present, target)
+        return True
 
-    for entry in sorted(ledger.get("excluded_skus", []), key=lambda item: item[0]):
+    def apply_excluded_sku_row(entry) -> bool:
+        """一条共享排除身份：本地已排除即跳过、与本机组矛盾记冲突、其余照加。"""
         key = entry[0]
         if key not in members or key in excluded_skus:
-            continue
+            return False
         group = group_of.get(key)
         if claimed(group):
             if group.get("excluded_group"):
-                continue                               # 本地已排除：同一件事
+                return False                           # 本地已排除：同一件事
             conflict(CONFLICT_GROUP_VS_EXCLUSION,
-                     {"side": "sku", "members": [[key, None]], "machine": entry[-1] if len(entry) > 1 else ""},
+                     {"side": "sku", "members": [[key, None]],
+                      "machine": entry[-1] if len(entry) > 1 else ""},
                      [local_group_entry(group)])
-            continue
+            return False
         excluded_skus.add(key)
-        if group is not None and len(group["members"]) == 1 and not claimed(group):
+        if group is not None and len(group["members"]) == 1:
             group.update(excluded_group=True, manual_reason="人工排除", manual_membership=True)
-        applied += 1
+        return True
 
-    for entry in sorted(ledger.get("excluded_pairs", []), key=lambda item: (item[0], item[1])):
+    def apply_excluded_pair_row(entry) -> bool:
+        """一条共享排除对：两端同属一个已主张的组才矛盾，其余照加。"""
         left, right = entry[0], entry[1]
         if left not in members or right not in members:
-            continue
+            return False
         pair = frozenset((left, right))
         if pair in excluded_pairs:
-            continue
-        shared_group = next((g for g in snapshot["groups"]
-                             if claimed(g) and {left, right} <= {identity(r) for r in g["members"]}),
-                            None)
-        if shared_group is not None:
+            return False
+        claimed_group = next((g for g in snapshot["groups"]
+                              if claimed(g) and {left, right} <= {identity(r) for r in g["members"]}),
+                             None)
+        if claimed_group is not None:
             conflict(CONFLICT_GROUP_VS_EXCLUSION,
                      {"side": "pair", "members": [[left, None], [right, None]],
                       "machine": entry[2] if len(entry) > 2 else ""},
-                     [local_group_entry(shared_group)])
-            continue
+                     [local_group_entry(claimed_group)])
+            return False
         excluded_pairs.add(pair)
-        applied += 1
+        return True
+
+    for row in sorted(ledger.get("groups", []),
+                      key=lambda item: json.dumps(item["members"], ensure_ascii=False)):
+        applied += apply_group_row(row)
+    for entry in sorted(ledger.get("excluded_skus", []), key=lambda item: item[0]):
+        applied += apply_excluded_sku_row(entry)
+    for entry in sorted(ledger.get("excluded_pairs", []), key=lambda item: (item[0], item[1])):
+        applied += apply_excluded_pair_row(entry)
 
     snapshot["excluded_skus"] = sorted(excluded_skus)
     snapshot["excluded"] = [sorted(pair) for pair in sorted(excluded_pairs, key=sorted)]
@@ -531,7 +562,7 @@ def apply_codes(snapshot: dict) -> None:
             continue
         member["grouping_basis"] = "同码归组" if code else "暂时独立"
         member["matching_state"] = "code_rule" if code else "unjudged"
-        member["matching_note"] = "" if code else ("编码有歧义；图文判断尚未开放" if member.get("code_ambiguous") else "无有效编码；图文判断尚未开放")
+        member["matching_note"] = "" if code else ("编码有歧义；待图文判断" if member.get("code_ambiguous") else "无有效编码；待图文判断")
         if not code and member.get("image_source") == "missing":
             member["matching_note"] += "；缺少图片证据"
         targets = [g for g in anchors if code and code in codes[g["id"]] and not g.get("excluded_group")

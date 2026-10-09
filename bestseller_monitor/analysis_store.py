@@ -359,22 +359,10 @@ class DraftStore:
                     local_contents = sorted((_format_sku_entry(item) for item in entry["local"]),
                                             key=lambda content: json.dumps(content, sort_keys=True,
                                                                            ensure_ascii=False))
-                    conflict_digest = _digest({'kind': entry["kind"], 'incoming': incoming,
-                                               'local': local_contents})
-                    if conflict_digest in known:
-                        continue
-                    known.add(conflict_digest)
-                    recorded += 1
-                    members = sorted({member for content in [incoming, *local_contents]
-                                      for member, _ in content['members']})
-                    machines = sorted({content['machine'] for content in local_contents})
-                    conn.execute(
-                        f'INSERT INTO {SKU_CONFLICT_TABLE}(digest,kind,members,incoming_machine,'
-                        'incoming,local_machines,local,seen_at) VALUES(?,?,?,?,?,?,?,?)',
-                        (conflict_digest, entry["kind"], json.dumps(members, ensure_ascii=False),
-                         incoming['machine'], json.dumps(incoming, ensure_ascii=False),
-                         json.dumps(machines, ensure_ascii=False),
-                         json.dumps(local_contents, ensure_ascii=False), seen_at))
+                    _, fresh = _insert_sku_conflict(conn, known, kind=entry["kind"],
+                                                    incoming=incoming, local_contents=local_contents,
+                                                    seen_at=seen_at)
+                    recorded += fresh
             return recorded
         finally:
             conn.close()
@@ -801,12 +789,6 @@ def _sku_group_key(members):
                       ensure_ascii=False)
 
 
-def _same_sku_members(left, right):
-    """两组（成员, 证据版本）是不是同一条决定：顺序无关。"""
-    return (sorted((member, member_version) for member, member_version in left)
-            == sorted((member, member_version) for member, member_version in right))
-
-
 def _sku_group_content(members, row, machine):
     return {'kind': SIDE_RELATION, 'confirmed': bool(row['confirmed']),
             'excluded': bool(row.get('excluded')),
@@ -824,6 +806,30 @@ def _sku_pair_content(pair):
             'machine': pair[2] if len(pair) > 2 else ''}
 
 
+def _insert_sku_conflict(conn, known, *, kind, incoming, local_contents, seen_at):
+    """把一条 SKU 冲突写进 `sku_decision_conflicts`（票 08）：并入期与回放期共用这一件。
+
+    `incoming` 与 `local_contents` 都是格式化后的内容；摘要按内容算，`known` 是调用方
+    已读到的既有摘要集合（新记的同步补进，同一批里重复也不再算新记）。返回
+    `(摘要, 这次是否新记)`——同一条重复遇到只核对不重记。
+    """
+    conflict_digest = _digest({'kind': kind, 'incoming': incoming, 'local': local_contents})
+    if conflict_digest in known:
+        return conflict_digest, False
+    known.add(conflict_digest)
+    members = sorted({member for content in [incoming, *local_contents]
+                      for member, _ in content['members']})
+    machines = sorted({content['machine'] for content in local_contents})
+    conn.execute(
+        f'INSERT INTO {SKU_CONFLICT_TABLE}(digest,kind,members,incoming_machine,incoming,'
+        'local_machines,local,seen_at) VALUES(?,?,?,?,?,?,?,?)',
+        (conflict_digest, kind, json.dumps(members, ensure_ascii=False),
+         incoming['machine'], json.dumps(incoming, ensure_ascii=False),
+         json.dumps(machines, ensure_ascii=False),
+         json.dumps(local_contents, ensure_ascii=False), seen_at))
+    return conflict_digest, True
+
+
 def _format_sku_entry(entry):
     """回放期冲突行的统一格式（票 08）：`apply_shared` 交来的 `{side, …}` 折成与
     并入期冲突同一份内容形状（组／排除身份／排除对三种 `side`）。"""
@@ -837,22 +843,26 @@ def _format_sku_entry(entry):
                               entry, entry.get('machine') or '')
 
 
-def _sku_source(entry, default):
-    """SKU 决定行的来源机器：组是带键的行（machine_id 字段）；排除身份是 [身份, 来源]；
-    排除对是 [a, b, 来源]。末位带来源就用它，没带记通道来源 `default`。
+def _sku_exclusion_source(entry, default):
+    """排除身份行 [身份, 来源?] 的来源：第 2 位是来源；没带记通道来源 `default`。
 
-    与商品账本的 `source_of` 分开：SKU 的两张排除表没有版本位，按位置读会错位——
-    身份行 [身份, 来源] 的第 3 位不存在，排除对 [a, b, 来源] 的第 3 位才是来源。
+    与商品账本的 `source_of` 分开的点就在这：SKU 的排除身份行没有版本位，
+    按 `source_of` 的位置读会把来源读空。
     """
-    if isinstance(entry, dict):
-        return entry.get('machine_id') or default
-    return entry[-1] if len(entry) > 1 and entry[-1] else default
+    return entry[1] if len(entry) > 1 and entry[1] else default
+
+
+def _sku_pair_source(pair, default):
+    """排除对 [a, b, 来源?] 的来源：第 3 位才是来源（第 2 位是另一半身份，
+    按末位读会在只带两端的行上把身份当来源）。没带记通道来源 `default`。
+    """
+    return pair[2] if len(pair) > 2 and pair[2] else default
 
 
 def _write_sku_ledger(conn, present, decisions, *, machine, saved_at):
     """保存时把本机 SKU 决定并进账本（票 08）：产品 `merge_decisions` 的 SKU 版。
 
-    判法：
+    判法（三张表同一条，由 `_rewrite_sku_ledger_rows` 落）：
 
     - 旧行成员全在场（`present`＝本次快照的成员身份）：新决定里有同一成员集 → 按新行
       改写（版本／确认／排除刷新），来源沿用旧行（收进来的决定往返一次不被改写）；
@@ -863,56 +873,56 @@ def _write_sku_ledger(conn, present, decisions, *, machine, saved_at):
     old = _read_sku_ledger(conn)
     new_groups = {frozenset(member for member, _ in row['members']): row
                   for row in decisions['groups']}
-    handled = set()
-    for row in old['groups']:
-        idents = frozenset(member for member, _ in row['members'])
-        if not idents <= present:
-            continue                                    # 有缺席成员：原样保留
-        conn.execute('DELETE FROM sku_manual_groups WHERE members=?',
-                     (_sku_group_key(row['members']),))
-        replacement = new_groups.get(idents)
-        if replacement is None:
-            continue                                    # 本机视图里这条决定没了：撤下
-        handled.add(idents)
-        _insert_sku_group(conn, replacement, source=_sku_source(row, machine), saved_at=saved_at)
-    for idents, row in new_groups.items():
-        if idents in handled:
-            continue
-        _insert_sku_group(conn, row, source=_sku_source(row, machine), saved_at=saved_at)
-
+    _rewrite_sku_ledger_rows(
+        old['groups'], new_groups, machine=machine,
+        key_of=lambda row: frozenset(member for member, _ in row['members']),
+        present_ok=lambda row: {member for member, _ in row['members']} <= present,
+        source_of_old=lambda row: source_of(row, machine),
+        delete=lambda row: conn.execute('DELETE FROM sku_manual_groups WHERE members=?',
+                                        (_sku_group_key(row['members']),)),
+        insert=lambda row, source: _insert_sku_group(conn, row, source=source, saved_at=saved_at))
     new_skus = {entry[0]: entry for entry in decisions['excluded_skus']}
-    handled = set()
-    for entry in old['excluded_skus']:
-        if entry[0] not in present:
-            continue
-        conn.execute('DELETE FROM sku_excluded_skus WHERE identity=?', (entry[0],))
-        if entry[0] in new_skus:
-            handled.add(entry[0])
-            conn.execute('INSERT OR IGNORE INTO sku_excluded_skus(identity,saved_at,machine_id)'
-                         ' VALUES(?,?,?)', (entry[0], saved_at, _sku_source(entry, machine)))
-    for ident in new_skus:
-        if ident in handled:
-            continue
-        conn.execute('INSERT OR IGNORE INTO sku_excluded_skus(identity,saved_at,machine_id)'
-                     ' VALUES(?,?,?)', (ident, saved_at, machine))
-
+    _rewrite_sku_ledger_rows(
+        old['excluded_skus'], new_skus, machine=machine,
+        key_of=lambda entry: entry[0],
+        present_ok=lambda entry: entry[0] in present,
+        source_of_old=lambda entry: _sku_exclusion_source(entry, machine),
+        delete=lambda entry: conn.execute('DELETE FROM sku_excluded_skus WHERE identity=?',
+                                          (entry[0],)),
+        insert=lambda entry, source: conn.execute(
+            'INSERT OR IGNORE INTO sku_excluded_skus(identity,saved_at,machine_id) VALUES(?,?,?)',
+            (entry[0], saved_at, source)))
     new_pairs = {frozenset((row[0], row[1])): row for row in decisions['excluded_pairs']}
+    _rewrite_sku_ledger_rows(
+        old['excluded_pairs'], new_pairs, machine=machine,
+        key_of=lambda pair: frozenset((pair[0], pair[1])),
+        present_ok=lambda pair: {pair[0], pair[1]} <= present,
+        source_of_old=lambda pair: _sku_pair_source(pair, machine),
+        delete=lambda pair: conn.execute('DELETE FROM sku_excluded_pairs WHERE pair_a=? AND pair_b=?',
+                                         (pair[0], pair[1])),
+        insert=lambda pair, source: conn.execute(
+            'INSERT OR IGNORE INTO sku_excluded_pairs(pair_a,pair_b,saved_at,machine_id)'
+            ' VALUES(?,?,?,?)', (pair[0], pair[1], saved_at, source)))
+
+
+def _rewrite_sku_ledger_rows(old_rows, new_by_key, *, machine, key_of, present_ok,
+                             source_of_old, delete, insert):
+    """一张 SKU 账本表的保存侧改写：在场旧行删掉后按新视图重写（同键沿用原来源），
+    缺席旧行原样保留；新视图里没被旧行接上的按本机来源补插。三张表共用这一条判法。
+    """
     handled = set()
-    for pair in old['excluded_pairs']:
-        if not {pair[0], pair[1]} <= present:
-            continue
-        key = frozenset((pair[0], pair[1]))
-        conn.execute('DELETE FROM sku_excluded_pairs WHERE pair_a=? AND pair_b=?',
-                     (pair[0], pair[1]))
-        if key in new_pairs:
-            handled.add(key)
-            conn.execute('INSERT OR IGNORE INTO sku_excluded_pairs(pair_a,pair_b,saved_at,machine_id)'
-                         ' VALUES(?,?,?,?)', (pair[0], pair[1], saved_at, _sku_source(pair, machine)))
-    for row in new_pairs.values():
-        if frozenset((row[0], row[1])) in handled:
-            continue
-        conn.execute('INSERT OR IGNORE INTO sku_excluded_pairs(pair_a,pair_b,saved_at,machine_id)'
-                     ' VALUES(?,?,?,?)', (row[0], row[1], saved_at, machine))
+    for old_row in old_rows:
+        if not present_ok(old_row):
+            continue                                    # 有缺席成员：原样保留
+        delete(old_row)
+        key = key_of(old_row)
+        if key not in new_by_key:
+            continue                                    # 本机视图里这条决定没了：撤下
+        handled.add(key)
+        insert(new_by_key[key], source_of_old(old_row))
+    for key, row in new_by_key.items():
+        if key not in handled:
+            insert(row, machine)
 
 
 def _insert_sku_group(conn, row, *, source, saved_at):
@@ -954,13 +964,13 @@ class _SkuLedgerMerge:
         """一条外来人工组：同一条跳过或同源更新、矛盾记冲突、其余并入（含状态更新）。"""
         members = [(member, member_version) for member, member_version in row['members']]
         idents = {member for member, _ in members}
-        source = _sku_source(row, self.source)
+        source = source_of(row, self.source)
         content = _sku_group_content(members, row, source)
         # 同一成员集就是同一条决定：版本只是内容刷新，不作第二行并存（否则重复行会越积越多）。
         same = [other for other in self.local['groups']
                 if {member for member, _ in other['members']} == idents]
         if same:
-            if any(_sku_source(other, '') != source for other in same):
+            if any(source_of(other, '') != source for other in same):
                 return                             # 别的机器已记过同一决定：先到者保留，幂等跳过
             self._retire_groups(same)              # 同一台机器在更新自己（版本/确认/排除）
         opponents, superseded = [], []
@@ -968,24 +978,24 @@ class _SkuLedgerMerge:
             other_idents = {member for member, _ in other['members']}
             if other_idents == idents or not (other_idents & idents):
                 continue                           # 同一成员集在上面判过；不相交与这条无关
-            if _sku_source(other, '') == source:
+            if source_of(other, '') == source:
                 superseded.append(('group', other))
             else:
                 kind = (CONFLICT_GROUP_VS_EXCLUSION if other.get('excluded')
                         else CONFLICT_DIFFERENT_GROUPS)
                 opponents.append((kind,
-                                  _sku_group_content(other['members'], other, _sku_source(other, ''))))
+                                  _sku_group_content(other['members'], other, source_of(other, ''))))
         for pair in self.local['excluded_pairs']:
             if not {pair[0], pair[1]} <= idents:
                 continue
-            if _sku_source(pair, '') == source:
+            if _sku_pair_source(pair, '') == source:
                 superseded.append(('pair', pair))
             else:
                 opponents.append((CONFLICT_GROUP_VS_EXCLUSION, _sku_pair_content(pair)))
         for entry in self.local['excluded_skus']:
             if entry[0] not in idents:
                 continue
-            if _sku_source(entry, '') == source:
+            if _sku_exclusion_source(entry, '') == source:
                 superseded.append(('sku', entry))
             else:
                 opponents.append((CONFLICT_GROUP_VS_EXCLUSION, _sku_exclusion_content(entry)))
@@ -1002,18 +1012,18 @@ class _SkuLedgerMerge:
     def excluded_sku(self, entry):
         """一条外来排除身份：同一条跳过或同源更新、与本机组矛盾记冲突、其余并入。"""
         ident = entry[0]
-        source = _sku_source(entry, self.source)
+        source = _sku_exclusion_source(entry, self.source)
         content = _sku_exclusion_content([ident, source])
         current = [other for other in self.local['excluded_skus'] if other[0] == ident]
         if current:
-            if all(_sku_source(other, '') == source for other in current):
+            if all(_sku_exclusion_source(other, '') == source for other in current):
                 self._retire([('sku', other) for other in current])
             else:
                 return
         rows = [row for row in self.local['groups']
                 if ident in {member for member, _ in row['members']}]
         opponents = [(CONFLICT_GROUP_VS_EXCLUSION,
-                      _sku_group_content(row['members'], row, _sku_source(row, '')))
+                      _sku_group_content(row['members'], row, source_of(row, '')))
                      for row in rows if source_of(row, '') != source]
         if opponents:
             self._conflict_kinds(opponents, content)
@@ -1027,19 +1037,19 @@ class _SkuLedgerMerge:
     def excluded_pair(self, pair):
         """一条外来排除对：同一条跳过或同源更新、两端同组矛盾记冲突、其余并入。"""
         left, right = pair[0], pair[1]
-        source = _sku_source(pair, self.source)
+        source = _sku_pair_source(pair, self.source)
         content = _sku_pair_content([left, right, source])
         current = [other for other in self.local['excluded_pairs']
                    if {other[0], other[1]} == {left, right}]
         if current:
-            if all(_sku_source(other, '') == source for other in current):
+            if all(_sku_pair_source(other, '') == source for other in current):
                 self._retire([('pair', other) for other in current])
             else:
                 return
         rows = [row for row in self.local['groups']
                 if {left, right} <= {member for member, _ in row['members']}]
         opponents = [(CONFLICT_GROUP_VS_EXCLUSION,
-                      _sku_group_content(row['members'], row, _sku_source(row, '')))
+                      _sku_group_content(row['members'], row, source_of(row, '')))
                      for row in rows if source_of(row, '') != source]
         if opponents:
             self._conflict_kinds(opponents, content)
@@ -1077,22 +1087,13 @@ class _SkuLedgerMerge:
             self._conflict(kind, incoming, local_contents)
 
     def _conflict(self, kind, incoming, local_contents):
-        conflict_digest = _digest({'kind': kind, 'incoming': incoming, 'local': local_contents})
-        members = sorted({member for content in [incoming, *local_contents]
-                          for member, _ in content['members']})
-        machines = sorted({content['machine'] for content in local_contents})
-        recorded = conflict_digest not in self.known
-        if recorded:
-            self.known.add(conflict_digest)
-            self.conn.execute(
-                f'INSERT INTO {SKU_CONFLICT_TABLE}(digest,kind,members,incoming_machine,incoming,'
-                'local_machines,local,seen_at) VALUES(?,?,?,?,?,?,?,?)',
-                (conflict_digest, kind, json.dumps(members, ensure_ascii=False),
-                 incoming['machine'], json.dumps(incoming, ensure_ascii=False),
-                 json.dumps(machines, ensure_ascii=False),
-                 json.dumps(local_contents, ensure_ascii=False), self.seen_at))
+        conflict_digest, recorded = _insert_sku_conflict(
+            self.conn, self.known, kind=kind, incoming=incoming,
+            local_contents=local_contents, seen_at=self.seen_at)
         self.conflicts.append(Conflict(
-            digest=conflict_digest, kind=kind, members=tuple(members),
+            digest=conflict_digest, kind=kind,
+            members=tuple(sorted({member for content in [incoming, *local_contents]
+                                  for member, _ in content['members']})),
             incoming_machine=incoming['machine'], incoming=incoming,
-            local_machines=tuple(machines), local=tuple(local_contents),
-            seen_at=self.seen_at, recorded=recorded))
+            local_machines=tuple(sorted({content['machine'] for content in local_contents})),
+            local=tuple(local_contents), seen_at=self.seen_at, recorded=recorded))

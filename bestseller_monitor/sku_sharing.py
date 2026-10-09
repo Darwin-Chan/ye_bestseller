@@ -17,13 +17,18 @@
 
 **版本闸门**：只认识 `sku-v1`。读到来路不明的版本号时**明确拒绝**（如实报错、点名升级），
 不猜、不静默跳过——新格式的消费者必须能对未知版本说不。
+
+**与商品判断集（`judgment_set`）的关系**：装的机器件与那边**有意各写一份**（建/读包、
+内容摘要、导入账、收取一家的骨架）——两条通道的表集、版本、来源列口径会各自演进，
+一条改版不该牵动另一条的已发布行为；纯工具件（`pack_gzip`、`row_bytes`）已共用
+`export` 的那份。判法（`analysis_store` 的 SKU 账本并入与回放）与商品账本同规但分表，
+理由见那里。
 """
 from __future__ import annotations
 
 import contextlib
 import dataclasses
 import datetime as dt
-import gzip
 import hashlib
 import json
 import pathlib
@@ -32,7 +37,7 @@ import tempfile
 from collections.abc import Iterator
 
 from bestseller_monitor.db import CST
-from bestseller_monitor.export import pull_fresh, restore_remote, row_bytes
+from bestseller_monitor.export import pack_gzip, pull_fresh, restore_remote, row_bytes
 from bestseller_monitor.git_channel import ChannelError, GitChannel
 from bestseller_monitor.merge import open_package
 
@@ -224,11 +229,6 @@ def table_counts(cache: pathlib.Path, store: pathlib.Path) -> dict[str, int]:
     return {name: len(rows) for name, rows in _read_rows(cache, store).items()}
 
 
-def _pack_gzip(data: bytes) -> bytes:
-    """统一形态的 gzip：不嵌构建时刻（与周包、商品判断集同规，同内容压出来一样）。"""
-    return gzip.compress(data, mtime=0)
-
-
 @contextlib.contextmanager
 def _open_bytes(data: bytes) -> Iterator[sqlite3.Connection]:
     """把发布形态（`.db.gz`）的字节落在临时文件上，按包的读口打开（只读）。
@@ -246,8 +246,8 @@ def _probe_published(data: bytes) -> tuple[str, str | None]:
     """探已发布那份的字节：`(状态, 内容摘要)`。
 
     - `("ok", digest)`：是本机认识的口径版本、可读，摘要即内容身份。
-    - `("unknown", None)`：读得出元数据、但版本号不是本机认识的（未来版本）——
-      调用方必须**明确拒绝**，绝不覆盖（覆盖会毁掉新机器发布的数据）。
+    - `("unknown", version)`：读得出元数据、但版本号不是本机认识的（未来版本）——
+      调用方必须**明确拒绝**，绝不覆盖（覆盖会毁掉新机器发布的数据），version 供报错点名。
     - `("corrupt", None)`：解不动、表不齐——照常按「与本地不同内容」处理，
       用本机的真内容覆盖它正是自愈（与商品集同规）。
     """
@@ -328,7 +328,7 @@ def publish(exchange_root: str | pathlib.Path, machine_id: str, cache: str | pat
             digest = package_digest(conn)
         finally:
             conn.close()
-        package_gz = _pack_gzip(package.read_bytes())
+        package_gz = pack_gzip(package.read_bytes())
 
     published_gz = channel.read_path(SKU_PACKAGE_REL)
     if published_gz is not None:

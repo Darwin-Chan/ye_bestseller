@@ -26,7 +26,6 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
-from unittest.mock import patch
 
 import test_sku_recommendations as sku_fixtures
 
@@ -539,6 +538,12 @@ class DecisionMergeTests(SkuSharingCase):
         self.assertEqual([], self.ledger()["excluded_skus"], "同一台机器的新话覆盖旧话")
         self.assertEqual(1, len(self.groups()))
 
+    def test_two_element_exclusion_rows_stamp_the_channel_source(self):
+        """审查发现的边界：只带两端的排除行（[身份]／[a, b]）不能把第二端当来源机器。"""
+        self.merge("m1", excluded_pairs=[["s1", "s2"]], excluded_skus=[["s3"]])
+        self.assertEqual([["s1", "s2", "m1"]], self.ledger()["excluded_pairs"])
+        self.assertEqual([["s3", "m1"]], self.ledger()["excluded_skus"])
+
     def test_conflicts_are_recorded_once(self):
         self.merge("m1", groups=[self.group_row(["s1", "s2"], group_id="g-1")])
         clash = self.group_row(["s1", "s3"], group_id="g-2", machine_id="m2")
@@ -647,8 +652,8 @@ class LedgerWriteTests(unittest.TestCase):
                          "版本刷新为本次保存时的证据摘要")
 
 
-class CrossMachineTests(unittest.TestCase):
-    """端到端：真交换台发布/收取 + 第二台机器的真分析服务（复用、回放、保护）。"""
+class CrossMachineCase(unittest.TestCase):
+    """跨机共用的机器夹具：m1 夹具服务 + judged-m1 世界 + 机器切换/发布/收取助手。"""
 
     def setUp(self):
         sku_fixtures.SkuRecommendationTests.setUp(self)
@@ -711,6 +716,9 @@ class CrossMachineTests(unittest.TestCase):
         return sku_sharing.collect(self.exchange, machine_id,
                                    cache=self.service.config.matching.cache,
                                    store=self.service.config.store, now=STAMP)
+
+class CrossMachineTests(CrossMachineCase):
+    """端到端：复用、人工决定回放、局部保护、拆组混码、证据变化与同族补员。"""
 
     def test_second_machine_reuses_judgments_and_uncertain_recommendation(self):
         self.seed("#A#", image=product_picture("red"))
@@ -890,6 +898,62 @@ class CrossMachineTests(unittest.TestCase):
             self.assertEqual({"A", "B"},
                              set(self.group_for(result, left)["merchant_codes"]))
 
+    def test_a_partially_applied_shared_group_extends_when_members_arrive(self):
+        """审查 F1：同一共享行先按在场子集应用、成员后到齐——补员进同一组，不记假冲突。"""
+        a = self.seed("#A#", image=product_picture("red"))
+        b = self.seed("无码", shop="B01", image=product_picture("blue"))
+        self.result = dict(same=False, confidence=.95, reason="不同主体")
+        first = self.analyze()
+        target = self.group_for(first, a)["id"]
+        self.service.edit_group(first["id"], "move", self.group_for(first, b)["id"], b, target)
+        self.service.save_draft(first["id"])
+        c = self.seed("无码二", shop="C01", image=product_picture("green"))
+        second = self.analyze()
+        self.service.edit_group(second["id"], "move", self.group_for(second, c)["id"], c,
+                                self.group_for(second, a)["id"])
+        self.service.save_draft(second["id"])
+        self.publish("m1")
+
+        m2 = self.second_machine()
+        with self.on(m2):
+            self.seed("#A#", image=product_picture("red"))
+            self.seed("无码", shop="B01", image=product_picture("blue"))
+            self.collect("m2")
+            partial = self.analyze()                    # c 还没到：按在场子集先应用
+            self.assertEqual(self.group_for(partial, a)["id"], self.group_for(partial, b)["id"])
+            self.service.save_draft(partial["id"])
+            self.seed("无码二", shop="C01", image=product_picture("green"))
+            result = self.analyze()                     # c 到齐：补进同一组
+            self.assertEqual(target, self.group_for(result, c)["id"], "同族扩员：组 ID 不变")
+            self.assertEqual(self.group_for(result, a)["id"], self.group_for(result, c)["id"])
+            self.assertEqual([], DraftStore(self.service.config.store, "m-test").sku_conflicts(),
+                             "同族补员不是矛盾，不记冲突")
+
+    def test_shared_group_with_changed_evidence_keeps_membership_unconfirmed(self):
+        """共享行证据对不上：保留原归属、整组退回未确认并标注（票面第 4 条后半跨机适用）。"""
+        a = self.seed("#A#", image=product_picture("red"))
+        b = self.seed("无码", shop="B01", image=product_picture("blue"))
+        self.result = dict(same=False, confidence=.95, reason="不同主体")
+        first = self.analyze()
+        target = self.group_for(first, a)["id"]
+        self.service.edit_group(first["id"], "move", self.group_for(first, b)["id"], b, target)
+        self.service.confirm_groups(first["id"], [target])
+        self.service.save_draft(first["id"])
+        self.publish("m1")
+
+        m2 = self.second_machine()
+        with self.on(m2):
+            self.seed("#A#", image=product_picture("red"))
+            self.seed("改过名字的无码", shop="B01", image=product_picture("blue"))
+            self.collect("m2")
+            result = self.analyze()
+            group = self.group_for(result, b)
+            self.assertEqual(self.group_for(result, a)["id"], group["id"], "保留原归属")
+            self.assertFalse(group["confirmed"], "证据对不上：整组退回未确认")
+            self.assertIn("与共享决定时的证据不一致",
+                          self.evidence(result, b)["evidence_changes"])
+            self.assertEqual([], DraftStore(self.service.config.store, "m-test").sku_conflicts())
+
     def test_evidence_change_is_not_reused_and_only_completed_rows_are_shared(self):
         a = self.seed("#A#", image=product_picture("red"))
         b = self.seed("无码", shop="B01", image=product_picture("green"))
@@ -919,57 +983,8 @@ class CrossMachineTests(unittest.TestCase):
             self.assertEqual(1, len(self.calls), "证据变了不命中共享判断：重新判一次")
 
 
-class CrossMachineBrowserTests(unittest.TestCase):
+class CrossMachineBrowserTests(CrossMachineCase):
     """真实页面验收（票 08）：经交换台收取后，SKU 确认页看到归属、推荐理由、多候选与确认状态。"""
-
-    observe = sku_fixtures.SkuRecommendationTests.observe
-    member = staticmethod(sku_fixtures.SkuRecommendationTests.member)
-    group_for = classmethod(sku_fixtures.SkuRecommendationTests.group_for.__func__)
-    enable_model = sku_fixtures.SkuRecommendationTests.enable_model
-    seed = sku_fixtures.SkuRecommendationTests.seed
-    analyze = sku_fixtures.SkuRecommendationTests.analyze
-
-    def setUp(self):
-        sku_fixtures.SkuRecommendationTests.setUp(self)
-        from dataclasses import replace
-        from bestseller_monitor.analysis import AnalysisService
-        self.service = AnalysisService(replace(self.service.config, machine="m1"),
-                                       running=lambda: False)
-        self.box = GitSandbox(self)
-        self.world = _take_world(self.box, "judged-m1")
-        self.exchange = self.world["exchange"].parent
-
-    def second_machine(self, name="m2"):
-        from bestseller_monitor.analysis import AnalysisConfig, AnalysisService
-        from bestseller_monitor.db import connect, Database
-        from bestseller_monitor.matching import MatchingConfig, ModelConfig
-        from types import SimpleNamespace
-        root = Path(self.tmp.name) / name
-        root.mkdir()
-        path = root / "inventory.db"
-        conn = connect(path)
-        self.addCleanup(conn.close)
-        config = AnalysisConfig(path, member_kind="sku", machine=name,
-                                store=root / "drafts.sqlite",
-                                matching=MatchingConfig(root / "matching.sqlite",
-                                    ModelConfig(endpoint="http://127.0.0.1:9/v1/chat/completions",
-                                                key_env="SKU04_TEST_KEY"),
-                                    mode="direct", min_score=0))
-        return SimpleNamespace(path=path, conn=conn, db=Database(conn),
-                               service=AnalysisService(config, running=lambda: False))
-
-    def on(self, machine):
-        import contextlib
-
-        @contextlib.contextmanager
-        def switch():
-            saved = (self.db, self.service, self.path)
-            self.db, self.service, self.path = machine.db, machine.service, machine.path
-            try:
-                yield machine
-            finally:
-                self.db, self.service, self.path = saved
-        return switch()
 
     def test_page_after_collect_shows_grouping_reason_alternatives_and_state(self):
         import os
@@ -1057,10 +1072,14 @@ class LegacyCoexistenceTests(SkuSharingCase):
         """旧版本实测用的就是真实旧代码：旧通道文件与 main（已部署）逐字节一致。"""
         import bestseller_monitor
         root = Path(bestseller_monitor.__file__).resolve().parents[1]
-        done = subprocess.run(["git", "-C", str(root), "diff", "--quiet", "main", "--",
-                               "bestseller_monitor/judgment_set.py"], capture_output=True)
+        for ref in ("main", "origin/main"):     # 功能树里有本地 main；隔离副本克隆里是 origin/main
+            done = subprocess.run(["git", "-C", str(root), "diff", "--quiet", ref, "--",
+                                   "bestseller_monitor/judgment_set.py"], capture_output=True)
+            if done.returncode in (0, 1):
+                break
+        self.assertIn(done.returncode, (0, 1), "找不到 main/origin/main 作比较基准")
         self.assertEqual(0, done.returncode,
-                         "judgment_set.py 与 main 有差异，先确认部署版本再谈旧版本实测")
+                         "judgment_set.py 与已部署（main）有差异，先确认部署版本再谈旧版本实测")
 
     def test_legacy_publish_and_collect_leave_the_new_file_untouched(self):
         from bestseller_monitor import judgment_set
