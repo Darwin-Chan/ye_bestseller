@@ -8,6 +8,7 @@ from datetime import datetime
 from .db import cst_date, SKU_IMAGE_OWN
 from .parse import DEFAULT_SKU_ID, sku_name_source
 from .sku_grouping import _new_group, refresh
+from .sku_codes import code_evidence
 
 
 def _time(value):
@@ -57,6 +58,7 @@ def _evidence(conn, shop, offer, sku_id, latest, end):
     result.update(image)
     result['product_name'] = title
     result['matching_input']['product_name'] = title
+    result.update(code_evidence(result))
     return result
 
 
@@ -95,7 +97,7 @@ def freeze(conn, analysis_id, start, end, calculate, frozen_at):
                 shops=[dict(s) for s in conn.execute('SELECT * FROM shops ORDER BY shop_key')],
                 dirty=True,saved_at=None,conflicts=[],excluded=[],
                 review_order=[g['id'] for g in groups],
-                limitations=['编码自动分组、图文判断与跨机共享尚未开放'])
+                limitations=['无有效编码／编码歧义的图文判断尚未开放；多候选比较与跨机共享尚未开放'])
     refresh(snapshot)
     return snapshot
 

@@ -69,7 +69,8 @@ class SkuDraftTests(unittest.TestCase):
         self.assertEqual([('A01','11','blue'), ('A01','11','red')],
                          [(m['shop_key'],m['offer_id'],m['sku_id']) for m in draft['members']])
         self.assertEqual([5,20], [m['sales'] for m in draft['members']])
-        self.assertEqual(2, len(draft['groups']))
+        self.assertEqual(1, len(draft['groups']))  # Ticket 04: same-code default, not human confirmation.
+        self.assertEqual(25, draft['groups'][0]['sales'])
         self.assertTrue(all(not g['confirmed'] for g in draft['groups']))
         self.service.save_draft(draft['id'])
         restarted = AnalysisService(self.service.config, running=lambda: False)

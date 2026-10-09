@@ -24,7 +24,7 @@ from .matching import (MATCH_DISABLED, PHASE_ASSEMBLE, PHASE_JUDGE, PHASE_RECALL
                        STATUS_DISABLED, identity, matching_summary, offer_of, state_of_status,
                        summarize_group, version)
 from .report import report_name, write_report
-from .sku_grouping import apply_saved as apply_saved_sku, edit_group as edit_sku_group, refresh as refresh_sku
+from .sku_grouping import apply_saved as apply_saved_sku, edit_group as edit_sku_group, refresh as refresh_sku, apply_codes as apply_sku_codes, bind_manual_members
 
 log = logging.getLogger(__name__)
 
@@ -390,6 +390,7 @@ class AnalysisService:
                     stored = self.store.read(latest['id'])
                     if stored and stored.payload.get('member_kind') == 'sku':
                         apply_saved_sku(snapshot, stored.payload)
+                apply_sku_codes(snapshot)
                 with self._lock:
                     self._snapshots[snapshot['id']] = snapshot
                 progress.update(products=len(snapshot['members']),
@@ -591,7 +592,7 @@ class AnalysisService:
             from .sku_drafts import restore_curve_boundaries
             restore_curve_boundaries(snapshot, calculate_inventory)
             refresh_sku(snapshot)
-            snapshot['limitations'] = ['编码自动分组、图文判断与跨机共享尚未开放']
+            snapshot['limitations'] = ['无有效编码／编码歧义的图文判断尚未开放；多候选比较与跨机共享尚未开放']
             return snapshot
         snapshot = self._rehydrate(stored.payload)
         if self.config.member_kind == 'sku':
@@ -783,6 +784,7 @@ class AnalysisService:
                 for group in groups:
                     if group.get('confirmed', False) != confirmed:
                         group['confirmed'] = confirmed
+                        bind_manual_members(snapshot, group, confirmed=confirmed)
                         group['adjusted'] = True
                         changed = True
                 if changed:
