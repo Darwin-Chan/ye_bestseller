@@ -584,6 +584,26 @@ class CollectTests(JudgmentSetCase):
         self.assertTrue(outcome.notes)
         self.assertIn("judged", outcome.notes[0])
 
+    def test_an_explicit_source_list_replaces_the_local_enumeration(self):
+        """票 02：来源清单接入之后，收取按点名名单走（被阻断的来源根本不在名单里）。"""
+        self.publish_from("m1")
+        _take_world(self.box, "judged-m2")             # 本地也有这本，但名单不点它
+        listed = (("m1", self.exchange / "judged-m1"),)
+
+        outcome = collect(self.exchange, "m4", self.cache, self.store, sources=listed)
+
+        self.assertFalse(outcome.failed, [r.failure for r in outcome.results])
+        self.assertEqual([r.machine for r in outcome.results], ["m1"])
+
+    def test_an_empty_explicit_source_list_means_nothing_to_collect(self):
+        self.publish_from("m1")                        # 交换区里其实有这本，但名单是空的
+
+        outcome = collect(self.exchange, "m4", self.cache, self.store, sources=())
+
+        self.assertEqual(outcome.results, ())
+        self.assertTrue(outcome.notes, "没有可收的来源要如实说一句")
+        self.assertFalse(self.cache.exists(), "名单没点名：连缓存都不碰")
+
     def test_the_machines_own_judged_repo_is_not_collected_for_itself(self):
         self.publish_from("m4", cache=self.cache)                # 本机自己发布的那本
 

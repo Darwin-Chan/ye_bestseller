@@ -2,7 +2,9 @@
 
 **这份清单解决什么**：收谁的判断集，一直是**本地口径**——`judgment_set.collect()` 只枚举交换区
 里实际存在的 `judged-*` 目录。远端多了一本来源、本地没建克隆时，接收机就无从知道「该有谁」。
-来源清单把「预期来源与已批准远端地址」变成一份共享事实，接收机据此补齐本地克隆（接收侧在票 02）。
+来源清单把「预期来源与已批准远端地址」变成一份共享事实，接收机据此补齐本地克隆（`prepare_sources`，
+接收侧在票 02：缺的建克隆、已有的只快进更新并核对远端地址；坏现场按来源阻断；plan 拉不动时只用
+上一版快照处理已有且匹配的来源；没有任何可用来源报「接收通道未就绪」）。
 
 **谁维护**：m4（汇总机）是唯一的生成者，也是唯一持有该用途 Gitee API token 的机器。token 只从
 环境变量 `GITEE_TOKEN` 读，**不进仓库、不进快照、不进日志**；没有 token 的机器（m1/m2/m3）读到
@@ -41,7 +43,7 @@ from bestseller_monitor.db import CST
 from bestseller_monitor.export import pull_fresh, restore_remote
 from bestseller_monitor.git_channel import ChannelError, GitChannel
 # 来源库的目录名前缀与判断集同源一处（`judged-<机器>`）：不再各写一份「judged-」。
-from bestseller_monitor.judgment_set import REPO_PREFIX
+from bestseller_monitor.judgment_set import PACKAGE_REL, REPO_PREFIX, judged_repos
 from bestseller_monitor.plan_step import PLAN_REPO_DIR
 
 # 快照在 plan 库里的相对路径（库根下，与 shops.csv / machines.json 并列）。
@@ -129,10 +131,14 @@ class RefreshResult:
 
 @dataclasses.dataclass(frozen=True)
 class _PreviousSnapshot:
-    """上一版快照的读回：`state` 取 `absent`（还没发布过）/ `ok`（读到了）/ `broken`（在但读不动）。"""
+    """上一版快照的读回：`state` 取 `absent`（还没发布过）/ `ok`（读到了）/ `broken`（在但读不动）。
+
+    `format_version` 照抄文件里的原值——生成侧只看来源，消费侧（票 02）拿它挡不认识的版本。
+    """
 
     state: str
     owner: str = ""
+    format_version: str = ""
     sources: tuple[SourceEntry, ...] = ()
 
 
@@ -291,12 +297,14 @@ def _read_snapshot(channel: GitChannel) -> _PreviousSnapshot:
     try:
         document = json.loads(raw.decode("utf-8"))
         owner = str(document.get("owner") or "")
+        format_version = str(document.get("format_version") or "")
         sources = tuple(SourceEntry(machine_id=str(entry["machine_id"]),
                                     repo=str(entry["repo"]), remote=str(entry["remote"]))
                         for entry in document.get("sources") or ())
     except (ValueError, UnicodeDecodeError, KeyError, TypeError, AttributeError):
         return _PreviousSnapshot(state="broken")
-    return _PreviousSnapshot(state="ok", owner=owner, sources=sources)
+    return _PreviousSnapshot(state="ok", owner=owner, format_version=format_version,
+                             sources=sources)
 
 
 # ---------- Gitee API 客户端（唯一的网络口） ----------
@@ -375,3 +383,252 @@ def _repo_of(item: object) -> GiteeRepo:
         owner = full_name.split("/", 1)[0] if "/" in full_name else ""
     return GiteeRepo(name=name, owner=owner, private=bool(item.get("private")),
                      remote=str(item.get("ssh_url") or ""))
+
+
+# ---------- 接收侧（票 02）：按来源清单自动接入本地克隆 ----------
+
+# 每条来源的接入终态（票 02；spec §3 的收款状态词表在报告那一票里扩全，这里先落三档）：
+# 已接入（有判断集包）/ 已接入但还没有包 / 被阻断（不动现场，点名原因）/ 这次没接入（跳过，见 reason）。
+SOURCE_CONNECTED = "connected"
+SOURCE_CONNECTED_NO_PACKAGE = "connected_no_package"
+SOURCE_BLOCKED = "blocked"
+SOURCE_SKIPPED = "skipped"
+
+
+@dataclasses.dataclass(frozen=True)
+class PreparedSource:
+    """一条来源的接入结果：本地目录在哪、结局如何、为什么。
+
+    `action` 只说这次对本地克隆做了什么：`cloned`（新建）/ `updated`（快进到新内容）/
+    `unchanged`（已是最新）；被阻断或跳过时为空。`failure` 是阻断的具体原因（原样引用
+    git 的输出）；`reason` 是「这次没接入」的说明——两者都不是整趟的失败（整趟的结论
+    在 `PreparedSources` 上）。
+    """
+
+    machine_id: str
+    repo: str
+    remote: str
+    path: pathlib.Path
+    state: str
+    action: str = ""
+    failure: str | None = None
+    reason: str | None = None
+
+    @property
+    def usable(self) -> bool:
+        """这条来源这次能不能交给收取：已接入的才算（被阻断/跳过的不读它的包）。"""
+        return self.state in (SOURCE_CONNECTED, SOURCE_CONNECTED_NO_PACKAGE)
+
+
+@dataclasses.dataclass(frozen=True)
+class PreparedSources:
+    """跑一次来源接入做了什么（收取任务与周报从这里读）。
+
+    `snapshot_state`：`ok`（读到了清单）/ `absent`（plan 里还没有这份文件）/ `broken`
+    （在但读不动）/ `no_plan_clone`（计划库还没 clone）。`stale` = 计划库这次拉不动、
+    用的本机上一版快照（只处理已有且匹配的来源，不新建克隆）。`not_ready` 非空 =
+    没有任何可用来源（「接收通道未就绪」的原因）——不能表现成「没有新判断集」。
+    `local_only` 是交换区里清单外已有的 judged 库（快照语义：不删克隆，照收）。
+    """
+
+    machine_id: str
+    root: pathlib.Path
+    entries: tuple[PreparedSource, ...] = ()
+    snapshot_state: str = "no_plan_clone"
+    stale: bool = False
+    warnings: tuple[str, ...] = ()
+    not_ready: str | None = None
+    local_only: tuple[tuple[str, pathlib.Path], ...] = ()
+
+    @property
+    def ready(self) -> bool:
+        return self.not_ready is None
+
+    def collect_sources(self) -> tuple[tuple[str, pathlib.Path], ...]:
+        """这次该交给自己收取的来源名单：接入成功的 + 清单外本地已有的（排序）。
+
+        被阻断的来源不在名单里——阻断就是连读它的包都不读；清单外已有的照旧收
+        （快照语义：来源从清单消失不触发删克隆，本地克隆按老口径继续收）。
+        """
+        connected = [(entry.machine_id, entry.path) for entry in self.entries if entry.usable]
+        return tuple(sorted(connected + list(self.local_only)))
+
+
+def prepare_sources(exchange_root: str | pathlib.Path, *, machine_id: str) -> PreparedSources:
+    """收取任务启动时的来源接入：读最近一次有效来源清单，把本地克隆补齐。
+
+    只由收取那半调（`exchange.run_once` 走 `judgment_set.collect` 之前）——打开交换窗口
+    与启动分析都不触发。逐条来源独立处理，一条坏不拦别条；目标目录只由**经校验的来源
+    身份**推出（`<exchange_root>/judged-<机器>`），清单不能注入本地路径。
+    """
+    root = pathlib.Path(exchange_root)
+    plan = root / PLAN_REPO_DIR
+    warnings: list[str] = []
+    stale = False
+    entries: list[PreparedSource] = []
+    snapshot_state = "no_plan_clone"
+    if not (plan / ".git").exists():
+        warnings.append(f"计划库还没有 clone 到 {plan}（上机清单第 9 / 11 步）："
+                        "读不到来源清单，来源没法自动接入。")
+    else:
+        channel = GitChannel(plan)
+        try:
+            channel.pull()
+        except ChannelError as exc:
+            stale = True
+            warnings.append(f"计划库这次拉不动（{exc}）：\n"
+                            "改用本机上一版来源清单（可能不是最新）——只处理已有且匹配的来源，"
+                            "不新建克隆；通道恢复后重跑一次。")
+        previous = _read_snapshot(channel)
+        if previous.state == "absent":
+            snapshot_state = "absent"
+            warnings.append(f"来源清单还没有发布过（plan 里没有 {SNAPSHOT_REL}）："
+                            "先让维护机（m4）跑一趟交换台刷新并发布。")
+        elif previous.state == "broken":
+            snapshot_state = "broken"
+            warnings.append(f"来源清单读不出来（plan 里的 {SNAPSHOT_REL} 坏了）：不覆盖、不猜，"
+                            "先看一眼、修好再跑。")
+        elif previous.format_version != FORMAT_VERSION:
+            snapshot_state = "unknown_format"
+            warnings.append(f"来源清单的格式版本本机不认识（读到 {previous.format_version!r}，"
+                            f"本机只懂 {FORMAT_VERSION}）：不按它动本地目录——"
+                            "升级本机程序再跑，别拿旧口径猜新格式。")
+        else:
+            snapshot_state = "ok"
+            entries = _connect_sources(root, machine_id=machine_id,
+                                       sources=previous.sources, stale=stale)
+    declared = {entry.machine_id for entry in entries}
+    local_only = tuple((machine, path) for machine, path in
+                       judged_repos(root, exclude=machine_id) if machine not in declared)
+    not_ready = None
+    if not any(entry.usable for entry in entries) and not local_only:
+        not_ready = _not_ready_text(snapshot_state, entries=entries, plan=plan)
+    return PreparedSources(machine_id=machine_id, root=root, entries=tuple(entries),
+                           snapshot_state=snapshot_state, stale=stale,
+                           warnings=tuple(warnings), not_ready=not_ready, local_only=local_only)
+
+
+def _connect_sources(root: pathlib.Path, *, machine_id: str,
+                     sources: tuple[SourceEntry, ...], stale: bool) -> list[PreparedSource]:
+    """逐条接入：本机那本跳过；缺目录就建克隆；已有目录核对现场、只快进更新。
+
+    每条来源独立收尾（结果无论如何都有一条）；被阻断的现场一律不动它——不删、不重建、
+    不改 origin、不清理、不 merge、不重置，只点名具体原因。
+    """
+    out: list[PreparedSource] = []
+    for entry in sources:
+        if entry.machine_id == machine_id:
+            continue                            # 本机那本自己发布、自己不发自己收
+        repo = f"{REPO_PREFIX}{entry.machine_id}"
+        dest = root / repo
+
+        def resolved(state: str, **kwargs) -> None:
+            out.append(PreparedSource(entry.machine_id, repo, entry.remote, dest, state, **kwargs))
+
+        if not MACHINE_ID_RE.match(entry.machine_id) or entry.repo != repo or not entry.remote:
+            resolved(SOURCE_BLOCKED, failure=(
+                f"清单条目非法（机器编号/库名/远端地址不合规）："
+                f"machine_id={entry.machine_id!r}、repo={entry.repo!r}——不按它动本地目录，"
+                "先核对维护机发布的清单。"))
+            continue
+        cloned = False
+        if not dest.exists():
+            if stale:
+                resolved(SOURCE_SKIPPED, reason=(
+                    "本机还没有这本的克隆，而计划库这次拉不动（用的是上一版快照）："
+                    "不从过期快照新建克隆——等计划库恢复后重跑。"))
+                continue
+            try:
+                GitChannel.clone(entry.remote, dest)
+            except ChannelError as exc:
+                resolved(SOURCE_BLOCKED, failure=f"克隆没成功：{exc}")
+                continue
+            cloned = True
+        channel = GitChannel(dest)
+        if not (dest / ".git").exists():
+            resolved(SOURCE_BLOCKED, failure=(
+                f"{dest} 已存在但不是 git 克隆：不删、不重建——先人工看一眼它是什么，"
+                "收拾好之后重跑。"))
+            continue
+        try:
+            origin = channel.remote_url()
+        except ChannelError as exc:
+            resolved(SOURCE_BLOCKED, failure=(
+                f"仓库读不动（{exc}）：不自动修——人工看一眼这本（坏了的仓库不重建）。"))
+            continue
+        if origin is None:
+            resolved(SOURCE_BLOCKED, failure=(
+                f"本地这本 {repo} 没有 origin 这个远端：不替它补（补一个就等于替它选来源）"
+                "——人工核对这本是哪来的，收拾好之后重跑。"))
+            continue
+        if origin != entry.remote:
+            resolved(SOURCE_BLOCKED, failure=(
+                f"远端不匹配：本地 origin 是 {origin}，清单批准的是 {entry.remote}——"
+                "不改 origin、不动它；核对这本是哪来的，收拾好之后重跑。"))
+            continue
+        if cloned:
+            action = "cloned"
+        else:
+            try:
+                changes = channel.local_changes()
+            except ChannelError as exc:
+                resolved(SOURCE_BLOCKED, failure=(
+                    f"仓库读不动（{exc}）：不自动修——人工看一眼这本。"))
+                continue
+            if changes:
+                shown = "、".join(changes[:5]) + ("…" if len(changes) > 5 else "")
+                resolved(SOURCE_BLOCKED, failure=(
+                    f"工作区有未提交的改动（{shown}）：不清理、不重置——这本是只读来源，"
+                    "本机不该在它里面改文件；人工看一眼再重跑。"))
+                continue
+            before = _head_or_none(channel)
+            try:
+                channel.pull_ff_only()
+            except ChannelError as exc:
+                resolved(SOURCE_BLOCKED, failure=(
+                    f"更新没成功（只许快进，不 merge、不重置）：{exc}\n"
+                    "本地有分叉的提交就说明有人动过这本，人工核对后重跑。"))
+                continue
+            action = "updated" if _head_or_none(channel) != before else "unchanged"
+        if channel.read_path(PACKAGE_REL) is None:
+            resolved(SOURCE_CONNECTED_NO_PACKAGE, action=action)
+        else:
+            resolved(SOURCE_CONNECTED, action=action)
+    return out
+
+
+def _head_or_none(channel: GitChannel) -> str | None:
+    """当前提交；还没有任何提交（空库的克隆）回 None——「更新没更新」拿它比。"""
+    try:
+        return channel.head()
+    except ChannelError:
+        return None
+
+
+def _not_ready_text(snapshot_state: str, *, entries: list[PreparedSource],
+                    plan: pathlib.Path) -> str:
+    """「接收通道未就绪」的原因与下一步：为什么一条可用的来源都没有。"""
+    parts: list[str] = []
+    if snapshot_state == "no_plan_clone":
+        parts.append(f"计划库还没 clone 到 {plan}（上机清单第 9 / 11 步），读不到来源清单")
+    elif snapshot_state == "absent":
+        parts.append("来源清单还没发布过——先让维护机（m4）跑一趟交换台刷新并发布")
+    elif snapshot_state == "broken":
+        parts.append(f"来源清单读不出来（plan 里的 {SNAPSHOT_REL} 坏了）：先看一眼、修好再跑")
+    elif snapshot_state == "unknown_format":
+        parts.append(f"来源清单的格式版本本机不认识（本机只懂 {FORMAT_VERSION}）："
+                     "升级本机程序再跑")
+    else:
+        blocked = [f"judged-{entry.machine_id}" for entry in entries
+                   if entry.state == SOURCE_BLOCKED]
+        skipped = [f"judged-{entry.machine_id}" for entry in entries
+                   if entry.state == SOURCE_SKIPPED]
+        if blocked:
+            parts.append("清单里的来源都没接上（" + "、".join(blocked) + "）")
+        if skipped:
+            parts.append("计划库这次拉不动、用的是上一版快照，本机又还没有这些来源的克隆"
+                         "（" + "、".join(skipped) + "）：不新建克隆")
+        if not blocked and not skipped:
+            parts.append("来源清单里没有别的来源可接（清单空着，或只有本机自己那本）")
+    parts.append("本机也没有别的 judged-* 库可收")
+    return "；".join(parts)

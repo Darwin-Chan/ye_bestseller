@@ -84,6 +84,29 @@ class GitChannel:
         if done.returncode != 0 and not _UNBORN_REMOTE.search(done.stderr or ""):
             raise _failure("拉取", args, done)
 
+    def pull_ff_only(self) -> None:
+        """接收侧专用：拉取远端且**只允许快进**——本地有分叉的提交就失败，绝不重写历史。
+
+        与发布侧的 `pull`（`--rebase`）分开：收来的别人那本 judged 库是只读来源，
+        本机在它里面不该有本地提交，有就说明现场不对（人工动过），如实报错、由调用方
+        按来源阻断——不自动 merge、不重置。`--no-rebase` 写死是不吃本机 git 配置的
+        影响（pull.rebase 之类），空库（远端还没有分支）与 `pull` 同规视为没有可拉的。
+        """
+        args = ("-C", str(self.path), "pull", "--ff-only", "--no-rebase")
+        done = _run(*args)
+        if done.returncode != 0 and not _UNBORN_REMOTE.search(done.stderr or ""):
+            raise _failure("快进拉取", args, done)
+
+    def remote_url(self, name: str = "origin") -> str | None:
+        """远端 `name` 的地址；没有这条 remote 时回 None（别的失败原样抛）。"""
+        args = ("-C", str(self.path), "remote", "get-url", name)
+        done = _run(*args)
+        if done.returncode == 0:
+            return done.stdout.strip()
+        if "no such remote" in (done.stderr or "").lower():
+            return None
+        raise _failure("读取远端地址", args, done)
+
     def local_changes(self) -> list[str]:
         """工作区里未提交的改动与未跟踪文件的 porcelain 清单；干净时为空。
 

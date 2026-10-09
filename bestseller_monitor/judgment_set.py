@@ -25,7 +25,8 @@
 （旧版虽在 git 历史里，没必要制造这一步）。推送失败把克隆退回远端状态、如实报错；本地
 缓存与账本一个字不动。
 
-**收取**（`collect`）：对交换区里别的机器的 `judged-<机器>` 库各 pull 一次，读它 HEAD 里
+**收取**（`collect`）：对交换区里别的机器的 `judged-<机器>` 库各 pull 一次（名单可由调用方点名
+——票 02 的来源清单接入之后，被阻断的来源根本不在名单里；缺省仍按交换区里实际存在的枚举），读它 HEAD 里
 那份包，按内容摘要幂等导入：**先并人工决定**（不冲突即生效、冲突写进本机冲突账，票 04），
 **后导判断**（三类表逐行 `INSERT OR IGNORE`）+ **导入账**（`judgment_imports`，就在缓存
 库里——账与行同一个文件，「收过」与「收进了什么」不可能说法不一）。导入账只在决定与判断
@@ -473,7 +474,8 @@ def judged_repos(exchange_root: str | pathlib.Path,
 
 
 def collect(exchange_root: str | pathlib.Path, machine_id: str, cache: str | pathlib.Path,
-            store: str | pathlib.Path, *, now: dt.datetime | None = None) -> CollectOutcome:
+            store: str | pathlib.Path, *, now: dt.datetime | None = None,
+            sources: tuple[tuple[str, pathlib.Path], ...] | None = None) -> CollectOutcome:
     """把交换区里别的机器的判断集收进本机（spec §3、§7）：决定进账本，判断进缓存。
 
     对名单里每本 `judged-<机器>` pull 一次，读它 HEAD 里那份包，按内容摘要幂等导入：
@@ -481,11 +483,16 @@ def collect(exchange_root: str | pathlib.Path, machine_id: str, cache: str | pat
     逐行 `INSERT OR IGNORE`，本机已有的行不动）+ 导入账，各自一个事务、失败全回滚。
     一家拉不动、没发布过、包坏了都只记那一家，别家照收。`now` 是账上的收到时刻（UTC），
     缺省取现在。
+
+    `sources` 是名单：给了就按它收（票 02——交换台先按来源清单把本地克隆接入好，被阻断
+    的来源根本不在名单里，这里就不会去读它的包）；缺省仍按交换区里实际存在的 `judged-*`
+    枚举（老口径，直接调本函数时用）。
     """
     root = pathlib.Path(exchange_root)
     cache = pathlib.Path(cache)
     store = pathlib.Path(store)
-    sources = judged_repos(root, exclude=machine_id)
+    if sources is None:
+        sources = judged_repos(root, exclude=machine_id)
     if not sources:
         return CollectOutcome((), ((
             f"交换区里没有别的机器的判断库（{REPO_PREFIX}*）可收：别的机器建库、"

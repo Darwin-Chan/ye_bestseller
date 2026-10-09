@@ -1,11 +1,11 @@
 """交换台的一次运行与周报（spec §7/§8 + 判断集的两条动作，ADR-0039 决策 7）。
 
 **一次运行**（`run_once`，手工触发）：刷新来源清单 → 检查 → 导出 → 发布判断集 → 拉取 →
-汇总 → 收取判断集 → 报告；`--only export|merge|publish|collect` 只跑其中一个动作（刷新来源
+汇总 → 接入来源 → 收取判断集 → 报告；`--only export|merge|publish|collect` 只跑其中一个动作（刷新来源
 清单、检查与写报告照常，其余各个环节的「没做」如实写）。退出码：`0` 干净 / `1` 有需要人看一眼的
 （缺口、冲突、别人的包还没来、通道没拉成、图片缺、判断集本周记下的决定冲突、来源清单有来源减少/
-改址）/ `2` 本机没做成事（导出没成功、有包没导成、纯汇总机被要求只导出、判断集没发出去或没收进来、
-来源清单没刷新）。
+改址、来源接入被阻断或用了上一版快照）/ `2` 本机没做成事（导出没成功、有包没导成、纯汇总机被要求只导出、
+判断集没发出去或没收进来、来源清单没刷新、接收通道未就绪）。
 
 - **刷新来源清单**（票 01、ADR-0052）：维护机（配了 `machine.gitee_owner` 的 m4）经 Gitee API
   生成 `judged-*` 来源快照、发布到 plan 库；只在实际交换任务启动时刷新——打开窗口、启动分析都不
@@ -29,9 +29,15 @@
   同哈希幂等跳过）；本机自己的包不收。**不只本周**：账里还没有的历史包也一起收——
   冷启动一次重放全部（spec §11），别的机器迟到补发的历史包下次运行自动补上
   （各台最终收敛到同一份全量库）；账里已有的历史包安静跳过，不重进报告表。
-- **收取判断集**：`judgment_set.collect` 拉取名单（交换区里实际存在的 `judged-*` 库，
-  spec §9）上各家的判断集、按内容摘要幂等导入；缺库没 clone、别人还没发布都只给可读
-  提示，不中止其余步骤。
+- **接入来源**（票 02、ADR-0052）：收取那半先读最近一次有效来源清单（plan 库里的
+  `judged-sources.json`），按它补齐缺的 `judged-<机器>` 本地克隆、只快进更新已有的、
+  核对远端地址；只在实际收取任务里做——开窗口、启动分析都不触发。plan 拉不动时用本机
+  上一版快照，只处理已有且匹配的来源（不新建克隆）。单来源失败按来源阻断、别家继续；
+  被阻断的来源不进收取名单（连它的包都不读）。没有任何可用来源 = 「接收通道未就绪」
+  （本机没做成事），不能表现成「没有新判断集」。
+- **收取判断集**：`judgment_set.collect` 按接入好的名单（来源清单接入的 + 清单外本地已有的
+  `judged-*` 库，spec §9）上各家的判断集、按内容摘要幂等导入；缺库没 clone、别人还没发布
+  都只给可读提示，不中止其余步骤。
 - **报告**：`<交换区根>/报告/<年>-W<周>.md`——**一周一份、同周重跑重写同一份**，
   内容是**状态累积**（从计划表、本机库、交换区、幂等账与冲突账现读）而不是两次运行
   日志相加；开头「本次运行」行说明这一次具体做了什么。逐次流水在 `logs/exchange.log`。
@@ -249,6 +255,9 @@ class RunOutcome:
     # 判断来源清单（票 01、ADR-0052）：维护机（m4）在任务启动时刷新并发布的结果。None =
     # 这一趟没走刷新（例如 fatal 提前返回）。非维护机是「没配 owner」的可读说明，不是失败。
     source_refresh: judged_sources.RefreshResult | None = None
+    # 来源接入（票 02）：收取那半按最近一次有效快照补齐/核对本地克隆的结果。None = 这一趟
+    # 没有收取（没配分析配置、或 --only 别的动作）。被阻断的来源不进收取名单。
+    source_prep: judged_sources.PreparedSources | None = None
 
 
 def _emitter(emit: Callable[[str], None] | None) -> Callable[[str], None]:
@@ -337,7 +346,8 @@ def _judgment_check_notes(cfg, notes: list[str], *, root: pathlib.Path,
         notes.append(f"本机的判断库 {own} 还没 clone 到 {root / own}：发布判断集那一步会点名它"
                      "（上机清单第 14 步）。")
     if not judgment_set.judged_repos(root, exclude=machine_id):
-        notes.append("交换区里没有别的 judged 库：判断集的收取这趟没有可收的。")
+        notes.append("交换区里还没有别的 judged 库：来源清单里有来源的话，收取时会自动接入"
+                     "补齐克隆（没有清单就只收本地已有的）。")
     if _source_owner(cfg) and not (root / plan_step.PLAN_REPO_DIR).is_dir():
         notes.append(f"本机是来源维护机（配了 machine.gitee_owner），但 plan 库还没 clone 到 "
                      f"{root / plan_step.PLAN_REPO_DIR}：刷新判断来源清单那一步会点名它"
@@ -473,7 +483,7 @@ def run_once(cfg, *, only: str | None = None, week: str | None = None,
              now: dt.datetime | None = None, store=None,
              emit: Callable[[str], None] | None = None,
              source_provider=None, confirm_shrink: bool = False) -> RunOutcome:
-    """一次运行：刷新来源清单 → 检查 → 导出 → 发布判断集 → 拉取 → 汇总 → 收取判断集 → 报告。
+    """一次运行：刷新来源清单 → 检查 → 导出 → 发布判断集 → 拉取 → 汇总 → 接入来源 → 收取判断集 → 报告。
 
     `only` 取 `ONLY_EXPORT` / `ONLY_MERGE` / `ONLY_PUBLISH` / `ONLY_COLLECT` 之一，
     只跑那个动作（None = 整趟）；`week` 默认本周（补历史指定周窗口，导出与报告都按它走）；
@@ -543,14 +553,20 @@ def run_once(cfg, *, only: str | None = None, week: str | None = None,
             imported = _merge_packages(cfg, db, week=week, machine_id=machine_id,
                                        store=store, say=say)
 
-        # ---- 收取判断集（名单 = 交换区里实际存在的 judged-* 库，spec §9）----
+        # ---- 收取判断集（票 02：先按来源清单接入本地克隆，再按接入名单收）----
         judgment_collect: judgment_set.CollectOutcome | None = None
+        source_prep: judged_sources.PreparedSources | None = None
         if judgments is not None and only in (None, ONLY_COLLECT):
+            say("接入判断来源（读来源清单、补齐本地克隆）…")
+            source_prep = judged_sources.prepare_sources(cfg.exchange_root, machine_id=machine_id)
+            for line in _source_prep_lines(source_prep):
+                say(line)
             say("收取别的机器的判断集…")
             judgment_collect = judgment_set.collect(
                 cfg.exchange_root, machine_id, cache=judgments.cache,
                 store=judgments.store,
-                now=now.astimezone(dt.timezone.utc))   # 账上的收到时刻按 UTC 记（票 03 的口径）
+                now=now.astimezone(dt.timezone.utc),   # 账上的收到时刻按 UTC 记（票 03 的口径）
+                sources=source_prep.collect_sources())
             say(_judgment_collect_line(judgment_collect))
 
         outcome = _assemble(cfg, db, week=week, now=now, machine_id=machine_id, role=role,
@@ -559,7 +575,7 @@ def run_once(cfg, *, only: str | None = None, week: str | None = None,
                             judgments=judgments, judgment_note=judgment_note,
                             judgment_publish=judgment_publish,
                             judgment_collect=judgment_collect,
-                            source_refresh=source_refresh)
+                            source_refresh=source_refresh, source_prep=source_prep)
         report_path = pathlib.Path(cfg.exchange_root) / REPORT_DIR / f"{week}.md"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(_render(outcome), encoding="utf-8")
@@ -594,7 +610,7 @@ def _judgment_collect_line(outcome: judgment_set.CollectOutcome) -> str:
 def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_result,
               export_note, pulls, imported, merge_ran, only, judgments=None,
               judgment_note=None, judgment_publish=None, judgment_collect=None,
-              source_refresh=None) -> RunOutcome:
+              source_refresh=None, source_prep=None) -> RunOutcome:
     """把这次运行与库里的现成事实折成报告模型（状态累积，不是运行日志相加）。"""
     root = pathlib.Path(cfg.exchange_root)
     plan = plan_step.stored_plan(db, week)
@@ -626,7 +642,7 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
                  export_result=export_result, imported=imported,
                  image_missing_total=image_missing_total,
                  judgment_publish=judgment_publish, judgment_collect=judgment_collect,
-                 source_refresh=source_refresh)
+                 source_refresh=source_refresh, source_prep=source_prep)
 
     failures: list[str] = []
     if export_result is not None and export_result.failed:
@@ -637,11 +653,13 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
         failures.append("本机是纯汇总机：导出这半没有可做的事")
     failures += _judgment_failures(judgment_publish, judgment_collect)
     failures += _source_failures(source_refresh)
+    failures += _source_prep_failures(source_prep)
     soft = bool(gaps) or bool(conflicts) or bool(missing) or any(not p.ok for p in pulls) \
         or (export_result is not None and export_result.images is not None
             and export_result.images.failure is not None) or image_missing_total > 0 \
         or bool(judgment_conflicts) or _judgment_soft(judgment_collect) \
-        or (source_refresh is not None and source_refresh.held)
+        or (source_refresh is not None and source_refresh.held) \
+        or _source_prep_soft(source_prep)
 
     return RunOutcome(
         week=week, machine_id=machine_id, role=role, ran_at=now, check=check, only=only,
@@ -650,7 +668,8 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
         gaps=gaps, conflicts=conflicts, missing_machines=missing, todo=todo,
         summary=_summary(only=only, export_result=export_result, export_note=export_note,
                          imported=imported, merge_ran=merge_ran,
-                         judgment_publish=judgment_publish, judgment_collect=judgment_collect),
+                         judgment_publish=judgment_publish, judgment_collect=judgment_collect,
+                         source_prep=source_prep),
         failures=tuple(failures),
         exit_code=(EXIT_NOTHING_DONE if failures
                    else EXIT_NEEDS_LOOK if soft else EXIT_CLEAN),
@@ -658,7 +677,8 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
         plan_known=plan is not None, plan_of_shop=plan_of_shop,
         judgments=judgments, judgment_note=judgment_note,
         judgment_publish=judgment_publish, judgment_collect=judgment_collect,
-        judgment_conflicts=judgment_conflicts, source_refresh=source_refresh)
+        judgment_conflicts=judgment_conflicts, source_refresh=source_refresh,
+        source_prep=source_prep)
 
 
 def _judgment_conflicts(judgments, machine_id: str, *, week: str) -> tuple:
@@ -742,6 +762,65 @@ def _source_text(result: judged_sources.RefreshResult) -> str:
 def _source_row(outcome: RunOutcome) -> str:
     """报告第三节的「来源清单」一行：只在实际交换任务里刷过、且本机是维护机时才有。"""
     return f"- 来源清单：{_source_text(outcome.source_refresh)}"
+
+
+# 来源接入（票 02）的进度行与报告行共用这一处措辞：动作短名 + 「当前没有判断集包」。
+_PREP_ACTION_GLOSS = {"cloned": "新克隆", "updated": "已快进", "unchanged": "已是最新"}
+
+
+def _source_prep_text(entry: judged_sources.PreparedSource) -> str:
+    """一条来源接入结果的人话（进度行与报告第三节共用）。"""
+    if entry.state == judged_sources.SOURCE_BLOCKED:
+        return f"{entry.repo} 被阻断（{_first_line(entry.failure)}）"
+    if entry.state == judged_sources.SOURCE_SKIPPED:
+        return f"{entry.repo} 这次没接入（{_first_line(entry.reason)}）"
+    gloss = _PREP_ACTION_GLOSS.get(entry.action, "已接入")
+    if entry.state == judged_sources.SOURCE_CONNECTED_NO_PACKAGE:
+        return f"{entry.repo} 已接入（{gloss}；当前没有判断集包）"
+    return f"{entry.repo} 已接入（{gloss}）"
+
+
+def _source_prep_lines(prep: judged_sources.PreparedSources) -> list[str]:
+    """来源接入这一趟的进度行：告警在前、逐条来源在中、未就绪收尾。"""
+    lines = [f"来源接入：{warning}" for warning in prep.warnings]
+    lines += [f"来源接入：{_source_prep_text(entry)}" for entry in prep.entries]
+    if not prep.ready:
+        lines.append(f"接收通道未就绪：{prep.not_ready}")
+    return lines
+
+
+def _source_prep_row(outcome: RunOutcome) -> str:
+    """报告第三节的「来源接入」一行（票 02）：逐条来源的接入结局，或整趟的未就绪。"""
+    prep = outcome.source_prep
+    if not prep.ready:
+        return f"- 来源接入：接收通道未就绪 —— {prep.not_ready}"
+    if not prep.entries:
+        why = _first_line(prep.warnings[0]) if prep.warnings else "来源清单里没有别的来源"
+        return f"- 来源接入：没有可接入的来源清单（{why}）；本地已有的 judged 库照旧收"
+    head = "（用了上一版来源清单）" if prep.stale else ""
+    return f"- 来源接入{head}：" + " · ".join(_source_prep_text(entry) for entry in prep.entries)
+
+
+def _source_prep_failures(source_prep) -> list[str]:
+    """来源接入这半的硬失败（退出码 2）：没有任何可用来源 = 接收通道未就绪。
+
+    不能表现成「没有新判断集」——这正是 2026-09-24 现场那类误导的落点。
+    """
+    if source_prep is not None and not source_prep.ready:
+        return [f"接收通道未就绪：{source_prep.not_ready}"]
+    return []
+
+
+def _source_prep_soft(source_prep) -> bool:
+    """需要人看一眼的接入状况（退出码 1）：某来源被阻断/跳过，或计划库拉不动用了上一版。
+
+    未就绪另有硬失败那一档，不在这里重复记。
+    """
+    if source_prep is None or not source_prep.ready:
+        return False
+    return source_prep.stale or any(
+        entry.state in (judged_sources.SOURCE_BLOCKED, judged_sources.SOURCE_SKIPPED)
+        for entry in source_prep.entries)
 
 
 def _package_row(db: Database, ref: export.PackageRef,
@@ -844,7 +923,7 @@ def _conflicts(db: Database, *, week: str, machine_id: str,
 
 
 def _summary(*, only, export_result, export_note, imported, merge_ran,
-             judgment_publish=None, judgment_collect=None) -> str:
+             judgment_publish=None, judgment_collect=None, source_prep=None) -> str:
     """报告开头的「本次运行」行：这一次具体做了什么。判断集两段只在真跑了时出现。"""
     parts: list[str] = []
     if only is not None:
@@ -880,6 +959,18 @@ def _summary(*, only, export_result, export_note, imported, merge_ran,
             parts.append(f"{len(failed)} 个包没导成")
         if not (fresh or skipped or failed):
             parts.append("没有新包")
+    if source_prep is not None:
+        if not source_prep.ready:
+            parts.append("接收通道未就绪")
+        else:
+            cloned = [entry for entry in source_prep.entries if entry.action == "cloned"]
+            off = [entry for entry in source_prep.entries
+                   if entry.state in (judged_sources.SOURCE_BLOCKED,
+                                      judged_sources.SOURCE_SKIPPED)]
+            if cloned:
+                parts.append(f"新接入来源 {len(cloned)} 个")
+            if off:
+                parts.append(f"{len(off)} 个来源没接入")
     if judgment_collect is not None:
         results = list(judgment_collect.results)
         fresh = [r for r in results if not r.skipped and not r.failed and r.note is None]
@@ -916,7 +1007,7 @@ def _gap_detail(gaps: list[GapLine], *, reasons: bool) -> str:
 
 def _todo(*, machine_id, week, plan_of_shop, gaps, conflicts, missing, pulls, export_result,
           imported, image_missing_total, judgment_publish=None,
-          judgment_collect=None, source_refresh=None) -> tuple[str, ...]:
+          judgment_collect=None, source_refresh=None, source_prep=None) -> tuple[str, ...]:
     """「下次该做什么」：从这次运行的事实与账里长出来。"""
     week_short = week.split("-")[1]
     items: list[str] = []
@@ -987,6 +1078,15 @@ def _todo(*, machine_id, week, plan_of_shop, gaps, conflicts, missing, pulls, ex
         items.append("判断来源清单有来源减少或远端地址变化（见第三节）：核对 token 权限与库是否"
                      "真被删/改名，确认无误后跑 `python exchange.py --confirm-source-shrink` "
                      "按新的发布")
+    if source_prep is not None and not source_prep.ready:
+        items.append(f"接收通道未就绪（见第三节）：{source_prep.not_ready}")
+    elif source_prep is not None and source_prep.stale:
+        items.append("计划库这次拉不动、来源接入用了上一版快照（见第三节）：通道恢复后重跑一次；"
+                     "本机还没有克隆的来源这次没有新建")
+    if source_prep is not None:
+        for entry in source_prep.entries:
+            if entry.state == judged_sources.SOURCE_BLOCKED:
+                items.append(f"{entry.repo} 没接入（见第三节）：{_first_line(entry.failure)}")
 
     return tuple(items) if items else ("没有待办：本周干净",)
 
@@ -1061,6 +1161,9 @@ def _judgment_section(outcome: RunOutcome) -> list[str]:
     # 「本机不是来源维护机」是恒定事实、不是状态，收进报告只会每周重复一句噪声。
     if outcome.source_refresh is not None and outcome.source_refresh.note is None:
         out.append(_source_row(outcome))
+    # 来源接入一行（票 02）：只在收取真跑过时出现（没配分析配置 / --only 别的动作都不出现）。
+    if outcome.source_prep is not None:
+        out.append(_source_prep_row(outcome))
     if outcome.judgments is None:
         # 没配分析配置：判断集这半整趟没做——如实写一句，不折成失败（那是上机阶段的事）
         out.append(f"- 这趟没做：{outcome.judgment_note}")
