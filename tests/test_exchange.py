@@ -39,7 +39,8 @@ from bestseller_monitor.db import CST
 from bestseller_monitor.git_channel import GitChannel
 from bestseller_monitor.image_store import ImageStoreError
 from bestseller_monitor.matching import ModelConfig, prepare_cache, signature_of_model
-from helpers import crawler_cfg, group, insert_sku_image, ledger_of, member, store_weekly_plan
+from helpers import (crawler_cfg, group, insert_sku_image, ledger_of, member, store_weekly_plan,
+                     tamper_package)
 from tests.git_repos import GitSandbox, WorldTemplate
 
 WEEK = "2026-W38"
@@ -56,14 +57,13 @@ CONTRACT_ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
 CONTRACT_MODEL = "deepseek-chat"
 
 
-def seed_judgments(cache, *, machine_id, rows=(("pair-1", "sig-1"),), evidence=()) -> None:
+def seed_judgments(cache, *, machine_id, rows=(("pair-1", "sig-1"),)) -> None:
     """往判断缓存里预置判断行（spec「预置缓存行」的口径，不调模型）。
 
     交换台这半不消费判断（消费在分析那半），所以结果正文只要是段 JSON、行能进包就行；
     行内容是不跑模型的捷径（pair 与版本都是字面量标签）——**只给本机缓存预置用**。
     要发布出去、会被收取端验的包走 `ConsoleWorld.judged_publish`（那边按 `matching`
-    的口径生成真形状的行，票 04 起收端会验包内自洽）。`rows` 是 (标签, 署名)；
-    `evidence` 是 (身份, 版本) 的证据索引行。
+    的口径生成真形状的行，票 04 起收端会验包内自洽）。`rows` 是 (标签, 署名)。
     """
     conn = sqlite3.connect(cache)
     try:
@@ -73,9 +73,6 @@ def seed_judgments(cache, *, machine_id, rows=(("pair-1", "sig-1"),), evidence=(
             "result) VALUES (?,?,?,?,?,?)",
             [(pair, sig, machine_id, f"ev-{pair}-a", f"ev-{pair}-b", '{"same": true}')
              for pair, sig in rows])
-        conn.executemany(
-            "INSERT OR REPLACE INTO evidence(identity,version,name,image_hash,image_data,origin)"
-            " VALUES (?,?,'商品',NULL,NULL,'新商品')", list(evidence))
         conn.commit()
     finally:
         conn.close()
@@ -339,15 +336,14 @@ class ConsoleWorld:
             "draft", "2026-09-01", "2026-09-02", "2026-09-22T20:00:00+08:00",
             {"products": []}, ledger)
 
-    def judged_publish(self, machine, *, rows=None, evidence=(), ledger=None) -> None:
+    def judged_publish(self, machine, *, rows=None, ledger=None) -> None:
         """别的机器发布判断集：经它的旁路克隆推到裸库（真打包，与票 03 同一条路）。
 
         包在 judged-<机器> 库里的相对路径就是 `PACKAGE_REL`（一个库一本、覆盖同名路径）。
         行内容取真形状（票 04）：pair 与证据版本都按 `matching` 的口径从内容算出
         （对级判断的键 = 两端证据版本的摘要）、两名成员的证据索引行随行——收端门禁会验
         包内自洽，夹具出的包就得是合格式的。`rows` 是 (标签, 署名)，缺省一行本机当前
-        契约署名（要造署名不符的包就显式传别的署名）；`evidence` 是额外的 (身份, 标签)
-        证据行。
+        契约署名（要造署名不符的包就显式传别的署名）。
         """
         cache = self.box.tmp / f"{machine}-cache.sqlite"
         store = self.box.tmp / f"{machine}-drafts.sqlite"
@@ -371,13 +367,6 @@ class ConsoleWorld:
                     "image_data,origin) VALUES (?,?,?,?,?,?)",
                     [(f"{label}-甲", fingerprint_a, f"{label}·甲", None, None, "新商品"),
                      (f"{label}-乙", fingerprint_b, f"{label}·乙", None, None, "新商品")])
-            for identity, label in evidence:
-                fingerprint = matching.version({"product_name": f"证据-{label}",
-                                                "image_hash": None})
-                conn.execute(
-                    "INSERT OR REPLACE INTO evidence(identity,version,name,image_hash,"
-                    "image_data,origin) VALUES (?,?,?,?,?,?)",
-                    (identity, fingerprint, f"证据-{label}", None, None, "新商品"))
             conn.commit()
         finally:
             conn.close()
@@ -395,20 +384,8 @@ class ConsoleWorld:
                              message=f"judged publish {machine}")
 
     def tamper_judged(self, machine, mutate) -> None:
-        """把 judged-<机器> 已发布的那份包拆出来、`mutate(conn)` 改一处、重新压回去（真推送）。
-
-        给门禁用例造坏包/异格式包用。改 meta 的包内容摘要不变（meta 不进摘要）、改行内容的
-        包摘要会变——两种按用例自己挑。
-        """
-        work = self.judged_work[machine]
-        package = self.box.tmp / f"tampered-{machine}.db"
-        package.write_bytes(gzip.decompress((work / judgment_set.PACKAGE_REL).read_bytes()))
-        with contextlib.closing(sqlite3.connect(package)) as conn, conn:
-            mutate(conn)
-        self.box.commit_push(work,
-                             {judgment_set.PACKAGE_REL:
-                              gzip.compress(package.read_bytes(), mtime=0)},
-                             message=f"tampered {machine}")
+        """把 judged-<机器> 已发布的那份包改一处再推（真推送）：坏包/异格式包交给用例挑。"""
+        tamper_package(self.box, self.judged_work[machine], judgment_set.PACKAGE_REL, mutate)
 
     def publish_broken_judged(self, machine, payload=b"not a judgment set at all") -> None:
         """别的机器那本 judged 库里放一个读不成判断集的包（坏包那一路）。"""
@@ -865,6 +842,27 @@ class JudgmentSetTests(JudgmentSetCase):
                       f"（商品 {member('o1')}、{member('o2')}；外来包提交 {collect_head}；"
                       "在分析页面上裁决）", report)
         self.assertEqual([c.kind for c in self.draft_store().conflicts()], ["group_vs_exclusion"])
+
+    def test_a_broken_model_section_still_collects_and_the_gate_line_says_unevaluated(self):
+        """票 04：分析配置的模型段写坏 → 契约署名推不出——门禁照走、如实记「未评估」，
+        gated_out 数照印（报告里四个数同时可见），不拦收取。"""
+        self.world.judged_publish("m2")
+        self.world.sync()            # 上次运行拉过（只有 collect 时周包缺口不掺进退出码）
+        self.world.analysis_path.write_text(
+            "[analysis]\n"
+            f'database = "{self.world.db_path.as_posix()}"\n'
+            f'store = "{self.world.judgment_store.as_posix()}"\n'
+            "\n[matching]\n"
+            f'cache = "{self.world.cache.as_posix()}"\n'
+            'model = "不是一节表"\n',
+            encoding="utf-8")
+
+        outcome = self.world.run(only="collect")
+
+        self.assertEqual(outcome.exit_code, 0, outcome.failures)
+        report = self.world.report()
+        self.assertIn("；门禁 gated_out 0 条；未评估 1 条（本机没有可用的分析署名）；", report)
+        self.assertIn("- 采纳：判断 未评估", report)
 
     def test_a_second_run_skips_the_collected_set_and_forwards_it_on(self):
         """收进来的判断进了本机判断集：下一次发布把它带上（内容身份不变，票 03 的转发口径）；

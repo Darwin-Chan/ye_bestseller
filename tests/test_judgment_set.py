@@ -42,7 +42,7 @@ from bestseller_monitor.matching import (STATUS_CACHE, STATUS_MODEL, MatchingCon
                                          MatchingService, ModelConfig, identity, prepare_cache,
                                          signature_of_model, version)
 from tests.git_repos import GitSandbox, WorldTemplate
-from helpers import group, ledger_of, member, submit_offer
+from helpers import group, ledger_of, member, submit_offer, tamper_package
 from test_exchange import FakeImageStore
 from test_matching import ModelTransport, product, singles
 
@@ -439,17 +439,8 @@ class CollectTests(JudgmentSetCase):
         return signature_of_model(ModelConfig().endpoint, "deepseek-chat")
 
     def republish_tampered(self, mutate, *, machine="m1") -> None:
-        """把 judged-<机器> 已发布的那份包拆出来、`mutate` 改一处、重新压回去（真推送）。
-
-        给门禁用例造坏包/异格式包：改 meta 的包内容摘要不变（meta 不进摘要），改行内容的
-        摘要会变——两种都按用例自己挑。
-        """
-        repo = self.exchange / f"judged-{machine}"
-        package = self.root / f"tampered-{machine}.db"
-        package.write_bytes(gzip.decompress((repo / PACKAGE_REL).read_bytes()))
-        with closing(sqlite3.connect(package)) as conn, conn:
-            mutate(conn)
-        self.box.commit_push(repo, {PACKAGE_REL: gzip.compress(package.read_bytes(), mtime=0)})
+        """把 judged-<机器> 已发布的那份包改一处再推（真推送）：坏包/异格式包交给用例挑。"""
+        tamper_package(self.box, self.exchange / f"judged-{machine}", PACKAGE_REL, mutate)
 
     def dump(self, cache=None):
         """缓存里三类表 + 导入账的全部行：幂等断言比这个（比计数严）。"""
@@ -1503,6 +1494,28 @@ class ConflictLedgerTests(DecisionCarryCase):
         self.assertTrue(repeat.results[0].skipped, "同一包重复收取：什么都不做")
         self.assertEqual(self.conflicts()[0].source_commit, source_commit,
                          "重遇同一条冲突：账不变、提交不重写")
+
+    def test_an_old_conflict_ledger_gains_the_source_commit_column(self):
+        """票 04：老冲突账缺来源提交列——打开即补；老行照旧可读（空串），新记的行带提交。"""
+        with closing(sqlite3.connect(self.store)) as conn, conn:
+            conn.execute(
+                "CREATE TABLE decision_conflicts (digest TEXT PRIMARY KEY, kind TEXT NOT NULL,"
+                " members TEXT NOT NULL, incoming_machine TEXT NOT NULL, incoming TEXT NOT NULL,"
+                " local_machines TEXT NOT NULL, local TEXT NOT NULL, seen_at TEXT NOT NULL,"
+                " resolved_at TEXT NOT NULL DEFAULT '')")
+            conn.execute(
+                "INSERT INTO decision_conflicts VALUES ('old','different_groups','[\"a\"]',"
+                "'m1','{}','[\"m4\"]','[]','2026-01-01T00:00:00+00:00','')")
+        self.seed_ledger(ledger_of(excluded=[[member("11"), member("22"), "m4"]]))
+
+        result = self.merge(ledger_of(relations=[group("11", "22", "33")]),
+                            source_commit="abc1234")
+
+        stored = self.conflicts()
+        self.assertEqual([row.source_commit for row in stored], ["", "abc1234"],
+                         "老行按空默认值照旧可读；新记的带上提交")
+        self.assertEqual(stored[0].digest, "old", "老行原样留着")
+        self.assertEqual(result.conflicts[0].source_commit, "abc1234")
 
 
 class DecisionLifecycleTests(DecisionCarryCase):

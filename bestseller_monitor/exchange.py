@@ -1343,8 +1343,8 @@ def _collect_identity(result: judgment_set.CollectResult) -> str:
 def _gate_text(result: judgment_set.CollectResult) -> str:
     """这份包的门禁回执（票 04）：gated_out 数量与原因、未评估——接在计数行后面（带前导「；」）。
 
-    没记过门禁的老账（票 04 之前收的）如实说「未记录」，不冒充 0。契约读得出时不显示
-    「未评估」；一个判断行都没有的包只剩「gated_out 0 条」这一句，照样如实列。
+    没记过门禁的老账（票 04 之前收的）如实说「未记录」，不冒充 0。gated_out 数每份都印
+    （验收要求四个数同时可见）；契约读不出时补一句「未评估 N 条」说清哪部分判不了。
     """
     summary = result.gate_summary
     if not summary:
@@ -1354,10 +1354,8 @@ def _gate_text(result: judgment_set.CollectResult) -> str:
         details.append(f"署名不符 {summary['signature']}")
     if summary.get("evidence_version"):
         details.append(f"证据版本没有着落 {summary['evidence_version']}")
-    parts = []
-    if result.gated_out or not summary.get("unevaluated"):
-        parts.append(f"门禁 gated_out {result.gated_out} 条"
-                     + (f"（{'、'.join(details)}）" if details else ""))
+    parts = [f"门禁 gated_out {result.gated_out} 条"
+             + (f"（{'、'.join(details)}）" if details else "")]
     if summary.get("unevaluated"):
         parts.append(f"未评估 {summary['unevaluated']} 条（本机没有可用的分析署名）")
     return "；" + "；".join(parts)

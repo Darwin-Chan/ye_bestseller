@@ -500,10 +500,11 @@ class CollectResult:
     别家照收。`unreachable` 标记失败出在**通道**（这本拉不动）而不是包本身——交换台
     周报按它分退出码，与采集侧「通道没拉成」/「有包没导成」两档同规。
 
-    门禁回执（票 04、spec §4）：`gate_summary` 是这份包判断行的门禁分类计数
-    （`gated_out` 总量与三个原因各自的行数；重复收取时从账里回放，口径与首次一致），
-    `contract_signature` 是当时对着判的那份本机契约署名（空 = 读不出，门禁未评估）。
-    格式与自洽拒绝的包走 `failure`，不会在账上留下回执。
+    门禁回执（票 04、spec §4）：`gate_summary` 是这份包判断行的门禁分类计数——`gated`
+    与 `gated_out` 两档，后者再分「署名不符」「证据版本没有着落」两个原因，契约读不出
+    的行另计 `unevaluated`（重复收取时从账里回放，口径与首次一致）；`contract_signature`
+    是当时对着判的那份本机契约署名（空 = 读不出，门禁未评估）。格式与自洽拒绝的包走
+    `failure`，不会在账上留下回执。
     """
 
     machine: str
@@ -522,7 +523,7 @@ class CollectResult:
     snapshot_version: str = ""   # 这趟收取看到的来源清单版本（plan 提交短哈希；读不到时为空）
     remote: str = ""             # 来源库的远端地址（只作识别，不参与判法）
     # 票 04 的门禁回执（同上，从账里回放）：
-    gate_summary: dict = dataclasses.field(default_factory=dict)
+    gate_summary: dict[str, int] = dataclasses.field(default_factory=dict)
     contract_signature: str = ""
 
     @property
@@ -933,7 +934,7 @@ def _established_versions(conn: sqlite3.Connection, sliced: dict) -> set[str]:
 
 
 def _classify_gates(sliced: dict, *, contract_signature: str,
-                    established: set[str]) -> dict:
+                    established: set[str]) -> dict[str, int]:
     """给包里每条判断行记门禁分类（票 04、spec §4）：gated / gated_out / 未评估。
 
     - 署名与本机当前契约不符 → gated_out（`signature`）——分析消费只认同署名，这行照收
@@ -942,7 +943,8 @@ def _classify_gates(sliced: dict, *, contract_signature: str,
     - 契约读不出（空署名）→ `unevaluated`：不猜哪边，如实记账；
     - 其余 → `gated`（对当前消费可用的那部分）。
 
-    署名不符先判、证据版本后判：一行只进一类，四类之和 = 包里判断行总数。
+    署名不符先判、证据版本后判：一行只进一类，四类之和 = 包里判断行总数。调用方保证
+    `sliced` 已过 `_consistency_problems`（判断表的列都在），这里不再验列。
     """
     names, rows = sliced["judgments"]
     index = {name: position for position, name in enumerate(names)}

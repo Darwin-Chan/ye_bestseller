@@ -10,7 +10,7 @@
 只作显示与冲突说明、不参与键；写入时行上带了就照它写，没带就记本机。
 
 外来决定经判断集收取并进来（票 04、`merge_incoming`）：不冲突即生效、冲突写进冲突账
-`decision_conflicts`（两侧来源机器与内容、记下的时刻、外来那侧随行的来源提交），只增不
+`decision_conflicts`（两侧来源机器与内容、记下的时刻；外来那侧随行的来源提交是 issue 06 票 04 加的），只增不
 自动消解——人在页面上裁决后本机账本按现有编辑动作变化、下一次发布带走，冲突行留着作历史。
 """
 from __future__ import annotations
@@ -92,7 +92,7 @@ class Conflict:
     `resolved_at` 是人裁决过的时刻（票 07）：页面上用现有编辑动作裁决后、下一次保存
     记下它；空串＝还没裁决。行照旧只增，裁决只标时刻。
 
-    `source_commit` 是外来那一侧随行的来源提交（票 04，spec §5）：这份决定搭乘的
+    `source_commit` 是外来那一侧随行的来源提交（issue 06 票 04，spec §5）：这份决定搭乘的
     包所在的来源库提交短哈希；记第一次收到的那笔（同一条冲突再遇到不重写），
     本机一侧没有提交可言——本机决定来自分析保存，不是一个 git 提交。
     """
@@ -154,7 +154,7 @@ class DraftStore:
                          " ADD COLUMN resolved_at TEXT NOT NULL DEFAULT ''")
 
     def _add_source_commit_column(self, conn):
-        """老库补上来源提交列（一次性，票 04）：补列前的冲突没记过外来包的来源提交，空串即未记。"""
+        """老库补上来源提交列（一次性，issue 06 票 04）：补列前的冲突没记过外来包的来源提交，空串即未记。"""
         if 'source_commit' in {row[1] for row in conn.execute(f'PRAGMA table_info({CONFLICT_TABLE})')}:
             return
         with conn:
@@ -253,7 +253,7 @@ class DraftStore:
         来源：行上带了就用行的（转发的决定仍点名原来那台机器），没带记 `source`。
         让位与冲突都以行的来源为界：转发来的别人的话，仍算别人的。
         `seen_at` 是记下的时刻（收取时刻，UTC ISO）；`source_commit` 是这份外来账本
-        所搭乘的包的来源提交（票 04，随冲突行留档；直接调用没有提交可言时留空）。
+        所搭乘的包的来源提交（issue 06 票 04，随冲突行留档；直接调用没有提交可言时留空）。
         """
         conn = self._connect()
         try:
@@ -271,7 +271,7 @@ class DraftStore:
         按记下的先后返回；形状与并入结果里的 `Conflict` 一致（`recorded` 恒为真——
         记下来的都已经在账上）。人裁决过的带 `resolved_at`（票 07）：页面按它把
         已裁决的冲突从展示里摘掉，行本身照旧留着作历史。`source_commit` 是记下这条
-        冲突时外来那侧随行的来源提交（票 04）。
+        冲突时外来那侧随行的来源提交（issue 06 票 04）。
         """
         if not self.path.exists():
             return []
@@ -658,7 +658,7 @@ class _LedgerMerge:
     def _conflict(self, kind, incoming, local_contents):
         """记一条冲突：本机一行不动、外来那一行也不并；同一条重复遇到只核对不重记。
 
-        `source_commit`（外来包随行的来源提交，票 04）只随**第一次**记下的那笔留档：
+        `source_commit`（外来包随行的来源提交，issue 06 票 04）只随**第一次**记下的那笔留档：
         同一条冲突再遇到时不重写——与判断行的来源「先到者保留」同规。
         """
         local_contents = sorted(local_contents,
