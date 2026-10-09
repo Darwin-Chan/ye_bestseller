@@ -60,6 +60,24 @@ def _context(snapshot, member, groups):
                                           excluded_skus=sorted(snapshot.get("excluded_skus", []))))
 
 
+def preserve_history(snapshot, member, previous, target, work):
+    """Keep a valid audit trail, without treating an unknown new alternative as unique."""
+    audit = previous.get("recommendation")
+    if not audit or audit.get("group_id") != target["id"] or audit.get("rule") != RULE_VERSION:
+        return False
+    groups = _legal_groups(snapshot, member, previous.get("candidate_groups", []))
+    context = _context(snapshot, member, groups)
+    key = digest(context)
+    if key != audit.get("context") or work.completed_result("recommendation", context, RULE_VERSION) is None:
+        return False
+    result, cached = work.execute("recommendation", context, [identity(member)], RULE_VERSION, key, None)
+    member.update(recommendation=dict(result, cached=cached, context=key, rule=RULE_VERSION),
+                  multiple_candidates=True, candidate_groups=[g["id"] for g in groups],
+                  matching_state="recommended", grouping_basis="多候选推荐（未人工确认）",
+                  matching_note="多个候选；保留有效历史推荐加入 "+target["id"]+"："+result["reason"])
+    return True
+
+
 def apply(snapshot, config, *, stop=None, reload_manual=None, work):
     judge = ImageJudge(config) if config and config.mode != "disabled" else None
     for member in snapshot["members"]:

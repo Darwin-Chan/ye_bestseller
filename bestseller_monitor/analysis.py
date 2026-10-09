@@ -283,7 +283,7 @@ class AnalysisService:
 
     def settings(self):
         return {"full_capture_weekday": self.config.full_capture_weekday,
-                "machine": self.config.machine}
+                "machine": self.config.machine, "member_kind": self.config.member_kind}
 
     def coverage(self, day):
         date.fromisoformat(day)

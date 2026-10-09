@@ -173,11 +173,16 @@ def _apply(snapshot, config, work, *, stop=None, reload_manual=None, previous_sn
             continue  # the unencoded side will join this coded anchor instead
         if not all(_legal(snapshot, member, members[other]) and frozenset((key, other)) not in negative for other in target_ids):
             continue
+        from .sku_recommendations import preserve_history
+        retained = (key in failed_members and valid_history(key, target)
+                    and preserve_history(snapshot, member, previous_members[key], target, work))
         ref = source["members"].pop()
         target["members"].append(ref)
         target["confirmed"] = False
-        member.update(added_to_group=True, grouping_basis="图文归组", matching_state="image_rule",
-                      matching_note="图文依据：" + "; ".join(e["reason"] for edge, e in positive.items() if key in edge and any(other in edge for other in target_ids)))
+        member["added_to_group"] = True
+        if not retained:
+            member.update(grouping_basis="图文归组", matching_state="image_rule",
+                          matching_note="图文依据：" + "; ".join(e["reason"] for edge, e in positive.items() if key in edge and any(other in edge for other in target_ids)))
         target["image_grouping"] = True
         moved.add(key)
     from .sku_recommendations import apply as apply_recommendations

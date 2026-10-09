@@ -46,14 +46,21 @@ class ModelWork:
         task = self.tasks[digest(dict(branch=branch, context=context))]
         return task.get("error", task["reason"])
 
+    def completed_result(self, branch, context, rule):
+        cfg = self.config
+        signature = digest({**signature_parts(cfg), "rule": rule}) if cfg and cfg.mode != "disabled" else None
+        old = self.previous.get(digest(dict(branch=branch, context=context)))
+        if old and old["completed"] and (signature is None or old.get("signature") == signature):
+            return old["result"]
+        return None
+
     def execute(self, branch, context, members, rule, cache_key, call):
         cfg = self.config
         signature = digest({**signature_parts(cfg), "rule": rule}) if cfg and cfg.mode != "disabled" else None
         key = digest(dict(branch=branch, context=context))
         old = self.previous.get(key)
-        result, cached = None, False
-        if old and old["completed"] and (signature is None or old.get("signature") == signature):
-            result, cached = old["result"], True
+        result = self.completed_result(branch, context, rule)
+        cached = result is not None
         if result is None and signature:
             if self.conn is None:
                 cfg.cache.parent.mkdir(parents=True, exist_ok=True)

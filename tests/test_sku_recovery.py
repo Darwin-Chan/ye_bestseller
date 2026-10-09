@@ -377,6 +377,30 @@ class SkuRecoveryTests(unittest.TestCase):
         self.assertEqual(1, stopped["matching"]["reasons"]["stopped"])
         self.assertEqual(1, len(self.calls))
 
+    def test_historical_recommendation_retains_audit_when_new_candidate_is_unfinished(self):
+        a = self.seed("#A#", image=product_picture("red"))
+        self.seed("#C#", shop="C01", image=product_picture("blue"))
+        b = self.seed("无码", shop="B01", image=product_picture("green"))
+        first = self.analyze()
+        before = self.evidence(first, b)
+        self.assertEqual("recommended", before["matching_state"])
+        self.service.save_draft(first["id"])
+        self.seed("#D#", shop="D01", image=product_picture("purple"))
+        def fail(content):
+            raise ModelFailure("新候选调用失败")
+        self.result = fail
+        for stopped in (False, True):
+            result = self.service.retry_matching(first["id"], stop=lambda: stopped)
+            member = self.evidence(result, b)
+            self.assertEqual(self.group_for(first, b)["id"], self.group_for(result, b)["id"])
+            self.assertEqual(before["recommendation"]["reason"], member["recommendation"]["reason"])
+            self.assertEqual(before["candidate_groups"], member["candidate_groups"])
+            self.assertEqual("recommended", member["matching_state"])
+            self.assertEqual(1, len(self.recommend_calls))
+        self.service.save_draft(first["id"])
+        saved = AnalysisService(self.service.config, running=lambda: False).get(first["id"])
+        self.assertEqual(before["recommendation"]["reason"], self.evidence(saved, b)["recommendation"]["reason"])
+
     def test_retry_recommendation_rechecks_manual_save_during_external_call(self):
         a, b, c, d, _ = self.split_code_anchors()
         def fail(context):
@@ -504,6 +528,24 @@ class SkuRecoveryBrowserTests(unittest.TestCase):
         self.assertEqual(3, len(self.recommend_calls))
         expect(self.page.locator("#runMatching")).to_be_disabled()
         self.retain("recommendation-resumed-uncertain")
+
+    def test_page_historical_recommendation_keeps_reason_during_new_failure(self):
+        from playwright.sync_api import expect
+        self.seed("#A#", image=product_picture("red"))
+        self.seed("#C#", shop="C01", image=product_picture("blue"))
+        b = self.seed("无码", shop="B01", image=product_picture("green"))
+        first = self.analyze()
+        self.service.save_draft(first["id"])
+        self.seed("#D#", shop="D01", image=product_picture("purple"))
+        def fail(content):
+            raise ModelFailure("新候选调用失败")
+        self.result = fail
+        self.begin()
+        expect(self.page.locator("#matchingStatus")).to_contain_text("调用失败")
+        self.page.locator("#skuQuery").fill("B01")
+        expect(self.page.locator(".sku-evidence-card").filter(has_text="原始 SKU 名称：无码")).to_contain_text("杯口与底座证据更完整")
+        self.assertEqual(1, len(self.recommend_calls))
+        self.retain("historical-recommendation-new-failure")
 
     def test_page_missing_picture_only_can_recheck_after_evidence_restored(self):
         from playwright.sync_api import expect
