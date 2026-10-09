@@ -139,6 +139,45 @@ class SkuRecommendationTests(unittest.TestCase):
         self.assertFalse(self.group_for(result, b)["confirmed"])
         self.assertEqual(2, len(self.evidence(result, b)["candidate_groups"]))
 
+    def test_split_first_automatic_member_keeps_distinct_candidate_ids_after_replay(self):
+        a = self.seed("#A#", image=product_picture("red"))
+        c = self.seed("#A#", shop="C01", image=product_picture("blue"))
+        first = self.analyze()
+        original = self.group_for(first, a)["id"]
+        split = self.service.edit_group(first["id"], "remove", original, a)
+        ids = [g["id"] for g in split["groups"]]
+        self.assertEqual(len(ids), len(set(ids)))
+        target = self.group_for(split, a)["id"]
+        self.assertNotEqual(original, target)
+        self.service.confirm_groups(split["id"], ids)
+        self.service.save_draft(split["id"])
+        b = self.seed("#A#", shop="B01", image=product_picture("green"))
+        self.recommend_result = dict(group_id=target, reason="拆出的首成员组更接近")
+        result = self.analyze()
+        self.assertEqual(target, self.group_for(result, b)["id"])
+        self.assertEqual({original, target}, set(self.evidence(result, b)["candidate_groups"]))
+        self.assertNotEqual(target, self.group_for(result, c)["id"])
+        self.assertEqual(1, self.group_for(result, c)["sku_count"])
+        self.service.save_draft(result["id"])
+        again = self.analyze()
+        self.assertEqual(target, self.group_for(again, b)["id"])
+        self.assertEqual(1, len(self.recommend_calls))
+
+    def test_exclude_first_automatic_member_is_separately_addressable_after_restore(self):
+        a = self.seed("#A#", image=product_picture("red"))
+        c = self.seed("#A#", shop="C01", image=product_picture("blue"))
+        first = self.analyze()
+        original = self.group_for(first, a)["id"]
+        excluded = self.service.edit_group(first["id"], "exclude", original, a)
+        self.assertNotEqual(self.group_for(excluded, a)["id"], self.group_for(excluded, c)["id"])
+        self.service.save_draft(excluded["id"])
+        again = self.analyze()
+        target = self.group_for(again, a)["id"]
+        self.assertTrue(self.group_for(again, a)["excluded_group"])
+        included = self.service.edit_group(again["id"], "undo_exclude", target, a)
+        self.assertFalse(self.group_for(included, a)["excluded_group"])
+        self.assertEqual(2, len(included["groups"]))
+
     def test_mixed_code_exception_is_local_to_candidate_group(self):
         a, b, c, first = self.split_anchors(mixed=True)
         target = self.group_for(first, a)["id"]
@@ -420,8 +459,11 @@ class SkuRecommendationBrowserTests(unittest.TestCase):
         expect(card).to_contain_text("人工归组")
         self.page.locator("#saveDraft").click()
         expect(self.page.locator("#saveStatus")).to_contain_text("已保存")
-        saved = self.service.get(self.service.store.latest()["id"])
-        self.assertEqual(alternative, self.group_for(saved, b)["id"])
+        self.page.reload()
+        self.page.locator("#skuQuery").fill("B01")
+        expect(self.page.locator("#groupDetail")).to_contain_text(alternative)
+        expect(card).to_contain_text("人工归组")
+        expect(card).to_contain_text("杯口与底座证据更完整")
         self.retain("human-moved-to-alternative")
 
     def test_successful_uncertainty_is_visible_and_restored_without_fake_scores(self):

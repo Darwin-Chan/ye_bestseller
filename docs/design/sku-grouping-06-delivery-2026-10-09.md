@@ -19,15 +19,17 @@
 
 公开 AnalysisService 操作及真实临时历史／决定存储为主要接缝，仅控制外部模型；真实 Edge 浏览器覆盖推荐、替代候选、保存恢复、人工改组和无法确定。
 
-- 推荐22项通过；同码22、草稿23、分组4、排行9、切换7项定向通过。旧匹配14项首次1项本机HTTP重定向失败，保留证据并复核，不删除失败记录。
+- 推荐24项通过（新增建组首成员拆出／排除回归）；同码22、草稿23、分组4、排行9、切换7项定向通过。旧匹配14项首次1项本机HTTP重定向失败，保留证据并复核，不删除失败记录。
 - 已保留请求失败记账红灯及修复绿灯；缺图、人工排除／调用中改组、非法目标及证据／成员／规则变更覆盖齐全。
 - 语法编译和 `git diff --check` 用于快速检查，不冒称静态类型检查。未发现已配置静态类型检查器。
-- 双轴审查和隔离分段全量待补最终结果；本初稿不表示工单已完成。
+- 初审 Standards 1项P2：浏览器测试读取内部存储，改为页面刷新验证；Spec 1项P1：拆出建组首成员造成重复组号，补公开服务红灯，区分人工新组身份并保证所有创建路径组号唯一。复审和隔离分段全量待补最终结果；本初稿不表示工单已完成。
 
 ## 证据及目录
 
 定向证据：`F:\AI\projects\bestseller\.scratch\logs\tickets\sku-grouping\06\20261009-sku06-01`。
 
-5张浏览器截图：`F:\AI\projects\bestseller\.scratch\tool-output\sku-grouping\06\20261009-sku06-01`。
+5张初始浏览器截图：`F:\AI\projects\bestseller\.scratch\tool-output\sku-grouping\06\20261009-sku06-01`。
 
 共享功能树 `F:\AI\projects\bestseller\.scratch\sandboxes\sku-grouping\02\bestseller` 保留供后票，不删除。全量副本、审查及最终处置将在收口补齐。
+
+审查修复后3张浏览器截图：`F:\AI\projects\bestseller\.scratch\tool-output\sku-grouping\06\20261009-sku06-review-fix`。

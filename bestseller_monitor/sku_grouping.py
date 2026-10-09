@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from hashlib import sha256
+from uuid import uuid4
 
 from .stock_series import aggregate_points
 from .sku_codes import changed_evidence
@@ -28,9 +29,16 @@ def member_key(member: dict) -> tuple[str, str, str]:
     return member["shop_key"], member["offer_id"], member["sku_id"]
 
 
-def _new_group(member: dict, *, group_id: str | None = None, excluded: bool = False) -> dict:
+def _new_group(member: dict, *, group_id: str | None = None, excluded: bool = False, existing_ids=()) -> dict:
+    base = group_id or "sku-" + sha256(identity(member).encode("utf-8")).hexdigest()[:12]
+    occupied = set(existing_ids)
+    candidate = base
+    suffix = 2
+    while candidate in occupied:
+        candidate = f"{base}-{suffix}"
+        suffix += 1
     return {
-        "id": group_id or "sku-" + sha256(identity(member).encode("utf-8")).hexdigest()[:12],
+        "id": candidate,
         "members": [dict(shop_key=member["shop_key"], offer_id=member["offer_id"], sku_id=member["sku_id"])],
         "confirmed": False,
         "adjusted": False,
@@ -118,7 +126,7 @@ def refresh(snapshot: dict) -> None:
     for member in snapshot.get("members", []):
         key = identity(member)
         if key not in seen:
-            snapshot["groups"].append(_new_group(member))
+            snapshot["groups"].append(_new_group(member, existing_ids=(g["id"] for g in snapshot["groups"])))
             seen.add(key)
     snapshot["groups"] = [group for group in snapshot["groups"] if group["members"]]
     for group in snapshot["groups"]:
@@ -199,7 +207,8 @@ def edit_group(snapshot: dict, action: str, group_id: str, member: dict, target_
             reason = "人工排除"
         source_others = [item for item in source["members"] if identity(item) != key]
         source["members"].remove(source_member)
-        target = _new_group(source_member, excluded=excluded_group)
+        target = _new_group(source_member, group_id="sku-manual-" + uuid4().hex[:12], excluded=excluded_group,
+                            existing_ids=(g["id"] for g in snapshot["groups"]))
         target["manual_reason"] = reason
         target["adjusted"] = True
         source["confirmed"] = False
@@ -281,7 +290,7 @@ def apply_saved(snapshot: dict, saved: dict) -> None:
         groups.append(group)
     for member in snapshot["members"]:
         if identity(member) not in used:
-            groups.append(_new_group(member))
+            groups.append(_new_group(member, existing_ids=(g["id"] for g in groups)))
     snapshot["groups"] = groups
     snapshot["excluded"] = [list(pair) for pair in saved.get("excluded", []) if len(pair) == 2]
     snapshot["excluded_skus"] = sorted(set(saved.get("excluded_skus", [])) | {identity(ref) for group in saved_groups if group.get("excluded_group") for ref in group["members"]})
@@ -362,11 +371,11 @@ def apply_codes(snapshot: dict) -> None:
             member["candidate_groups"] = [g["id"] for g in targets]
             member["matching_state"] = "pending_candidates"
             member["matching_note"] = "多个候选，无法确定归属；等待候选比较"
-            groups.append(_new_group(member))
+            groups.append(_new_group(member, existing_ids=(g["id"] for g in groups)))
         elif code and code in automatic and all(frozenset((key, other)) not in excluded for other in _group_member_ids(automatic[code])):
             automatic[code]["members"].append({field: member[field] for field in ("shop_key", "offer_id", "sku_id")})
         else:
-            group = _new_group(member)
+            group = _new_group(member, existing_ids=(g["id"] for g in groups))
             groups.append(group)
             if code:
                 automatic[code] = group
