@@ -393,14 +393,18 @@ SOURCE_CONNECTED = "connected"
 SOURCE_CONNECTED_NO_PACKAGE = "connected_no_package"
 SOURCE_BLOCKED = "blocked"
 SOURCE_SKIPPED = "skipped"
+# 这次对本地克隆实际做的动作（`PreparedSource.action`；阻断/跳过时为空）。
+ACTION_CLONED = "cloned"        # 新建
+ACTION_UPDATED = "updated"      # 快进到新内容
+ACTION_UNCHANGED = "unchanged"  # 已是最新
 
 
 @dataclasses.dataclass(frozen=True)
 class PreparedSource:
     """一条来源的接入结果：本地目录在哪、结局如何、为什么。
 
-    `action` 只说这次对本地克隆做了什么：`cloned`（新建）/ `updated`（快进到新内容）/
-    `unchanged`（已是最新）；被阻断或跳过时为空。`failure` 是阻断的具体原因（原样引用
+    `action` 只说这次对本地克隆做了什么（`ACTION_CLONED` / `ACTION_UPDATED` /
+    `ACTION_UNCHANGED`）；被阻断或跳过时为空。`failure` 是阻断的具体原因（原样引用
     git 的输出）；`reason` 是「这次没接入」的说明——两者都不是整趟的失败（整趟的结论
     在 `PreparedSources` 上）。
     """
@@ -418,6 +422,14 @@ class PreparedSource:
     def usable(self) -> bool:
         """这条来源这次能不能交给收取：已接入的才算（被阻断/跳过的不读它的包）。"""
         return self.state in (SOURCE_CONNECTED, SOURCE_CONNECTED_NO_PACKAGE)
+
+    @property
+    def blocked(self) -> bool:
+        return self.state == SOURCE_BLOCKED
+
+    @property
+    def skipped(self) -> bool:
+        return self.state == SOURCE_SKIPPED
 
 
 @dataclasses.dataclass(frozen=True)
@@ -467,9 +479,10 @@ def prepare_sources(exchange_root: str | pathlib.Path, *, machine_id: str) -> Pr
     stale = False
     entries: list[PreparedSource] = []
     snapshot_state = "no_plan_clone"
+    trouble: str | None = None      # 清单不可用时的那句「为什么」（告警与未就绪共用一处）
     if not (plan / ".git").exists():
-        warnings.append(f"计划库还没有 clone 到 {plan}（上机清单第 9 / 11 步）："
-                        "读不到来源清单，来源没法自动接入。")
+        trouble = f"计划库还没 clone 到 {plan}（上机清单第 9 / 11 步），读不到来源清单"
+        warnings.append(f"{trouble}——来源没法自动接入。")
     else:
         channel = GitChannel(plan)
         try:
@@ -482,17 +495,17 @@ def prepare_sources(exchange_root: str | pathlib.Path, *, machine_id: str) -> Pr
         previous = _read_snapshot(channel)
         if previous.state == "absent":
             snapshot_state = "absent"
-            warnings.append(f"来源清单还没有发布过（plan 里没有 {SNAPSHOT_REL}）："
-                            "先让维护机（m4）跑一趟交换台刷新并发布。")
+            trouble = f"来源清单还没发布过（plan 里没有 {SNAPSHOT_REL}）"
+            warnings.append(f"{trouble}——先让维护机（m4）跑一趟交换台刷新并发布。")
         elif previous.state == "broken":
             snapshot_state = "broken"
-            warnings.append(f"来源清单读不出来（plan 里的 {SNAPSHOT_REL} 坏了）：不覆盖、不猜，"
-                            "先看一眼、修好再跑。")
+            trouble = f"来源清单读不出来（plan 里的 {SNAPSHOT_REL} 坏了）"
+            warnings.append(f"{trouble}——不覆盖、不猜，先看一眼、修好再跑。")
         elif previous.format_version != FORMAT_VERSION:
             snapshot_state = "unknown_format"
-            warnings.append(f"来源清单的格式版本本机不认识（读到 {previous.format_version!r}，"
-                            f"本机只懂 {FORMAT_VERSION}）：不按它动本地目录——"
-                            "升级本机程序再跑，别拿旧口径猜新格式。")
+            trouble = (f"来源清单的格式版本本机不认识（读到 {previous.format_version!r}，"
+                       f"本机只懂 {FORMAT_VERSION}）")
+            warnings.append(f"{trouble}——不按它动本地目录，升级本机程序再跑。")
         else:
             snapshot_state = "ok"
             entries = _connect_sources(root, machine_id=machine_id,
@@ -502,7 +515,7 @@ def prepare_sources(exchange_root: str | pathlib.Path, *, machine_id: str) -> Pr
                        judged_repos(root, exclude=machine_id) if machine not in declared)
     not_ready = None
     if not any(entry.usable for entry in entries) and not local_only:
-        not_ready = _not_ready_text(snapshot_state, entries=entries, plan=plan)
+        not_ready = _not_ready_text(trouble, entries=entries)
     return PreparedSources(machine_id=machine_id, root=root, entries=tuple(entries),
                            snapshot_state=snapshot_state, stale=stale,
                            warnings=tuple(warnings), not_ready=not_ready, local_only=local_only)
@@ -541,7 +554,8 @@ def _connect_sources(root: pathlib.Path, *, machine_id: str,
             try:
                 GitChannel.clone(entry.remote, dest)
             except ChannelError as exc:
-                resolved(SOURCE_BLOCKED, failure=f"克隆没成功：{exc}")
+                resolved(SOURCE_BLOCKED, failure=(
+                    f"克隆没成功：{exc}\n核对批准地址与凭据/网络后重跑（这本这次没接上）。"))
                 continue
             cloned = True
         channel = GitChannel(dest)
@@ -567,7 +581,7 @@ def _connect_sources(root: pathlib.Path, *, machine_id: str,
                 "不改 origin、不动它；核对这本是哪来的，收拾好之后重跑。"))
             continue
         if cloned:
-            action = "cloned"
+            action = ACTION_CLONED
         else:
             try:
                 changes = channel.local_changes()
@@ -581,7 +595,7 @@ def _connect_sources(root: pathlib.Path, *, machine_id: str,
                     f"工作区有未提交的改动（{shown}）：不清理、不重置——这本是只读来源，"
                     "本机不该在它里面改文件；人工看一眼再重跑。"))
                 continue
-            before = _head_or_none(channel)
+            before = channel.head_or_none()
             try:
                 channel.pull_ff_only()
             except ChannelError as exc:
@@ -589,7 +603,13 @@ def _connect_sources(root: pathlib.Path, *, machine_id: str,
                     f"更新没成功（只许快进，不 merge、不重置）：{exc}\n"
                     "本地有分叉的提交就说明有人动过这本，人工核对后重跑。"))
                 continue
-            action = "updated" if _head_or_none(channel) != before else "unchanged"
+            if not channel.head_matches_upstream():
+                resolved(SOURCE_BLOCKED, failure=(
+                    "本地这本有上游没有的提交（只许快进：pull 说「已是最新」也可能藏着"
+                    "这种提交）——读它的包等于读一份未经来源发布的判断集；不 merge、不重置，"
+                    "人工核对这本是哪来的、收拾好之后重跑。"))
+                continue
+            action = ACTION_UPDATED if channel.head_or_none() != before else ACTION_UNCHANGED
         if channel.read_path(PACKAGE_REL) is None:
             resolved(SOURCE_CONNECTED_NO_PACKAGE, action=action)
         else:
@@ -597,32 +617,14 @@ def _connect_sources(root: pathlib.Path, *, machine_id: str,
     return out
 
 
-def _head_or_none(channel: GitChannel) -> str | None:
-    """当前提交；还没有任何提交（空库的克隆）回 None——「更新没更新」拿它比。"""
-    try:
-        return channel.head()
-    except ChannelError:
-        return None
-
-
-def _not_ready_text(snapshot_state: str, *, entries: list[PreparedSource],
-                    plan: pathlib.Path) -> str:
+def _not_ready_text(trouble: str | None, *, entries: list[PreparedSource]) -> str:
     """「接收通道未就绪」的原因与下一步：为什么一条可用的来源都没有。"""
     parts: list[str] = []
-    if snapshot_state == "no_plan_clone":
-        parts.append(f"计划库还没 clone 到 {plan}（上机清单第 9 / 11 步），读不到来源清单")
-    elif snapshot_state == "absent":
-        parts.append("来源清单还没发布过——先让维护机（m4）跑一趟交换台刷新并发布")
-    elif snapshot_state == "broken":
-        parts.append(f"来源清单读不出来（plan 里的 {SNAPSHOT_REL} 坏了）：先看一眼、修好再跑")
-    elif snapshot_state == "unknown_format":
-        parts.append(f"来源清单的格式版本本机不认识（本机只懂 {FORMAT_VERSION}）："
-                     "升级本机程序再跑")
+    if trouble is not None:
+        parts.append(trouble)
     else:
-        blocked = [f"judged-{entry.machine_id}" for entry in entries
-                   if entry.state == SOURCE_BLOCKED]
-        skipped = [f"judged-{entry.machine_id}" for entry in entries
-                   if entry.state == SOURCE_SKIPPED]
+        blocked = [entry.repo for entry in entries if entry.blocked]
+        skipped = [entry.repo for entry in entries if entry.skipped]
         if blocked:
             parts.append("清单里的来源都没接上（" + "、".join(blocked) + "）")
         if skipped:

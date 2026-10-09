@@ -177,6 +177,21 @@ class BlockedSourceTests(PrepareCase):
         self.assertIn("快进", entry.failure)
         self.assertTrue((clone / "local.txt").exists(), "本地那笔提交与内容原样留着")
 
+    def test_a_clone_ahead_of_its_upstream_is_blocked_not_collected(self):
+        """本地领先（远端没动，pull 说「已是最新」）：照样是有人动过它——读它的包
+        等于读一份未经来源发布的判断集，按来源阻断。"""
+        self.box.clone(self.remote("m4"), "exchange/judged-m4")
+        clone = self.judged("m4")
+        self.box.write_files(clone, {PACKAGE_REL: b"hand-made-package"})
+        self.box.must("add", PACKAGE_REL, cwd=clone)
+        self.box.must("commit", "-m", "hand made", cwd=clone)
+        self.publish_snapshot(self.source("m4"))
+
+        entry = self.blocked_entry(self.prepare())
+
+        self.assertIn("上游", entry.failure)
+        self.assertTrue((clone / PACKAGE_REL).exists(), "不重置、不重建")
+
     def test_a_dirty_worktree_is_blocked_and_left_alone(self):
         self.box.clone(self.remote("m4"), "exchange/judged-m4")
         (self.judged("m4") / "stray.txt").write_text("残迹", encoding="utf-8")

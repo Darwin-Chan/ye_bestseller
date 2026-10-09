@@ -765,16 +765,18 @@ def _source_row(outcome: RunOutcome) -> str:
 
 
 # 来源接入（票 02）的进度行与报告行共用这一处措辞：动作短名 + 「当前没有判断集包」。
-_PREP_ACTION_GLOSS = {"cloned": "新克隆", "updated": "已快进", "unchanged": "已是最新"}
+_PREP_ACTION_GLOSS = {judged_sources.ACTION_CLONED: "新克隆",
+                      judged_sources.ACTION_UPDATED: "已快进",
+                      judged_sources.ACTION_UNCHANGED: "已是最新"}
 
 
 def _source_prep_text(entry: judged_sources.PreparedSource) -> str:
     """一条来源接入结果的人话（进度行与报告第三节共用）。"""
-    if entry.state == judged_sources.SOURCE_BLOCKED:
+    if entry.blocked:
         return f"{entry.repo} 被阻断（{_first_line(entry.failure)}）"
-    if entry.state == judged_sources.SOURCE_SKIPPED:
+    if entry.skipped:
         return f"{entry.repo} 这次没接入（{_first_line(entry.reason)}）"
-    gloss = _PREP_ACTION_GLOSS.get(entry.action, "已接入")
+    gloss = _PREP_ACTION_GLOSS.get(entry.action, entry.action or "已接入")
     if entry.state == judged_sources.SOURCE_CONNECTED_NO_PACKAGE:
         return f"{entry.repo} 已接入（{gloss}；当前没有判断集包）"
     return f"{entry.repo} 已接入（{gloss}）"
@@ -818,9 +820,8 @@ def _source_prep_soft(source_prep) -> bool:
     """
     if source_prep is None or not source_prep.ready:
         return False
-    return source_prep.stale or any(
-        entry.state in (judged_sources.SOURCE_BLOCKED, judged_sources.SOURCE_SKIPPED)
-        for entry in source_prep.entries)
+    return source_prep.stale or any(entry.blocked or entry.skipped
+                                    for entry in source_prep.entries)
 
 
 def _package_row(db: Database, ref: export.PackageRef,
@@ -963,10 +964,9 @@ def _summary(*, only, export_result, export_note, imported, merge_ran,
         if not source_prep.ready:
             parts.append("接收通道未就绪")
         else:
-            cloned = [entry for entry in source_prep.entries if entry.action == "cloned"]
-            off = [entry for entry in source_prep.entries
-                   if entry.state in (judged_sources.SOURCE_BLOCKED,
-                                      judged_sources.SOURCE_SKIPPED)]
+            cloned = [entry for entry in source_prep.entries
+                      if entry.action == judged_sources.ACTION_CLONED]
+            off = [entry for entry in source_prep.entries if entry.blocked or entry.skipped]
             if cloned:
                 parts.append(f"新接入来源 {len(cloned)} 个")
             if off:
@@ -1085,7 +1085,7 @@ def _todo(*, machine_id, week, plan_of_shop, gaps, conflicts, missing, pulls, ex
                      "本机还没有克隆的来源这次没有新建")
     if source_prep is not None:
         for entry in source_prep.entries:
-            if entry.state == judged_sources.SOURCE_BLOCKED:
+            if entry.blocked:
                 items.append(f"{entry.repo} 没接入（见第三节）：{_first_line(entry.failure)}")
 
     return tuple(items) if items else ("没有待办：本周干净",)
