@@ -386,11 +386,23 @@ class AnalysisService:
                 # SKU decisions live only in the versioned SKU draft. Never read
                 # the legacy product ledger or copy a product decision to a SKU.
                 latest = self.store.latest()
+                saved_sku_payload = None
                 if latest:
                     stored = self.store.read(latest['id'])
                     if stored and stored.payload.get('member_kind') == 'sku':
+                        saved_sku_payload = stored.payload
                         apply_saved_sku(snapshot, stored.payload)
                 apply_sku_codes(snapshot)
+                from .sku_matching import apply as apply_sku_images
+                def reload_manual():
+                    nonlocal saved_sku_payload
+                    latest = self.store.latest()
+                    stored = self.store.read(latest['id']) if latest else None
+                    if stored and stored.payload.get('member_kind') == 'sku' and stored.payload != saved_sku_payload:
+                        saved_sku_payload = stored.payload
+                        apply_saved_sku(snapshot, stored.payload)
+                        apply_sku_codes(snapshot)
+                apply_sku_images(snapshot, self.config.matching, stop=progress.stop_requested, reload_manual=reload_manual)
                 with self._lock:
                     self._snapshots[snapshot['id']] = snapshot
                 progress.update(products=len(snapshot['members']),
@@ -601,7 +613,8 @@ class AnalysisService:
                 if group.get('confirmed') or group.get('adjusted') or group.get('excluded_group'):
                     group.setdefault('manual_membership', True)
             refresh_sku(snapshot)
-            snapshot['limitations'] = ['无有效编码／编码歧义的图文判断尚未开放；多候选比较与跨机共享尚未开放']
+            from .sku_matching import LIMITATIONS
+            snapshot['limitations'] = list(LIMITATIONS)
             return snapshot
         snapshot = self._rehydrate(stored.payload)
         if self.config.member_kind == 'sku':

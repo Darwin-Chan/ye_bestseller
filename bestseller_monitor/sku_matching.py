@@ -1,0 +1,163 @@
+"""Local SKU image judgments. Never read/write the legacy shared ledger."""
+from __future__ import annotations
+
+import json
+from contextlib import closing
+import sqlite3
+
+from .matching import ImageJudge, ModelFailure, digest, scored_pairs, signature_parts
+from .sku_grouping import identity, refresh
+
+RULE_VERSION = "sku-physical-object-v1"
+LIMITATIONS = ["多候选比较、选择性重试与 SKU 跨机共享尚未开放"]
+
+
+def evidence_version(member):
+    return digest([identity(member), member["matching_input"], member.get("image_hash"),
+                   member.get("image_source"), member.get("observed_at"), member.get("observed_date"),
+                   member.get("merchant_codes")])
+
+
+def _legal(snapshot, left, right):
+    a, b = identity(left), identity(right)
+    excluded = set(snapshot.get("excluded_skus", []))
+    if a == b or a in excluded or b in excluded:
+        return False
+    if any(frozenset(pair) == frozenset((a, b)) for pair in snapshot.get("excluded", [])):
+        return False
+    ca, cb = left.get("merchant_code"), right.get("merchant_code")
+    return not (ca and cb)  # both equal and different codes belong to code/manual rules
+
+
+def _finish(snapshot):
+    for member in snapshot["members"]:
+        if member.get("code_ambiguous") and member.get("matching_state") != "manual" and not member.get("matching_note", "").startswith("编码有歧义"):
+            member["matching_note"] = "编码有歧义；" + member.get("matching_note", "")
+    refresh(snapshot)
+
+
+def apply(snapshot, config, *, stop=None, reload_manual=None):
+    snapshot["limitations"] = list(LIMITATIONS)
+    members = {identity(m): m for m in snapshot["members"]}
+    groups = list(snapshot["groups"])
+    group_of = {identity(ref): g for g in groups for ref in g["members"]}
+    protected = {identity(ref) for g in groups if g.get("manual_membership") or g.get("excluded_group") for ref in g["members"]}
+    for key, m in members.items():
+        if key in protected or m.get("matching_state") == "pending_candidates":
+            continue
+        if not m.get("image_data"):
+            if not m.get("merchant_code"):
+                m.update(matching_state="missing_image", matching_note="缺少图片证据；暂时独立，可人工处理")
+        elif not m.get("merchant_code"):
+            m.update(matching_state="unjudged", matching_note="尚未完成图文判断；暂时独立")
+    if not config or config.mode == "disabled":
+        for key, m in members.items():
+            if key not in protected and m.get("image_data") and not m.get("merchant_code"):
+                m.update(matching_state="needs_config", matching_note="需配置图文模型；暂时独立，可人工处理")
+        _finish(snapshot)
+        return
+    eligible = sorted((m for m in members.values() if m.get("image_data")), key=identity)
+    judge = ImageJudge(config)
+    signature = digest({**signature_parts(config), "rule": RULE_VERSION})
+    config.cache.parent.mkdir(parents=True, exist_ok=True)
+    positive = {}
+    negative = set()
+    with closing(sqlite3.connect(config.cache)) as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS sku_judgments (pair TEXT, signature TEXT, result TEXT NOT NULL, PRIMARY KEY(pair, signature))")
+        for (i, j), score in sorted(scored_pairs(eligible, config.candidates).items()):
+            if reload_manual:
+                reload_manual()
+                group_of = {identity(ref): g for g in snapshot["groups"] for ref in g["members"]}
+                protected = {identity(ref) for g in snapshot["groups"] if g.get("manual_membership") or g.get("excluded_group") for ref in g["members"]}
+            left, right = eligible[i], eligible[j]
+            a, b = identity(left), identity(right)
+            if group_of[a] is group_of[b] or (a in protected and b in protected) or not _legal(snapshot, left, right):
+                continue
+            pair = digest(sorted((evidence_version(left), evidence_version(right))))
+            row = conn.execute("SELECT result FROM sku_judgments WHERE pair=? AND signature=?", (pair, signature)).fetchone()
+            cached = bool(row)
+            if row:
+                result = json.loads(row[0])
+            elif score < config.min_score:
+                continue
+            elif stop and stop():
+                break
+            else:
+                try:
+                    result = judge.compare(left, right)
+                except ModelFailure as exc:
+                    for key in (a, b):
+                        if key not in protected:
+                            members[key].update(matching_state="pending", matching_note=str(exc) + "；图文判断未完成")
+                    continue
+                if result["confidence"] >= .8:
+                    conn.execute("INSERT OR REPLACE INTO sku_judgments VALUES (?,?,?)", (pair, signature, json.dumps(result, ensure_ascii=False)))
+                    conn.commit()  # successful judgments survive later failures/stops
+            if result["confidence"] < .8:
+                for key in (a, b):
+                    if key not in protected:
+                        members[key].update(matching_state="pending", matching_note="图文证据不确定；暂时独立")
+                continue
+            if not _legal(snapshot, left, right):
+                continue
+            edge = frozenset((a, b))
+            if result["same"]:
+                reason = result.get("reason") or "主体实物图文判断同款（忽略颜色、包装与销售件数差异）"
+                positive[edge] = dict(reason=reason, cached=cached, pair=pair)
+                for key, other in ((a, b), (b, a)):
+                    members[key].setdefault("image_judgments", []).append(dict(member=other, **positive[edge]))
+            else:
+                negative.add(edge)
+                for key in (a, b):
+                    if key not in protected:
+                        members[key].update(matching_state="judged", matching_note="已完成图文判断：该候选非同款")
+    if reload_manual:
+        reload_manual()
+    groups = list(snapshot["groups"])
+    group_of = {identity(ref): g for g in groups for ref in g["members"]}
+    protected = {identity(ref) for g in groups if g.get("manual_membership") or g.get("excluded_group") for ref in g["members"]}
+    # Freeze targets before any addition. A no-code SKU is never a bridge.
+    proposals = {}
+    for key, member in members.items():
+        source = group_of[key]
+        if key in protected or len(source["members"]) != 1 or member.get("matching_state") == "pending_candidates":
+            continue
+        targets = []
+        for target in groups:
+            if target is source or target.get("excluded_group"):
+                continue
+            if member.get("merchant_code") and not target.get("manual_membership"):
+                continue  # coded groups anchor automatic no-code arrivals, not the reverse
+            others = [identity(ref) for ref in target["members"]]
+            if (any(frozenset((key, other)) in positive for other in others)
+                and all(_legal(snapshot, member, members[other]) and frozenset((key, other)) not in negative for other in others)):
+                targets.append(target)
+        if len(targets) > 1:
+            member.update(candidate_groups=sorted(g["id"] for g in targets), matching_state="pending_candidates",
+                          grouping_basis="暂时独立（待候选比较）", matching_note="多个图文候选，等待候选比较；未选择归属")
+        elif len(targets) == 1:
+            proposals[key] = targets[0]
+    moved = set()
+    for key in sorted(proposals):
+        member = members[key]
+        source, target = group_of[key], proposals[key]
+        # A coded group is an anchor, not a way to pull a multi-candidate SKU.
+        target_ids = [identity(ref) for ref in target["members"]]
+        if len(source["members"]) != 1 or not target["members"]:
+            continue
+        if key in moved or any(members[other].get("matching_state") == "pending_candidates" for other in target_ids):
+            continue
+        if target.get("merchant_codes") and member.get("merchant_code"):
+            continue
+        if member.get("merchant_code") and not target.get("manual_membership"):
+            continue  # the unencoded side will join this coded anchor instead
+        if not all(_legal(snapshot, member, members[other]) and frozenset((key, other)) not in negative for other in target_ids):
+            continue
+        ref = source["members"].pop()
+        target["members"].append(ref)
+        target["confirmed"] = False
+        member.update(added_to_group=True, grouping_basis="图文归组", matching_state="image_rule",
+                      matching_note="图文依据：" + "; ".join(e["reason"] for edge, e in positive.items() if key in edge and any(other in edge for other in target_ids)))
+        target["image_grouping"] = True
+        moved.add(key)
+    _finish(snapshot)

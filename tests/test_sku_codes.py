@@ -306,7 +306,7 @@ class MerchantCodeTests(unittest.TestCase):
         a = self.seed("无码")
         b = self.seed("蓝 #A#", shop="B01")
         result = self.service.start("2026-09-07", "2026-09-14")
-        self.assertIn("尚未开放", result["members"][0]["matching_note"])
+        self.assertIn("缺少图片证据", result["members"][0]["matching_note"])
         result = self.service.edit_group(result["id"], "move", self.group_for(result, a)["id"], a, self.group_for(result, b)["id"])
         member = next(m for m in result["members"] if m["shop_key"] == "A01")
         self.assertEqual("人工归组", member["grouping_basis"])
@@ -361,7 +361,7 @@ class MerchantCodeBrowserTests(unittest.TestCase):
         self.page.locator("#skuQuery").fill("amb")
         expect(self.page.locator(".sku-evidence-card")).to_contain_text("编码有歧义")
         expect(self.page.locator(".sku-evidence-card")).to_contain_text("Q、Z")
-        expect(self.page.locator(".sku-evidence-card")).to_contain_text("图文判断尚未开放")
+        expect(self.page.locator(".sku-evidence-card")).to_contain_text("缺少图片证据")
         self.retain("ambiguous-code")
         self.page.get_by_role("button", name="添加 SKU", exact=True).click()
         for query in ["ab-1", target]:

@@ -59,6 +59,8 @@ def _group_member_ids(group: dict) -> list[str]:
 def _grouping_basis(group: dict, present: list[dict]) -> str:
     if group.get("excluded_group"):
         return "人工排除"
+    if group.get("image_grouping"):
+        return "人工归组＋图文增员" if group.get("manual_membership") else "图文归组"
     if group.get("manual_membership"):
         return "人工归组"
     if any(member.get("matching_state") == "pending_candidates" for member in present):
@@ -280,6 +282,14 @@ def apply_saved(snapshot: dict, saved: dict) -> None:
     snapshot["groups"] = groups
     snapshot["excluded"] = [list(pair) for pair in saved.get("excluded", []) if len(pair) == 2]
     snapshot["excluded_skus"] = sorted(set(saved.get("excluded_skus", [])) | {identity(ref) for group in saved_groups if group.get("excluded_group") for ref in group["members"]})
+    # Preserve auditable image evidence only when both endpoints still match the frozen inputs.
+    from .sku_matching import evidence_version
+    for key, member in members.items():
+        before = previous_members.get(key)
+        if before and evidence_version(before) == evidence_version(member):
+            member["image_judgments"] = [dict(judgment, cached=True) for judgment in before.get("image_judgments", [])
+                if judgment["member"] in members and judgment["member"] in previous_members
+                and evidence_version(previous_members[judgment["member"]]) == evidence_version(members[judgment["member"]])]
     refresh(snapshot)
     snapshot["reused_from"] = saved.get("id")
     snapshot["dirty"] = True
