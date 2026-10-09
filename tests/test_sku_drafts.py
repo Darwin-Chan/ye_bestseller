@@ -243,7 +243,8 @@ class SkuDraftTests(unittest.TestCase):
         ledger=dict(relations=[],standalone=[['A01|11','old-version','machine']],excluded=[['A01|11','A01|12','machine']])
         self.service.store.write('old','2026-09-07','2026-09-14','2026-09-14T02:00:00+00:00',{},ledger)
         draft=self.service.start('2026-09-07','2026-09-14'); group=draft['groups'][0]['id']
-        self.assertEqual('unjudged',draft['members'][0]['matching_state'])
+        self.assertEqual('missing_image',draft['members'][0]['matching_state'])
+        self.assertIn('缺少图片证据',draft['members'][0]['matching_note'])
         confirmed=self.service.confirm(draft['id'],group)
         self.assertTrue(confirmed['groups'][0]['confirmed'])
         withdrawn=self.service.withdraw(draft['id'],group)
