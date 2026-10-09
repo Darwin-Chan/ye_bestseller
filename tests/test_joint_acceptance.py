@@ -15,7 +15,6 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import gui
@@ -26,6 +25,7 @@ from frozen_clock import FROZEN_DATE, FROZEN_NOW, frozen_clock
 from helpers import crawler_cfg, insert_inventory_rows, isolated_locks
 from test_gui import StopClock, store_today_plan
 from test_identity_lifecycle import BUSINESS, FIXTURE, Clock
+from test_paused_manual_login import PausedBrowserOS
 
 
 def identity_html() -> str:
@@ -36,26 +36,6 @@ def identity_html() -> str:
 BUSINESS_SKU = BUSINESS.replace(
     '</body>', '<script>{"skuInfoMap":{"red":{"skuId":"red","name":"red",'
                '"price":10,"canBookCount":3}}}</script></body>')
-
-
-class PausedBrowserOS:
-    """可控的专用浏览器 OS 事实；配置校验仍走真实 `BrowserRuntime`。"""
-
-    def __init__(self):
-        self.state = 'free'
-        self.starts = []
-
-    def config_error(self, settings):
-        from bestseller_monitor.dedicated_browser import BrowserRuntime
-        return BrowserRuntime().config_error(settings)
-
-    def observe(self, settings):
-        return SimpleNamespace(state=self.state, message='测试 OS 事实：' + self.state)
-
-    def launch(self, settings):
-        self.starts.append(settings)
-        self.state = 'occupied'
-        return SimpleNamespace(pid=123, poll=lambda: 0)
 
 
 class JointAcceptanceTests(unittest.TestCase):

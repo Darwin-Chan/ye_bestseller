@@ -55,8 +55,11 @@ def browser_cleanup_complete(state: str | None) -> bool:
     return state in ("NOT_STARTED", "BORROWED", "CLOSED")
 
 
-def _taken_over(pid: int, registered_proof: str | None) -> bool:
-    """A different known creation proof means the original process is gone (PID reuse)."""
+def taken_over(pid: int, registered_proof: str | None) -> bool:
+    """A different known creation proof means the original process is gone (PID reuse).
+
+    停止处置共用的唯一判据：`settle_dead_registration` 与 `StopWatch` 的浏览器结账都走这里。
+    """
     actual = browser_proc.process_creation_proof(pid)
     return (actual is not None and registered_proof is not None
             and actual != registered_proof)
@@ -82,7 +85,7 @@ def settle_dead_registration(conn, who: CrawlerProcess) -> bool:
     本身从不被终止：这里没有终止动作，处置的只有登记事实与本次启动的浏览器。
     """
     alive = browser_proc.process_alive(who.pid)
-    if alive is not False and not _taken_over(who.pid, who.process_os_started):
+    if alive is not False and not taken_over(who.pid, who.process_os_started):
         return False
     if not browser_cleanup_complete(who.browser_state):
         if (who.browser_state != "OWNED" or not who.browser_pid
@@ -93,8 +96,8 @@ def settle_dead_registration(conn, who: CrawlerProcess) -> bool:
             browser_pid=who.browser_pid, browser_os_started=who.browser_os_started)
         if closed is None:
             b_alive = browser_proc.process_alive(who.browser_pid)
-            if b_alive is not False and not _taken_over(who.browser_pid,
-                                                        who.browser_os_started):
+            if b_alive is not False and not taken_over(who.browser_pid,
+                                                       who.browser_os_started):
                 return False
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -179,7 +182,7 @@ def _registration_may_be_live(identity: CrawlerProcess | None) -> bool:
         return False
     # A different known creation proof means the original process is gone
     # (PID reuse). Missing proof is unknown, not permission to ignore it.
-    return not _taken_over(identity.pid, identity.process_os_started)
+    return not taken_over(identity.pid, identity.process_os_started)
 
 
 def _verified(identity: CrawlerProcess | None, other_space: Path, *, own_alive=False) -> CrawlerProcess:

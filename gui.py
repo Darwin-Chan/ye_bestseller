@@ -491,6 +491,10 @@ class Api:
             return "停止或收尾仍在进行，请稍后刷新重试。"
         if self.current_crawler(conn) is not None:
             return "采集或身份验证等待中，不能另开手动浏览器。"
+        debt = crawler_identity.registered(conn)
+        if debt is not None and not crawler_identity.browser_cleanup_complete(debt.browser_state):
+            # 已有终态但停止/浏览器收尾未结清（含界面重开后的残留欠账）：先完成收尾核验。
+            return "上一轮的停止/浏览器收尾仍未完成；请先在开始页完成收尾核验，再打开手动浏览器。"
         return None
 
     def open_login_browser(self):

@@ -313,13 +313,11 @@ class ProcessStopRuntime:
             browser_os_started=browser.os_started)
         if closed is not None:
             return EffectResult(True)
-        # 无法关闭 != 已退出；只有 OS 确证退出或 PID 已由另一创建身份接管才结账。
-        # 后者不对新进程执行任何停止副作用。
-        alive = browser_proc.process_alive(browser.pid)
-        if alive is False:
+        # 无法关闭 != 已退出；只有 OS 确证退出或 PID 已由另一创建身份接管才结账
+        # （与 crawler_identity 的停止处置共用同一判据）。后者不对新进程执行任何停止副作用。
+        if browser_proc.process_alive(browser.pid) is False:
             return EffectResult(True)
-        proof = browser_proc.process_creation_proof(browser.pid) if alive is True else None
-        if browser.os_started is not None and proof is not None and proof != browser.os_started:
+        if crawler_identity.taken_over(browser.pid, browser.os_started):
             return EffectResult(True)
         return EffectResult(False, "browser_close_failed")
 

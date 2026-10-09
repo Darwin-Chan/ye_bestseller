@@ -545,6 +545,38 @@ class LeftoverRoundTests(unittest.TestCase):
         self.assertTrue(self.api.get_start()["start_allowed"])
         self.assertIsNone(self.api.get_start().get("residue"))
 
+    def test_unsettled_cleanup_debt_keeps_the_manual_login_entry_disabled(self):
+        # spec 可用性表：已有终态但停止/浏览器收尾未完成时，手动登录入口禁用。
+        rid = self.open_round()
+        self.record_dead_identity(rid, state="OWNED", browser_pid=9201,
+                                  browser_os_started="browser-proof", port=9222)
+        prepared = self.api.prepare_abort(rid)
+        with self.gone(4321), \
+                self.proof({9201: "browser-proof"}), \
+                patch("bestseller_monitor.browser_proc.close_browser", return_value=None):
+            first = self.api.confirm_abort(prepared["confirmation"])
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["cleanup"], "pending")
+        start = self.api.get_start()
+        self.assertEqual((start.get("residue") or {}).get("round_id"), rid)
+        self.assertFalse(start["browser"]["can_open"], "收尾欠账未结清不提供手动入口")
+        refused = self.api.open_login_browser()
+        self.assertFalse(refused["ok"])
+        self.assertIn("收尾", refused["error"])
+        page = self.page()
+        page.evaluate("refreshStart()")
+        self.assertTrue(page.locator("#loginBrowserBtn").is_disabled())
+        # 结清（重试收尾核验）后入口恢复可用
+        retry = self.api.prepare_cleanup_retry()
+        self.assertTrue(retry["ok"], retry)
+        with self.gone(4321), \
+                self.proof({9201: "unrelated-new-browser"}), \
+                patch("bestseller_monitor.browser_proc.close_browser", return_value=None):
+            done = self.api.confirm_abort(retry["confirmation"])
+        self.assertNotEqual(done.get("cleanup"), "pending")
+        self.assertIsNone(self.api.get_start().get("residue"))
+        self.assertTrue(self.api.get_start()["browser"]["can_open"])
+
     def test_cleanup_retry_without_residue_refuses_and_cancel_writes_nothing(self):
         rid = self.open_round()
         self.assertFalse(self.api.prepare_cleanup_retry()["ok"])
