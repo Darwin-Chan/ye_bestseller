@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from uuid import uuid4
 
+from .stock_series import aggregate_points
+
 
 def identity(member: dict) -> str:
     return json.dumps([member["shop_key"], member["offer_id"], member["sku_id"]], ensure_ascii=False)
@@ -55,6 +57,24 @@ def _group_member_ids(group: dict) -> list[str]:
 
 def summarize_group(group: dict, members: dict[str, dict]) -> None:
     present = [members[key] for key in _group_member_ids(group) if key in members]
+    for member in present:
+        member["display_name"] = member.get("product_name") or member["offer_id"]
+        if member.get("single_sku") is not True and member.get("raw_sku_name"):
+            member["display_name"] += " · " + member["raw_sku_name"]
+    ordered = sorted(present, key=lambda member: (-member.get("sales", 0), member_key(member)))
+    group["representative"] = ({key: ordered[0][key] for key in ("shop_key", "offer_id", "sku_id")} if ordered else None)
+    group["points"] = aggregate_points([member["points"] for member in present])
+    products = {}
+    for member in sorted(present, key=member_key):
+        key = (member["shop_key"], member["offer_id"])
+        product = products.setdefault(key, dict(shop_key=key[0], offer_id=key[1],
+            product_name=member["product_name"], shape_switches=member.get("shape_switches", []), members=[]))
+        product["members"].append({field: member[field] for field in ("shop_key", "offer_id", "sku_id")})
+    for product in products.values():
+        children = [members[identity(ref)] for ref in product["members"]]
+        product["sales"] = sum(member.get("sales", 0) for member in children)
+        product["points"] = aggregate_points([member["points"] for member in children])
+    group["products"] = list(products.values())
     group["sales"] = sum(member.get("sales", 0) for member in present)
     group["shop_count"] = len({member["shop_key"] for member in present})
     group["product_count"] = len({(member["shop_key"], member["offer_id"]) for member in present})

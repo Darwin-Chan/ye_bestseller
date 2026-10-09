@@ -256,10 +256,10 @@ async function confirmBulk(){
     if(await updateDraft({action,groups:bulkTargets}))$('bulkDialog').close();
 }
 function snapshotInfoHTML(snapshot){
-    if(snapshot.member_kind==='sku')return `<p>${esc(snapshot.start)} — ${esc(snapshot.end)} · ${snapshot.members.length} 个 SKU · ${snapshot.groups.length} 个尚未判断的独立组</p>`;
+    if(snapshot.member_kind==='sku')return `<p>${esc(snapshot.start)} — ${esc(snapshot.end)} · ${snapshot.members.length} 个 SKU · ${snapshot.groups.length} 组（${pendingCount(snapshot)} 组待确认）</p>`;
     const pending=pendingCount(snapshot);
     return `<p class="snapshot-meta"><span><b>日期区间</b>：${esc(snapshot.start)} — ${esc(snapshot.end)}</span><span><b>数据固定于</b>：${fmtMomentSecond(snapshot.frozen_at)}</span></p>`
-        +`<p class="snapshot-tally">${snapshot.products.length} 个商品 · ${snapshot.groups.length} 组同款（其中 ${pending} 组待确认）</p>`;
+        +`<p class="snapshot-tally">${snapshot.member_kind==='sku'?new Set(snapshot.members.map(m=>JSON.stringify([m.shop_key,m.offer_id]))).size:snapshot.products.length} 个商品 · ${snapshot.groups.length} 组同款（其中 ${pending} 组待确认）</p>`;
 }
 // 阶段图例＝「正在显示哪一屏」的镜像，与库存抓取页同规：当前屏蓝、其左绿、可逆（票 16）。
 const STAGE_ORDER=['dates','review','result'];
@@ -283,7 +283,7 @@ function showScreen(name){
 }
 // 落屏门禁（票 06，与既有结果可见性判定同一口径）：已保存（不脏）且没有待确认组。
 function resultsReady(snapshot){
-    if(snapshot.member_kind==='sku'||snapshot.migration_note)return false;
+    if(snapshot.migration_note)return false;
     return !snapshot.dirty&&snapshot.groups.length>0&&snapshot.groups.every(g=>groupConfirmed(g));
 }
 function show(snapshot) {
@@ -354,6 +354,16 @@ function skuMemberKey(m){return JSON.stringify([m.shop_key,m.offer_id,m.sku_id])
 function skuMemberIndex(m){return currentSnapshot.members.findIndex(item=>skuMemberKey(item)===skuMemberKey(m));}
 function skuGroupFor(m){return currentSnapshot.groups.find(g=>g.members.some(item=>skuMemberKey(item)===skuMemberKey(m)));}
 function skuShopName(m){return currentSnapshot.shops.find(s=>s.shop_key===m.shop_key)?.shop_name||m.shop_key;}
+function skuGroupMembers(g){return g.members.map(ref=>currentSnapshot.members.find(m=>skuMemberKey(m)===skuMemberKey(ref)));}
+function skuRepresentative(g){return currentSnapshot.members.find(m=>skuMemberKey(m)===skuMemberKey(g.representative));}
+function skuUnitsNote(){return '组销量是不同 SKU 销售单位数量合计，并非统一实物数量；不按单个装、双件套等换算倍数。';}
+function skuCode(m){return m.merchant_code?`<span class="merchant-code">商家编码：${esc(m.merchant_code)}</span>`:'';}
+function skuHeading(m){return `<div class="product-title"><b>${esc(m.display_name)}</b>${sourceIcon(m)}</div><small class="image-source">${esc(skuImageSource(m))}</small>${skuCode(m)}`;}
+function skuSummary(g){const m=skuRepresentative(g);return `<div class="sku-group-summary product">${rankingPhoto(m)}<div>${skuHeading(m)}<p>组销量 ${g.sales}</p><p class="muted">${skuUnitsNote()}</p></div></div>`;}
+function skuTreeHTML(g){
+    const shops=[...new Set(g.products.map(p=>p.shop_key))];
+    return shops.map(shop=>`<div class="tree" data-shop="${esc(shop)}"><b>▾ ${esc(skuShopName({shop_key:shop}))}</b>${g.products.filter(p=>p.shop_key===shop).map(p=>`<div class="tree" data-product="${esc(p.offer_id)}"><b>${esc(p.product_name)}</b><p>本组内销量小计 <b>${p.sales}</b></p>${switchNotes(p)}${chart(p.points,false,'本组内商品')}${p.members.map(ref=>{const m=currentSnapshot.members.find(item=>skuMemberKey(item)===skuMemberKey(ref));return `<details class="sku-row" data-sku-id="${esc(m.sku_id)}"><summary><div class="product">${rankingPhoto(m)}<div>${skuHeading(m)}</div></div><span class="sku-total">销量 <b>${m.sales}</b></span></summary><p>原始商品名称：${esc(m.product_name)} · 原始 SKU 名称：${esc(m.raw_sku_name||'（空）')}</p><p>平台 SKU：${esc(m.sku_id)} · 观测：${esc(m.observed_at||m.observed_date)}${m.evidence_note?' · '+esc(m.evidence_note):''}</p>${chart(m.points,true)}</details>`;}).join('')}</div>`).join('')}</div>`).join('');
+}
 function skuStatus(g){return g.excluded_group?'人工排除':g.confirmed?'已确认':'待确认';}
 function skuImageSource(m){return ({sku:'SKU 专图',product_main_same_observation:'同次商品主图代填',missing:'当次缺图'})[m.image_source]||'未知来源';}
 function skuSearchValues(g){return g.members.flatMap(ref=>{const m=currentSnapshot.members.find(item=>skuMemberKey(item)===skuMemberKey(ref))||{};return [m.product_name,m.raw_sku_name,m.offer_id,m.sku_id,m.shop_key,skuShopName(m),g.id];}).map(v=>String(v||'').toLocaleLowerCase());}
@@ -402,10 +412,10 @@ function renderSkuDraft() {
     productPage=Math.min(productPage,pages-1);
     const start=productPage*GROUPS_PER_PAGE, visible=filtered.slice(start,start+GROUPS_PER_PAGE);
     if(!visible.some(g=>g.id===selectedGroup))selectedGroup=visible[0]?.id;
-    $('products').innerHTML=visible.map(g=>{const lead=g.members.slice().sort((a,b)=>b.sales-a.sales)[0];return `<button class="group-choice" aria-pressed="${g.id===selectedGroup}" data-sku-group="${esc(g.id)}"><b>${esc(g.id)} · ${g.sku_count||g.members.length} 个 SKU</b><small>${esc(lead?.product_name||'')} · 组销量 ${esc(g.sales||0)}</small><small>店铺 ${esc(g.shop_count||0)} · 商品 ${esc(g.product_count||0)} · ${esc(skuStatus(g))}</small></button>`;}).join('')||'<p class="muted">没有匹配的 SKU 分组</p>';
+    $('products').innerHTML=visible.map(g=>{const lead=skuRepresentative(g);return `<button class="group-choice" aria-pressed="${g.id===selectedGroup}" data-sku-group="${esc(g.id)}"><b>${esc(g.id)} · ${g.sku_count||g.members.length} 个 SKU</b>${rankingPhoto(lead)}<small>${esc(lead?.display_name||'')} · ${esc(skuImageSource(lead||{}))} · 组销量 ${esc(g.sales||0)}</small><small>店铺 ${esc(g.shop_count||0)} · 商品 ${esc(g.product_count||0)} · ${esc(skuStatus(g))}</small></button>`;}).join('')||'<p class="muted">没有匹配的 SKU 分组</p>';
     $('products').querySelectorAll('[data-sku-group]').forEach(b=>b.onclick=()=>{selectedGroup=b.dataset.skuGroup;renderSkuDraft();});
     const g=s.groups.find(item=>item.id===selectedGroup);
-    $('groupDetail').innerHTML=g?`<div class="bar"><h3>${esc(g.id)} · ${esc(g.sku_count||g.members.length)} 个 SKU</h3><div class="group-actions">${skuGroupActions(g)}</div></div><p>店铺数 <b>${esc(g.shop_count||0)}</b> · 商品数 <b>${esc(g.product_count||0)}</b> · SKU 数 <b>${esc(g.sku_count||g.members.length)}</b> · 组内销量 <b>${esc(g.sales||0)}</b> · <span class="group-status">${esc(skuStatus(g))}</span></p>${g.manual_reason?`<aside><b>人工依据</b><p>${esc(g.manual_reason)}</p></aside>`:''}${g.members.slice().sort((a,b)=>b.sales-a.sales||skuMemberKey(a).localeCompare(skuMemberKey(b))).map(m=>renderSkuMember(s.members.find(item=>skuMemberKey(item)===skuMemberKey(m)),g)).join('')}`:'暂无符合条件的 SKU 分组';
+    $('groupDetail').innerHTML=g?`<div class="bar"><h3>${esc(g.id)} · ${esc(g.sku_count||g.members.length)} 个 SKU</h3><div class="group-actions">${skuGroupActions(g)}</div></div><p>店铺数 <b>${esc(g.shop_count||0)}</b> · 商品数 <b>${esc(g.product_count||0)}</b> · SKU 数 <b>${esc(g.sku_count||g.members.length)}</b> · 组内销量 <b>${esc(g.sales||0)}</b> · <span class="group-status">${esc(skuStatus(g))}</span></p>${skuSummary(g)}${g.manual_reason?`<aside><b>人工依据</b><p>${esc(g.manual_reason)}</p></aside>`:''}${skuGroupMembers(g).slice().sort((a,b)=>b.sales-a.sales||skuMemberKey(a).localeCompare(skuMemberKey(b))).map(m=>renderSkuMember(m,g)).join('')}`:'暂无符合条件的 SKU 分组';
     $('snapshotInfo').innerHTML=`<p class="snapshot-meta"><span><b>日期区间</b>：${esc(s.start)} — ${esc(s.end)}</span><span><b>SKU 成员</b>：${esc(s.members.length)} 个 SKU</span><span><b>同款组</b>：${esc(s.groups.length)}</span></p>`;
     $('dirtyStatus').textContent=s.dirty?'未保存':'';
     $('pageInfo').textContent=filtered.length?`${start+1}–${Math.min(start+GROUPS_PER_PAGE,filtered.length)} / ${filtered.length} 个 SKU 分组`:'0 / 0 个 SKU 分组';
@@ -529,7 +539,7 @@ function updateSaveGate() {
     $('saveDraft').disabled=!!snapshot?.migration_note;
     if(snapshot?.member_kind==='sku'){
         $('saveStatus').textContent=!snapshot.dirty&&snapshot.saved_at?`已保存 · ${fmtDayTime(snapshot.saved_at)}`:'';
-        $('saveAndView').disabled=true;
+        $('saveAndView').disabled=snapshot.groups.some(g=>!groupConfirmed(g));
         return;
     }
     $('saveStatus').textContent=snapshot&&!snapshot.dirty&&snapshot.saved_at?`已保存 · ${fmtDayTime(snapshot.saved_at)}`:'';
@@ -658,7 +668,7 @@ function chartLayout(points){
     for(const limit of limits){let score=0;for(let i=0;i<points.length;i++){if(points[i].stock===null)continue;const gap=Math.abs(stockY(points[i].stock)-(bottom-cumulative[i]/limit*height));score+=Math.max(0,23-gap)**2*(i===points.length-1?6:1)}score+=total?limit/total*.05:0;if(score<best){best=score;salesHigh=limit}}
     return {low,high,salesHigh,cumulative,top,bottom,height};
 }
-function chart(points, sku=false){
+function chart(points, sku=false, label=null){
     const {low,high,salesHigh,cumulative,top,bottom,height}=chartLayout(points), n=points.length;
     const X=i=>98+i*696/Math.max(1,n-1), Y=v=>bottom-(v-low)/(high-low)*height, S=v=>bottom-v/salesHigh*height;
     let lines='', salesLine='';
@@ -675,7 +685,7 @@ function chart(points, sku=false){
         return `${showLabel?`<text class="date-label" x="${X(i)}" y="242" text-anchor="middle" font-size="11">${p.date.slice(5)}</text>`:''}<path class="sales-point" data-date="${p.date}" data-x="${X(i)}" data-y="${sy}" d="M ${X(i)} ${sy-4} l 4 4 -4 4 -4 -4 z" stroke-width="1.6"/>${showLabel?`<text class="point-label sales-value" x="${X(i)}" y="${labelSales}" text-anchor="middle" font-size="11">${chartNumber(cumulative[i])}</text>`:''}${iy===null?'':`<circle class="stock-point ${p.color}" data-date="${p.date}" data-stock="${p.stock}" cx="${X(i)}" cy="${iy}" r="5"${tip?` data-tip="${tip}"`:''}/>${showLabel?`<text class="point-label stock-value" x="${X(i)}" y="${labelStock}" text-anchor="middle" font-size="11">${chartNumber(p.stock)}</text>`:''}`}`;
     }).join('');
     const ticks=[0,.5,1].map(t=>`<line class="grid-line" x1="88" x2="808" y1="${bottom-t*height}" y2="${bottom-t*height}"/><text class="axis-label stock-axis" x="77" y="${bottom-t*height+4}" text-anchor="end" font-size="10">${chartNumber(low+(high-low)*t)}</text><text class="axis-label sales-axis" x="826" y="${bottom-t*height+4}" font-size="10">${chartNumber(salesHigh*t)}</text>`).join('');
-    return `<div class="chart-block" data-sku="${sku}"><div class="chart-toolbar"><div class="chart-key"><span>━ 库存（左轴）</span><span class="sales">┄ ◇ 累计销量（右轴）</span></div><div class="stock-legend"><span class="green">● 正常观测</span>${sku?'<span class="yellow">● 当日未抓取库存</span>':''}<span class="red">● 疑似补货</span></div></div><div class="chart"><svg class="inventory-chart" viewBox="0 0 920 262" role="img" aria-label="${sku?'SKU':'同款组'}库存与累计销量"><text class="axis-title stock-title" x="77" y="17" text-anchor="end" font-size="11">库存</text><text class="axis-title sales-title" x="826" y="17" font-size="11">累计销量</text>${ticks}${lines}${salesLine}${plot}</svg></div></div>`;
+    return `<div class="chart-block" data-sku="${sku}"><div class="chart-toolbar"><div class="chart-key"><span>━ 库存（左轴）</span><span class="sales">┄ ◇ 累计销量（右轴）</span></div><div class="stock-legend"><span class="green">● 正常观测</span>${sku?'<span class="yellow">● 当日未抓取库存</span>':''}<span class="red">● 疑似补货</span></div></div><div class="chart"><svg class="inventory-chart" viewBox="0 0 920 262" role="img" aria-label="${label||(sku?'SKU':'同款组')}库存与累计销量"><text class="axis-title stock-title" x="77" y="17" text-anchor="end" font-size="11">库存</text><text class="axis-title sales-title" x="826" y="17" font-size="11">累计销量</text>${ticks}${lines}${salesLine}${plot}</svg></div></div>`;
 }
 function toggleSku(button){
     const rows=[...button.closest('.rank').querySelectorAll('.sku-row')], open=!rows.every(row=>row.open);
@@ -695,21 +705,24 @@ function switchNotes(product) {
     return (product.shape_switches||[]).map(sw=>`<p class="muted switch-note">${esc(switchNote(sw))}</p>`).join('');
 }
 function treeHTML(group) {
+    if(currentSnapshot.member_kind==='sku')return skuTreeHTML(group);
     const members=groupProducts(group), shops=[...new Set(members.map(p=>shopName(p)))];
     return shops.map(shop=>`<div class="tree"><b>▾ ${esc(shop)}</b>${members.filter(p=>shopName(p)===shop).map(p=>`<div class="tree"><div class="product">${rankingPhoto(p)}<div><div class="product-title"><b>${esc(p.product_name||p.offer_id)}</b>${sourceIcon(p)}</div><p class="muted">商品销量 <b>${p.sales}</b></p></div></div>${switchNotes(p)}${p.skus.map(sku=>`<details class="sku-row"><summary><span>▸ ${esc(sku.name)}</span><span class="sku-total">销量 <b>${sku.sales}</b></span></summary>${chart(sku.points,true)}</details>`).join('')}</div>`).join('')}</div>`).join('');
 }
 function groupMeta(group) {
+    if(currentSnapshot.member_kind==='sku')return `${group.shop_count} 家店铺 · ${group.product_count} 个商品 · ${group.sku_count} 个 SKU`;
     const members=groupProducts(group);
     const stores=new Set(members.map(p=>shopName(p))).size;
     return `${stores} 家店铺 · ${members.length} 个商品 · ${members.reduce((count,p)=>count+p.skus.length,0)} 个 SKU`;
 }
 // 排名行的骨架只有这一份：在线懒渲染与离线报告共用，避免两边各存一套。
 function rankSummary(group, index) {
-    const representative=groupProducts(group)[0];
-    return `<div class="product"><b>${String(index+1).padStart(2,'0')}</b>${rankingPhoto(representative)}<div class="product-title"><b>${esc(representative.product_name||representative.offer_id)}</b>${sourceIcon(representative)}</div></div><span class="number">${group.sales} <small>销量</small></span>`;
+    const sku=currentSnapshot.member_kind==='sku';
+    const representative=sku?skuRepresentative(group):groupProducts(group)[0];
+    return `<div class="product"><b>${String(index+1).padStart(2,'0')}</b>${rankingPhoto(representative)}<div class="product-title"><b>${esc(representative.display_name||representative.product_name||representative.offer_id)}</b>${sourceIcon(representative)}${sku?`<small class="image-source">${esc(skuImageSource(representative))}</small>${skuCode(representative)}`:""}</div></div><span class="number">${group.sales} <small>${sku?"组销量":"销量"}</small></span>`;
 }
 function rankBody(group) {
-    return `${chart(group.points)}<p class="muted">${groupMeta(group)}</p><div class="bar tree-heading"><h3>同款构成</h3><button class="subtle-button expand-all" onclick="toggleSku(this)">展开全部</button></div>${treeHTML(group)}`;
+    return `${currentSnapshot.member_kind==='sku'?`<p class="muted">${skuUnitsNote()}</p>`:""}${chart(group.points)}<p class="muted">${groupMeta(group)}</p><div class="bar tree-heading"><h3>同款构成</h3><button class="subtle-button expand-all" onclick="toggleSku(this)">展开全部</button></div>${treeHTML(group)}`;
 }
 function renderRankDetail(details) {
     if(!details.open||details.dataset.rendered)return;
@@ -748,7 +761,7 @@ function buildReport(snapshot, urls) {
         const script=['const $ = id => document.getElementById(id);',`${tipOver}`,`${tipOut}`,`${toggleSku}`,
             "document.addEventListener('pointerover', tipOver);","document.addEventListener('pointerout', tipOut);"]
             .join('\n').replace(/<\/script/gi,'<\\/script');
-        return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>销量分析报告 ${esc(snapshot.start)} — ${esc(snapshot.end)}</title><style>${document.querySelector('style').textContent}</style><header><h1>销量分析报告</h1><span>离线副本 · 无需本地服务与网络</span></header><main><section class="panel"><h2>${esc(snapshot.start)} — ${esc(snapshot.end)}</h2><p>数据固定于 <b>${fmtMomentSecond(snapshot.frozen_at)}</b>${snapshot.saved_at?`，保存于 <b>${fmtMomentSecond(snapshot.saved_at)}</b>`:''}，导出于 ${fmtMomentSecond(new Date().toISOString())}。</p><p class="muted">分析 ${esc(snapshot.id)} · ${snapshot.products.length} 个商品 · ${snapshot.groups.length} 个同款组（含零销量组），随附全部 SKU 明细与库存 / 累计销量图。商品源图标指向导出时的详情地址，打开它需要网络，不影响本页离线阅读。</p></section><section class="panel"><h2>畅销品排名</h2><div id="ranking">${rows||'<p class="empty">本区间没有符合条件的畅销品。</p>'}</div></section></main><div id="tip" class="tip" hidden></div><script>${script}<\/script></body></html>`;
+        return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>销量分析报告 ${esc(snapshot.start)} — ${esc(snapshot.end)}</title><style>${document.querySelector('style').textContent}</style><header><h1>销量分析报告</h1><span>离线副本 · 无需本地服务与网络</span></header><main><section class="panel"><h2>${esc(snapshot.start)} — ${esc(snapshot.end)}</h2><p>数据固定于 <b>${fmtMomentSecond(snapshot.frozen_at)}</b>${snapshot.saved_at?`，保存于 <b>${fmtMomentSecond(snapshot.saved_at)}</b>`:''}，导出于 ${fmtMomentSecond(new Date().toISOString())}。</p><p class="muted">分析 ${esc(snapshot.id)} · ${snapshot.member_kind==='sku'?new Set(snapshot.members.map(m=>JSON.stringify([m.shop_key,m.offer_id]))).size:snapshot.products.length} 个商品 · ${snapshot.groups.length} 个同款组（含零销量组）${snapshot.member_kind==='sku'?` · ${snapshot.members.length} 个 SKU；${skuUnitsNote()}`:''}，随附全部 SKU 明细与库存 / 累计销量图。商品源图标指向导出时的详情地址，打开它需要网络，不影响本页离线阅读。</p></section><section class="panel"><h2>畅销品排名</h2><div id="ranking">${rows||'<p class="empty">本区间没有符合条件的畅销品。</p>'}</div></section></main><div id="tip" class="tip" hidden></div><script>${script}<\/script></body></html>`;
     } finally {
         exportSources=null;
     }

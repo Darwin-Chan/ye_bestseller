@@ -14,6 +14,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+from .stock_series import aggregate_points as _aggregate_points
 from . import crawler_identity
 from .analysis_store import DraftStore, SIDE_EXCLUSION, SIDE_STANDALONE, source_of
 from .config import machine_id_of
@@ -586,7 +587,12 @@ class AnalysisService:
     def _restore(self, stored):
         """把磁盘上的草稿还原成内存工作草稿：已保存版本没有未保存修改。"""
         if stored.payload.get('member_kind') == 'sku':
-            return copy.deepcopy(stored.payload)
+            snapshot = copy.deepcopy(stored.payload)
+            from .sku_drafts import restore_curve_boundaries
+            restore_curve_boundaries(snapshot, calculate_inventory)
+            refresh_sku(snapshot)
+            snapshot['limitations'] = ['编码自动分组、图文判断与跨机共享尚未开放']
+            return snapshot
         snapshot = self._rehydrate(stored.payload)
         if self.config.member_kind == 'sku':
             snapshot['member_kind'] = 'product'
@@ -659,8 +665,9 @@ class AnalysisService:
             if snapshot is None:
                 raise ValueError('分析已不存在，请重新选择日期')
             if snapshot.get('member_kind') == 'sku':
-                if require_confirmed:
-                    raise ValueError('SKU 结果排行尚未开放，请保存草稿')
+                if require_confirmed and pending_groups(snapshot):
+                    raise ValueError('还有待确认的同款组，请先完成确认')
+                refresh_sku(snapshot)
                 saved_at = utcnow()
                 payload = copy.deepcopy(snapshot)
                 payload.update(dirty=False, saved_at=saved_at)
@@ -816,8 +823,10 @@ class AnalysisService:
                 if stored is None:
                     raise ValueError("分析已不存在，请重新选择日期")
                 snapshot = stored.payload
-            self._guard_product_operation(snapshot)
-            offers = sorted({product['offer_id'] for product in snapshot['products']})
+            if snapshot.get('member_kind') != 'sku':
+                self._guard_product_operation(snapshot)
+            members = snapshot['members'] if snapshot.get('member_kind') == 'sku' else snapshot['products']
+            offers = sorted({member['offer_id'] for member in members})
         urls = {}
         with self._read() as conn:
             for offset in range(0, len(offers), 400):
@@ -836,7 +845,8 @@ class AnalysisService:
             snapshot = self._snapshots.get(analysis_id)
             if snapshot is None:
                 raise ValueError("分析已不存在，请重新选择日期")
-            self._guard_product_operation(snapshot)
+            if snapshot.get('member_kind') != 'sku':
+                self._guard_product_operation(snapshot)
             if snapshot.get('dirty'):
                 raise ValueError('当前分析有未保存的修改，请先保存再导出')
             if pending_groups(snapshot):
@@ -1018,22 +1028,6 @@ def order_review_groups(snapshot: dict) -> None:
         snapshot['groups'], key=lambda group: (-len(group['members']), -group.get('sales', 0)))]
 
 
-def _aggregate_points(series: list[list[dict]]) -> list[dict]:
-    """把多个成员的逐日点聚合成上一层：库存只累加当日有效观测（全缺即未知），销量求和，补货向上汇总。"""
-    if not series:
-        return []
-    aggregated = []
-    for index, lead in enumerate(series[0]):
-        active = [member[index] for member in series if member[index]['stock'] is not None]
-        aggregated.append({
-            'date': lead['date'],
-            'stock': sum(point['stock'] for point in active) if active else None,
-            'sales': sum(member[index]['sales'] for member in series),
-            'color': 'red' if any(member[index]['color'] == 'red' for member in series) else 'green',
-            'segment_start': any(member[index].get('segment_start') for member in series),
-        })
-    return aggregated
-
 
 def product_versions(products: list[dict]) -> dict:
     """商品身份 → 当前证据版本：复用与信息变更标注都以此为准。"""
@@ -1060,7 +1054,7 @@ def pending_groups(snapshot: dict) -> list[dict]:
     冲突组按待确认算（页面上的页签、计数与保存门都用这一条）——「回到人面前」。
     """
     return [group for group in snapshot['groups']
-            if not group['confirmed'] or group['conflicts']]
+            if not group['confirmed'] or group.get('conflicts')]
 
 
 def attach_conflicts(snapshot: dict) -> None:
