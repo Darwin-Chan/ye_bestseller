@@ -268,7 +268,7 @@ def run_round(cfg: Config, shops: list[Shop], *, deviations=(),
 def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *,
                       elapsed_clock: Callable[[], float] | None = None,
                       new_intent: rounds.NewRoundIntent | None = None,
-              resume_intent: rounds.ResumeRoundIntent | None = None) -> None:
+                      resume_intent: rounds.ResumeRoundIntent | None = None) -> None:
     """拿到采集锁之后真正干活的部分。"""
     cfg.ensure_dirs()
     conn = connect(cfg.db_file)
@@ -320,10 +320,12 @@ def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *,
         stop_request.install(check_execution)
         try:
             initializing = False
+            resume_options = ({"resume_intent": resume_intent}
+                              if resume_intent is not None else {})
             _run_pwcdp_round(db, cfg, round_id, work_shops,
                              on_execution_end=segment.settle,
                              explicit_new=new_intent is not None,
-                             resume_intent=resume_intent)
+                             **resume_options)
         finally:
             _settle_execution(segment.settle)
         _finalize_round(db, cfg, opened.round)
