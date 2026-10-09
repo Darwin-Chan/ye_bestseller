@@ -24,7 +24,7 @@ from .matching import (MATCH_DISABLED, PHASE_ASSEMBLE, PHASE_JUDGE, PHASE_RECALL
                        STATUS_DISABLED, identity, matching_summary, offer_of, state_of_status,
                        summarize_group, version)
 from .report import report_name, write_report
-from .sku_grouping import apply_saved as apply_saved_sku, edit_group as edit_sku_group, refresh as refresh_sku, apply_codes as apply_sku_codes, bind_manual_members
+from .sku_grouping import apply_saved as apply_saved_sku, edit_group as edit_sku_group, refresh as refresh_sku, apply_codes as apply_sku_codes, bind_manual_members, shareable_decisions as shareable_sku_decisions, apply_shared as apply_shared_sku
 
 log = logging.getLogger(__name__)
 
@@ -501,6 +501,13 @@ class AnalysisService:
             apply_saved_sku(snapshot, previous)
             snapshot['model_tasks'] = copy.deepcopy(previous.get('model_tasks', {}))
             snapshot['matching_options'] = copy.deepcopy(previous.get('matching_options', {}))
+        def apply_shared():
+            # 收取进来的 SKU 决定在本地草稿回放之后、编码规则之前套上（票 08）；
+            # 与本地人工主张矛盾的记进 SKU 冲突账，本地决定永不被覆盖。
+            _, conflicts = apply_shared_sku(snapshot, self.store.sku_ledger())
+            if conflicts:
+                self.store.record_sku_replay_conflicts(conflicts, seen_at=utcnow())
+        apply_shared()
         apply_sku_codes(snapshot)
         def reload_manual():
             nonlocal saved_payload
@@ -508,10 +515,11 @@ class AnalysisService:
             if latest and latest.get('member_kind') == 'sku' and latest != saved_payload:
                 saved_payload = latest
                 apply_saved_sku(snapshot, latest)
+                apply_shared()
                 apply_sku_codes(snapshot)
         from .sku_matching import apply as apply_sku_images
         apply_sku_images(snapshot, self.config.matching, stop=stop, reload_manual=reload_manual,
-                         previous_snapshot=previous)
+                         previous_snapshot=previous, machine=self.config.machine)
 
     def retry_matching(self, analysis_id, progress=None, stop=None):
         with self._lock:
@@ -715,7 +723,7 @@ class AnalysisService:
                 saved_at = utcnow()
                 payload = copy.deepcopy(snapshot)
                 payload.update(dirty=False, saved_at=saved_at)
-                self.store.write_sku(payload)
+                self.store.write_sku(payload, decisions=shareable_sku_decisions(payload))
                 snapshot.update(dirty=False, saved_at=saved_at)
                 return copy.deepcopy(snapshot)
             self._guard_product_operation(snapshot)

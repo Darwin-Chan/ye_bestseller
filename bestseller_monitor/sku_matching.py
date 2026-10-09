@@ -7,7 +7,8 @@ from .matching import ImageJudge, digest, scored_pairs
 from .sku_grouping import identity, refresh
 
 RULE_VERSION = "sku-physical-object-v1"
-LIMITATIONS = ["SKU 跨机共享尚未开放"]
+# 八票全部开放后这里不再挂「尚未开放」的说明；保留字段供页面统一渲染（票 08 收口）。
+LIMITATIONS: list[str] = []
 
 
 def evidence_version(member):
@@ -34,8 +35,8 @@ def _finish(snapshot):
     refresh(snapshot)
 
 
-def apply(snapshot, config, *, stop=None, reload_manual=None, previous_snapshot=None):
-    work = ModelWork(snapshot, config, stop)
+def apply(snapshot, config, *, stop=None, reload_manual=None, previous_snapshot=None, machine=""):
+    work = ModelWork(snapshot, config, stop, machine)
     try:
         _apply(snapshot, config, work, stop=stop, reload_manual=reload_manual, previous_snapshot=previous_snapshot)
         work.finish()

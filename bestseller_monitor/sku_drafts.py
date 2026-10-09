@@ -97,7 +97,7 @@ def freeze(conn, analysis_id, start, end, calculate, frozen_at):
                 shops=[dict(s) for s in conn.execute('SELECT * FROM shops ORDER BY shop_key')],
                 dirty=True,saved_at=None,conflicts=[],excluded=[],
                 review_order=[g['id'] for g in groups],
-                limitations=['无有效编码／编码歧义的图文判断尚未开放；多候选比较与跨机共享尚未开放'])
+                limitations=[])
     refresh(snapshot)
     return snapshot
 

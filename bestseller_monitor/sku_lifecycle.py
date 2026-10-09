@@ -21,10 +21,36 @@ LABELS = {
 }
 RETRYABLE = {"needs_config", "model_unavailable", "failed", "stopped", "inconclusive"}
 
+# 两张 SKU 缓存表的生产 DDL：打包（票 08）与收取导入都照这一份口径备表。
+# machine_id 只作来源与冲突说明、不参与键；一条结果记「第一次收到」的来源。
+SKU_JUDGMENTS_DDL = """CREATE TABLE IF NOT EXISTS sku_judgments (
+    pair TEXT, signature TEXT, machine_id TEXT NOT NULL DEFAULT '',
+    result TEXT NOT NULL, PRIMARY KEY(pair, signature))"""
+SKU_RECOMMENDATIONS_DDL = """CREATE TABLE IF NOT EXISTS sku_recommendations (
+    context TEXT, signature TEXT, machine_id TEXT NOT NULL DEFAULT '',
+    result TEXT NOT NULL, PRIMARY KEY(context, signature))"""
+
+
+def ensure_tables(conn, machine_id):
+    """备好两张 SKU 缓存表，并给老形状就地补来源列（一次只付条件判断）。
+
+    补列前的行只有本机能写（那时还没有导入路径），所以老行都算本机产生的、
+    来源记本机——与产品判断表升级同一口径。
+    """
+    conn.execute(SKU_JUDGMENTS_DDL)
+    conn.execute(SKU_RECOMMENDATIONS_DDL)
+    for table in ("sku_judgments", "sku_recommendations"):
+        if "machine_id" in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
+            continue
+        with conn:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN machine_id TEXT NOT NULL DEFAULT ''")
+            conn.execute(f"UPDATE {table} SET machine_id=? WHERE machine_id=''", (machine_id,))
+
 
 class ModelWork:
-    def __init__(self, snapshot, config, stop=None):
+    def __init__(self, snapshot, config, stop=None, machine=""):
         self.snapshot, self.config, self.stop = snapshot, config, stop
+        self.machine = machine
         self.previous = copy.deepcopy(snapshot.get("model_tasks", {}))
         snapshot["model_tasks"] = self.tasks = {}
         self.conn = None
@@ -71,8 +97,7 @@ class ModelWork:
             if self.conn is None:
                 cfg.cache.parent.mkdir(parents=True, exist_ok=True)
                 self.conn = sqlite3.connect(cfg.cache)
-                self.conn.execute("CREATE TABLE IF NOT EXISTS sku_judgments (pair TEXT, signature TEXT, result TEXT NOT NULL, PRIMARY KEY(pair, signature))")
-                self.conn.execute("CREATE TABLE IF NOT EXISTS sku_recommendations (context TEXT, signature TEXT, result TEXT NOT NULL, PRIMARY KEY(context, signature))")
+                ensure_tables(self.conn, self.machine)
             if branch == "judgment":
                 row = self.conn.execute("SELECT result FROM sku_judgments WHERE pair=? AND signature=?", (cache_key, signature)).fetchone()
             else:
@@ -107,9 +132,11 @@ class ModelWork:
                 self.record(branch, context, members, "inconclusive", signature=signature)
                 return result, False
             if branch == "judgment":
-                self.conn.execute("INSERT OR REPLACE INTO sku_judgments VALUES (?,?,?)", (cache_key, signature, json.dumps(result, ensure_ascii=False)))
+                self.conn.execute("INSERT OR REPLACE INTO sku_judgments(pair,signature,machine_id,result) VALUES (?,?,?,?)",
+                                  (cache_key, signature, self.machine, json.dumps(result, ensure_ascii=False)))
             else:
-                self.conn.execute("INSERT OR REPLACE INTO sku_recommendations VALUES (?,?,?)", (cache_key, signature, json.dumps(result, ensure_ascii=False)))
+                self.conn.execute("INSERT OR REPLACE INTO sku_recommendations(context,signature,machine_id,result) VALUES (?,?,?,?)",
+                                  (cache_key, signature, self.machine, json.dumps(result, ensure_ascii=False)))
             self.conn.commit()
         state = ("completed_uncertain" if (result.get("group_id") is None if branch == "recommendation" else result["confidence"] < .8)
                  else "completed_positive" if branch == "recommendation" or result["same"] else "completed_negative")
