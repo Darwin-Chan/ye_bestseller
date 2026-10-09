@@ -81,3 +81,13 @@ implement；尚未认领或实施，未运行 elapsed 行为测试或全量。�
 用户随后授权03，重开/CLI接管/正常关窗与历史结果矩阵新增12项全部通过；03没有新增生产故障，保留01/02已正确实现。Standards/Spec双轴各0项可行动发现，03独立隔离全量1544/1544项、7/7段OK、计数对账一致（701.5s），退出0、不带-f。
 #elapsed 已实施并完成约定自动化验收；轮次持有采集执行累计，GUI与views只消费保存事实，旧未知不反推。决策见 [ADR-0051](0051-round-elapsed-owned-by-collection-execution.md)，定义、证据、处置与现场限制见 [03整项交付记录](../design/elapsed-03-delivery-2026-10-08.md)。
 原生Windows关窗、真实强杀/崩溃/掉电未做现场验收，不把adapter覆盖说成现场已验证。#prep-owner、#page-contract、其余挂起候选及附录保持原状态；仅保留现有准备后计时/执行结束最小衔接，未改变状态模型、超时和进程归属。归档HTML未修改。
+
+## 2026-10-09：prep-owner 设计确认与工单发布（未实施）
+
+用户授权恢复 `#prep-owner`，按 grill-with-docs → to-spec → to-tickets → implement 推进。
+Q1–Q8 及最终运行态/interface、新测试 seam 均已确认；grill、to-spec、to-tickets 已完成，01→02→03粒度与依赖获批。
+已发布本机 tracker spec及三张独立工单，正式[规格](../design/prep-owner-spec-2026-10-09.md)与[工单存档](../design/prep-owner-tickets-2026-10-09.md)随本次授权提交；未修改生产实现，实施范围尚未授权。
+基线公开 interface 诊断 12 项：6 个通过对照、6 个行为断言失败，0 error；这是旧实现的复现证据，
+不是交付验收或生产事故记录。记录见 [prep-owner 访谈与取证](../design/prep-owner-interview-2026-10-09.md)。
+`#page-contract` 及其余候选状态不变；不重开已完成的 `#elapsed`、handled-predicate 或店铺阶段。
+归档 HTML 未修改。
