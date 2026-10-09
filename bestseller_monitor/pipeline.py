@@ -27,7 +27,7 @@ from .db import (
 )
 from .delay import Humanizer
 from .pacing import Pacing
-from .guard import RoundPauseRequired
+from .guard import IdentityVerificationTimeout, RoundPauseRequired
 from .rounds import Round, RoundRequest, ShopScope, TerminalReason
 from .stop_request import StopRequested
 from .listing import ListingLoadFailed, save_raw_listing_page
@@ -96,6 +96,14 @@ _STOP_OUTCOMES: dict[type, StopOutcome] = {
         log_line="轮次 #{round_id}：{note}",
         notice="{note}。",
         log_level=logging.WARNING,
+    ),
+    IdentityVerificationTimeout: StopOutcome(
+        round_end=TerminalReason.IDENTITY_VERIFICATION_TIMEOUT,
+        round_note="身份验证等待超时，本轮已自动中止，已保存数据保留，不可续跑",
+        shop_note="身份验证等待超时，本店未完成",
+        log_line="轮次 #{round_id}：{note}",
+        notice="{note}；安全收尾完成后可明确开始新轮。",
+        log_level=logging.ERROR,
     ),
     RoundPauseRequired: StopOutcome(
         shop_note="人工介入未完成：{exc}",
@@ -305,7 +313,7 @@ def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *,
                              on_execution_end=segment.settle,
                              explicit_new=new_intent is not None)
         finally:
-            segment.settle()
+            _settle_execution(segment.settle)
         _finalize_round(db, cfg, opened.round)
     except STOP_WITH_OUTCOME as exc:
         # 停止这一族在这里统一收尾：分类与文案都来自 _STOP_OUTCOMES。
@@ -423,6 +431,17 @@ def _finalize_round(db: Database, cfg: Config, run: Round) -> None:
 
 # ---------- Playwright 连接接管（pw_cdp）路径 ----------
 
+def _settle_execution(callback) -> None:
+    """Cleanup must not replace an already classified identity timeout."""
+    timeout = isinstance(sys.exc_info()[1], IdentityVerificationTimeout)
+    try:
+        callback()
+    except Exception:
+        if not timeout:
+            raise
+        log.exception("身份验证已超时，时长收尾失败；仍按原超时停止")
+
+
 def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
                      shops: list[Shop], started_at: str | None = None, *,
                      on_execution_end: Callable[[], bool] | None = None,
@@ -453,16 +472,32 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
                                   TerminalReason.STARTUP_FAILED,
                                   note=f"采集启动失败，未进入采集：{exc}")
         raise
+    identity_timeout = None
+    browser_binding = db.crawler_process()
     try:
         _run_listing_pw(db, cfg, round_id, shops, page, emit=emit, deny_tracker=deny_tracker)
+    except IdentityVerificationTimeout as exc:
+        identity_timeout = exc
+        raise
     finally:
         # 采集已结束；浏览器归属清理不再贡献采集段时长。
         # callback 只表达执行结束事件，差值/保存/冻结知识仍属于 elapsed。
         try:
             if on_execution_end is not None:
-                on_execution_end()
+                _settle_execution(on_execution_end)
         finally:
-            browser_pw.close_session(pw, br, publish_browser=publish)
+            try:
+                browser_pw.close_session(pw, br, publish_browser=publish)
+            except Exception:
+                if identity_timeout is None:
+                    raise
+                # Preserve the classified timeout; cleanup debt is independently
+                # visible to the GUI and continues to block a new round.
+                publish("UNKNOWN",
+                        browser_binding["browser_port"] if browser_binding else cfg.attach_port,
+                        browser_binding["browser_pid"] if browser_binding else None,
+                        browser_binding["browser_os_started"] if browser_binding else None)
+                log.exception("身份验证已超时，浏览器收尾失败；保留收尾门禁")
 
 
 def _record_shop_stop(db: Database, round_id: int, shop: Shop, exc: BaseException,

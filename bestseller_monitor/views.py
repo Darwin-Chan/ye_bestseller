@@ -136,6 +136,9 @@ def _pacing_state(conn: sqlite3.Connection, round_id: int, *, now: str,
 
 
 _TERMINAL_TEXT = {
+    rounds.TerminalReason.IDENTITY_VERIFICATION_TIMEOUT: (
+        "身份验证超时中止", "身份验证等待超时，本轮自动中止；已抓取数据已保留、不可续跑。请完成安全收尾后明确开始新轮。",
+    ),
     rounds.TerminalReason.STARTUP_FAILED: (
         "启动失败", "本次新建在启动或初始化时失败，未进入采集；请核实收尾与配置后明确开始新轮。",
     ),
@@ -459,6 +462,26 @@ def _round_counts(conn: sqlite3.Connection, round_id: int) -> tuple[int, int]:
     return total, deny
 
 
+def _identity_wait(conn, round_id: int, state: UiState) -> dict | None:
+    """Only the running round's latest verification event can represent a wait."""
+    if not state.crawler_running or state.stopping or state.manually_paused:
+        return None
+    row = conn.execute(
+        "SELECT event, verification_type, note FROM event_log "
+        "WHERE round_id=? AND kind='verification' ORDER BY id DESC LIMIT 1",
+        (round_id,),
+    ).fetchone()
+    if not row or row["event"] != "verification_appear" or row["verification_type"] != "identity":
+        return None
+    values = dict(part.split("=", 1) for part in (row["note"] or "").split(";") if "=" in part)
+    try:
+        minutes = float(values["wait_minutes"])
+    except (KeyError, ValueError):
+        return None
+    return {"type": "identity", "wait_minutes": minutes,
+            "note": f"需要人工完成身份验证；本次最长等待 {minutes:g} 分钟，超时自动中止。"}
+
+
 def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str,
              max_attempts: int = shop_progress.DEFAULT_MAX_ATTEMPTS) -> dict:
     """过程页取数：本轮进度、各店明细、当前处理中的店。
@@ -492,6 +515,7 @@ def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str,
         "stop_grace_sec": state.stop_grace_sec,
         "has_round": True,
         "round_id": round_id,
+        "verification": _identity_wait(conn, round_id, state),
         "can_resume": (state.manually_paused and state.round_id == round_id
                        and not state.crawler_running and not state.stopping
                        and active.resumable_on(now)),

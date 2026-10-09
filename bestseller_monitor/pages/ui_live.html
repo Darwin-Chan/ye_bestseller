@@ -476,7 +476,7 @@
       $("rBar").style.width = (d.progress * 100) + "%";
       const cur = d.current_shop ? d.current_shop + "（第 " + (d.done_count + 1) + " 家）" : "准备中";
       // 主动停顿（ADR-0037）：程序自己在给站点降温，说清楚还要等多久，别像卡死。
-      $("rProgressLine").textContent = (d.pacing_remaining_sec != null)
+      $("rProgressLine").textContent = d.verification ? d.verification.note : (d.pacing_remaining_sec != null)
         ? "进度：主动停顿中，剩余 " + d.pacing_remaining_text + " · 当前处理 " + cur
         : "进度：当前处理 " + cur + " · 已抓时长 " + d.elapsed_text;
       $("rDoneTitle").textContent = "已完成店铺（" + d.done_count + "）";

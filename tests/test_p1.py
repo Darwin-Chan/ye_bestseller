@@ -3,6 +3,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from helpers import readable_mock_page
 from unittest.mock import MagicMock, patch
 
 from playwright.sync_api import Error as PlaywrightError
@@ -47,7 +48,7 @@ class P1Tests(unittest.TestCase):
 
     def test_navigate_detail_announces_the_offer_without_reading_html(self):
         """补采 adapter 只负责导航；当前 HTML 由 detail_visit 在 guard 后读取。"""
-        page = MagicMock()
+        page = readable_mock_page()
         events: list[tuple[str, dict]] = []
 
         opened = browser_pw.navigate_detail(
@@ -70,7 +71,7 @@ class P1Tests(unittest.TestCase):
             "product_url": "https://detail.1688.com/offer/111.html",
             "list_title": "榜单标题",
         }
-        page = MagicMock()
+        page = readable_mock_page()
         page.url = offer["product_url"]
         page.content.side_effect = ["<html>登录墙</html>", DETAIL_HTML]
 
@@ -101,7 +102,7 @@ class P1Tests(unittest.TestCase):
             "product_url": "https://detail.1688.com/offer/111.html",
             "list_title": "榜单标题",
         }
-        page = MagicMock()
+        page = readable_mock_page()
         page.url = offer["product_url"]
         page.content.return_value = DETAIL_HTML
         opened = detail_visit.OpenedDetail(page)
@@ -218,7 +219,7 @@ class P1Tests(unittest.TestCase):
             "list_title": "榜单标题",
         }
         events: list[str] = []
-        page = MagicMock()
+        page = readable_mock_page()
         page.content.return_value = DETAIL_HTML
 
         # 走真的 navigate_detail 与 detail_visit，事件才真是生产路径发出来的；判据那两处按本仓
@@ -285,7 +286,7 @@ class P1Tests(unittest.TestCase):
                        "sku_stock": 3}],
             collected_at=utcnow(), attempt=1)
         cfg = crawler_cfg(deny_shop_limit=2, raw_page_dir=Path(self.tmp.name) / "raw")
-        page = MagicMock()
+        page = readable_mock_page()
         page.url = "https://s.1688.com/bsop-punish?x=1"
         crawled: list[str] = []
 
@@ -447,7 +448,7 @@ class P1Tests(unittest.TestCase):
 
     @staticmethod
     def _opened_detail(html: str, *, deny: bool = False):
-        page = MagicMock()
+        page = readable_mock_page()
         page.url = ("https://s.1688.com/bsop-punish?x=1" if deny
                     else "https://detail.1688.com/offer/111.html")
         page.content.return_value = html

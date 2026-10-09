@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 from bestseller_monitor import single_instance
@@ -259,7 +259,7 @@ class FakePage:
     def __init__(self, url: str, *, body: str = "", captcha: bool = False,
                  html: str = "<html></html>", body_after_reload: str | None = None):
         self.url = url
-        self.body = body
+        self.body = body or "正常商品详情"
         self.captcha = captcha
         self.html = html
         self._body_after_reload = body_after_reload
@@ -271,16 +271,21 @@ class FakePage:
 
     def solve(self) -> None:
         """人工解决：验证容器与文案一起消失。"""
-        self.body = ""
+        self.body = "正常商品详情"
         self.captcha = False
 
     def reload(self, wait_until=None) -> None:
         self.reloads += 1
         if self._body_after_reload is not None:
-            self.body = self._body_after_reload
+            self.body = self._body_after_reload or "正常商品详情"
 
     def content(self) -> str:
         return self.html
+
+    def evaluate(self, expression):
+        # Explicit readable/business DOM seam for legacy unit tests. Unknown and
+        # identity contexts are covered by real offline DOM in ticket 02 tests.
+        return {"loaded": True, "identity": False, "business": True}
 
     def locator(self, selector: str):
         return _BodyLocator(self) if selector == "body" else _CaptchaLocator(self)
@@ -370,10 +375,9 @@ class FakeCard:
             return ('<script>{"skuInfoMap":{"A":{"skuId":"A",'
                     '"name":"默认","price":1,"canBookCount":3}}}</script>')
 
-        page = SimpleNamespace(
-            url=self.DENY_URL if self._denied else self.url,
-            content=content,
-        )
+        page = FakePage(self.DENY_URL if self._denied else self.url,
+                        body="正常商品详情")
+        page.content = content
         return detail_visit.OpenedDetail(page)
 
     def close(self) -> None:
@@ -416,3 +420,12 @@ class ScriptedListing:
 
     def load_failed(self, reason: str):
         raise ListingLoadFailed(reason)
+
+
+def readable_mock_page():
+    """A scripted normal business page with explicit successful DOM reads."""
+    page = MagicMock()
+    page.evaluate.return_value = {"loaded": True, "identity": False, "business": True}
+    page.locator.return_value.inner_text.return_value = "正常商品详情"
+    page.locator.return_value.count.return_value = 0
+    return page

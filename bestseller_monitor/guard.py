@@ -10,9 +10,10 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from . import sound
-from . import waiting
+from . import waiting, stop_request
 from .config import Config
 
 log = logging.getLogger(__name__)
@@ -22,8 +23,16 @@ class RoundPauseRequired(RuntimeError):
     """轮次必须暂停并保留进度，等待后续人工或环境恢复。"""
 
 
+class PageEvidenceUnavailable(RoundPauseRequired):
+    """页面读取不可靠；不能据此继续采集或宣称解除。"""
+
+
 class InterventionTimeout(RoundPauseRequired):
     """人工验证或扫码未在配置时限内解决。"""
+
+
+class IdentityVerificationTimeout(InterventionTimeout):
+    """身份验证达到固定等待上限；原轮必须自动中止。"""
 
 
 class ShopDenyExceeded(Exception):
@@ -97,6 +106,8 @@ def is_deny_url(url: str) -> bool:
 
 def vtype(kind: str | None) -> str:
     """把『滑块/登录墙』这类文案映射为相对稳定的验证类型。"""
+    if kind == "身份验证":
+        return "identity"
     if kind == "登录墙":
         return "login"
     if kind in ("滑块", "物品识别", "图片验证"):
@@ -105,14 +116,16 @@ def vtype(kind: str | None) -> str:
 
 
 # ---------- Playwright 页面读取 ----------
-def body_text(page) -> str:
+def body_text(page, *, strict: bool = False) -> str:
     try:
         return page.locator("body").inner_text(timeout=3000) or ""
     except Exception:
+        if strict:
+            raise
         return ""
 
 
-def captcha_visible(page) -> bool:
+def captcha_visible(page, *, strict: bool = False) -> bool:
     # 只针对特征明确的验证容器/iframe，避免普通元素误判
     sel = ("iframe[src*='captcha' i], iframe[src*='nocaptcha' i], iframe[src*='secaptcha' i], "
            "#nc_1_wrapper, #nc_1_container, .nc-container, .nc_scale, #nc_1_n1z, "
@@ -126,9 +139,13 @@ def captcha_visible(page) -> bool:
                 if loc.nth(i).is_visible():
                     return True
             except Exception:
+                if strict:
+                    raise
                 continue
         return False
     except Exception:
+        if strict:
+            raise
         return False
 
 
@@ -139,6 +156,8 @@ class _PageEvidence:
     url: str
     body: str
     captcha: bool
+    identity_page: bool = False
+    business_page: bool = False
 
 
 def _page_evidence(page) -> _PageEvidence:
@@ -147,12 +166,37 @@ def _page_evidence(page) -> _PageEvidence:
     判据与它的解除判定都从这一份读起（ADR-0030）。各读各的就会给出互相矛盾的答案，
     而「要人工介入」与「介入已经解除」本来就是同一件事的两种读法。
     """
-    return _PageEvidence(page.url or "", body_text(page), captcha_visible(page))
+    try:
+        context = page.evaluate(r"""() => {
+            const visible = e => !!e && e.getClientRects().length > 0;
+            const anyVisible = sel => [...document.querySelectorAll(sel)].some(visible);
+            return {
+                loaded: document.readyState !== 'loading' && !!document.body,
+                identity: /^(?:阿里巴巴集团\s*[|｜]\s*)?(?:身份验证|登录验证)$/.test(document.title.trim()) ||
+                    anyVisible('form[name="validateParams"]'),
+                business: anyVisible('#offer-detail, .offer-detail, #mod-detail-title, '
+                    + '.mod-detail-title, .detail-gallery, .sku-selection, img.main-picture, '
+                    + '.sm-offer-list, .offer-list, .no-result, .empty-result')
+            };
+        }""")
+        text = body_text(page, strict=True)
+        captcha = captcha_visible(page, strict=True)
+        if not context["loaded"] or not text.strip():
+            raise PageEvidenceUnavailable("页面尚未可靠加载，不能确认业务状态")
+        return _PageEvidence(page.url or "", text, captcha,
+                             context["identity"], context["business"])
+    except PageEvidenceUnavailable:
+        raise
+    except Exception as exc:
+        raise PageEvidenceUnavailable("页面证据读取失败，不能确认业务状态") from exc
 
 
 def _intervention_of(evidence: _PageEvidence) -> str | None:
     """三样证据 → 需不需要人工介入。纯函数，判据只有这一份。"""
     url = evidence.url.lower()
+    if (evidence.identity_page and
+            "为确认是你本人操作，请完成以下验证" in evidence.body):
+        return "身份验证"
     if is_login_url(url):
         return "登录墙"
     if is_punish_url(url):
@@ -180,26 +224,27 @@ def intervention_kind(page) -> str | None:
 
     判据只有这一份：`resolved` 是它的另一种读法，不再自己认一遍证据（ADR-0030）。
     """
-    return _intervention_of(_page_evidence(page))
+    evidence = _page_evidence(page)
+    kind = _intervention_of(evidence)
+    if kind is None and (evidence.identity_page or not evidence.business_page):
+        raise PageEvidenceUnavailable("页面上下文未知，不能确认业务页面可用")
+    return kind
 
 
-def resolved(page) -> bool:
-    """人工介入是否已经解除：同一次判定不再认得这个页面上的任何信号。
-
-    改前这是一份独立的判据，只读地址与可见验证容器、看不见正文。于是「只由正文命中」的
-    那一幕里，它与 `intervention_kind` 同时给出「要介入」和「已解决」两个矛盾答案：详情读取
-    循环的每一步都在等一个永远不为假的判据，而确认窗口拿这个「已解决」把自己判成误报
-    （ADR-0030）。
-
-    读**不出**证据时回 `False`（还没解除、继续等）——与 `intervention_kind` 上抛是有意的
-    不同：那是判据，异常交给调用方；这是轮询谓词，「读不到」只说明还不能停。注意这说的是
-    **读证据出错**：`body_text` / `captcha_visible` 自己把异常吞成空证据，那种情况判据给
-    `None`、这里便是 `True`，与「页面确实没有信号」不可分。这层区分先于本条存在（改前的
-    `resolved` 也这样），记在 ADR-0030 的挂账里。
-    """
+def resolved(page, *, target_url: str | None = None) -> bool:
+    """读取成功、全部介入消失并有可用业务页证据，才算真正解除。"""
     try:
-        return _intervention_of(_page_evidence(page)) is None
-    except Exception:
+        evidence = _page_evidence(page)
+        if target_url is not None:
+            target = urlsplit(target_url)
+            current = urlsplit(evidence.url)
+            if (target.hostname, target.path.split('/_____tmd_____')[0].rstrip('/')) != (
+                    current.hostname, current.path.split('/_____tmd_____')[0].rstrip('/')):
+                return False
+        return (evidence.business_page and not evidence.identity_page
+                and not is_deny_url(evidence.url)
+                and _intervention_of(evidence) is None)
+    except PageEvidenceUnavailable:
         return False
 
 
@@ -247,31 +292,50 @@ def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | 
     取消钩子由原语默认接上（与睡眠分片同一个判据），本模块不再手写检查点。
     """
     vtype_name = verification_type or "slider"
+    target_url = page.url if vtype_name == "identity" else None
+    deadline = None
+    def probe():
+        if vtype_name == "identity":
+            stop_request.check()  # A user stop wins before even a now-readable page.
+            if deadline is not None and time.monotonic() > deadline:
+                return False
+            usable = resolved(page, target_url=target_url)
+            return usable and (deadline is None or time.monotonic() <= deadline)
+        return resolved(page)
     # 确认窗口：短暂出现又自行消失的信号（如 tmd/x5sec 上报）不算真正的人工介入
-    if waiting.until(lambda: resolved(page), timeout_sec=confirm_sec, poll_sec=0.3):
+    if waiting.until(probe, timeout_sec=confirm_sec, poll_sec=0.3):
         log.debug("人工介入信号瞬时就消失，判定为误报，忽略")
         return
     # 超过确认窗口仍未解决 => 确认为真正需要人工介入
     # 先尝试一次刷新：反爬拦截页/瞬时 block 常可通过刷新解除，刷新后恢复则不响铃
-    try:
-        page.reload(wait_until="domcontentloaded")
-        time.sleep(1.5)
-    except Exception:
-        pass
-    if resolved(page):
-        log.info("刷新后已恢复，忽略（原为瞬时报错/反爬拦截）")
-        return
+    if vtype_name != "identity":
+        try:
+            page.reload(wait_until="domcontentloaded")
+            time.sleep(1.5)
+        except Exception:
+            pass
+        if resolved(page):
+            log.info("刷新后已恢复，忽略（原为瞬时报错/反爬拦截）")
+            return
+    deadline = time.monotonic() + minutes * 60
+    appear_ts = time.time()
     log.warning("检测到需要人工介入，请在浏览器窗口处理（持续响铃直到解决）……最长 %s 分钟", minutes)
     if emit:
         emit("verification_appear", kind="verification", verification_type=vtype_name,
-             note=f"type={vtype_name}")
-    appear_ts = time.time()
-
+             note=f"type={vtype_name};wait_minutes={minutes}")
     def ring() -> None:
         sound.play_alarm(count=1)   # 每次约 1 秒，循环播放
 
-    if waiting.until(lambda: resolved(page), timeout_sec=minutes * 60, poll_sec=3,
+    timeout_sec = (max(0.0, deadline - time.monotonic())
+                   if vtype_name == "identity" else minutes * 60)
+    if waiting.until(probe, timeout_sec=timeout_sec, poll_sec=3,
                      on_wait=ring) is None:
+        if vtype_name == "identity":
+            stop_request.check()
+            if emit:
+                emit("verification_timeout", kind="verification", verification_type="identity",
+                     note="reason=IDENTITY_VERIFICATION_TIMEOUT")
+            raise IdentityVerificationTimeout("身份验证等待超时，本轮自动中止，已保存数据保留")
         raise InterventionTimeout("人工介入超时")
     if emit:
         emit("verification_solved", kind="verification", verification_type=vtype_name,
