@@ -20,4 +20,15 @@
 
 主要边界为真实临时历史库存及决定存储 → AnalysisService公开操作；只控制外部模型请求。真实Edge浏览器 → HTTP → 服务覆盖增员、重新确认、人工保存恢复、缺图与多候选；回归票01–04。
 
-主仓工单 `.scratch/sku-grouping/issues/05-sku-text-image-matching.md` 记录最终全量、审查、提交号与目录处置；本文件不将尚未完成的全量或审查宣称通过。
+主仓工单 `F:\AI\projects\bestseller\.scratch\sku-grouping\issues\05-sku-text-image-matching.md` 记录提交与处置。最终代码提交 `6c3f0c2d33f5d2ba4553e590b1a5b2fad0eb8817`。
+
+- TDD图文服务／真实浏览器最终15项通过；票04编码22项、草稿23项、分组4项、排行9项、切换7项、旧匹配14项定向回归通过。
+- 固定起点双轴初审：Standards 0项，Spec 1项P2（另一个候选失败可被成功或否定判断覆盖）。补真实服务红灯并修复后，完整差异复审两轴待整改0项。失败合法候选保留pending，不据此自动归属，不扩展成票07重试能力。
+- 安全独立副本分段全量：1582项（预期1582，计数对账一致），7/7段OK，退出0，总耗时705.7秒。不加-f，无提前停止；副本全部336个跟踪文件与实际功能树逐字节对账，配置写路径在副本内，未复制真实库存／登录态。
+- 全量与配置证据：`F:\AI\projects\bestseller\.scratch\logs\tickets\sku-grouping\05\full-20261009-sku05-01`。
+- 定向、失败原文、验收映射和审查归档：`F:\AI\projects\bestseller\.scratch\logs\tickets\sku-grouping\05\20261009-sku-image-01`。
+- 8张浏览器截图：`F:\AI\projects\bestseller\.scratch\tool-output\sku-grouping\05\20261009-sku-image-01`；确认卡可见同次商品主图代填、图文依据、缺图／多候选；已人工检查截图及确认保存恢复。
+
+## 目录处置
+
+共享功能树 `F:\AI\projects\bestseller\.scratch\sandboxes\sku-grouping\02\bestseller` 保留供06–08继续使用。测试副本 `F:\AI\projects\bestseller\.scratch\sandboxes\sku-grouping\05\full-20261009-sku05-01\bestseller` 暂留；可删除候选不等于授权，未删除。主仓日志／截图不随副本清理。仅本票四份已结束审查任务目录在SHA256归档核验后依交接协议清理，报告仍保留；无其他目录删除。本票停止在05，不继续后票、不合并main、不推送。
