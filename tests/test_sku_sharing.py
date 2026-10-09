@@ -563,19 +563,24 @@ class DecisionMergeTests(SkuSharingCase):
         self.assertTrue(self.conflicts(), "矛盾照记")
 
     def test_a_clashing_exclusion_self_update_retires_nothing(self):
-        """B1 同规：排除身份行的同源让位也不许抢在冲突判定之前执行。"""
+        """B1 同规：排除身份行的同源让位也不许抢在冲突判定之前执行。
+
+        正常流程里这两行不会共存（并入互斥、保存会撤在场身份行），按「预置行」直写
+        造出共存态：同源排除行（m1）＋异源组（m2）同时在账。旧码上这条用例会红：
+        让位先删掉 m1 的排除行，冲突判定随后返回，行再也补不回来。
+        """
         first = sku_identity({"shop_key": "S", "offer_id": "1", "sku_id": "s1"})
         second = sku_identity({"shop_key": "S", "offer_id": "1", "sku_id": "s2"})
-        self.merge("m1", excluded_skus=[[first, "m1"]])
-        DraftStore(self.store, "m2").write_sku(
-            {"id": "d2", "saved_at": "2026-10-09T00:00:00+00:00",
-             "start": "2026-09-07", "end": "2026-09-14",
-             "members": [{"shop_key": "S", "offer_id": "1", "sku_id": "s1"},
-                         {"shop_key": "S", "offer_id": "1", "sku_id": "s2"}]},
-            decisions={"groups": [{"members": sorted([[first, "v1"], [second, "v1"]]),
-                                   "confirmed": False, "excluded": False,
-                                   "group_id": "g-2", "machine_id": ""}],
-                       "excluded_skus": [], "excluded_pairs": []})
+        DraftStore(self.store, "seed").merge_incoming_sku(
+            {"groups": [], "excluded_skus": [[first, "m1"]], "excluded_pairs": []},
+            source="m1", seen_at=STAMP_ISO)
+        with closing(sqlite3.connect(self.store)) as conn:
+            conn.execute("INSERT OR IGNORE INTO sku_manual_groups"
+                         "(members,confirmed,excluded,group_id,saved_at,machine_id)"
+                         " VALUES(?,?,?,?,?,?)",
+                         (json.dumps(sorted([[first, "v1"], [second, "v1"]]), ensure_ascii=False),
+                          0, 0, "g-2", STAMP_ISO, "m2"))
+            conn.commit()
         before = self.ledger()["excluded_skus"]
         self.merge("m1", excluded_skus=[[first, "m1"]])
         self.assertEqual(before, self.ledger()["excluded_skus"], "矛盾时先不动本机一侧")
