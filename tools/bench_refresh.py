@@ -52,7 +52,10 @@ def refresh_api(db_file: Path, *, now: str = NOW, open_conn=None):
     """
     from gui import Api
 
-    return Api(cfg=SimpleNamespace(db_file=db_file, max_pages_per_shop=3, local_trial=False),
+    return Api(cfg=SimpleNamespace(db_file=db_file, max_pages_per_shop=3, local_trial=False,
+                                   root=db_file.parent, chrome_path="",
+                                   user_data_path=db_file.parent / "unused-profile",
+                                   attach_port=9222, start_browser=False),
                shops=[], now=lambda: now, open_conn=open_conn)
 
 

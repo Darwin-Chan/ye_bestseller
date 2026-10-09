@@ -88,6 +88,7 @@ def crawler_cfg(**overrides):
         "user_data_path": _RAW_PAGE_DIR / "profile",
         "chrome_path": "",
         "start_browser": True,
+        "gui_browser_settings": None,
         "attach_port": 9222,
         "base_url": "",
         "pages_per_shop_override": None,
