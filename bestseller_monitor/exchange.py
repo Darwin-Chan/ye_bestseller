@@ -37,7 +37,11 @@
   （本机没做成事），不能表现成「没有新判断集」。
 - **收取判断集**：`judgment_set.collect` 按接入好的名单（来源清单接入的 + 清单外本地已有的
   `judged-*` 库，spec §9）上各家的判断集、按内容摘要幂等导入；缺库没 clone、别人还没发布
-  都只给可读提示，不中止其余步骤。
+  都只给可读提示，不中止其余步骤。票 03 起每份包在导入账里记全审计身份（来源提交、清单
+  版本、格式与署名/证据摘要、行数），逐次流水与周报报的是同一份（任务 ID、来源名、远端、
+  提交、包相对路径、摘要、计数）；整趟汇总状态 ok / partial_failure /
+  receive_channel_not_ready；周报里导入数与当前采纳分列（采纳从本机库现读，本机没跑过
+  分析记「未评估」，不拿导入数冒充）。
 - **报告**：`<交换区根>/报告/<年>-W<周>.md`——**一周一份、同周重跑重写同一份**，
   内容是**状态累积**（从计划表、本机库、交换区、幂等账与冲突账现读）而不是两次运行
   日志相加；开头「本次运行」行说明这一次具体做了什么。逐次流水在 `logs/exchange.log`。
@@ -252,6 +256,12 @@ class RunOutcome:
     judgment_publish: judgment_set.PublishResult | None = None
     judgment_collect: judgment_set.CollectOutcome | None = None
     judgment_conflicts: tuple = ()
+    # 票 03：这次运行的 ID（收取日志与报告共用）、收取那半的汇总状态
+    # （ok / partial_failure / receive_channel_not_ready；None = 这趟没收取）与各来源的
+    # 当前采纳读数（从本机库现读：导入数不是采用数）。
+    task_id: str = ""
+    judgment_collect_state: str | None = None
+    judgment_adoption: tuple = ()
     # 判断来源清单（票 01、ADR-0052）：维护机（m4）在任务启动时刷新并发布的结果。None =
     # 这一趟没走刷新（例如 fatal 提前返回）。非维护机是「没配 owner」的可读说明，不是失败。
     source_refresh: judged_sources.RefreshResult | None = None
@@ -269,6 +279,11 @@ def _emitter(emit: Callable[[str], None] | None) -> Callable[[str], None]:
             emit(message)
 
     return say
+
+
+def _task_id(machine_id: str, now: dt.datetime) -> str:
+    """这次运行的 ID（票 03）：机器编号 + 运行时刻。收取的逐次流水与周报共用一处生成。"""
+    return f"{machine_id}-{now:%Y%m%d-%H%M%S}"
 
 
 def _first_line(text: str | None) -> str:
@@ -499,6 +514,7 @@ def run_once(cfg, *, only: str | None = None, week: str | None = None,
     machine_id = str(cfg.machine_id)
     role = str(cfg.role)
     say = _emitter(emit)
+    task_id = _task_id(machine_id, now)      # 票 03：这次运行的 ID（收取日志与报告共用）
 
     conn = connect(cfg.db_file)
     try:
@@ -561,13 +577,19 @@ def run_once(cfg, *, only: str | None = None, week: str | None = None,
             source_prep = judged_sources.prepare_sources(cfg.exchange_root, machine_id=machine_id)
             for line in _source_prep_lines(source_prep):
                 say(line)
-            say("收取别的机器的判断集…")
+            # 票 03：这趟收取的任务 ID 与读到的清单版本——逐次流水与报告说的是同一份。
+            say(f"收取别的机器的判断集（任务 {task_id}；来源清单 "
+                f"{source_prep.snapshot_version or '无'}）…")
             judgment_collect = judgment_set.collect(
                 cfg.exchange_root, machine_id, cache=judgments.cache,
                 store=judgments.store,
                 now=now.astimezone(dt.timezone.utc),   # 账上的收到时刻按 UTC 记（票 03 的口径）
-                sources=source_prep.collect_sources())
-            say(_judgment_collect_line(judgment_collect))
+                sources=source_prep.collect_sources(),
+                snapshot_version=source_prep.snapshot_version)
+            for text in _judgment_collect_texts(judgment_collect):
+                say(f"收取：{text}")
+            state, failed_sources = _receive_state(source_prep, judgment_collect)
+            say("收取结果：" + _receive_state_text(state, failed_sources))
 
         outcome = _assemble(cfg, db, week=week, now=now, machine_id=machine_id, role=role,
                             check=check, export_result=export_result, export_note=export_note,
@@ -575,7 +597,8 @@ def run_once(cfg, *, only: str | None = None, week: str | None = None,
                             judgments=judgments, judgment_note=judgment_note,
                             judgment_publish=judgment_publish,
                             judgment_collect=judgment_collect,
-                            source_refresh=source_refresh, source_prep=source_prep)
+                            source_refresh=source_refresh, source_prep=source_prep,
+                            task_id=task_id)
         report_path = pathlib.Path(cfg.exchange_root) / REPORT_DIR / f"{week}.md"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(_render(outcome), encoding="utf-8")
@@ -602,15 +625,37 @@ def _judgment_publish_line(result: judgment_set.PublishResult) -> str:
     return "发布判断集：" + _judgment_publish_text(result)
 
 
-def _judgment_collect_line(outcome: judgment_set.CollectOutcome) -> str:
-    """收取这一趟的进度行：一家一句，没得收也说明一句。"""
-    return "收取判断集：" + "；".join(_judgment_collect_texts(outcome))
+def _receive_state(source_prep, collect) -> tuple[str, tuple[str, ...]]:
+    """收取那半的汇总状态与没成的来源名单（票 03、spec §2）。
+
+    receive_channel_not_ready（没有任何可用来源，票 02 沿用）> partial_failure（有来源
+    没成：接入被阻断/跳过，或收取拉不动/没导成）> ok。整趟绝不能显示全部成功——这正是
+    2026-09-24 那类误导的落点。
+    """
+    failed: list[str] = []
+    if source_prep is not None:
+        if not source_prep.ready:
+            return judgment_set.COLLECT_STATE_NOT_READY, ()
+        failed += [entry.repo for entry in source_prep.entries if entry.blocked or entry.skipped]
+    if collect is not None:
+        failed += [f"{judgment_set.REPO_PREFIX}{result.machine}"
+                   for result in collect.results if result.failed]
+    if failed:
+        return judgment_set.COLLECT_STATE_PARTIAL_FAILURE, tuple(failed)
+    return judgment_set.COLLECT_STATE_OK, ()
+
+
+def _receive_state_text(state: str, failed: tuple[str, ...]) -> str:
+    """汇总状态的人话（报告「- 收取结果：」与进度行共用）：partial_failure 点名没成的来源。"""
+    if state == judgment_set.COLLECT_STATE_PARTIAL_FAILURE:
+        return "partial_failure —— 没成的来源：" + "、".join(failed)
+    return state
 
 
 def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_result,
               export_note, pulls, imported, merge_ran, only, judgments=None,
               judgment_note=None, judgment_publish=None, judgment_collect=None,
-              source_refresh=None, source_prep=None) -> RunOutcome:
+              source_refresh=None, source_prep=None, task_id="") -> RunOutcome:
     """把这次运行与库里的现成事实折成报告模型（状态累积，不是运行日志相加）。"""
     root = pathlib.Path(cfg.exchange_root)
     plan = plan_step.stored_plan(db, week)
@@ -637,6 +682,19 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
     conflicts = _conflicts(db, week=week, machine_id=machine_id, plan=plan)
     image_missing_total = sum(result.images_missing for result in imported.values())
     judgment_conflicts = _judgment_conflicts(judgments, machine_id, week=week)
+    # 票 03：收取那半的汇总状态与各来源的当前采纳读数（采纳从本机库现读；读不出来只落
+    # 日志、报告如实记「未评估」——交换台不能因为一个附带的读而停摆）。
+    collect_state: str | None = None
+    adoption: tuple = ()
+    if judgment_collect is not None and judgments is not None:
+        collect_state, _ = _receive_state(source_prep, judgment_collect)
+        if judgment_collect.results:
+            try:
+                adoption = judgment_set.current_adoption(
+                    judgments.cache, judgments.store, machine_id,
+                    [result.machine for result in judgment_collect.results])
+            except sqlite3.Error as exc:
+                log.warning("采用读数读不出来（%s）：%s", judgments.cache, exc)
     todo = _todo(machine_id=machine_id, week=week, plan_of_shop=plan_of_shop, gaps=gaps,
                  conflicts=conflicts, missing=missing, pulls=pulls,
                  export_result=export_result, imported=imported,
@@ -678,7 +736,8 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
         judgments=judgments, judgment_note=judgment_note,
         judgment_publish=judgment_publish, judgment_collect=judgment_collect,
         judgment_conflicts=judgment_conflicts, source_refresh=source_refresh,
-        source_prep=source_prep)
+        source_prep=source_prep, task_id=task_id, judgment_collect_state=collect_state,
+        judgment_adoption=adoption)
 
 
 def _judgment_conflicts(judgments, machine_id: str, *, week: str) -> tuple:
@@ -792,15 +851,24 @@ def _source_prep_lines(prep: judged_sources.PreparedSources) -> list[str]:
 
 
 def _source_prep_row(outcome: RunOutcome) -> str:
-    """报告第三节的「来源接入」一行（票 02）：逐条来源的接入结局，或整趟的未就绪。"""
+    """报告第三节的「来源接入」一行（票 02 + 票 03 的「已发现」）：逐条来源的接入结局、
+    清单外本地已有的来源，或整趟的未就绪。
+
+    清单外的本地 judged 库点名列出（票 03 的口径：清单里「已声明」，清单外「已发现」）；
+    照旧收——快照语义：来源从清单消失不触发删克隆。
+    """
     prep = outcome.source_prep
+    local = ("；清单外本地已有：" + "、".join(f"{judgment_set.REPO_PREFIX}{machine}"
+                                          for machine, _ in prep.local_only) + "（照旧收）"
+             if prep.local_only else "")
     if not prep.ready:
         return f"- 来源接入：接收通道未就绪 —— {prep.not_ready}"
     if not prep.entries:
         why = _first_line(prep.warnings[0]) if prep.warnings else "来源清单里没有别的来源"
-        return f"- 来源接入：没有可接入的来源清单（{why}）；本地已有的 judged 库照旧收"
+        return f"- 来源接入：没有可接入的来源清单（{why}）{local}"
     head = "（用了上一版来源清单）" if prep.stale else ""
-    return f"- 来源接入{head}：" + " · ".join(_source_prep_text(entry) for entry in prep.entries)
+    return (f"- 来源接入{head}："
+            + " · ".join(_source_prep_text(entry) for entry in prep.entries) + local)
 
 
 def _source_prep_failures(source_prep) -> list[str]:
@@ -1169,10 +1237,17 @@ def _judgment_section(outcome: RunOutcome) -> list[str]:
         out.append(f"- 这趟没做：{outcome.judgment_note}")
         return out + [""]
     out.append(_judgment_publish_row(outcome))
+    if outcome.judgment_collect is not None:
+        out.append(_judgment_collect_task_row(outcome))
     out += _judgment_collect_rows(outcome)
+    if outcome.judgment_collect_state is not None:
+        out.append(_judgment_collect_state_row(outcome))
     out.append(_judgment_adopt_row(outcome))
     out += _judgment_conflict_rows(outcome)
-    out.append("- 口径：判断集走 judged-<机器> 这条独立通道（spec §3）；同内容重复发布/"
+    out.append("- 口径：逐级分开记账——来源已声明/已发现 → 已接入（含「已接入但当前没有"
+               "判断集包」）→ 包已发现/已接收 → 已导入 → 门禁（gated/gated_out 暂记"
+               "未评估，不让导入数冒充）→ 冲突 → 采纳；导入数不是采用数（采纳从本机库"
+               "现读）。判断集走 judged-<机器> 这条独立通道（spec §3）；同内容重复发布/"
                "重复收取都是空操作；人工决定不冲突即生效、冲突只记不动两边的决定，"
                "在分析页面上裁决（冲突账只增不自动消解，这里只列本周记下的）")
     return out + [""]
@@ -1202,8 +1277,26 @@ def _judgment_publish_text(result: judgment_set.PublishResult) -> str:
     return f"{counts} → {judgment_set.REPO_PREFIX}{result.machine_id} @ {result.commit}"
 
 
+def _collect_identity(result: judgment_set.CollectResult) -> str:
+    """这份包的审计身份（票 03）：包相对路径、来源提交、内容摘要、远端地址。
+
+    报告行与逐次流水共用这一处措辞——日志里报的数都能对回导入账上的同一行。
+    """
+    parts = [f"包 {result.package_rel}"]
+    if result.source_commit:
+        parts.append(f"提交 {result.source_commit}")
+    if result.digest:
+        parts.append(f"摘要 {result.digest}")
+    if result.remote:
+        parts.append(f"远端 {result.remote}")
+    return "；".join(parts)
+
+
 def _judgment_collect_texts(collect: judgment_set.CollectOutcome) -> list[str]:
-    """收取结果每个来源一句（没有可收的、整趟没做成也是一句）：报告与命令行共用。"""
+    """收取结果每个来源一句（没有可收的、整趟没做成也是一句）：报告与逐次流水共用。
+
+    收下与已收过的两类带上审计身份（票 03）：包路径、来源提交、内容摘要、远端地址。
+    """
     if collect.failure is not None:
         return [f"没做成（{_first_line(collect.failure)}）"]
     if not collect.results:
@@ -1218,11 +1311,28 @@ def _judgment_collect_texts(collect: judgment_set.CollectOutcome) -> list[str]:
         elif result.note is not None:
             texts.append(f"{name} 没有判断集可收 —— {result.note}")
         elif result.skipped:
-            texts.append(f"{name} —— 已收过（{_judgment_counts(result.rows)}；无变化）")
+            texts.append(f"{name} —— 已收过（{_judgment_counts(result.rows)}；无变化）；"
+                         f"{_collect_identity(result)}")
         else:
             texts.append(f"{name} —— {_judgment_counts(result.rows)}"
-                         f"（新增 {sum(result.added.values()):,} 行）")
+                         f"（新增 {sum(result.added.values()):,} 行）；{_collect_identity(result)}")
     return texts
+
+
+def _judgment_collect_task_row(outcome: RunOutcome) -> str:
+    """「收取任务」一行（票 03）：任务 ID 与这趟读的来源清单版本（plan 提交的短哈希）。
+
+    计划库还没克隆时清单版本为空——如实写「无」，不装成读到过。
+    """
+    version = outcome.source_prep.snapshot_version if outcome.source_prep is not None else ""
+    return (f"- 收取任务：{outcome.task_id}；来源清单 "
+            + (version if version else "无（计划库没克隆，按本地枚举收）"))
+
+
+def _judgment_collect_state_row(outcome: RunOutcome) -> str:
+    """「收取结果」一行（票 03、spec §2）：ok / partial_failure / receive_channel_not_ready。"""
+    _, failed = _receive_state(outcome.source_prep, outcome.judgment_collect)
+    return "- 收取结果：" + _receive_state_text(outcome.judgment_collect_state, failed)
 
 
 def _judgment_publish_row(outcome: RunOutcome) -> str:
@@ -1242,23 +1352,30 @@ def _judgment_collect_rows(outcome: RunOutcome) -> list[str]:
 
 
 def _judgment_adopt_row(outcome: RunOutcome) -> str:
-    """「采纳」一行：并进本机账本的人工决定有几条、来自谁（ADR-0039 判据 2 的措辞）。
+    """「采纳」一行（票 03 的口径）：导入数不是采用数——采用从本机库现读。
 
-    计数来自收取结果（`adopted_total`）：重复收取时它从导入账回放——账里已有的那几条
-    照旧点名来源，报告因此是同周重跑也稳定的一份（不是「这趟新增了几条」）。
+    判断侧算本机分析署名下的缓存行（本机分析消费的正是这些行），本机还没跑过分析
+    （缓存里没有本机自己写的行）记「未评估」，不拿导入数冒充、不伪造零；决定侧算本机
+    账本里在效的行（已确认的关系、单独成组、排除对，ADR-0039 判据 2 的「采纳」）。这行
+    是**当前状态**：同周重跑读到的是同一份，不是「这趟新增了几条」。
     """
     collect = outcome.judgment_collect
     if collect is None or not collect.results:
         return "- 采纳：没有（这趟没有收到判断集）"
-    adopted = [(result.machine, result.adopted_total)
-               for result in collect.results if result.adopted_total]
-    if not adopted:
-        return "- 采纳：没有（收到的判断集里没有新的人工决定）"
-    if len(adopted) == 1:
-        return f"- 采纳：{adopted[0][1]} 条人工决定（来自 {adopted[0][0]}）—— 已进本机账本"
-    who = "、".join(f"{machine} {count} 条" for machine, count in adopted)
-    return (f"- 采纳：{sum(count for _, count in adopted)} 条人工决定（来自 {who}）"
-            "—— 已进本机账本")
+    if not outcome.judgment_adoption:
+        return "- 采纳：未评估（采用读数这趟没读出来，见日志）"
+    adopted = [info for info in outcome.judgment_adoption
+               if info.decisions or info.judgments]
+    if adopted:
+        def counts(info):
+            judged = "未评估" if info.judgments is None else f"{info.judgments} 条"
+            return f"{info.machine} 判断 {judged}、人工决定 {info.decisions} 条"
+        return ("- 采纳：" + "；".join(counts(info) for info in adopted)
+                + "（判断 = 本机分析署名下的缓存行；人工决定 = 本机账本在效的行）")
+    if not outcome.judgment_adoption[0].evaluated:
+        return ("- 采纳：判断 未评估（本机还没跑过分析——先在缓存里闲置待用，跑过一次"
+                "分析后这里才有采用口径）· 人工决定 0 条在效")
+    return "- 采纳：没有（判断都不在本机分析署名下；账本里没有这些来源的在效决定）"
 
 
 # 冲突三类的人话（spec §6）：键就是 `analysis_store` 那三个类别名，不在这里重拼字符串。

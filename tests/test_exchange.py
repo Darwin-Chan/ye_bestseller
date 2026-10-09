@@ -51,10 +51,11 @@ RUN_AT = dt.datetime(2026, 9, 20, 19, 41, tzinfo=CST)
 IMG_HASH = "ab" + "1" * 62
 
 
-def seed_judgments(cache, *, machine_id, rows=(("pair-1", "sig-1"),)) -> None:
+def seed_judgments(cache, *, machine_id, rows=(("pair-1", "sig-1"),), evidence=()) -> None:
     """往判断缓存里预置判断行（spec「预置缓存行」的口径，不调模型）。
 
     交换台这半不消费判断（消费在分析那半），所以结果正文只要是段 JSON、行能进包就行。
+    `evidence` 是 `(身份, 版本)` 的证据索引行（票 03 的最小「判断/证据包」用例要它）。
     """
     conn = sqlite3.connect(cache)
     try:
@@ -64,6 +65,9 @@ def seed_judgments(cache, *, machine_id, rows=(("pair-1", "sig-1"),)) -> None:
             "result) VALUES (?,?,?,?,?,?)",
             [(pair, sig, machine_id, f"ev-{pair}-a", f"ev-{pair}-b", '{"same": true}')
              for pair, sig in rows])
+        conn.executemany(
+            "INSERT OR REPLACE INTO evidence(identity,version,name,image_hash,image_data,origin)"
+            " VALUES (?,?,'商品',NULL,NULL,'新商品')", list(evidence))
         conn.commit()
     finally:
         conn.close()
@@ -311,14 +315,14 @@ class ConsoleWorld:
             "draft", "2026-09-01", "2026-09-02", "2026-09-22T20:00:00+08:00",
             {"products": []}, ledger)
 
-    def judged_publish(self, machine, *, rows=(("pair-1", "sig-1"),), ledger=None) -> None:
+    def judged_publish(self, machine, *, rows=(("pair-1", "sig-1"),), evidence=(), ledger=None) -> None:
         """别的机器发布判断集：经它的旁路克隆推到裸库（真打包，与票 03 同一条路）。
 
         包在 judged-<机器> 库里的相对路径就是 `PACKAGE_REL`（一个库一本、覆盖同名路径）。
         """
         cache = self.box.tmp / f"{machine}-cache.sqlite"
         store = self.box.tmp / f"{machine}-drafts.sqlite"
-        seed_judgments(cache, machine_id=machine, rows=rows)
+        seed_judgments(cache, machine_id=machine, rows=rows, evidence=evidence)
         if ledger is not None:
             DraftStore(store, machine).write("draft", "2026-09-01", "2026-09-02",
                                              "2026-09-22T20:00:00+08:00",
@@ -702,7 +706,8 @@ class JudgmentSetTests(JudgmentSetCase):
         self.assertIn("- 收取：judged-m2 —— 判断 1 条 · 视觉描述 0 条 · 证据 0 条 · 人工决定 0 条"
                       "（新增 1 行）", report)
         self.assertIn("- 收取：judged-m3 没有判断集可收", report)
-        self.assertIn("- 采纳：没有（收到的判断集里没有新的人工决定）", report)
+        self.assertIn("- 采纳：没有（判断都不在本机分析署名下；账本里没有这些来源的在效决定）",
+                      report)
         self.assertIn("- 冲突：没有", report)
         self.assertIn("**本次运行**：导出已发布 · 发布判断 2 条 · 新收 2 个包（34 行）"
                       " · 收下 1 份判断集", report)
@@ -718,7 +723,8 @@ class JudgmentSetTests(JudgmentSetCase):
         report = self.world.report()
         self.assertIn("- 收取：judged-m2 —— 判断 0 条 · 视觉描述 0 条 · 证据 0 条 · 人工决定 1 条"
                       "（新增 1 行）", report)
-        self.assertIn("- 采纳：1 条人工决定（来自 m2）—— 已进本机账本", report)
+        self.assertIn("- 采纳：m2 判断 0 条、人工决定 1 条"
+                      "（判断 = 本机分析署名下的缓存行；人工决定 = 本机账本在效的行）", report)
         relations = self.draft_store().ledger()["relations"]
         self.assertEqual([row["members"] for row in relations],
                          [[[member("o1"), "vo1"], [member("o2"), "vo2"]]])

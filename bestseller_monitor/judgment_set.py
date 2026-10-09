@@ -34,6 +34,11 @@
 冲突账按内容去重）。判断集这条通道因此只碰自己的两个库与自己的 git 库，与采集包那条
 互不影响。
 
+**收取的记账**（票 03）：每份收下的包在导入账里留下完整身份——来源机器、来源提交（读包时
+来源库 HEAD 的短哈希）、清单版本（这趟读的来源清单 = plan 提交短哈希）、包相对路径、
+内容摘要、包格式版本、模型署名与证据版本摘要、各表行数与新增数。周报与逐次流水照这一份
+说话，日志里报的数都能对回账上的同一行；重复收取时这些列从账里回放，口径与首次一致。
+
 **顺序**：两条通道互不设先后——判断集先到就先收下、闲置待用（引用的商品/版本本机还没有
 也不报错，键是内容摘要，本机算出来的对得上就命中），数据到齐后自然生效。谁还没建库、
 还没发布过判断集、库没 clone 下来，都只给可读提示，不挡别家的收取。
@@ -49,6 +54,7 @@ import json
 import pathlib
 import sqlite3
 import tempfile
+from collections import Counter
 from collections.abc import Iterator
 
 from bestseller_monitor import matching
@@ -389,6 +395,8 @@ def publish(exchange_root: str | pathlib.Path, machine_id: str, cache: str | pat
 # 导入账（本机账，就在缓存库里）：包身份 → 这次收进来时各表有多少行、新插进去多少行。
 # 账与行同一个文件，「收过」与「收进了什么」不可能说法不一（缓存被删时账随它一起去，
 # 重收一遍就是了）；重复收取按内容摘要命中这里，计数回放，什么都不写。
+# 票 03 加审计列：来源提交、清单版本、包格式版本与署名/证据摘要——报告里的每个数都能
+# 对回账上这一行（日志与账本可以对账）。
 LEDGER_TABLE = "judgment_imports"
 
 _LEDGER_DDL = f"""CREATE TABLE IF NOT EXISTS {LEDGER_TABLE} (
@@ -398,7 +406,55 @@ _LEDGER_DDL = f"""CREATE TABLE IF NOT EXISTS {LEDGER_TABLE} (
     imported_at TEXT NOT NULL,
     rows_total INTEGER NOT NULL DEFAULT 0,
     rows_added INTEGER NOT NULL DEFAULT 0,
-    rows_detail TEXT NOT NULL DEFAULT '{{}}')"""
+    rows_detail TEXT NOT NULL DEFAULT '{{}}',
+    source_commit TEXT NOT NULL DEFAULT '',
+    snapshot_version TEXT NOT NULL DEFAULT '',
+    format_version TEXT NOT NULL DEFAULT '',
+    model_summary TEXT NOT NULL DEFAULT '{{}}',
+    evidence_summary TEXT NOT NULL DEFAULT '{{}}')"""
+
+# 票 03 的审计列：老缓存库的导入账一次性补上（ALTER 每缺一列补一列，老行按默认值补齐）。
+_LEDGER_PROVENANCE_COLUMNS = (
+    ("source_commit", "TEXT NOT NULL DEFAULT ''"),
+    ("snapshot_version", "TEXT NOT NULL DEFAULT ''"),
+    ("format_version", "TEXT NOT NULL DEFAULT ''"),
+    ("model_summary", "TEXT NOT NULL DEFAULT '{}'"),
+    ("evidence_summary", "TEXT NOT NULL DEFAULT '{}'"),
+)
+
+# 摘要里最多留几种值（行数最多的前几名）：摘要用来看「这是一份什么口径的包」，不是逐行复刻。
+_SUMMARY_CAP = 5
+
+
+def _summarize(values: list[str]) -> dict:
+    """一列值聚合成 {值: 行数}（按行数从多到少、同数按值排序）；种类超上限时归一条 `*`。"""
+    counts = Counter(value for value in values if value)
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    out = {value: count for value, count in ordered[:_SUMMARY_CAP]}
+    rest = len(ordered) - _SUMMARY_CAP
+    if rest > 0:
+        out["*"] = rest
+    return out
+
+
+def _package_summaries(sliced: dict) -> tuple[str, str]:
+    """包内数据的来源摘要（票 03）：模型署名与视觉模型、证据版本各有多少行。
+
+    列缺了（老包或外来包）按没有值算——格式本身的门禁判定在票 04，这里只如实记下
+    「这份包是谁的什么口径」，不拦包。
+    """
+    def column_values(table: str, column: str) -> list[str]:
+        names, rows = sliced[table]
+        if column not in names:
+            return []
+        index = names.index(column)
+        return [str(row[index] or "") for row in rows]
+
+    model = {"signatures": _summarize(column_values("judgments", "signature")),
+             "visual_models": _summarize(column_values("visual_evidence", "model"))}
+    evidence = {"versions": _summarize(column_values("evidence", "version"))}
+    return (json.dumps(model, ensure_ascii=False, sort_keys=True),
+            json.dumps(evidence, ensure_ascii=False, sort_keys=True))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -423,6 +479,10 @@ class CollectResult:
     failure: str | None = None
     unreachable: bool = False
     note: str | None = None
+    # 票 03 的审计身份（日志与周报照它说「这份包从哪来」；重复收取时从账里回放）：
+    source_commit: str = ""      # 收下这份包时来源库 HEAD 的短哈希
+    snapshot_version: str = ""   # 这趟收取读的来源清单版本（plan 提交短哈希；无清单 = 空）
+    remote: str = ""             # 来源库的远端地址（只作识别，不参与判法）
 
     @property
     def failed(self) -> bool:
@@ -435,7 +495,11 @@ class CollectResult:
 
     @property
     def adopted_total(self) -> int:
-        """这次并进本机账本的决定行数合计（周报的「采纳了几条」）。"""
+        """这次并进本机账本的决定行数合计。
+
+        与周报的「采纳」不是一回事：那按本机库现读（票 03 的口径，`current_adoption`），
+        这里数的是这一收取动作本身的并入量。
+        """
         return sum(self.adopted.values())
 
 
@@ -454,6 +518,81 @@ class CollectOutcome:
     @property
     def failed(self) -> bool:
         return self.failure is not None or any(result.failed for result in self.results)
+
+
+# 收取那半的汇总状态（票 03、spec §2）：整趟的结果词面，报告与逐次流水共用。
+# 有来源没成 = partial_failure；一个可用来源都没有 = receive_channel_not_ready（票 02 沿用，
+# 不能表现成「没有新判断集」）；其余 = ok。
+COLLECT_STATE_OK = "ok"
+COLLECT_STATE_PARTIAL_FAILURE = "partial_failure"
+COLLECT_STATE_NOT_READY = "receive_channel_not_ready"
+
+
+@dataclasses.dataclass(frozen=True)
+class SourceAdoption:
+    """一个来源在本机的**采用读数**（票 03、spec §3 的 adopted）：每个数都从实际库现读。
+
+    `judgments` 是缓存里来源为该机器、且签名落在**本机分析署名**下的判断行数——本机分析
+    消费缓存正是按署名读（`matching` 的口径），所以这些行就是当前契约下会被采用的行；
+    本机还没跑过分析（缓存里没有本机自己写的行）时是 `None` = 未评估——采用数不能拿
+    导入数冒充，也不伪造零。`decisions` 是本机账本里来源为该机器、当前在效的决定行数
+    （已确认的关系、单独成组、排除对；撤回过的中间态不驱动分析，不算）。
+    """
+
+    machine: str
+    decisions: int
+    judgments: int | None
+
+    @property
+    def evaluated(self) -> bool:
+        return self.judgments is not None
+
+
+def current_adoption(cache: str | pathlib.Path, store: str | pathlib.Path, machine_id: str,
+                     sources: tuple[str, ...] | list[str]) -> tuple[SourceAdoption, ...]:
+    """现读本机两个库，给每个来源算一份采用读数（票 03）：导入条数与当前采用分开列的口径。
+
+    判断侧看缓存：本机自己写的行带的署名，就是本机分析实际使用的署名；同署名的外来行
+    会在分析里直接命中（零模型调用），异署名只留存参考、不驱动本机分组。本机一条自己
+    写的行都没有 = 还没跑过分析，判断侧记 `None`（未评估）。决定侧看账本：并入本机账本
+    的决定就是分析使用的硬约束，按行的来源机器数；账本还不存在时各来源都是 0。
+    """
+    cache = pathlib.Path(cache)
+    store = pathlib.Path(store)
+    sources = list(sources)
+    signatures: set[str] = set()
+    adopted_by_source: dict[str, int] = {}
+    if cache.exists():
+        with contextlib.closing(_connect_ro(cache)) as conn:
+            tables = {row[0] for row in
+                      conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            # 老形状（判断表还没有署名列）算「分析还没留下署名证据」：未评估，不去升它。
+            if "judgments" in tables and "signature" in {
+                    row[1] for row in conn.execute("PRAGMA table_info(judgments)")}:
+                signatures = {str(row[0]) for row in conn.execute(
+                    "SELECT DISTINCT signature FROM judgments WHERE machine_id=?",
+                    (machine_id,))}
+                if signatures and sources:
+                    marks = ", ".join("?" * len(sources))
+                    signature_marks = ", ".join("?" * len(signatures))
+                    adopted_by_source = {str(machine): int(count) for machine, count in conn.execute(
+                        f"SELECT machine_id, COUNT(*) FROM judgments "
+                        f"WHERE machine_id IN ({marks}) AND signature IN ({signature_marks}) "
+                        "GROUP BY machine_id", (*sources, *sorted(signatures)))}
+    decisions = Counter()
+    if store.exists():
+        ledger = DraftStore(store, machine_id).ledger()
+        for relation in ledger['relations']:
+            if relation["confirmed"]:
+                decisions[relation.get("machine_id") or ""] += 1
+        for entry in ledger['standalone']:
+            decisions[entry[2] if len(entry) > 2 else ""] += 1
+        for pair in ledger['excluded']:
+            decisions[pair[2] if len(pair) > 2 else ""] += 1
+    return tuple(
+        SourceAdoption(machine=machine, decisions=decisions[machine],
+                       judgments=(adopted_by_source.get(machine, 0) if signatures else None))
+        for machine in sources)
 
 
 def judged_repos(exchange_root: str | pathlib.Path,
@@ -475,7 +614,8 @@ def judged_repos(exchange_root: str | pathlib.Path,
 
 def collect(exchange_root: str | pathlib.Path, machine_id: str, cache: str | pathlib.Path,
             store: str | pathlib.Path, *, now: dt.datetime | None = None,
-            sources: tuple[tuple[str, pathlib.Path], ...] | None = None) -> CollectOutcome:
+            sources: tuple[tuple[str, pathlib.Path], ...] | None = None,
+            snapshot_version: str = "") -> CollectOutcome:
     """把交换区里别的机器的判断集收进本机（spec §3、§7）：决定进账本，判断进缓存。
 
     对名单里每本 `judged-<机器>` pull 一次，读它 HEAD 里那份包，按内容摘要幂等导入：
@@ -486,7 +626,8 @@ def collect(exchange_root: str | pathlib.Path, machine_id: str, cache: str | pat
 
     `sources` 是名单：给了就按它收（票 02——交换台先按来源清单把本地克隆接入好，被阻断
     的来源根本不在名单里，这里就不会去读它的包）；缺省仍按交换区里实际存在的 `judged-*`
-    枚举（老口径，直接调本函数时用）。
+    枚举（老口径，直接调本函数时用）。`snapshot_version` 是这趟收取读的来源清单版本
+    （票 03：交换台传 plan 提交的短哈希，落进导入账；无清单时留空）。
     """
     root = pathlib.Path(exchange_root)
     cache = pathlib.Path(cache)
@@ -505,7 +646,8 @@ def collect(exchange_root: str | pathlib.Path, machine_id: str, cache: str | pat
             "分析程序正在跑的时候收不了判断集（它占着缓存的写口），等它跑完再重跑收取。"))
     try:
         return CollectOutcome(tuple(
-            _collect_one(conn, path, machine=machine, machine_id=machine_id, store=store, now=now)
+            _collect_one(conn, path, machine=machine, machine_id=machine_id, store=store,
+                         now=now, snapshot_version=snapshot_version)
             for machine, path in sources))
     finally:
         conn.close()
@@ -517,7 +659,16 @@ def _connect_cache(cache: pathlib.Path, machine_id: str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     matching.prepare_cache(conn, machine_id)
     conn.execute(_LEDGER_DDL)
+    _add_ledger_columns(conn)
     return conn
+
+
+def _add_ledger_columns(conn: sqlite3.Connection) -> None:
+    """老缓存库的导入账一次性补上票 03 的审计列：已存在的老行按默认值补齐。"""
+    present = {row[1] for row in conn.execute(f"PRAGMA table_info({LEDGER_TABLE})")}
+    for name, declaration in _LEDGER_PROVENANCE_COLUMNS:
+        if name not in present:
+            conn.execute(f"ALTER TABLE {LEDGER_TABLE} ADD COLUMN {name} {declaration}")
 
 
 def _incoming_decisions(sliced: dict) -> dict:
@@ -543,7 +694,7 @@ def _incoming_decisions(sliced: dict) -> dict:
 
 def _collect_one(conn: sqlite3.Connection, repo: pathlib.Path, *,
                  machine: str, machine_id: str, store: pathlib.Path,
-                 now: dt.datetime | None) -> CollectResult:
+                 now: dt.datetime | None, snapshot_version: str = "") -> CollectResult:
     rel = f"{repo.name}/{PACKAGE_REL}"
     if not (repo / ".git").exists():
         return CollectResult(machine, rel, note=(
@@ -565,23 +716,36 @@ def _collect_one(conn: sqlite3.Connection, repo: pathlib.Path, *,
         with _open_bytes(published) as package:
             digest = package_digest(package)
             sliced = _read_package_rows(package)
+            meta = read_package_meta(package)
         decisions = _incoming_decisions(sliced)          # 形状不对的包：算这本读不出来
     except (sqlite3.Error, OSError, KeyError, ValueError, TypeError) as exc:
         return CollectResult(machine, rel, failure=(
             f"判断集读不出来（{rel} 不是判断集的包，这本这次没收）：{exc}"))
 
+    # 票 03 的审计身份：来源提交、远端地址、包格式与署名/证据摘要。读不到远端地址只影响
+    # 识别信息，不拦这本的收取；提交在 pull 之后取，就是读这份包时的那个 HEAD。
+    remote = ""
+    try:
+        remote = channel.remote_url() or ""
+    except ChannelError:
+        pass
+    source_commit = channel.head_or_none() or ""
+    model_summary, evidence_summary = _package_summaries(sliced)
     rows = {name: len(rows_) for name, (_, rows_) in sliced.items()}
     # 账本一枚一枚现查（不预先取快照）：同一趟里两家内容相同时，第二家要看见第一家
     # 刚写下的那行、如实算「已经收过」，而不是撞主键报一个假的导入失败。
     known = conn.execute(f"SELECT * FROM {LEDGER_TABLE} WHERE digest=?",
                           (digest,)).fetchone()
     if known is not None:
-        # 同内容已收过：什么都不写，计数从账里回放（幂等）。
+        # 同内容已收过：什么都不写，计数与审计身份都从账里回放（幂等）。
         detail = json.loads(known["rows_detail"])
         return CollectResult(machine, rel, digest=digest, skipped=True,
                              rows={name: counts[0] for name, counts in detail.items()},
                              added={name: counts[1] for name, counts in detail.items()},
-                             imported_at=known["imported_at"])
+                             imported_at=known["imported_at"],
+                             source_commit=known["source_commit"],
+                             snapshot_version=known["snapshot_version"],
+                             remote=remote)
 
     imported_at = (now or dt.datetime.now(dt.timezone.utc)).isoformat(timespec="seconds")
     # 先并人工决定（本机账本），后导判断与记导入账：并决定逐行幂等、冲突账按内容去重，
@@ -608,16 +772,22 @@ def _collect_one(conn: sqlite3.Connection, repo: pathlib.Path, *,
             added.update(merge.adopted)
             conn.execute(
                 f"INSERT INTO {LEDGER_TABLE}(digest, source_machine, package_rel, imported_at, "
-                "rows_total, rows_added, rows_detail) VALUES (?,?,?,?,?,?,?)",
+                "rows_total, rows_added, rows_detail, source_commit, snapshot_version, "
+                "format_version, model_summary, evidence_summary) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (digest, machine, rel, imported_at, sum(rows.values()), sum(added.values()),
                  json.dumps({name: [rows[name], added[name]] for name in rows},
-                            ensure_ascii=False)))
+                            ensure_ascii=False),
+                 source_commit, snapshot_version, meta["format_version"],
+                 model_summary, evidence_summary))
     except sqlite3.Error as exc:
         conn.rollback()
         return CollectResult(machine, rel, digest=digest, failure=(
             f"整包没有导入（已全部回滚）：{exc}"))
     return CollectResult(machine, rel, digest=digest, rows=rows, added=added,
-                         conflicts=merge.conflicts, imported_at=imported_at)
+                         conflicts=merge.conflicts, imported_at=imported_at,
+                         source_commit=source_commit, snapshot_version=snapshot_version,
+                         remote=remote)
 
 
 def _read_package_rows(package: sqlite3.Connection) -> dict[str, tuple[tuple[str, ...], list[tuple]]]:

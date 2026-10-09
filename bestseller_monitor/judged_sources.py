@@ -441,12 +441,15 @@ class PreparedSources:
     用的本机上一版快照（只处理已有且匹配的来源，不新建克隆）。`not_ready` 非空 =
     没有任何可用来源（「接收通道未就绪」的原因）——不能表现成「没有新判断集」。
     `local_only` 是交换区里清单外已有的 judged 库（快照语义：不删克隆，照收）。
+    `snapshot_version` 是读清单时计划库 HEAD 的短哈希（票 03：落进导入账的「清单版本」；
+    计划库还没克隆时为空）。
     """
 
     machine_id: str
     root: pathlib.Path
     entries: tuple[PreparedSource, ...] = ()
     snapshot_state: str = "no_plan_clone"
+    snapshot_version: str = ""
     stale: bool = False
     warnings: tuple[str, ...] = ()
     not_ready: str | None = None
@@ -479,6 +482,7 @@ def prepare_sources(exchange_root: str | pathlib.Path, *, machine_id: str) -> Pr
     stale = False
     entries: list[PreparedSource] = []
     snapshot_state = "no_plan_clone"
+    snapshot_version = ""
     trouble: str | None = None      # 清单不可用时的那句「为什么」（告警与未就绪共用一处）
     if not (plan / ".git").exists():
         trouble = f"计划库还没 clone 到 {plan}（上机清单第 9 / 11 步），读不到来源清单"
@@ -492,6 +496,8 @@ def prepare_sources(exchange_root: str | pathlib.Path, *, machine_id: str) -> Pr
             warnings.append(f"计划库这次拉不动（{exc}）：\n"
                             "改用本机上一版来源清单（可能不是最新）——只处理已有且匹配的来源，"
                             "不新建克隆；通道恢复后重跑一次。")
+        # 票 03：读清单这一刻的计划库提交 = 这次消费的「清单版本」（stale 时就是本机那版）。
+        snapshot_version = channel.head_or_none() or ""
         previous = _read_snapshot(channel)
         if previous.state == "absent":
             snapshot_state = "absent"
@@ -517,8 +523,9 @@ def prepare_sources(exchange_root: str | pathlib.Path, *, machine_id: str) -> Pr
     if not any(entry.usable for entry in entries) and not local_only:
         not_ready = _not_ready_text(trouble, entries=entries)
     return PreparedSources(machine_id=machine_id, root=root, entries=tuple(entries),
-                           snapshot_state=snapshot_state, stale=stale,
-                           warnings=tuple(warnings), not_ready=not_ready, local_only=local_only)
+                           snapshot_state=snapshot_state, snapshot_version=snapshot_version,
+                           stale=stale, warnings=tuple(warnings), not_ready=not_ready,
+                           local_only=local_only)
 
 
 def _connect_sources(root: pathlib.Path, *, machine_id: str,

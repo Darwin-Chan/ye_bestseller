@@ -14,13 +14,16 @@
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import pathlib
+import sqlite3
 import unittest
 
 import exchange
 from bestseller_monitor import judged_sources
 from bestseller_monitor.db import CST
+from bestseller_monitor.git_channel import GitChannel
 from bestseller_monitor.judgment_set import PACKAGE_REL
 from tests.git_repos import GitSandbox, WorldTemplate
 from test_exchange import ConsoleWorld, todo_of
@@ -400,6 +403,25 @@ class CloneFailureIsolationTests(PrepareCase):
         self.assertEqual([m for m, _ in result.collect_sources()], ["m2"])
 
 
+class SnapshotVersionTests(PrepareCase):
+    """票 03：来源接入记下读清单这一刻的计划库提交——导入账的「清单版本」就取它。"""
+
+    def test_the_prepared_sources_name_the_snapshot_version(self):
+        self.publish_snapshot(self.source("m4"))
+
+        result = self.prepare()
+
+        expected = GitChannel(self.box.tmp / _PLAN_PATHS["exchange"]).head()
+        self.assertEqual(result.snapshot_version, expected)
+
+    def test_without_a_plan_clone_the_version_is_empty(self):
+        (self.box.tmp / _PLAN_PATHS["exchange"]).rename(self.box.tmp / "plan-away")
+
+        result = self.prepare()
+
+        self.assertEqual(result.snapshot_version, "")
+
+
 class RunOnceWiringTests(unittest.TestCase, SourceWorldMixin):
     """整趟接线：收取任务先按来源清单接入，再走既有收取；报告与退出码说清状态。
 
@@ -430,6 +452,96 @@ class RunOnceWiringTests(unittest.TestCase, SourceWorldMixin):
         self.assertIn("来源接入：judged-m4 已接入", report)
         self.assertIn("还没发布过判断集", report, "空远端库：已接入、没有包——不是失败")
 
+    def minimal_world(self):
+        """票 03 的最小判断/证据包：m4 发布 1 条判断 + 2 条证据，清单点名它。"""
+        self.world.judged("m4")
+        self.world.judged_publish("m4", rows=(("m4-pair", "sig-a"),),
+                                  evidence=(("id-1", "ev-1"), ("id-2", "ev-2")))
+        self.publish_snapshot(self.source("m4"))
+
+    def ledger_digest(self) -> str:
+        with contextlib.closing(sqlite3.connect(self.world.cache)) as conn:
+            return conn.execute("SELECT digest FROM judgment_imports").fetchone()[0]
+
+    def test_a_minimal_judged_package_imports_with_its_audit_identity(self):
+        """票 03：最小判断/证据包产生预期导入；报告带任务 ID、清单版本与逐包审计身份。"""
+        self.minimal_world()
+
+        outcome = self.world.run(only="collect")
+
+        self.assertEqual(outcome.exit_code, 0, outcome.failures)
+        report = self.world.report()
+        self.assertIn("- 收取：judged-m4 —— 判断 1 条 · 视觉描述 0 条 · 证据 2 条 · 人工决定 0 条"
+                      "（新增 3 行）", report)
+        self.assertEqual(outcome.task_id, "m1-20260920-194100", "任务 ID = 机器 + 运行时刻")
+        plan_head = GitChannel(self.exchange / "plan").head()
+        self.assertIn(f"- 收取任务：m1-20260920-194100；来源清单 {plan_head}", report)
+        self.assertIn(f"包 judged-m4/{PACKAGE_REL}", report)
+        self.assertIn(f"提交 {GitChannel(self.judged('m4')).head()}", report)
+        self.assertIn(f"摘要 {self.ledger_digest()}", report, "报告里的摘要就是账上那一行")
+        self.assertIn(f"远端 {self.remote('m4')}", report)
+        self.assertIn("- 收取结果：ok", report)
+        # 导入条数与当前采用分开显示：本机还没跑过分析，采用记「未评估」而不是 1。
+        self.assertIn("- 采纳：判断 未评估", report)
+
+    def test_the_collect_log_carries_the_task_and_audit_fields(self):
+        """票 03：逐次流水至少带任务 ID、接收机、来源名、清单版本、远端、提交、包路径、
+        摘要与各类数量——每个数都能对回导入账上的同一行。"""
+        self.minimal_world()
+        lines: list[str] = []
+
+        outcome = self.world.run(only="collect", emit=lines.append)
+
+        self.assertEqual(outcome.exit_code, 0, outcome.failures)
+        text = "\n".join(lines)
+        plan_head = GitChannel(self.exchange / "plan").head()
+        self.assertIn(f"任务 {outcome.task_id}", text)
+        self.assertIn("本机 m1", text, "接收机 machine_id")
+        self.assertIn(f"；来源清单 {plan_head}", text, "清单版本")
+        self.assertIn("收取：judged-m4 —— 判断 1 条 · 视觉描述 0 条 · 证据 2 条 · 人工决定 0 条"
+                      "（新增 3 行）", text, "来源名与各类数量")
+        self.assertIn(f"包 judged-m4/{PACKAGE_REL}", text, "包相对路径")
+        self.assertIn(f"提交 {GitChannel(self.judged('m4')).head()}", text, "来源提交 SHA")
+        self.assertIn(f"摘要 {self.ledger_digest()}", text, "包 digest 与账本对账")
+        self.assertIn(f"远端 {self.remote('m4')}", text, "远端 URL")
+        self.assertIn("收取结果：ok", text)
+
+    def test_adopted_counts_read_the_local_stores_not_the_imported_count(self):
+        """票 03：本机跑过分析（有本机署名的行）后，采纳按本机分析署名下的缓存行现读。"""
+        self.minimal_world()
+        self.world.judgments_local(rows=(("local-pair", "sig-a"),))
+
+        outcome = self.world.run(only="collect")
+
+        self.assertEqual(outcome.exit_code, 0, outcome.failures)
+        self.assertIn("- 采纳：m4 判断 1 条、人工决定 0 条"
+                      "（判断 = 本机分析署名下的缓存行；人工决定 = 本机账本在效的行）",
+                      self.world.report())
+
+    def test_a_mismatched_signature_is_not_adopted(self):
+        self.minimal_world()
+        self.world.judgments_local(rows=(("local-pair", "sig-other"),))
+
+        outcome = self.world.run(only="collect")
+
+        self.assertEqual(outcome.exit_code, 0, outcome.failures)
+        self.assertIn("- 采纳：没有（判断都不在本机分析署名下；账本里没有这些来源的在效决定）",
+                      self.world.report())
+
+    def test_one_broken_package_among_sources_shows_partial_failure(self):
+        """票 03：多来源一挂一好——好的照收，汇总如实记 partial_failure、点名没成的那家。"""
+        self.world.judged("m4", "m5")
+        self.world.judged_publish("m4", rows=(("m4-pair", "sig-a"),))
+        self.world.publish_broken_judged("m5")
+        self.publish_snapshot(self.source("m4"), self.source("m5"))
+
+        outcome = self.world.run(only="collect")
+
+        self.assertEqual(outcome.exit_code, 2, "包读不出来 = 本机没做成事")
+        report = self.world.report()
+        self.assertIn("- 收取：judged-m4 —— 判断 1 条", report, "好的来源照收")
+        self.assertIn("- 收取结果：partial_failure —— 没成的来源：judged-m5", report)
+
     def test_a_blocked_source_asks_for_a_look_while_the_others_still_collect(self):
         self.world.judged("m4", "m5")
         self.world.judged_publish("m4", rows=(("pair-1", "sig-1"),))
@@ -442,6 +554,8 @@ class RunOnceWiringTests(unittest.TestCase, SourceWorldMixin):
         report = self.world.report()
         self.assertIn("judged-m5 被阻断", report)
         self.assertIn("judged-m5 没接入", todo_of(report))
+        self.assertIn("- 收取结果：partial_failure —— 没成的来源：judged-m5", report,
+                      "票 03：一挂一好不许显示全部成功")
         results = {result.machine: result for result in outcome.judgment_collect.results}
         self.assertEqual(sorted(results), ["m4"], "被阻断的来源不进收取名单：不读它的包")
         self.assertFalse(results["m4"].failed, results["m4"].failure)
@@ -456,6 +570,8 @@ class RunOnceWiringTests(unittest.TestCase, SourceWorldMixin):
         self.assertIn("接收通道未就绪", "\n".join(outcome.failures))
         report = self.world.report()
         self.assertIn("接收通道未就绪", report)
+        self.assertIn("- 收取结果：receive_channel_not_ready", report,
+                      "票 03 的汇总状态词面沿用票 02 的口径")
         self.assertIn("接收通道未就绪", todo_of(report))
 
     def test_a_stale_plan_still_collects_known_sources_with_a_warning(self):

@@ -36,8 +36,8 @@ from bestseller_monitor.analysis import AnalysisConfig, AnalysisService
 from bestseller_monitor.analysis_store import DraftStore
 from bestseller_monitor.db import CST, Database, connect
 from bestseller_monitor.judgment_set import (FORMAT_VERSION, META_TABLE, PACKAGE_REL,
-                                             build_package, collect, package_digest, publish,
-                                             read_package_meta)
+                                             build_package, collect, current_adoption,
+                                             package_digest, publish, read_package_meta)
 from bestseller_monitor.matching import (STATUS_CACHE, STATUS_MODEL, MatchingConfig,
                                          MatchingService, ModelConfig, identity, prepare_cache,
                                          version)
@@ -428,14 +428,33 @@ class CollectTests(JudgmentSetCase):
         self.assertTrue(result.published, result.failure)
         return result
 
-    def collect(self, machine_id="m4", *, cache=None, store=None):
-        return collect(self.exchange, machine_id, cache or self.cache, store or self.store)
+    def collect(self, machine_id="m4", *, cache=None, store=None, snapshot_version=""):
+        return collect(self.exchange, machine_id, cache or self.cache, store or self.store,
+                       snapshot_version=snapshot_version)
 
     def dump(self, cache=None):
         """缓存里三类表 + 导入账的全部行：幂等断言比这个（比计数严）。"""
         with closing(sqlite3.connect(cache or self.cache)) as conn:
             return {name: conn.execute(f"SELECT * FROM {name} ORDER BY 1, 2").fetchall()
                     for name in ("judgments", "evidence", "visual_evidence", "judgment_imports")}
+
+    def ledger_row(self, digest=None):
+        """导入账里那行（缺省取唯一一行）的具名列字典。"""
+        with closing(sqlite3.connect(self.cache)) as conn:
+            conn.row_factory = sqlite3.Row
+            if digest is None:
+                return dict(conn.execute("SELECT * FROM judgment_imports").fetchone())
+            return dict(conn.execute("SELECT * FROM judgment_imports WHERE digest=?",
+                                     (digest,)).fetchone())
+
+    def package_conn(self, machine="m1") -> sqlite3.Connection:
+        """打开交换区里 judged-<机器> 那份发布包（发布即已落在工作区）。"""
+        path = self.root / f"published-{machine}.db"
+        path.write_bytes(gzip.decompress(
+            (self.exchange / f"judged-{machine}" / PACKAGE_REL).read_bytes()))
+        conn = sqlite3.connect(path)
+        self.addCleanup(conn.close)
+        return conn
 
     def test_collect_imports_the_other_machines_judgments_and_records_the_ledger(self):
         published = self.publish_from("m1")
@@ -652,6 +671,126 @@ class CollectTests(JudgmentSetCase):
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM judgments").fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT digest FROM judgment_imports").fetchone()[0],
                              published.digest)
+
+    def test_collect_records_the_package_provenance_in_the_ledger(self):
+        """票 03：导入账带上来源提交、清单版本、格式与署名/证据摘要——每条都能对回现场。"""
+        self.publish_from("m1")
+
+        outcome = self.collect(snapshot_version="0e10232")
+
+        result = outcome.results[0]
+        self.assertFalse(result.failed, result.failure)
+        source_head = self.box.must("rev-parse", "--short", "HEAD",
+                                    cwd=self.exchange / "judged-m1").strip()
+        self.assertEqual(result.source_commit, source_head,
+                         "来源提交 = 读包时来源库 HEAD 的短哈希")
+        self.assertEqual(result.snapshot_version, "0e10232")
+        self.assertEqual(result.remote,
+                         self.box.must("remote", "get-url", "origin",
+                                       cwd=self.exchange / "judged-m1").strip())
+        row = self.ledger_row(result.digest)
+        self.assertEqual(row["source_commit"], source_head)
+        self.assertEqual(row["snapshot_version"], "0e10232")
+        self.assertEqual(row["format_version"], FORMAT_VERSION)
+        package = self.package_conn("m1")
+        signature = package.execute("SELECT signature FROM judgments").fetchone()[0]
+        versions = dict(package.execute("SELECT version, COUNT(*) FROM evidence GROUP BY version"))
+        self.assertEqual(json.loads(row["model_summary"]),
+                         {"signatures": {signature: 1}, "visual_models": {}})
+        self.assertEqual(json.loads(row["evidence_summary"]), {"versions": versions})
+
+    def test_collecting_the_same_content_again_replays_the_same_provenance(self):
+        """重复收取：审计列从账里回放——回放的是那次真收下时记的，不按这次的新参数改。"""
+        self.publish_from("m1")
+        first = self.collect(snapshot_version="0e10232")
+        before = self.dump()
+
+        second = self.collect(snapshot_version="deadbee")
+
+        replay = second.results[0]
+        self.assertTrue(replay.skipped)
+        self.assertEqual(self.dump(), before, "账本一个字不变")
+        self.assertEqual(replay.source_commit, first.results[0].source_commit)
+        self.assertEqual(replay.snapshot_version, "0e10232")
+        self.assertEqual(replay.remote, first.results[0].remote)
+
+    def test_an_old_import_ledger_gains_the_provenance_columns(self):
+        """票 03 之前建的导入账：一次性补上审计列，老行照旧可读（新列按默认值补）。"""
+        published = self.publish_from("m1")
+        with closing(sqlite3.connect(self.cache)) as conn, conn:
+            conn.execute(
+                "CREATE TABLE judgment_imports (digest TEXT PRIMARY KEY,"
+                " source_machine TEXT NOT NULL, package_rel TEXT NOT NULL,"
+                " imported_at TEXT NOT NULL, rows_total INTEGER NOT NULL DEFAULT 0,"
+                " rows_added INTEGER NOT NULL DEFAULT 0, rows_detail TEXT NOT NULL DEFAULT '{}')")
+            conn.execute("INSERT INTO judgment_imports VALUES"
+                         " ('old-digest','m9','judged-m9/data/judgments.db.gz',"
+                         " '2026-01-01T00:00:00+00:00',3,3,'{}')")
+
+        outcome = self.collect()
+
+        self.assertFalse(outcome.results[0].failed, outcome.results[0].failure)
+        self.assertEqual(self.ledger_row("old-digest")["source_commit"], "",
+                         "老行照旧可读：补上的列是空默认值")
+        self.assertTrue(self.ledger_row(published.digest)["source_commit"],
+                        "新收的行带上了来源提交")
+
+
+class AdoptionTests(JudgmentSetCase):
+    """票 03：采用读数（`current_adoption`）从实际库现读——本机没跑过分析记未评估，
+    不拿导入数当采用数、也不伪造零值（spec §3 的 adopted）。"""
+
+    def seed_judgment_row(self, pair, signature, *, machine, cache=None):
+        with closing(sqlite3.connect(cache or self.cache)) as conn, conn:
+            prepare_cache(conn, machine)
+            conn.execute("INSERT OR REPLACE INTO judgments(pair,signature,machine_id,"
+                         "evidence_a,evidence_b,result) VALUES (?,?,?,?,?,?)",
+                         (pair, signature, machine, "ev-a", "ev-b", '{"same": true}'))
+
+    def adopt(self, sources=("m1",)):
+        return current_adoption(self.cache, self.store, "m4", sources)
+
+    def test_without_a_local_analysis_the_judgment_side_is_unevaluated(self):
+        """本机一条自己判过的行都没有 = 没跑过分析：判断采用未评估，而不是 0。"""
+        self.seed_judgment_row("pair-x", "sig-imported", machine="m1")
+
+        (adoption,) = self.adopt()
+
+        self.assertEqual(adoption.machine, "m1")
+        self.assertFalse(adoption.evaluated)
+        self.assertIsNone(adoption.judgments)
+        self.assertEqual(adoption.decisions, 0)
+
+    def test_only_rows_under_the_local_signature_count_as_adopted(self):
+        self.seed_judgment_row("pair-local", "sig-local", machine="m4")
+        self.seed_judgment_row("pair-hit", "sig-local", machine="m1")
+        self.seed_judgment_row("pair-other", "sig-other", machine="m1")
+
+        (adoption,) = self.adopt()
+
+        self.assertTrue(adoption.evaluated)
+        self.assertEqual(adoption.judgments, 1, "本机分析消费的就是署名一致的行")
+
+    def test_an_evaluated_zero_is_a_real_zero(self):
+        self.seed_judgment_row("pair-local", "sig-local", machine="m4")
+        self.seed_judgment_row("pair-other", "sig-other", machine="m1")
+
+        (adoption,) = self.adopt()
+
+        self.assertTrue(adoption.evaluated)
+        self.assertEqual(adoption.judgments, 0)
+
+    def test_decisions_in_effect_are_counted_and_withdrawn_ones_are_not(self):
+        self.seed_ledger(ledger_of(
+            relations=[group("11", "22", machine="m1"),
+                       group("33", "44", machine="m1", confirmed=False)],
+            standalone=[[member("55"), "v55", "m1"]],
+            excluded=[[member("66"), member("77"), "m1"]]))
+
+        (adoption,) = self.adopt()
+
+        self.assertEqual(adoption.decisions, 3,
+                         "已确认的关系 + 单独成组 + 排除对；撤回过的中间态不驱动分析、不算")
 
 
 class ChannelIndependenceTests(JudgmentSetCase):
