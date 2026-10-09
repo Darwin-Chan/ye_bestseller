@@ -237,7 +237,7 @@ class SkuDraftTests(unittest.TestCase):
             self.service.save_draft(first['id'])
             self.assertEqual(first['id'],restarted.draft()['id'])
 
-    def test_sku_mutations_are_open_but_matching_and_results_remain_gated(self):
+    def test_sku_mutations_and_retry_are_open_but_unconfirmed_results_remain_gated(self):
         self.observe('2026-09-07',[dict(sku_id='s',sku_name='真实名称',sku_stock=100)])
         self.observe('2026-09-14',[dict(sku_id='s',sku_name='真实名称',sku_stock=80)])
         ledger=dict(relations=[],standalone=[['A01|11','old-version','machine']],excluded=[['A01|11','A01|12','machine']])
@@ -251,9 +251,12 @@ class SkuDraftTests(unittest.TestCase):
         self.assertFalse(withdrawn['groups'][0]['confirmed'])
         removed=self.service.edit_group(draft['id'],'remove',group,draft['members'][0])
         self.assertEqual(1,len(removed['groups']))
-        operations=[lambda:self.service.retry_matching(draft['id']),
-            lambda:self.service.retry_matching_job(draft['id']),
-            lambda:self.service.save_and_view(draft['id']),
+        retried = self.service.retry_matching(draft['id'])
+        self.assertEqual(1, retried["matching"]["reasons"]["missing_evidence"])
+        accepted = self.service.retry_matching_job(draft['id'])
+        terminal = self.service.wait_terminal(accepted["id"], 5)
+        self.assertEqual("ready", terminal["state"])
+        operations=[lambda:self.service.save_and_view(draft['id']),
             lambda:self.service.export(draft['id'],'<!doctype html>unsafe')]
         for operation in operations:
             with self.subTest(operation=operation):

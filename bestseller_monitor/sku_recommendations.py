@@ -2,10 +2,8 @@
 from __future__ import annotations
 
 import json
-import sqlite3
-from contextlib import closing
 
-from .matching import ImageJudge, ModelFailure, digest, signature_parts
+from .matching import ImageJudge, digest
 from .sku_grouping import identity, refresh
 
 RULE_VERSION = "sku-candidate-recommendation-v1"
@@ -53,7 +51,8 @@ def _legal_groups(snapshot, member, candidate_ids):
 
 def _context(snapshot, member, groups):
     members = {identity(m): m for m in snapshot["members"]}
-    return dict(rule=RULE_VERSION, member=_member_context(member), candidates=[dict(
+    return dict(rule=RULE_VERSION, analysis=[snapshot["start"], snapshot["end"]],
+                member=_member_context(member), candidates=[dict(
         id=g["id"], manual_membership=bool(g.get("manual_membership")),
         manual_members=sorted(g.get("manual_members", [])),
         members=[_member_context(members[key]) for key in sorted(identity(r) for r in g["members"])])
@@ -61,63 +60,50 @@ def _context(snapshot, member, groups):
                                           excluded_skus=sorted(snapshot.get("excluded_skus", []))))
 
 
-def apply(snapshot, config, *, stop=None, reload_manual=None):
-    if not config or config.mode == "disabled":
-        return
-    judge = ImageJudge(config)
-    signature = digest({**signature_parts(config), "rule": RULE_VERSION})
-    with closing(sqlite3.connect(config.cache)) as conn:
-        conn.execute("CREATE TABLE IF NOT EXISTS sku_recommendations (context TEXT, signature TEXT, result TEXT NOT NULL, PRIMARY KEY(context, signature))")
-        for member in snapshot["members"]:
-            if member.get("matching_state") != "pending_candidates":
-                continue
-            candidate_ids = list(member.get("candidate_groups", []))
-            if reload_manual:
-                reload_manual()
-            groups = _legal_groups(snapshot, member, candidate_ids)
-            if len(groups) < 2:
-                continue  # changed human decisions win; do not invent a new choice
-            member["candidate_groups"] = [g["id"] for g in groups]
-            members = {identity(m): m for m in snapshot["members"]}
-            products = [member] + [members[identity(r)] for g in groups for r in g["members"]]
-            if any(not m.get("image_data") for m in products):
-                member.update(matching_note="多个候选，缺少图片证据；无法确定归属；暂时独立")
-                continue
-            context = _context(snapshot, member, groups)
-            key = digest(context)
-            row = conn.execute("SELECT result FROM sku_recommendations WHERE context=? AND signature=?", (key, signature)).fetchone()
-            cached = bool(row)
-            if row:
-                result = json.loads(row[0])
-            elif stop and stop():
-                break
-            else:
-                try:
-                    result = judge.recommend(context, products)
-                except ModelFailure as exc:
-                    member.update(matching_state="pending", matching_note=str(exc)+"；候选推荐未完成；暂时独立")
-                    continue
-                conn.execute("INSERT OR REPLACE INTO sku_recommendations VALUES (?,?,?)", (key, signature, json.dumps(result, ensure_ascii=False)))
-                conn.commit()
-            if reload_manual:
-                reload_manual()
-            current = _legal_groups(snapshot, member, candidate_ids)
-            if _context(snapshot, member, current) != context:
-                continue  # applies equally to fresh and cached results
-            selected = result["group_id"]
-            target = next((g for g in current if g["id"] == selected), None)
-            if selected is not None and target is None:
-                continue
-            member["recommendation"] = dict(result, cached=cached, context=key, rule=RULE_VERSION)
-            member["multiple_candidates"] = True
-            member["candidate_groups"] = [g["id"] for g in current]
-            if target is None:
-                member.update(matching_state="pending_candidates", matching_note="多个候选，无法确定归属；未选择归属："+result["reason"])
-            else:
-                source = next(g for g in snapshot["groups"] if any(identity(r) == identity(member) for r in g["members"]))
-                target["members"].append(source["members"].pop())
-                target["confirmed"] = False
-                target["image_grouping"] = True
-                member.update(matching_state="recommended", added_to_group=True, grouping_basis="多候选推荐（未人工确认）",
-                              matching_note="多个候选；推荐加入 "+target["id"]+"："+result["reason"])
+def apply(snapshot, config, *, stop=None, reload_manual=None, work):
+    judge = ImageJudge(config) if config and config.mode != "disabled" else None
+    for member in snapshot["members"]:
+        if member.get("matching_state") != "pending_candidates":
+            continue
+        candidate_ids = list(member.get("candidate_groups", []))
+        if reload_manual:
+            reload_manual()
+        groups = _legal_groups(snapshot, member, candidate_ids)
+        if len(groups) < 2:
+            continue  # changed human decisions win; do not invent a new choice
+        member["candidate_groups"] = [g["id"] for g in groups]
+        members = {identity(m): m for m in snapshot["members"]}
+        products = [member] + [members[identity(r)] for g in groups for r in g["members"]]
+        if any(not m.get("image_data") for m in products):
+            work.record("recommendation", _context(snapshot, member, groups), [identity(member)], "missing_evidence")
+            member.update(matching_note="多个候选，缺少图片证据；无法确定归属；暂时独立")
+            continue
+        context = _context(snapshot, member, groups)
+        key = digest(context)
+        result, cached = work.execute("recommendation", context, [identity(member)], RULE_VERSION, key,
+                                      lambda: judge.recommend(context, products))
+        if result is None:
+            member.update(matching_state="pending", matching_note="候选推荐未完成；暂时独立")
+            continue
+        if reload_manual:
+            reload_manual()
+        current = _legal_groups(snapshot, member, candidate_ids)
+        if _context(snapshot, member, current) != context:
+            continue  # applies equally to fresh and cached results
+        selected = result["group_id"]
+        target = next((g for g in current if g["id"] == selected), None)
+        if selected is not None and target is None:
+            continue
+        member["recommendation"] = dict(result, cached=cached, context=key, rule=RULE_VERSION)
+        member["multiple_candidates"] = True
+        member["candidate_groups"] = [g["id"] for g in current]
+        if target is None:
+            member.update(matching_state="pending_candidates", matching_note="多个候选，无法确定归属；未选择归属："+result["reason"])
+        else:
+            source = next(g for g in snapshot["groups"] if any(identity(r) == identity(member) for r in g["members"]))
+            target["members"].append(source["members"].pop())
+            target["confirmed"] = False
+            target["image_grouping"] = True
+            member.update(matching_state="recommended", added_to_group=True, grouping_basis="多候选推荐（未人工确认）",
+                          matching_note="多个候选；推荐加入 "+target["id"]+"："+result["reason"])
     refresh(snapshot)

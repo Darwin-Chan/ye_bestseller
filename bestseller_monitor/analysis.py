@@ -392,6 +392,8 @@ class AnalysisService:
                     if stored and stored.payload.get('member_kind') == 'sku':
                         saved_sku_payload = stored.payload
                         apply_saved_sku(snapshot, stored.payload)
+                        snapshot["model_tasks"] = copy.deepcopy(stored.payload.get("model_tasks", {}))
+                        snapshot["matching_options"] = copy.deepcopy(stored.payload.get("matching_options", {}))
                 apply_sku_codes(snapshot)
                 from .sku_matching import apply as apply_sku_images
                 def reload_manual():
@@ -509,6 +511,28 @@ class AnalysisService:
             if analysis_id not in self._snapshots:
                 raise ValueError('分析已不存在')
             snapshot = copy.deepcopy(self._snapshots[analysis_id])
+            if snapshot.get('member_kind') == 'sku':
+                # Re-freeze current selected historical evidence, then replay only
+                # current manual constraints; automatic results must revalidate.
+                current = self._freeze(analysis_id, snapshot['start'], snapshot['end'])
+                apply_saved_sku(current, snapshot)
+                current['model_tasks'] = copy.deepcopy(snapshot.get('model_tasks', {}))
+                current['matching_options'] = copy.deepcopy(snapshot.get('matching_options', {}))
+                apply_sku_codes(current)
+                from .sku_matching import apply as apply_sku_images
+                stored = self.store.read(analysis_id)
+                saved_payload = stored.payload if stored else None
+                def reload_manual():
+                    nonlocal saved_payload
+                    latest = self.store.read(analysis_id)
+                    if latest and latest.payload != saved_payload:
+                        saved_payload = latest.payload
+                        apply_saved_sku(current, latest.payload)
+                        apply_sku_codes(current)
+                apply_sku_images(current, self.config.matching, stop=stop, reload_manual=reload_manual)
+                current['dirty'] = True
+                self._snapshots[analysis_id] = current
+                return copy.deepcopy(current)
             self._guard_product_operation(snapshot)
             # 信息变更是本次分析展示的事实（重开的草稿也带着它）：重试只重跑匹配，
             # 不把已经标出的变更刷回未标注。
@@ -535,7 +559,8 @@ class AnalysisService:
             snapshot = self._snapshots.get(analysis_id)
             if snapshot is None:
                 raise ValueError('分析已不存在')
-            self._guard_product_operation(snapshot)
+            if snapshot.get('member_kind') != 'sku':
+                self._guard_product_operation(snapshot)
             start, end = snapshot['start'], snapshot['end']
         progress = _Progress(analysis_id, start, end, self._clock, phase_index=1, retry=True,
                              stop_timeout=self._stop_timeout())

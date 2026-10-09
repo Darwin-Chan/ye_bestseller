@@ -11,7 +11,7 @@
 #groupDetail>aside.conflict{border:1px solid var(--red);border-radius:6px;padding:10px 12px;margin:10px 0;background:#fef2f2}
 #groupDetail>aside.conflict b{color:var(--red)}
 #groupDetail>aside.conflict p{margin:4px 0}
-.match-bar{justify-content:flex-start;margin:12px 0}#matchControl button:disabled{cursor:not-allowed}#matchingStatus{color:var(--mut)}
+.match-bar{justify-content:flex-start;margin:12px 0}#matchControl{flex-shrink:0}#matchControl button{white-space:nowrap}#matchControl button:disabled{cursor:not-allowed}#matchingStatus{color:var(--mut)}
 /* 结果条目不自带白底：白由所在面板承担，条目只留自己的边框与内边距（分析界面反馈批·票 02）。 */
 .rank{border:1px solid var(--line);border-radius:9px;padding:8px 14px;margin:12px 0}.rank>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer}.rank .product{display:flex;align-items:center;gap:12px}.rank .product img,.tree .product img{width:58px;height:58px;object-fit:contain;background:white;border:1px solid #eef2f7;border-radius:8px}.product-title{display:flex;gap:7px;align-items:center;min-width:0}.number{font-size:28px;font-weight:650;color:var(--pri);white-space:nowrap}.chart-block{margin:12px 0}.chart{overflow-x:auto;margin-top:6px}.chart svg{min-width:690px;width:100%;height:262px}.chart-toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-top:12px}.chart-key{display:flex;gap:20px;font-size:11px;margin:6px 0}.chart-key .sales{color:var(--pri)}.stock-legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;justify-content:flex-end;font-size:11px;margin-left:auto}.green{color:var(--grn)}.stock-point.green{fill:var(--grn)}.yellow{color:var(--amb)}.stock-point.yellow{fill:var(--amb)}.red{color:var(--red)}.stock-point.red{fill:var(--red)}.stock-line{stroke:var(--grn)}.sales-line{stroke:var(--pri)}.sales-point{fill:#fff;stroke:var(--pri)}.grid-line{stroke:var(--line)}.date-label,.stock-axis,.stock-title{fill:var(--mut)}.sales-axis,.sales-value,.sales-title{fill:var(--pri)}.stock-value{fill:var(--grn)}.point-label{paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round}.tree{padding-left:22px;border-left:2px solid var(--line);margin:12px}.tree .product{margin:15px 0}.tree .product p{margin:6px 0}.tree-heading{justify-content:flex-start;gap:8px;margin-top:16px}.tree-heading h3{margin:8px 0}.subtle-button{font-size:12px;padding:4px 8px;background:transparent;border-color:transparent;color:var(--mut)}.subtle-button:hover{background:#f1f4f9;border-color:var(--line)}.sku-row{margin:10px 0 10px 18px}.sku-row summary{display:flex;align-items:center;justify-content:space-between;cursor:pointer}.sku-row[open]{border:1px solid var(--line);border-radius:7px;padding:6px}.switch-note{margin:6px 0 6px 18px;font-size:13px}.ranking-controls{justify-content:flex-start;margin:12px 0}.rank-pager{justify-content:flex-start;gap:14px;margin:12px 0}.export-bar{justify-content:flex-start;gap:14px;margin:12px 0}.empty{padding:32px;text-align:center;color:var(--mut)}.tip{position:fixed;background:#1f2937;color:white;padding:10px 14px;border-radius:6px;pointer-events:none;z-index:2147483647;max-width:320px}
 /* 阶段图例：与「库存数据抓取」页同一组件（ui_live.html 的 .tabs/.step），改这里时两页一起改。 */
@@ -79,7 +79,7 @@
 <dialog id="matchMask" aria-label="匹配进度"><h2 id="maskTitle">正在匹配同款</h2><p class="phase" id="maskPhase"></p>
 <ul class="mask-steps" id="maskSteps"></ul>
 <div id="maskNumbers" hidden><div class="pbar"><div class="pfill" id="maskBar"></div></div><p class="big" id="maskMain"></p><p class="sub" id="maskSub"></p><p class="sub" id="maskTime"></p></div>
-<p class="sub" id="maskStopNote" hidden>停下后自动进入本页；没判断的对记为「失败」，点「模型匹配同款」可以接着判<br>点「停止匹配」与点关窗确认里的「关闭并停止」进的都是这一态；收尾完成前窗口不消失</p>
+<p class="sub" id="maskStopNote" hidden>停下后自动进入本页；未完成项保留原因，稍后可以继续判断<br>点「停止匹配」与点关窗确认里的「关闭并停止」进的都是这一态；收尾完成前窗口不消失</p>
 <div id="maskError" class="error" role="alert" hidden></div>
 <p class="warn">匹配期间程序只做这一件事，完成后自动回到本页。<br><b>请勿关闭窗口。</b>已判断的会保存，重新开始会接着算，不会重复花钱；但这一趟的分析结果会没。</p>
 <div class="acts" id="maskLive" hidden><button id="maskStop">停止匹配</button><span class="spacer"></span><span class="muted" id="maskStopHint">停下后已判断的会留下，稍后可从本页继续</span></div>
@@ -405,6 +405,16 @@ function skuRecommendation(m){
     const choices=alternatives.map(id=>{const g=currentSnapshot.groups.find(g=>g.id===id);return g?`${esc(id)} · ${esc(skuRepresentative(g)?.display_name||'')} · ${g.members.length} 个 SKU（${esc(skuStatus(g))}）`:`${esc(id)}（历史候选，当前已不存在）`;}).join('；');
     return `<aside class="change sku-recommendation"><b>${heading}</b><p>推荐理由：${esc(r.reason)}</p><p>其他候选（比较时）：${choices||'无'}；可用“移到其他组”人工调整。</p><small>${r.cached?'复用有效候选语境':'模型候选比较'}；自动建议不替代当前人工决定。</small></aside>`;
 }
+function skuModelWork(m) {
+    if(!m.model_work?.length)return '';
+    return `<aside class="change sku-model-work">${m.model_work.map(t=>`<p><b>${t.branch==='judgment'?'普通图文判断':'多候选推荐'}</b>：${esc(t.reason)}${t.retryable?'；可以选择性重试':t.completed?'；已保存，不重复调用':'；补齐证据后重新检查'}</p>`).join('')}</aside>`;
+}
+function skuMatchingLine(summary) {
+    const states=(summary.states||[]).filter(s=>s.count).map(s=>`${s.reason} ${s.count}`).join('；');
+    return `SKU 模型任务：已完成 ${summary.completed||0}，未完成 ${summary.unfinished||0}；${states}；成员已完成 ${summary.completed_members||0}，未完成 ${summary.unfinished_members||0}；本次业务调用 ${summary.requested||0}（不含图像核验），复用 ${summary.cached||0}`
+        + ((summary.retryable||0)>0?'；只补未完成项。需要配置时请修改分析配置、保存草稿并重启，再继续选择性重试。':'；没有可重试的未完成调用。')
+        + ` ${(currentSnapshot.limitations||[]).join('；')}`;
+}
 function renderSkuMember(m,g){
     const index=skuMemberIndex(m), source=skuImageSource(m);
     const evidence=m.evidence_note?`<aside class="change"><b>证据说明</b><p>${esc(m.evidence_note)}</p></aside>`:'';
@@ -412,7 +422,7 @@ function renderSkuMember(m,g){
     const changes=m.evidence_changes?.length?`<aside class="change"><b>证据变化</b>：${m.evidence_changes.map(esc).join('、')}；保留原人工归属，需重新确认。</aside>`:'';
     const addition=m.added_to_group?`<aside class="change"><b>新增 SKU</b> · ${m.grouping_basis === "同码归组" ? `同码依据：${esc(m.merchant_code)}` : `自动依据：${esc(m.grouping_basis||g.grouping_basis)}`}；整个组待重新确认。</aside>`:'';
     const pending=m.matching_note?`<aside class="change">${esc(m.matching_note)}${m.candidate_groups?.length?` · 候选组：${m.candidate_groups.map(esc).join('、')}`:''}</aside>`:'';
-    return `<section class="matching-member sku-evidence-card" data-sku="${esc(m.sku_id)}"><div>${productPhoto(m)}</div><div class="member-info"><h4>${esc(m.product_name||m.offer_id)} ${sourceIcon(m)}</h4><p>原始 SKU 名称：${esc(m.raw_sku_name||'（空）')}</p><p>匹配商品名称：${esc(m.matching_input?.product_name||m.product_name||'')}</p><p>匹配 SKU 名称：${esc(m.matching_input?.sku_name||'空')}</p><p>店铺：${esc(skuShopName(m))} · 商品编号：${esc(m.offer_id)} · 平台 SKU：${esc(m.sku_id)}（平台 SKU 编号）</p><p><b>区间销量：${esc(m.sales)}</b>（SKU 销售单位，不换算实物数量）</p><p>观测库存：${esc(m.stock??'未知')} · 价格：${esc(m.price??'未知')}</p><p>观测时间：${esc(m.observed_at||((m.observed_date||'')+'（精确时间不可恢复）'))}</p><p>完整观测：${m.observation_complete?`${esc(m.observation_sku_count)} 个 SKU`:'无法证明'} · 单 SKU：${m.single_sku===null?'无法证明':m.single_sku?'是':'否'}</p><p>SKU 图片来源：${esc(source)}${m.image_observed_at?` · 观测于 ${esc(m.image_observed_at)}`:''}</p>${skuCode(m)}${m.image_judgments?.length?`<p>图文依据：${m.image_judgments.map(j=>esc(j.reason)).join("；")}（${m.image_judgments.every(j=>j.cached)?"复用有效判断":"SKU 图文判断"}）</p>`:""}<p>归组依据：${esc(basis)}</p>${addition}${skuRecommendation(m)}${changes}${pending}${evidence}<div class="group-actions"><button data-mutation onclick="skuMove(${index})">移到其他组</button>${g.excluded_group?`<button data-mutation onclick="skuUndoExclude(${index})">撤销排除</button>`:`<button data-mutation onclick="skuRemove(${index})">移出／独立</button><button data-mutation onclick="skuExclude(${index})">排除</button>`}</div></div></section>`;
+    return `<section class="matching-member sku-evidence-card" data-sku="${esc(m.sku_id)}"><div>${productPhoto(m)}</div><div class="member-info"><h4>${esc(m.product_name||m.offer_id)} ${sourceIcon(m)}</h4><p>原始 SKU 名称：${esc(m.raw_sku_name||'（空）')}</p><p>匹配商品名称：${esc(m.matching_input?.product_name||m.product_name||'')}</p><p>匹配 SKU 名称：${esc(m.matching_input?.sku_name||'空')}</p><p>店铺：${esc(skuShopName(m))} · 商品编号：${esc(m.offer_id)} · 平台 SKU：${esc(m.sku_id)}（平台 SKU 编号）</p><p><b>区间销量：${esc(m.sales)}</b>（SKU 销售单位，不换算实物数量）</p><p>观测库存：${esc(m.stock??'未知')} · 价格：${esc(m.price??'未知')}</p><p>观测时间：${esc(m.observed_at||((m.observed_date||'')+'（精确时间不可恢复）'))}</p><p>完整观测：${m.observation_complete?`${esc(m.observation_sku_count)} 个 SKU`:'无法证明'} · 单 SKU：${m.single_sku===null?'无法证明':m.single_sku?'是':'否'}</p><p>SKU 图片来源：${esc(source)}${m.image_observed_at?` · 观测于 ${esc(m.image_observed_at)}`:''}</p>${skuCode(m)}${m.image_judgments?.length?`<p>图文依据：${m.image_judgments.map(j=>esc(j.reason)).join("；")}（${m.image_judgments.every(j=>j.cached)?"复用有效判断":"SKU 图文判断"}）</p>`:""}<p>归组依据：${esc(basis)}</p>${addition}${skuRecommendation(m)}${changes}${pending}${skuModelWork(m)}${evidence}<div class="group-actions"><button data-mutation onclick="skuMove(${index})">移到其他组</button>${g.excluded_group?`<button data-mutation onclick="skuUndoExclude(${index})">撤销排除</button>`:`<button data-mutation onclick="skuRemove(${index})">移出／独立</button><button data-mutation onclick="skuExclude(${index})">排除</button>`}</div></div></section>`;
 }
 function renderSkuDraft() {
     const s=currentSnapshot;
@@ -421,8 +431,7 @@ function renderSkuDraft() {
     reviewControls.querySelector('.filter-panel').hidden=true;
     $('batchRow').hidden=true;
     $('skuReviewControls').hidden=false;
-    $('runMatching').disabled=true;
-    $('matchingStatus').textContent=(s.limitations||[]).join('；');
+    renderMatching();
     const query=($('skuQuery').value||'').trim().toLocaleLowerCase();
     const ordered=(s.review_order||s.groups.map(g=>g.id)).map(id=>s.groups.find(g=>g.id===id)).filter(Boolean);
     const filtered=query?ordered.filter(g=>skuSearchValues(g).some(v=>v.includes(query))):ordered;
@@ -632,7 +641,16 @@ function matchDisabledReason(summary) {
     return summary.missing_evidence?`没有可判断的商品：${MISSING_EVIDENCE}`:'没有可判断的商品';
 }
 function renderMatching() {
-    if(currentSnapshot?.member_kind==='sku'||currentSnapshot?.migration_note){$('runMatching').disabled=true;$('matchingStatus').textContent=currentSnapshot.migration_note||currentSnapshot.limitations.join('；');return;}
+    if(currentSnapshot?.member_kind==='sku'){
+        const summary=currentSnapshot.matching||{};
+        $('runMatching').textContent='选择性重试未完成项';
+        $('runMatching').disabled=!(summary.retryable>0)||busy;
+        $('matchingStatus').textContent=skuMatchingLine(summary);
+        $('matchControl').title=summary.retryable>0?'重新检查当前证据和人工约束，只补未完成调用':'有效已完成结果不再调用；缺证据需先补齐';
+        return;
+    }
+    $('runMatching').textContent='模型匹配同款';
+    if(currentSnapshot?.migration_note){$('runMatching').disabled=true;$('matchingStatus').textContent=currentSnapshot.migration_note||currentSnapshot.limitations.join('；');return;}
     const summary=currentSnapshot.matching||{}, usable=(summary.retryable||0)>0;
     $('runMatching').disabled=!usable;
     $('matchControl').title=usable?'':matchDisabledReason(summary);
@@ -1035,9 +1053,10 @@ async function stopMatching() {
 async function finishMask(id, reading) {
     try {
         const snapshot = await api('/api/analysis?id=' + encodeURIComponent(id));
-        const stopped = reading.stop_requested && reading.judged < reading.todo;
+        const stopped = reading.stop_requested && (snapshot.member_kind==='sku'?snapshot.matching?.reasons?.stopped>0:reading.judged < reading.todo);
         closeMask();
         if (maskRetry) applySnapshot(snapshot); else show(snapshot);
+        if(snapshot.member_kind==='sku'){renderMatching();return;}
         if (stopped) {
             matchResult = stoppedLine(reading, snapshot.matching || {});
             renderMatching();
