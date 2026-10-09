@@ -261,6 +261,15 @@ def active_round(db: Database, run_date: str | None = None) -> Round | None:
     return None
 
 
+def pending_rounds(db: Database) -> tuple[Round, ...]:
+    """全部未结束的轮次（新的在前）：界面逐个显式处置的清单。
+
+    与 active_round 的区别只是「一个还是全部」——多个遗留（换库、旧异常）都要
+    逐个展示与确认，不能只看见最新那一轮。
+    """
+    return tuple(_active_rounds(db))
+
+
 def finish_if_open(db: Database, round: Round, reason: TerminalReason, *,
                    note: str | None = None, now=None) -> Round:
     """收尾一轮；已经有终态就不覆盖也不报错，返回轮次当前的事实。

@@ -785,15 +785,111 @@ class Api:
                 conn.close()
 
     @_collection_action
-    def prepare_abort(self) -> dict:
-        """Freeze the round and target before the page displays its confirmation."""
+    def prepare_abort(self, round_id: int | None = None) -> dict:
+        """Freeze the round and target before the page displays its confirmation.
+
+        指定 round_id 时冻结的是「没有活动采集的遗留轮」（开始页逐个显式处置）；
+        不给编号时沿用关窗快照：运行中 / 暂停中照旧，另外把「本界面认领过、但已无
+        进程且无终态」的那一轮也按遗留冻结（异常退出后仍停在过程页的那条路）。
+        """
         with self._lock:
+            if self._closing_requested:
+                return {"ok": False, "error": CLOSING_REFUSAL}
+            if round_id is not None:
+                if not isinstance(round_id, int) or isinstance(round_id, bool):
+                    return {"ok": False, "error": "轮次编号无效，请刷新后重试。"}
+                return self._freeze_pending_abort(int(round_id))
             snapshot = self.close_snapshot()
-            if snapshot.kind not in ("running", "paused", "aborting") or snapshot.round_id is None:
-                return {"ok": False, "error": "当前轮次或采集目标不可核实，请重新确认。"}
-            token = secrets.token_urlsafe(24)
-            self._abort_confirmation = (token, snapshot)
-            return {"ok": True, "confirmation": token, "round_id": snapshot.round_id}
+            if (snapshot.kind in ("running", "paused", "aborting")
+                    and snapshot.round_id is not None):
+                token = secrets.token_urlsafe(24)
+                self._abort_confirmation = (token, snapshot)
+                return {"ok": True, "confirmation": token, "round_id": snapshot.round_id}
+            if snapshot.kind == "idle" and snapshot.round_id is not None:
+                return self._freeze_pending_abort(snapshot.round_id)
+            return {"ok": False, "error": "当前轮次或采集目标不可核实，请重新确认。"}
+
+    def _freeze_pending_abort(self, round_id: int) -> dict:
+        """没有活动采集时，按指定轮次冻结一次「中止此轮」授权。"""
+        conn = self._open_conn()
+        try:
+            self._stop_watch.tick(conn)
+            if self._stop_watch.status.phase is not stop_request.StopPhase.IDLE:
+                return {"ok": False, "error": "停止或收尾仍在进行，请稍后重试。",
+                        "retryable": True}
+            if self.any_crawler_running():
+                return {"ok": False, "error": _BUSY_ERROR}
+            db = Database(conn)
+            try:
+                target = rounds.load(db, round_id)
+            except ValueError:
+                return {"ok": False, "error": f"轮次 #{round_id} 不存在，请刷新后重试。"}
+            if target.reason is not None:
+                return {"ok": False, "error": f"轮次 #{round_id} 已经结束，无需中止。"}
+            identity = crawler_identity.registered(conn)
+            snapshot = CloseSnapshot("pending", stop_request.StopTarget.of(identity),
+                                     target.id)
+        finally:
+            conn.close()
+        token = secrets.token_urlsafe(24)
+        self._abort_confirmation = (token, snapshot)
+        return {"ok": True, "confirmation": token, "round_id": target.id,
+                "run_date": target.run_date, "shops": list(target.shop_keys),
+                "cross_day": target.run_date != self._today()}
+
+    def _confirm_pending_abort(self, expected: CloseSnapshot) -> dict:
+        """执行一次遗留轮中止：重核冻结事实，写终态，再结清可核实的收尾欠账。
+
+        授权只覆盖冻结的那一轮与当时可见的目标：执行前重核；出现新目标、新采集或
+        写库失败都拒绝或说明重试，不把旧确认套到后来出现的事实上。
+        """
+        conn = self._open_conn()
+        try:
+            self._stop_watch.tick(conn)
+            if self._stop_watch.status.phase is not stop_request.StopPhase.IDLE:
+                return {"ok": False, "error": "停止或收尾仍在进行，请稍后重试。",
+                        "retryable": True}
+            if self.any_crawler_running():
+                return {"ok": False, "error": "已有采集在运行，不能按本次确认处置；"
+                        "请先处置正在跑的这一轮。"}
+            db = Database(conn)
+            identity = crawler_identity.registered(conn)
+            current_target = stop_request.StopTarget.of(identity)
+            if current_target is not None and current_target != expected.target:
+                return {"ok": False, "error": "采集目标已变化，请重新确认中止。"}
+            try:
+                target = rounds.load(db, expected.round_id)
+            except ValueError:
+                return {"ok": False, "error": "轮次已不存在，请重新确认中止。"}
+            try:
+                settled = rounds.finish_if_open(db, target, TerminalReason.ABANDONED,
+                                                note="GUI 人工中止（放弃）")
+            except (sqlite3.Error, ValueError) as exc:
+                return {"ok": False, "error": f"中止或收尾尚未完成：{exc}",
+                        "retryable": True}
+            if self._paused_round_id == settled.id:
+                self.user_paused = False
+                self._paused_round_id = None
+            result = {"ok": True, "round_id": settled.id, "reason": settled.reason.value}
+            if settled.reason is not TerminalReason.ABANDONED:
+                result["note"] = (f"轮次 #{settled.id} 已按其它方式结束，"
+                                  "保留原终态，未改为人工中止。")
+            if identity is not None:
+                # 处置旧轮的这一刻顺手结清它的残留登记：进程确已不在时删行，
+                # OWNED 浏览器按精确绑定关；核不实就保留欠账，新轮继续被拦。
+                try:
+                    done = crawler_identity.settle_dead_registration(conn, identity)
+                except (OSError, sqlite3.Error) as exc:
+                    log.warning("遗留轮中止后身份收尾暂不可核验：%s", exc)
+                    done = False
+                if not done and not crawler_identity.browser_cleanup_complete(
+                        identity.browser_state):
+                    result["cleanup"] = "pending"
+                    result["note"] = ("中止已提交；原采集浏览器或身份收尾暂未核清，"
+                                      "新轮在收尾完成前仍被拦，可稍后重试。")
+            return result
+        finally:
+            conn.close()
 
     @_collection_action
     def confirm_abort(self, confirmation: str) -> dict:
@@ -804,6 +900,8 @@ class Api:
                     or not secrets.compare_digest(confirmation, frozen[0])):
                 return {"ok": False, "error": "中止确认已失效，请重新确认。"}
             expected = frozen[1]
+            if expected.kind == "pending":
+                return self._confirm_pending_abort(expected)
             current = self.close_snapshot()
             if current.round_id != expected.round_id or current.kind == "unknown":
                 return {"ok": False, "error": "轮次或采集目标已变化，请重新确认中止。"}

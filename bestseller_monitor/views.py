@@ -259,6 +259,64 @@ def _plan_mark(shop_key: str, plan: plan_step.StartPlan,
 _CARDS_PER_PAGE = 30
 
 
+def _round_can_resume(state: UiState, round_: rounds.Round, now: str) -> bool:
+    """这一轮在该界面此刻算不算「明确暂停、可继续」——开始页与过程页共用一条。
+
+    仅同界面明确暂停的原轮、同日、停止收尾完成且无采集进程才算数；数据库无终态、
+    进程消失或别的界面留下的记录都不授予继续资格（票 03/06）。
+    """
+    return (state.manually_paused and state.round_id == round_.id
+            and not state.crawler_running and not state.stopping
+            and round_.resumable_on(now))
+
+
+def _pending_round_text(row: rounds.Round, *, today: str, resumable: bool) -> str:
+    keys = "、".join(row.shop_keys) or "（无店铺）"
+    head = f"轮次 #{row.id}（{row.run_date}，{keys}）"
+    if resumable:
+        return (head + "：已暂停，可到过程页继续；如需换范围或新建，请先确认中止。")
+    if row.run_date != today:
+        return (head + "：采集已停止且已跨天，本轮未正常结束、不能继续；"
+                "请确认中止并等待收尾完成后开始新轮。")
+    return head + "：采集已停止，本轮未正常结束；请确认中止并等待收尾完成后开始新轮。"
+
+
+def _pending_payload(pending: tuple[rounds.Round, ...], state: UiState,
+                     now: str, today: str) -> list[dict]:
+    rows = []
+    for row in pending:
+        resumable = _round_can_resume(state, row, now)
+        rows.append({
+            "id": row.id,
+            "run_date": row.run_date,
+            "shops": list(row.shop_keys),
+            "cross_day": row.run_date != today,
+            "resumable": resumable,
+            "text": _pending_round_text(row, today=today, resumable=resumable),
+        })
+    return rows
+
+
+def _pending_hint(pending: tuple[rounds.Round, ...], state: UiState,
+                  now: str, today: str) -> str:
+    if len(pending) == 1 and _round_can_resume(state, pending[0], now):
+        row = pending[0]
+        return (f"轮次 #{row.id}（{row.run_date}）已暂停：请到过程页继续；"
+                "如需新建，请先确认中止本轮。")
+    heads = []
+    if any(row.run_date == today and not _round_can_resume(state, row, now)
+           for row in pending):
+        heads.append("采集已停止，本轮未正常结束")
+    if any(row.run_date != today for row in pending):
+        heads.append("有轮次已跨天，不能继续")
+    resumed = [row for row in pending if _round_can_resume(state, row, now)]
+    if resumed:
+        heads.append("、".join(f"轮次 #{row.id} 已暂停" for row in resumed))
+    ids = "、".join(f"#{row.id}（{row.run_date}）" for row in pending)
+    return (f"未结束的轮次：{ids}。" + "；".join(heads)
+            + "。请在下方逐个确认中止并等待收尾完成，再开始新轮。")
+
+
 def _start_shops(conn: sqlite3.Connection, shops, cfg, today: str, *,
                  plan: plan_step.StartPlan) -> list[dict]:
     out = []
@@ -340,11 +398,9 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
         notes.append("未能确认最新：这次没从计划库确认到本周计划，用的是本地已落库的那份"
                      "（发布后本周不重算，本地即权威）。")
     ov_products, ov_skus = _inventory_counts(conn, today)
-    current = rounds.active_round(db, today)
-    stale = None if current is not None else rounds.active_round(db)
+    pending = rounds.pending_rounds(db)
     # 开始页仅表达新建；无终态旧轮不是「可暂停续跑」的证明。
     locked = state.plan_confirming or plan.blocked
-    unfinished = current or stale
     start_allowed = not locked and not (is_merge_only(cfg) and not trial)
     if state.stopping:
         hint = "上一次停止仍在核验或收尾，请等待收尾完成再明确开始新轮。"
@@ -352,11 +408,8 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
     elif crawler is not None:
         hint = _crawler_hint(crawler)
         start_allowed = False
-    elif unfinished is not None:
-        hint = (f"轮次 #{unfinished.id}（{unfinished.run_date}）"
-                + ("已跨天，" if stale is not None else "")
-                + "尚未结束；开始页只新建轮次。"
-                "请先明确中止旧轮并等待收尾完成，再开始新轮。")
+    elif pending:
+        hint = _pending_hint(pending, state, now, today)
         start_allowed = False
     else:
         hint = ""
@@ -373,6 +426,8 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
         "total_shops": len(shops),
         "start_hint": hint,
         "start_allowed": start_allowed,
+        "pending": ({"rounds": _pending_payload(pending, state, now, today)}
+                    if pending else None),
         "plan_idle": idle,
         "plan_note": "\n".join(notes),
         "plan_gate": plan.blocked,
@@ -487,10 +542,19 @@ def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str,
     """过程页取数：本轮进度、各店明细、当前处理中的店。
 
     `state.start_error` 已置位（子进程被拒）时不读数据库，`conn` 可以传 None。
+    跨天的轮次只有「本界面明确暂停的那一轮」还留在这一页（界面保留到次日）：
+    继续被拒，说明跨天，用户可以从这里显式中止；其余历史遗留归开始页逐个处置。
     """
     if state.start_error is not None:
         return _refused_start(state.start_error)
-    active = rounds.active_round(Database(conn), cst_date(now))
+    today = cst_date(now)
+    db = Database(conn)
+    active = rounds.active_round(db, today)
+    cross_day = False
+    if active is None and state.manually_paused and state.round_id is not None:
+        stale = rounds.active_round(db)
+        if stale is not None and stale.id == state.round_id:
+            active, cross_day = stale, True
     if active is None:
         return {
             "running": state.crawler_running,
@@ -502,7 +566,7 @@ def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str,
             "stop_grace_sec": state.stop_grace_sec,
         }
     round_id = active.id
-    tally = Database(conn).round_tally(round_id)
+    tally = db.round_tally(round_id)
     done, todo = _shop_breakdown(conn, round_id, tally, max_attempts)
     total, deny = _round_counts(conn, round_id)
     timing = elapsed.read(conn, round_id)
@@ -515,10 +579,10 @@ def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str,
         "stop_grace_sec": state.stop_grace_sec,
         "has_round": True,
         "round_id": round_id,
+        "cross_day": cross_day,
+        "note": ("本轮已跨天，不能继续；请中止本轮后开始新轮。" if cross_day else None),
         "verification": _identity_wait(conn, round_id, state),
-        "can_resume": (state.manually_paused and state.round_id == round_id
-                       and not state.crawler_running and not state.stopping
-                       and active.resumable_on(now)),
+        "can_resume": _round_can_resume(state, active, now),
         "can_abort": True,
         "started_hhmm": _fmt_hhmm(active.started_at),
         "elapsed_sec": timing.seconds,
