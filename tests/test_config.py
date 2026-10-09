@@ -207,6 +207,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(cfg.cos_bucket, "", "没配桶：导出照发包，图片这半如实报缺")
             self.assertEqual(cfg.git_access, "readwrite")
             self.assertEqual(cfg.cos_access, "readwrite")
+            self.assertEqual(cfg.gitee_owner, "", "没配 owner：本机不是来源维护机（只读清单）")
 
     def test_machine_block_declares_role_exchange_root_and_tiers(self):
         """纯汇总机口径在配置里全量声明（spec §11）：只记档位、不记密钥。"""
@@ -215,6 +216,7 @@ class ConfigTests(unittest.TestCase):
 machine_id = "m4"
 role = "merge_only"
 exchange_root = "run/exchange"
+gitee_owner = "yeshuzhen"
 cos_bucket = "bestseller-exchange-1250000000"
 git_access = "read_only"
 cos_access = "read_only"
@@ -226,6 +228,7 @@ cos_access = "read_only"
             self.assertEqual(cfg.machine_id, "m4")
             self.assertEqual(cfg.role, "merge_only")
             self.assertEqual(cfg.exchange_root, (Path(tmp) / "run" / "exchange").resolve())
+            self.assertEqual(cfg.gitee_owner, "yeshuzhen", "来源维护机填空间名（ADR-0052）")
             self.assertEqual(cfg.cos_bucket, "bestseller-exchange-1250000000")
             self.assertEqual(cfg.git_access, "read_only")
             self.assertEqual(cfg.cos_access, "read_only")

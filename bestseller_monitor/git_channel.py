@@ -22,6 +22,8 @@ DEFAULT_PUSH_ATTEMPTS = 5
 
 # 远端还没有这个分支时的两种 git 说法（LC_ALL=C 下稳定）
 _UNBORN_REMOTE = re.compile(r"no such ref was fetched|couldn't find remote ref", re.IGNORECASE)
+# 仓库里没有这条 remote 时 git 的稳定说法（`remote get-url` 拿不到地址的那一档）
+_NO_SUCH_REMOTE = re.compile(r"no such remote", re.IGNORECASE)
 # 「远端在本机拉取之后又动了」两种拒绝措辞：普通非快进，与抢跑窗口里的陈旧信息保护。
 # 别的推送失败（认证、网络、钩子拒绝）不含这些字样，不重试。
 _RETRY_HINT = re.compile(
@@ -79,10 +81,53 @@ class GitChannel:
 
     def pull(self) -> None:
         """拉取远端；远端还没有分支（新空库）时视为没有可拉的。"""
-        args = ("-C", str(self.path), "pull", "--rebase")
+        self._pull("拉取", "--rebase")
+
+    def pull_ff_only(self) -> None:
+        """接收侧专用：拉取远端且**只允许快进**——本地有分叉的提交就失败，绝不重写历史。
+
+        与发布侧的 `pull`（`--rebase`）分开：收来的别人那本 judged 库是只读来源，
+        本机在它里面不该有本地提交，有就说明现场不对（人工动过），如实报错、由调用方
+        按来源阻断——不自动 merge、不重置。`--no-rebase` 写死是不吃本机 git 配置的
+        影响（pull.rebase 之类），空库（远端还没有分支）与 `pull` 同规视为没有可拉的。
+        """
+        self._pull("快进拉取", "--ff-only", "--no-rebase")
+
+    def _pull(self, what: str, *flags: str) -> None:
+        args = ("-C", str(self.path), "pull", *flags)
         done = _run(*args)
         if done.returncode != 0 and not _UNBORN_REMOTE.search(done.stderr or ""):
-            raise _failure("拉取", args, done)
+            raise _failure(what, args, done)
+
+    def remote_url(self, name: str = "origin") -> str | None:
+        """远端 `name` 的地址；没有这条 remote 时回 None（别的失败原样抛）。"""
+        args = ("-C", str(self.path), "remote", "get-url", name)
+        done = _run(*args)
+        if done.returncode == 0:
+            return done.stdout.strip()
+        if _NO_SUCH_REMOTE.search(done.stderr or ""):
+            return None
+        raise _failure("读取远端地址", args, done)
+
+    def head_matches_upstream(self) -> bool:
+        """HEAD 是否与上游一致；本地领先或落后都不一致（两端都还没提交的空库算一致）。
+
+        接收侧判据用：收来的库是来源的只读镜像，本地有上游没有的提交就说明有人动过它
+        ——读它的包等于读一份未经来源发布的判断集。
+        """
+        args = ("-C", str(self.path), "rev-list", "--left-right", "--count", "@{u}...HEAD")
+        done = _run(*args)
+        if done.returncode != 0:
+            return self.head_or_none() is None      # 还没有上游：空库的克隆，两端一致
+        behind, ahead = (int(count) for count in done.stdout.split())
+        return behind == 0 and ahead == 0
+
+    def head_or_none(self) -> str | None:
+        """当前提交；还没有任何提交（空库的克隆）回 None。"""
+        try:
+            return self.head()
+        except ChannelError:
+            return None
 
     def local_changes(self) -> list[str]:
         """工作区里未提交的改动与未跟踪文件的 porcelain 清单；干净时为空。

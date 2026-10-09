@@ -7,6 +7,7 @@
     python exchange.py --only publish      # 只发布判断集（检查 + 发布 + 报告）
     python exchange.py --only collect      # 只收取判断集（检查 + 收取 + 报告）
     python exchange.py --week 2026-W37     # 指定周窗口（补历史用）
+    python exchange.py --confirm-source-shrink   # 确认来源清单的来源减少/改址，按新的发布
     python exchange.py --window            # 开小窗口（整趟 + 只跑某一个动作）
 
 退出码（spec §7）：`0` 干净 / `1` 有需要人看一眼的（含判断集这趟新记下的冲突）/ `2` 本机
@@ -20,7 +21,7 @@
 的约定让启动壳保持安静），命令行打一行说明后退出 2。锁在每次运行结束时释放。
 
 **壳与参数**：`dist/inventory_exchange.exe` 只负责开窗（等价 `--window`），不转发参数；
-`--week`（补历史）、`--only`、`--config` 走本脚本。窗口不接周入口：`--window` 与
+`--week`（补历史）、`--only`、`--confirm-source-shrink`、`--config` 走本脚本。窗口不接周入口：`--window` 与
 `--week` 同传明确拒绝。
 
 窗口里「导出&汇总 / 仅导出 / 仅汇总 / 发布判断集 / 收取判断集」五个按钮与命令行 `--only`
@@ -77,6 +78,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="只跑一个动作：export（导出）/ merge（拉取+汇总）/ "
                              "publish（发布判断集）/ collect（收取判断集）")
     parser.add_argument("--week", default=None, help="指定周窗口，如 2026-W37（补历史用）")
+    parser.add_argument("--confirm-source-shrink", action="store_true",
+                        help="确认判断来源清单的来源减少/远端地址变化，按新的发布"
+                             "（默认保留上一版、等人确认）")
     parser.add_argument("--window", action="store_true",
                         help="开小窗口（整趟 + 只跑某一个动作），不直接跑一次")
     return parser.parse_args(argv)
@@ -270,7 +274,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.window:
             return _open_window_or_fail(cfg)
         try:
-            outcome = console.run_once(cfg, only=args.only, week=args.week, emit=print)
+            outcome = console.run_once(cfg, only=args.only, week=args.week, emit=print,
+                                       confirm_shrink=args.confirm_source_shrink)
         except PlanError as exc:              # --week 写错这类：点名说清楚，不吐栈
             print(f"\n>>> {exc}\n")
             return console.EXIT_NOTHING_DONE

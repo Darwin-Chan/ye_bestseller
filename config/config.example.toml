@@ -21,6 +21,12 @@ exchange_root = "exchange"
 git_access = "readwrite"
 # cos_access："readwrite"（采集机：限 img/* 前缀读写）或 "read_only"（纯汇总机：只 Get/Head）。
 cos_access = "readwrite"
+# 可信 Gitee owner（空间名）：**只有来源维护机（m4）**填这一项，用来刷新判断来源清单
+# （ADR-0052：m4 经 Gitee API 生成 `judged-*` 来源快照、发布到 plan 库；别的机器只读）。
+# 留空 = 本机不是来源维护机，只读取共享清单、不扫 Gitee。「按机器改」：m4 填空间名，其余留空。
+# 维护机另需环境变量 GITEE_TOKEN（只读 token，仓库外、不进日志）；配了 owner 却没这个 token，
+# 刷新那一步按「本机没做成事」如实失败（退出码 2），不静默装成「没有来源」。
+gitee_owner = ""
 # 图片通道的桶名（腾讯云 COS 私有桶，key 形如 img/<哈希前2位>/<哈希>.<扩展名>）。
 # 「按机器改」；只记桶名不记密钥——AK 在仓库外（coscli 配置如 ~/.cos.yaml，或本地 secrets/）。
 # 留空 = 没配：导出照发结构化包，图片这半会如实报缺（交换台的检查步骤也会先说）。

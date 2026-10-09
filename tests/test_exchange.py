@@ -33,13 +33,16 @@ from unittest.mock import patch
 import exchange
 from bestseller_monitor import db as dbmod
 from bestseller_monitor import exchange as exchange_mod
-from bestseller_monitor import export, judgment_set, merge, single_instance, sku_sharing
+from bestseller_monitor import (export, judgment_set, matching, merge, single_instance,
+                                sku_sharing)
 from bestseller_monitor.analysis_store import DraftStore
 from bestseller_monitor.config import ROLE_COLLECTOR, ROLE_MERGE_ONLY
 from bestseller_monitor.db import CST
+from bestseller_monitor.git_channel import GitChannel
 from bestseller_monitor.image_store import ImageStoreError
-from bestseller_monitor.matching import prepare_cache
-from helpers import crawler_cfg, group, insert_sku_image, ledger_of, member, store_weekly_plan
+from bestseller_monitor.matching import ModelConfig, prepare_cache, signature_of_model
+from helpers import (crawler_cfg, group, insert_sku_image, ledger_of, member, store_weekly_plan,
+                     tamper_package)
 from tests.git_repos import GitSandbox, WorldTemplate
 
 WEEK = "2026-W38"
@@ -50,12 +53,19 @@ RUN_AT = dt.datetime(2026, 9, 20, 19, 41, tzinfo=CST)
 # 字面量哈希（不是从字节算出来的）：包里的 key 由哈希与 mime 推出来，期望值因此也是
 # 字面量——不跟实现共算式（与 test_export 同一口径）。
 IMG_HASH = "ab" + "1" * 62
+# 夹具分析配置里的模型三件（analysis_config 写进 toml、contract 按同一份推）：票 04 起
+# 门禁与采纳按「本机当前分析署名」现读，夹具里的判断行署名取这里的契约值。
+CONTRACT_ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
+CONTRACT_MODEL = "deepseek-chat"
 
 
 def seed_judgments(cache, *, machine_id, rows=(("pair-1", "sig-1"),)) -> None:
     """往判断缓存里预置判断行（spec「预置缓存行」的口径，不调模型）。
 
-    交换台这半不消费判断（消费在分析那半），所以结果正文只要是段 JSON、行能进包就行。
+    交换台这半不消费判断（消费在分析那半），所以结果正文只要是段 JSON、行能进包就行；
+    行内容是不跑模型的捷径（pair 与版本都是字面量标签）——**只给本机缓存预置用**。
+    要发布出去、会被收取端验的包走 `ConsoleWorld.judged_publish`（那边按 `matching`
+    的口径生成真形状的行，票 04 起收端会验包内自洽）。`rows` 是 (标签, 署名)。
     """
     conn = sqlite3.connect(cache)
     try:
@@ -199,13 +209,18 @@ class ConsoleWorld:
     """
 
     def __init__(self, test: unittest.TestCase, *, machine_id="m1",
-                 role=ROLE_COLLECTOR):
+                 role=ROLE_COLLECTOR, gitee_owner=""):
         self.test = test
         self.box = GitSandbox(test, prefix="bestseller-exchange-")
         self.root = self.box.tmp / "exchange"
         self.root.mkdir()                        # 交换区根：取模板之前就得在
         self.machine_id = machine_id
         self.role = role
+        # 本机当前分析契约的署名（票 04 的采纳与门禁口径）：与 analysis_config 写进
+        # [matching.model] 的三件同一份（`signature_of_model` 就是要跑的那段推导）。
+        self.contract = signature_of_model(CONTRACT_ENDPOINT, CONTRACT_MODEL)
+        # 来源维护机（票 01）：配了 owner 的机器（m4）才会在任务启动时刷新判断来源清单。
+        self.gitee_owner = gitee_owner
         self.work: dict[str, Path] = {}          # 别的机器发布用的旁路克隆
         for machine in ("m1", "m2", "m3"):
             _world_template("raw", machine).take(self.box)     # 复制取副本（模板每进程搭一次）
@@ -285,7 +300,11 @@ class ConsoleWorld:
             self.judged_work[machine] = self.box.tmp / names["work"]
 
     def analysis_config(self, *, cache=None, store=None) -> Path:
-        """写一份分析配置：判断缓存与人工决定账本指向本机的两个库（交换台从它读）。"""
+        """写一份分析配置：判断缓存与人工决定账本指向本机的两个库（交换台从它读）。
+
+        带上 [matching.model] 三件（票 04）：交换台从它推本机当前契约署名（`self.contract`），
+        门禁与采纳按那个署名现读。
+        """
         self.cache = cache or self.box.tmp / "matching.sqlite"
         self.judgment_store = store or self.box.tmp / "analysis-drafts.sqlite"
         path = self.box.tmp / "config" / "analysis.toml"
@@ -295,14 +314,23 @@ class ConsoleWorld:
             f'database = "{self.db_path.as_posix()}"\n'
             f'store = "{self.judgment_store.as_posix()}"\n'
             "\n[matching]\n"
-            f'cache = "{self.cache.as_posix()}"\n',
+            f'cache = "{self.cache.as_posix()}"\n'
+            "\n[matching.model]\n"
+            f'endpoint = "{CONTRACT_ENDPOINT}"\n'
+            f'model = "{CONTRACT_MODEL}"\n',
             encoding="utf-8")
         self.analysis_path = path
         return path
 
-    def judgments_local(self, rows=(("pair-1", "sig-1"),)) -> None:
-        """往本机判断缓存里预置判断行（spec「预置缓存行」的口径，不调模型）。"""
-        seed_judgments(self.cache, machine_id=self.machine_id, rows=rows)
+    def judgments_local(self, rows=None) -> None:
+        """往本机判断缓存里预置判断行（spec「预置缓存行」的口径，不调模型）。
+
+        缺省一行**本机当前契约署名**下的判断（票 04：采纳口径按契约署名现读，预置行也得
+        在契约下才算「本机跑过当前配置的分析」）；行内容是不跑模型的捷径，形状不求自洽
+        （本机缓存不过门禁，包那边才过）。
+        """
+        seed_judgments(self.cache, machine_id=self.machine_id,
+                       rows=rows if rows is not None else (("pair-1", self.contract),))
 
     def decisions_local(self, ledger, *, machine=None, store=None) -> None:
         """往本机（或指定机器）的账本里写一版人工决定（与 `DraftStore.write` 同一条公开口）。"""
@@ -310,14 +338,40 @@ class ConsoleWorld:
             "draft", "2026-09-01", "2026-09-02", "2026-09-22T20:00:00+08:00",
             {"products": []}, ledger)
 
-    def judged_publish(self, machine, *, rows=(("pair-1", "sig-1"),), ledger=None) -> None:
+    def judged_publish(self, machine, *, rows=None, ledger=None) -> None:
         """别的机器发布判断集：经它的旁路克隆推到裸库（真打包，与票 03 同一条路）。
 
         包在 judged-<机器> 库里的相对路径就是 `PACKAGE_REL`（一个库一本、覆盖同名路径）。
+        行内容取真形状（票 04）：pair 与证据版本都按 `matching` 的口径从内容算出
+        （对级判断的键 = 两端证据版本的摘要）、两名成员的证据索引行随行——收端门禁会验
+        包内自洽，夹具出的包就得是合格式的。`rows` 是 (标签, 署名)，缺省一行本机当前
+        契约署名（要造署名不符的包就显式传别的署名）。
         """
         cache = self.box.tmp / f"{machine}-cache.sqlite"
         store = self.box.tmp / f"{machine}-drafts.sqlite"
-        seed_judgments(cache, machine_id=machine, rows=rows)
+        if rows is None:
+            rows = (("pair-1", self.contract),)
+        conn = sqlite3.connect(cache)
+        try:
+            prepare_cache(conn, machine)
+            for label, signature in rows:
+                fingerprint_a = matching.version({"product_name": f"{label}·甲",
+                                                  "image_hash": None})
+                fingerprint_b = matching.version({"product_name": f"{label}·乙",
+                                                  "image_hash": None})
+                conn.execute(
+                    "INSERT OR REPLACE INTO judgments(pair,signature,machine_id,evidence_a,"
+                    "evidence_b,result) VALUES (?,?,?,?,?,?)",
+                    (matching.digest(sorted([fingerprint_a, fingerprint_b])), signature,
+                     machine, fingerprint_a, fingerprint_b, '{"same": true}'))
+                conn.executemany(
+                    "INSERT OR REPLACE INTO evidence(identity,version,name,image_hash,"
+                    "image_data,origin) VALUES (?,?,?,?,?,?)",
+                    [(f"{label}-甲", fingerprint_a, f"{label}·甲", None, None, "新商品"),
+                     (f"{label}-乙", fingerprint_b, f"{label}·乙", None, None, "新商品")])
+            conn.commit()
+        finally:
+            conn.close()
         if ledger is not None:
             DraftStore(store, machine).write("draft", "2026-09-01", "2026-09-02",
                                              "2026-09-22T20:00:00+08:00",
@@ -330,6 +384,10 @@ class ConsoleWorld:
                              {judgment_set.PACKAGE_REL:
                               gzip.compress(package.read_bytes(), mtime=0)},
                              message=f"judged publish {machine}")
+
+    def tamper_judged(self, machine, mutate) -> None:
+        """把 judged-<机器> 已发布的那份包改一处再推（真推送）：坏包/异格式包交给用例挑。"""
+        tamper_package(self.box, self.judged_work[machine], judgment_set.PACKAGE_REL, mutate)
 
     def publish_broken_judged(self, machine, payload=b"not a judgment set at all") -> None:
         """别的机器那本 judged 库里放一个读不成判断集的包（坏包那一路）。"""
@@ -347,7 +405,8 @@ class ConsoleWorld:
     def cfg(self, **overrides):
         values = dict(machine_id=self.machine_id, role=self.role,
                       exchange_root=self.root, db_file=self.db_path,
-                      cos_bucket="", logs_dir=self.box.tmp / "logs")
+                      cos_bucket="", logs_dir=self.box.tmp / "logs",
+                      gitee_owner=self.gitee_owner)
         if self.analysis_path is not None:
             values["analysis_config"] = self.analysis_path
         values.update(overrides)
@@ -647,6 +706,46 @@ class AnalysisPathDefaultsTests(unittest.TestCase):
                          (Path(tmp) / exchange_mod.ANALYSIS_STORE_DEFAULT).resolve())
 
 
+class ContractSignatureTests(unittest.TestCase):
+    """票 04：本机当前契约署名从分析配置推——口径与分析的消费同源（`signature_of_model`），
+    读不出、怪值时给空串（门禁与采纳如实记「未评估」，也不拦交换台）。"""
+
+    def paths_of(self, text):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "analysis.toml"
+            path.write_text(text, encoding="utf-8")
+            return exchange_mod.judgment_paths(SimpleNamespace(analysis_config=path))
+
+    def test_the_signature_matches_the_model_section_of_the_config(self):
+        paths, note = self.paths_of(
+            '[analysis]\ndatabase = "stock.db"\n\n[matching]\ncache = "m.sqlite"\n'
+            '\n[matching.model]\nendpoint = "https://api.deepseek.com/v1/chat/completions"\n'
+            'model = "deepseek-chat"\n'
+            '\n[matching.vision]\nendpoint = "https://api.deepseek.com/v1/chat/completions"\n'
+            'model = "deepseek-vl"\n')
+
+        self.assertIsNone(note)
+        self.assertEqual(paths.signature,
+                         signature_of_model(CONTRACT_ENDPOINT, CONTRACT_MODEL, "deepseek-vl"))
+
+    def test_a_garbage_model_section_degrades_to_no_signature(self):
+        paths, note = self.paths_of(
+            '[analysis]\ndatabase = "stock.db"\n\n[matching]\ncache = "m.sqlite"\n'
+            'model = "不是一节表"\n')
+
+        self.assertIsNone(note, "模型段写坏不拦交换台：署名留空，门禁记「未评估」")
+        self.assertEqual(paths.signature, "")
+
+    def test_a_config_without_a_model_section_uses_the_same_defaults_as_analysis(self):
+        paths, note = self.paths_of(
+            '[analysis]\ndatabase = "stock.db"\n\n[matching]\ncache = "m.sqlite"\n')
+
+        self.assertIsNone(note)
+        self.assertEqual(paths.signature,
+                         signature_of_model(ModelConfig().endpoint, ModelConfig().model),
+                         "缺省模型三件与 from_file 同规：分析会用什么，契约就推什么")
+
+
 class JudgmentSetCase(unittest.TestCase):
     """票 05 的共用夹具：一趟干净的数据交换（无缺口无冲突）＋ 判断集这半就位。
 
@@ -661,7 +760,9 @@ class JudgmentSetCase(unittest.TestCase):
         self.world.publish("m3", [("A03", day) for day in DAYS])
         self.world.judged()                  # judged-m1（本机那本）+ judged-m2/m3
         self.world.analysis_config()         # 判断缓存与账本的位置（analysis.toml）
-        self.world.judgments_local(rows=(("pair-1", "sig-1"), ("pair-2", "sig-2")))
+        # 本机跑过分析（两行都在当前契约署名下）：票 04 的采纳口径要它才算得过。
+        self.world.judgments_local(rows=(("pair-1", self.world.contract),
+                                         ("pair-2", self.world.contract)))
 
     def cache_rows(self):
         """本机缓存里的判断行 (pair, 来源机器) 与导入账的来源；导入账还没建就是空的。"""
@@ -683,7 +784,7 @@ class JudgmentSetTests(JudgmentSetCase):
     """整趟里判断集的两条动作（ADR-0039 决策 7）：发布与收取都在之内；周报第三节记账。"""
 
     def test_a_full_run_publishes_our_set_and_collects_the_others(self):
-        self.world.judged_publish("m2", rows=(("m2-pair", "m2-sig"),))
+        self.world.judged_publish("m2", rows=(("m2-pair", self.world.contract),))
 
         outcome = self.world.run()
 
@@ -691,16 +792,19 @@ class JudgmentSetTests(JudgmentSetCase):
         self.assertIsNotNone(self.world.judged_local_bytes("m1"), "本机那本真收到了包")
         self.assertIsNotNone(self.world.judged_local_bytes("m2"), "收取那半拉过了别家那本")
         rows, sources = self.cache_rows()
-        self.assertEqual(rows, [("m2-pair", "m2"), ("pair-1", "m1"), ("pair-2", "m1")])
+        self.assertEqual(sorted(row[1] for row in rows), ["m1", "m1", "m2"],
+                         "本机两行 + m2 收进来一行（对的来源各归各）")
         self.assertEqual(sources, ["m2"])
         report = self.world.report()
         self.assertIn("## 三、判断集", report)
         self.assertIn("- 发布：判断 2 条 · 视觉描述 0 条 · 证据 0 条 · 人工决定 0 条 → judged-m1 @ ",
                       report)
-        self.assertIn("- 收取：judged-m2 —— 判断 1 条 · 视觉描述 0 条 · 证据 0 条 · 人工决定 0 条"
-                      "（新增 1 行）", report)
+        self.assertIn("- 收取：judged-m2 —— 判断 1 条 · 视觉描述 0 条 · 证据 2 条 · 人工决定 0 条"
+                      "（新增 3 行）", report)
         self.assertIn("- 收取：judged-m3 没有判断集可收", report)
-        self.assertIn("- 采纳：没有（收到的判断集里没有新的人工决定）", report)
+        self.assertIn("- 采纳：m2 判断 1 条、人工决定 0 条"
+                      "（判断 = 本机当前分析署名下、证据版本有着落的缓存行；"
+                      "人工决定 = 本机账本在效的行）", report)
         self.assertIn("- 冲突：没有", report)
         self.assertIn("**本次运行**：导出已发布 · 发布判断 2 条 · 新收 2 个包（34 行）"
                       " · 收下 1 份判断集", report)
@@ -716,7 +820,9 @@ class JudgmentSetTests(JudgmentSetCase):
         report = self.world.report()
         self.assertIn("- 收取：judged-m2 —— 判断 0 条 · 视觉描述 0 条 · 证据 0 条 · 人工决定 1 条"
                       "（新增 1 行）", report)
-        self.assertIn("- 采纳：1 条人工决定（来自 m2）—— 已进本机账本", report)
+        self.assertIn("- 采纳：m2 判断 0 条、人工决定 1 条"
+                      "（判断 = 本机当前分析署名下、证据版本有着落的缓存行；"
+                      "人工决定 = 本机账本在效的行）", report)
         relations = self.draft_store().ledger()["relations"]
         self.assertEqual([row["members"] for row in relations],
                          [[[member("o1"), "vo1"], [member("o2"), "vo2"]]])
@@ -733,21 +839,44 @@ class JudgmentSetTests(JudgmentSetCase):
         self.assertEqual(outcome.exit_code, 1, "这趟新记下的冲突：有需要人看一眼的")
         report = self.world.report()
         self.assertIn("· 判断集冲突 1", report)
+        collect_head = GitChannel(self.world.root / "judged-m2").head()
         self.assertIn("- 冲突：一边并组、一边排除 —— 外来的 m2 的 组 vs 本机的 m1 的 排除对"
-                      f"（商品 {member('o1')}、{member('o2')}；在分析页面上裁决）", report)
+                      f"（商品 {member('o1')}、{member('o2')}；外来包提交 {collect_head}；"
+                      "在分析页面上裁决）", report)
         self.assertEqual([c.kind for c in self.draft_store().conflicts()], ["group_vs_exclusion"])
+
+    def test_a_broken_model_section_still_collects_and_the_gate_line_says_unevaluated(self):
+        """票 04：分析配置的模型段写坏 → 契约署名推不出——门禁照走、如实记「未评估」，
+        gated_out 数照印（报告里四个数同时可见），不拦收取。"""
+        self.world.judged_publish("m2")
+        self.world.sync()            # 上次运行拉过（只有 collect 时周包缺口不掺进退出码）
+        self.world.analysis_path.write_text(
+            "[analysis]\n"
+            f'database = "{self.world.db_path.as_posix()}"\n'
+            f'store = "{self.world.judgment_store.as_posix()}"\n'
+            "\n[matching]\n"
+            f'cache = "{self.world.cache.as_posix()}"\n'
+            'model = "不是一节表"\n',
+            encoding="utf-8")
+
+        outcome = self.world.run(only="collect")
+
+        self.assertEqual(outcome.exit_code, 0, outcome.failures)
+        report = self.world.report()
+        self.assertIn("；门禁 gated_out 0 条；未评估 1 条（本机没有可用的分析署名）；", report)
+        self.assertIn("- 采纳：判断 未评估", report)
 
     def test_a_second_run_skips_the_collected_set_and_forwards_it_on(self):
         """收进来的判断进了本机判断集：下一次发布把它带上（内容身份不变，票 03 的转发口径）；
         那之后本机判断集不再变，发布才是空操作。"""
-        self.world.judged_publish("m2", rows=(("m2-pair", "m2-sig"),))
+        self.world.judged_publish("m2", rows=(("m2-pair", self.world.contract),))
         self.world.run()
 
         outcome = self.world.run()
 
         self.assertEqual(outcome.exit_code, 0, outcome.failures)
         report = self.world.report()
-        self.assertIn("- 发布：判断 3 条 · 视觉描述 0 条 · 证据 0 条 · 人工决定 0 条 → judged-m1 @ ",
+        self.assertIn("- 发布：判断 3 条 · 视觉描述 0 条 · 证据 2 条 · 人工决定 0 条 → judged-m1 @ ",
                       report)
         self.assertIn("- 收取：judged-m2 —— 已收过", report)
         self.assertIn("跳过 1 份已收过的判断集", report)
@@ -763,7 +892,7 @@ class JudgmentActionAloneTests(JudgmentSetCase):
 
     def setUp(self):
         super().setUp()
-        self.world.judged_publish("m2", rows=(("m2-pair", "m2-sig"),))
+        self.world.judged_publish("m2", rows=(("m2-pair", self.world.contract),))
         # 上次运行拉过（与 OnlyHalfTests 同一条约定）：只跑一个动作时不带拉取，
         # 别家的周包要在本地克隆里看得到，退出码才只反映这个动作本身。
         self.world.sync()
@@ -798,7 +927,7 @@ class JudgmentActionAloneTests(JudgmentSetCase):
         world.publish("m3", [("A03", day) for day in DAYS])
         world.judged("m4", "m2", "m3")
         world.analysis_config()
-        world.judgments_local(rows=(("pair-1", "sig-1"),))
+        world.judgments_local()
 
         outcome = world.run()
 
@@ -814,7 +943,7 @@ class JudgmentTroubleTests(JudgmentSetCase):
     """判断集这半的失败档位（与采集侧同规）与「不中止其余步骤」。"""
 
     def test_a_missing_judged_repo_is_a_note_a_readable_failure_and_the_rest_runs(self):
-        self.world.judged_publish("m2", rows=(("m2-pair", "m2-sig"),))
+        self.world.judged_publish("m2", rows=(("m2-pair", self.world.contract),))
         shutil.rmtree(self.world.root / "judged-m1")      # 本机那本没 clone 上（第 14 步）
 
         outcome = self.world.run()
@@ -832,7 +961,7 @@ class JudgmentTroubleTests(JudgmentSetCase):
 
     def test_a_broken_source_set_is_a_hard_failure_and_the_others_still_come_in(self):
         self.world.publish_broken_judged("m2")
-        self.world.judged_publish("m3", rows=(("m3-pair", "m3-sig"),))
+        self.world.judged_publish("m3", rows=(("m3-pair", self.world.contract),))
 
         outcome = self.world.run()
 
@@ -844,7 +973,7 @@ class JudgmentTroubleTests(JudgmentSetCase):
         self.assertIn("judged-m2 的判断集没导成（见第三节）", todo_of(report))
 
     def test_an_unreachable_source_asks_for_a_look_without_stopping_the_others(self):
-        self.world.judged_publish("m2", rows=(("m2-pair", "m2-sig"),))
+        self.world.judged_publish("m2", rows=(("m2-pair", self.world.contract),))
         self.world.box.must("remote", "set-url", "origin",
                             str(self.world.box.tmp / "gone.git"),
                             cwd=self.world.root / "judged-m3")
