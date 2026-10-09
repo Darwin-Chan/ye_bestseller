@@ -1,11 +1,16 @@
 """交换台的一次运行与周报（spec §7/§8 + 判断集的两条动作，ADR-0039 决策 7）。
 
-**一次运行**（`run_once`，手工触发）：检查 → 导出 → 发布判断集 → 拉取 → 汇总 →
-收取判断集 → 报告；`--only export|merge|publish|collect` 只跑其中一个动作（检查与
-写报告照常，其余各个环节的「没做」如实写）。退出码：`0` 干净 / `1` 有需要人看一眼的
-（缺口、冲突、别人的包还没来、通道没拉成、图片缺、判断集本周记下的决定冲突）/ `2` 本机
-没做成事（导出没成功、有包没导成、纯汇总机被要求只导出、判断集没发出去或没收进来）。
+**一次运行**（`run_once`，手工触发）：刷新来源清单 → 检查 → 导出 → 发布判断集 → 拉取 →
+汇总 → 收取判断集 → 报告；`--only export|merge|publish|collect` 只跑其中一个动作（刷新来源
+清单、检查与写报告照常，其余各个环节的「没做」如实写）。退出码：`0` 干净 / `1` 有需要人看一眼的
+（缺口、冲突、别人的包还没来、通道没拉成、图片缺、判断集本周记下的决定冲突、来源清单有来源减少/
+改址）/ `2` 本机没做成事（导出没成功、有包没导成、纯汇总机被要求只导出、判断集没发出去或没收进来、
+来源清单没刷新）。
 
+- **刷新来源清单**（票 01、ADR-0052）：维护机（配了 `machine.gitee_owner` 的 m4）经 Gitee API
+  生成 `judged-*` 来源快照、发布到 plan 库；只在实际交换任务启动时刷新——打开窗口、启动分析都不
+  触发。没配 owner 的机器是「不是维护机」的可读说明，不是失败。来源减少或远端地址变化先保留上一版、
+  等人确认（退出码 1）；查询/发布失败是硬失败（退出码 2）。
 - **判断集这半**（票 05、spec §3）：发布与收取都挂在整趟里，两个动作互不依赖、也能各自
   单独跑（`--only publish` / `--only collect`）；**纯汇总机照常发布判断**——判断库与角色
   档位无关（spec §9），跳过的只是采集包的导出。两个库（判断缓存与人工决定账本）的路径从
@@ -55,7 +60,8 @@ import sqlite3
 import tomllib
 from collections.abc import Callable
 
-from bestseller_monitor import export, judgment_set, merge, plan_step, rounds, weekly_plan
+from bestseller_monitor import (export, judgment_set, judged_sources, merge, plan_step,
+                                rounds, weekly_plan)
 from bestseller_monitor.analysis_store import (CONFLICT_CONFIRM_VS_WITHDRAW,
                                                CONFLICT_DIFFERENT_GROUPS,
                                                CONFLICT_GROUP_VS_EXCLUSION, DraftStore)
@@ -240,6 +246,9 @@ class RunOutcome:
     judgment_publish: judgment_set.PublishResult | None = None
     judgment_collect: judgment_set.CollectOutcome | None = None
     judgment_conflicts: tuple = ()
+    # 判断来源清单（票 01、ADR-0052）：维护机（m4）在任务启动时刷新并发布的结果。None =
+    # 这一趟没走刷新（例如 fatal 提前返回）。非维护机是「没配 owner」的可读说明，不是失败。
+    source_refresh: judged_sources.RefreshResult | None = None
 
 
 def _emitter(emit: Callable[[str], None] | None) -> Callable[[str], None]:
@@ -329,6 +338,11 @@ def _judgment_check_notes(cfg, notes: list[str], *, root: pathlib.Path,
                      "（上机清单第 14 步）。")
     if not judgment_set.judged_repos(root, exclude=machine_id):
         notes.append("交换区里没有别的 judged 库：判断集的收取这趟没有可收的。")
+    if str(getattr(cfg, "gitee_owner", "") or "").strip() \
+            and not (root / plan_step.PLAN_REPO_DIR).is_dir():
+        notes.append(f"本机是来源维护机（配了 machine.gitee_owner），但 plan 库还没 clone 到 "
+                     f"{root / plan_step.PLAN_REPO_DIR}：刷新判断来源清单那一步会点名它"
+                     "（上机清单第 9 / 11 步）。")
 
 
 def _self_crawled_days(db: Database, week: str, machine_id: str,
@@ -349,6 +363,27 @@ def _self_crawled_days(db: Database, week: str, machine_id: str,
         out.append((shop_key, tuple(day.isoformat() for day in days
                                     if day.isoformat() in covered)))
     return tuple(out)
+
+
+def _refresh_sources(cfg, *, machine_id: str, now: dt.datetime, provider, say
+                     ) -> judged_sources.RefreshResult:
+    """维护机在任务启动时经 Gitee API 刷新并发布判断来源清单（票 01、ADR-0052）。
+
+    只由 `run_once` 调——打开交换窗口（`Api.state`）与启动分析都不走它，因此天然不触发。
+    没配 `machine.gitee_owner` 的机器是「不是维护机」的可读说明（不是失败）；配了 owner 但
+    `provider` 为空时现搭一个真实 Gitee 客户端（token 只从环境变量读）。
+    """
+    owner = str(getattr(cfg, "gitee_owner", "") or "")
+    if not owner.strip():
+        say("刷新判断来源清单：跳过（本机不是来源维护机）")
+    else:
+        say("刷新判断来源清单…")
+        if provider is None:
+            provider = judged_sources.provider_from_config(owner)
+    result = judged_sources.refresh(cfg.exchange_root, owner=owner, generator=machine_id,
+                                    provider=provider, now=now)
+    say(_source_refresh_line(result))
+    return result
 
 
 def _pull_others(cfg, machine_id: str, say) -> tuple[PullNote, ...]:
@@ -430,12 +465,14 @@ def _ledger_row(conn: sqlite3.Connection, path: pathlib.Path):
 
 def run_once(cfg, *, only: str | None = None, week: str | None = None,
              now: dt.datetime | None = None, store=None,
-             emit: Callable[[str], None] | None = None) -> RunOutcome:
-    """一次运行：检查 → 导出 → 发布判断集 → 拉取 → 汇总 → 收取判断集 → 报告。
+             emit: Callable[[str], None] | None = None,
+             source_provider=None) -> RunOutcome:
+    """一次运行：刷新来源清单 → 检查 → 导出 → 发布判断集 → 拉取 → 汇总 → 收取判断集 → 报告。
 
     `only` 取 `ONLY_EXPORT` / `ONLY_MERGE` / `ONLY_PUBLISH` / `ONLY_COLLECT` 之一，
     只跑那个动作（None = 整趟）；`week` 默认本周（补历史指定周窗口，导出与报告都按它走）；
     `store` 是图片库（None = 按配置现搭）；`emit` 收进度行（小窗口用）。
+    `source_provider` 是来源查询的接缝（票 01）：None = 现搭真实 Gitee 客户端；测试注入替身。
     退出码见模块 docstring。
     """
     if getattr(cfg, "local_trial", False):
@@ -461,6 +498,11 @@ def run_once(cfg, *, only: str | None = None, week: str | None = None,
         if check.crawled:
             say("本机本周采到：" + "；".join(
                 f"{shop_key} {len(days)} 天" for shop_key, days in check.crawled))
+
+        # ---- 判断来源清单（票 01、ADR-0052）：维护机在任务启动时刷新并发布 ----
+        # 只在这里做：打开交换窗口（`Api.state`）与启动分析都不走 run_once，因此天然不触发。
+        source_refresh = _refresh_sources(cfg, machine_id=machine_id, now=now,
+                                          provider=source_provider, say=say)
 
         # ---- 导出这半：导出（纯汇总机跳过）· 发布判断集（与角色档位无关，spec §9）----
         export_result: export.ExportResult | None = None
@@ -508,7 +550,8 @@ def run_once(cfg, *, only: str | None = None, week: str | None = None,
                             pulls=pulls, imported=imported, merge_ran=merge_ran, only=only,
                             judgments=judgments, judgment_note=judgment_note,
                             judgment_publish=judgment_publish,
-                            judgment_collect=judgment_collect)
+                            judgment_collect=judgment_collect,
+                            source_refresh=source_refresh)
         report_path = pathlib.Path(cfg.exchange_root) / REPORT_DIR / f"{week}.md"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(_render(outcome), encoding="utf-8")
@@ -542,7 +585,8 @@ def _judgment_collect_line(outcome: judgment_set.CollectOutcome) -> str:
 
 def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_result,
               export_note, pulls, imported, merge_ran, only, judgments=None,
-              judgment_note=None, judgment_publish=None, judgment_collect=None) -> RunOutcome:
+              judgment_note=None, judgment_publish=None, judgment_collect=None,
+              source_refresh=None) -> RunOutcome:
     """把这次运行与库里的现成事实折成报告模型（状态累积，不是运行日志相加）。"""
     root = pathlib.Path(cfg.exchange_root)
     plan = plan_step.stored_plan(db, week)
@@ -573,7 +617,8 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
                  conflicts=conflicts, missing=missing, pulls=pulls,
                  export_result=export_result, imported=imported,
                  image_missing_total=image_missing_total,
-                 judgment_publish=judgment_publish, judgment_collect=judgment_collect)
+                 judgment_publish=judgment_publish, judgment_collect=judgment_collect,
+                 source_refresh=source_refresh)
 
     failures: list[str] = []
     if export_result is not None and export_result.failed:
@@ -583,10 +628,12 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
     if only == ONLY_EXPORT and role == ROLE_MERGE_ONLY:
         failures.append("本机是纯汇总机：导出这半没有可做的事")
     failures += _judgment_failures(judgment_publish, judgment_collect)
+    failures += _source_failures(source_refresh)
     soft = bool(gaps) or bool(conflicts) or bool(missing) or any(not p.ok for p in pulls) \
         or (export_result is not None and export_result.images is not None
             and export_result.images.failure is not None) or image_missing_total > 0 \
-        or bool(judgment_conflicts) or _judgment_soft(judgment_collect)
+        or bool(judgment_conflicts) or _judgment_soft(judgment_collect) \
+        or (source_refresh is not None and source_refresh.held)
 
     return RunOutcome(
         week=week, machine_id=machine_id, role=role, ran_at=now, check=check, only=only,
@@ -603,7 +650,7 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
         plan_known=plan is not None, plan_of_shop=plan_of_shop,
         judgments=judgments, judgment_note=judgment_note,
         judgment_publish=judgment_publish, judgment_collect=judgment_collect,
-        judgment_conflicts=judgment_conflicts)
+        judgment_conflicts=judgment_conflicts, source_refresh=source_refresh)
 
 
 def _judgment_conflicts(judgments, machine_id: str, *, week: str) -> tuple:
@@ -660,6 +707,37 @@ def _judgment_soft(collect) -> bool:
     """
     return bool(collect) and any(result.failed and result.unreachable
                                  for result in collect.results)
+
+
+def _source_failures(source_refresh) -> list[str]:
+    """来源清单这半的硬失败（退出码 2）：维护机没能刷新/发布清单（与「导出没成功」同规）。"""
+    if source_refresh is not None and source_refresh.failed:
+        return [f"判断来源清单没刷新：{source_refresh.failure}"]
+    return []
+
+
+def _source_text(result: judged_sources.RefreshResult) -> str:
+    """来源清单这一趟的正文（报告「来源清单：」与命令行共用一处措辞）。"""
+    if result.failed:
+        return f"没刷新（{_first_line(result.failure)}）"
+    if result.note is not None:
+        return result.note
+    count = len(result.sources)
+    if result.held:
+        why = result.warnings[0] if result.warnings else "来源有变化"
+        return f"{count} 个来源 —— 保留了上一版有效快照、等人确认（{why}）"
+    if result.unchanged:
+        return f"{count} 个来源，与上一版相同（无新提交）"
+    return f"{count} 个来源 → plan @ {result.commit}"
+
+
+def _source_refresh_line(result: judged_sources.RefreshResult) -> str:
+    return "来源清单：" + _source_text(result)
+
+
+def _source_row(outcome: RunOutcome) -> str:
+    """报告第三节的「来源清单」一行：只在实际交换任务里刷过才有（`source_refresh` 非空）。"""
+    return f"- 来源清单：{_source_text(outcome.source_refresh)}"
 
 
 def _package_row(db: Database, ref: export.PackageRef,
@@ -834,7 +912,7 @@ def _gap_detail(gaps: list[GapLine], *, reasons: bool) -> str:
 
 def _todo(*, machine_id, week, plan_of_shop, gaps, conflicts, missing, pulls, export_result,
           imported, image_missing_total, judgment_publish=None,
-          judgment_collect=None) -> tuple[str, ...]:
+          judgment_collect=None, source_refresh=None) -> tuple[str, ...]:
     """「下次该做什么」：从这次运行的事实与账里长出来。"""
     week_short = week.split("-")[1]
     items: list[str] = []
@@ -899,6 +977,11 @@ def _todo(*, machine_id, week, plan_of_shop, gaps, conflicts, missing, pulls, ex
             else:
                 items.append(f"judged-{result.machine} 的判断集没导成（见第三节）："
                              "让那台机器重发一版、或查一下这个包（重跑等价于首次导入）")
+    if source_refresh is not None and source_refresh.failed:
+        items.append("判断来源清单没刷新（见第三节）：token / 网络 / plan 克隆修好后重跑一次")
+    elif source_refresh is not None and source_refresh.held:
+        items.append("判断来源清单有来源减少或远端地址变化（见第三节）：核对 token 权限与库是否"
+                     "真被删/改名，确认无误后重跑并显式确认这次变化")
 
     return tuple(items) if items else ("没有待办：本周干净",)
 
@@ -968,6 +1051,8 @@ def _judgment_section(outcome: RunOutcome) -> list[str]:
     冲突账**现读、切在本周（账是累计的，重复收取时结果里不复现，票 04 的口径）。
     """
     out = ["## 三、判断集"]
+    if outcome.source_refresh is not None:
+        out.append(_source_row(outcome))
     if outcome.judgments is None:
         # 没配分析配置：判断集这半整趟没做——如实写一句，不折成失败（那是上机阶段的事）
         out.append(f"- 这趟没做：{outcome.judgment_note}")

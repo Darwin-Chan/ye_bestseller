@@ -102,6 +102,7 @@ def crawler_cfg(**overrides):
         "machine_id": "m-test",
         "role": ROLE_COLLECTOR,
         "exchange_root": _RAW_PAGE_DIR / "exchange",
+        "gitee_owner": "",
         "cos_bucket": "test-bucket",
         "git_access": ACCESS_READWRITE,
         "cos_access": ACCESS_READWRITE,

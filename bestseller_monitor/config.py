@@ -192,6 +192,9 @@ class Config:
     machine_id: str
     role: str                 # ROLE_COLLECTOR / ROLE_MERGE_ONLY
     exchange_root: pathlib.Path
+    # 可信 Gitee owner（空间名）：**只有来源维护机（m4）**填，用来刷新判断来源清单
+    # （判断来源清单见 ADR-0052）；空 = 本机不是维护机，只读取共享清单。
+    gitee_owner: str
     cos_bucket: str           # 图片通道的桶名（不记密钥；空 = 没配，导出时点名）
     git_access: str           # ACCESS_READWRITE / ACCESS_READ_ONLY（只记档位，不记密钥）
     cos_access: str
@@ -252,6 +255,7 @@ class Config:
             machine_id=_machine_id(machine, path),
             role=_role(machine.get("role")),
             exchange_root=exchange_root,
+            gitee_owner=str(machine.get("gitee_owner") or "").strip(),
             cos_bucket=cos_bucket,
             git_access=_access("git_access", machine.get("git_access")),
             cos_access=_access("cos_access", machine.get("cos_access")),

@@ -198,13 +198,15 @@ class ConsoleWorld:
     """
 
     def __init__(self, test: unittest.TestCase, *, machine_id="m1",
-                 role=ROLE_COLLECTOR):
+                 role=ROLE_COLLECTOR, gitee_owner=""):
         self.test = test
         self.box = GitSandbox(test, prefix="bestseller-exchange-")
         self.root = self.box.tmp / "exchange"
         self.root.mkdir()                        # 交换区根：取模板之前就得在
         self.machine_id = machine_id
         self.role = role
+        # 来源维护机（票 01）：配了 owner 的机器（m4）才会在任务启动时刷新判断来源清单。
+        self.gitee_owner = gitee_owner
         self.work: dict[str, Path] = {}          # 别的机器发布用的旁路克隆
         for machine in ("m1", "m2", "m3"):
             _world_template("raw", machine).take(self.box)     # 复制取副本（模板每进程搭一次）
@@ -346,7 +348,8 @@ class ConsoleWorld:
     def cfg(self, **overrides):
         values = dict(machine_id=self.machine_id, role=self.role,
                       exchange_root=self.root, db_file=self.db_path,
-                      cos_bucket="", logs_dir=self.box.tmp / "logs")
+                      cos_bucket="", logs_dir=self.box.tmp / "logs",
+                      gitee_owner=self.gitee_owner)
         if self.analysis_path is not None:
             values["analysis_config"] = self.analysis_path
         values.update(overrides)
