@@ -311,7 +311,15 @@ class ProcessStopRuntime:
         closed = browser_proc.close_browser(
             browser.port, launched_by_us=True, browser_pid=browser.pid,
             browser_os_started=browser.os_started)
-        return EffectResult(True) if closed is not None else EffectResult(False, "browser_close_failed")
+        if closed is not None:
+            return EffectResult(True)
+        # 无法关闭 != 已退出；只有 OS 确证退出或 PID 已由另一创建身份接管才结账
+        # （与 crawler_identity 的停止处置共用同一判据）。后者不对新进程执行任何停止副作用。
+        if browser_proc.process_alive(browser.pid) is False:
+            return EffectResult(True)
+        if crawler_identity.taken_over(browser.pid, browser.os_started):
+            return EffectResult(True)
+        return EffectResult(False, "browser_close_failed")
 
     def release(self, bound: BoundTarget) -> None:
         """释放绑定的句柄：只释放能力句柄。
@@ -337,7 +345,10 @@ class StopInFlight:
     acked: bool = False
     phase: StopPhase = StopPhase.STOPPING
     code: str | None = None
-    # 关失败、还欠着的那一个浏览器：在失败那一刻冻结，重试只碰它，绝不按当前事实重选。
+    # Keep the original browser evidence before the first tick can see a replacement.
+    frozen_browser: BoundBrowser | None = None
+    frozen_browser_state: str | None = None
+    # A failed close retains its exact binding; never reselect from a replacement.
     pending_browser: BoundBrowser | None = None
 
     @property
@@ -427,8 +438,14 @@ class StopWatch:
             db.clear_stop_request(target_pid=target.pid,
                                   target_started_at=target.started_at)
         bound = self._runtime.bind(command.target)
+        browser = (BoundBrowser(int(current.browser_pid), current.browser_port,
+                                current.browser_os_started)
+                   if current.browser_state == "OWNED" and current.browser_pid
+                   and current.browser_os_started else None)
         self._in_flight = StopInFlight(command, bound,
-                                       self._now() + self._grace_sec)
+                                       self._now() + self._grace_sec,
+                                       frozen_browser=browser,
+                                       frozen_browser_state=current.browser_state)
         return self.status
 
     def tick(self, conn) -> StopStatus:
@@ -453,15 +470,37 @@ class StopWatch:
         except Exception as exc:  # noqa: BLE001
             return self._verify(stop, "observation_failed", str(exc))
         relation = self._relation(stop.command.target, facts)
+        if relation is not StopRelation.REPLACED and facts.browser_state is not None:
+            stop = replace(stop, frozen_browser=facts.browser,
+                           frozen_browser_state=facts.browser_state)
+            self._in_flight = stop
         if stop.pending_browser is not None:
             return self._retry_cleanup(db, stop, facts.browser, relation)
-        if relation in (StopRelation.REPLACED, StopRelation.GONE):
-            return self._settle(db, stop)
+        if relation is StopRelation.REPLACED:
+            return self._replaced(stop)
+        if relation is StopRelation.GONE:
+            return self._cleanup_exited(conn, db, stop)
         if relation is StopRelation.UNVERIFIABLE:
             return self._verify(stop, "target_unverifiable")
         if self._now() < stop.deadline:
             return self.status
         return self._force(conn, db, stop)
+
+    def _replaced(self, stop):
+        """B cannot certify A's process exit or browser cleanup; never act on B."""
+        if stop.frozen_browser is not None:
+            return self._pending_cleanup(stop, stop.frozen_browser, "target_replaced")
+        if stop.frozen_browser_state == "NOT_STARTED":
+            # Startup may have progressed since begin, before B overwrote the row.
+            stop = replace(stop, frozen_browser_state="UNKNOWN")
+        return self._verify(stop, "target_replaced")
+
+    @staticmethod
+    def _original_browser_facts(stop, facts):
+        if facts.identity is None and facts.browser_state is None:
+            return replace(facts, browser=stop.frozen_browser,
+                           browser_state=stop.frozen_browser_state)
+        return facts
 
     @staticmethod
     def _relation(target, facts) -> StopRelation:
@@ -510,11 +549,20 @@ class StopWatch:
             target = stop.command.target
             if (current is not None
                     and (StopTarget.of(current) != target)):
-                self._delete_target_in_transaction(conn, target)
-                conn.commit()
-                self._finish(stop)
-                return self.status
-            current_facts = self._runtime.observe(conn, stop.bound)
+                conn.rollback()
+                return self._replaced(stop)
+            current_facts = self._original_browser_facts(
+                stop, self._runtime.observe(conn, stop.bound))
+            relation = self._relation(target, current_facts)
+            if relation is StopRelation.REPLACED:
+                conn.rollback()
+                return self._replaced(stop)
+            if relation is StopRelation.UNVERIFIABLE:
+                conn.rollback()
+                return self._verify(stop, "target_unverifiable")
+            if relation is StopRelation.GONE:
+                conn.rollback()
+                return self._cleanup_exited(conn, db, stop)
             browser = current_facts.browser
             if (current_facts.browser_state in ("STARTING", "UNKNOWN", "OWNED")
                     and browser is None):
@@ -527,10 +575,9 @@ class StopWatch:
             after = self._runtime.observe(conn, stop.bound)
             if (after.identity is not None
                     and (StopTarget.of(after.identity) != target)):
-                self._delete_target_in_transaction(conn, target)
-                conn.commit()
-                self._finish(stop)
-                return self.status
+                conn.commit()  # Preserve any replacement publication; never clean B.
+                return self._replaced(replace(stop, frozen_browser=browser,
+                                               frozen_browser_state=current_facts.browser_state))
             if after.process_alive is not False:
                 conn.rollback()
                 return self._verify(stop, "process_still_running")
@@ -553,45 +600,62 @@ class StopWatch:
         self._finish(stop)
         return self.status
 
-    def _pending_cleanup(self, stop, browser, code):
-        """停在这个相：还欠着一个没关掉的浏览器。
+    def _cleanup_exited(self, conn, db, stop):
+        """Process exit alone does not prove its owned browser is closed."""
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            facts = self._original_browser_facts(stop, self._runtime.observe(conn, stop.bound))
+            if self._relation(stop.command.target, facts) is StopRelation.REPLACED:
+                conn.rollback()
+                return self._replaced(stop)
+            if facts.process_alive is not False:
+                conn.rollback()
+                return self._verify(stop, "target_unverifiable")
+            if facts.browser_state in ("STARTING", "UNKNOWN", "OWNED") and facts.browser is None:
+                conn.rollback()
+                return self._verify(stop, "browser_binding_unavailable")
+            if facts.browser is not None:
+                closed = self._runtime.close_browser(facts.browser)
+                if not closed.ok:
+                    conn.rollback()
+                    return self._pending_cleanup(stop, facts.browser, closed.code)
+            self._delete_target_in_transaction(conn, stop.command.target)
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            return self._verify(stop, "database_unavailable", str(exc))
+        self._finish(stop)
+        return self.status
 
-        上限**只在进入这个相时开一次**（判据是此刻还没欠着任何浏览器）——每次重试都续期的话，
-        那个上限就形同虚设。
-        """
-        entering = stop.pending_browser is None
+    def _pending_cleanup(self, stop, browser, code):
+        """保留精确欠账；时间经过不是安全收尾的证明。"""
         self._in_flight = replace(
             stop, phase=StopPhase.CLEANUP_PENDING,
-            code=code or "browser_close_failed", pending_browser=browser,
-            deadline=self._now() + self._grace_sec if entering else stop.deadline)
+            code=code or "browser_close_failed", pending_browser=browser)
         return self.status
 
     def _retry_cleanup(self, db, stop, browser, relation):
-        """`CLEANUP_PENDING` 的重试主体：目标已经死透，只剩浏览器没关掉。
+        """采集已退出，重试被冻结的浏览器欠账；未知/替换都不能冒充成功。
 
-        `_force` 关浏览器失败时进程已被证明退出，所以下一次 tick 必然判出 `GONE` —— 而 `tick`
-        里 `GONE` 的短路在 deadline 之前。不在这里重试的话，`close_browser` 每个窗口只会被调
-        一次：一次瞬时失败就留下一个真在跑的孤儿浏览器占着 profile 与调试端口（IS-43），
-        而条件清理还会把唯一能定位它的那份精确绑定一起抹掉。
-
-        重试只认冻结下来的那一个 binding，绝不按当前事实重选（ADR-0024）。但**它必须有上限**：
-        `browser_proc.close_browser` 要先 `bind_process`，PID 已经不存在时它永远回 `None`
-        （实跑核过），不设上限窗口就永远停着，而界面在未收口的相里拒绝启动新的采集。
+        只认原 binding，不按端口或当前事实重选。关闭失败时保留门禁，
+        由 OS 确证原浏览器已退出或 PID 复用才允许安全结账，不按 deadline 放行。
         """
         if relation is StopRelation.REPLACED:
-            # B 接手了：结束旧重试，只留一句警告，不碰 B 的实例。
-            log.warning("停止目标已被替换，结束旧目标未完成的浏览器收尾。")
-            return self._settle(db, replace(stop, pending_browser=None))
-        if self._now() >= stop.deadline:
-            log.warning("浏览器收尾重试到窗口上限仍未成功，放弃这一个（PID %s，端口 %s）——"
-                        "绑定随事实一起清掉，那个进程可能还在。", browser.pid, browser.port)
-            return self._settle(db, replace(stop, pending_browser=None))
+            # 新目标不是旧浏览器收尾成功的证明；保留旧欠账，不对 B 动手。
+            self._in_flight = replace(stop, code="target_replaced")
+            return self.status
+        # A retry deadline is not proof of cleanup. Retain the exact binding
+        # until OS verification/cleanup succeeds; new rounds must remain blocked.
         if relation is StopRelation.UNVERIFIABLE:
             self._in_flight = replace(stop, code="target_unverifiable")
             return self.status
+        if relation is not StopRelation.GONE:
+            # Replacement can create debt before the original has exited.
+            self._in_flight = replace(stop, code="process_still_running")
+            return self.status
         if browser is not None and browser != stop.pending_browser:
             # 事实里的浏览器换了一个：原 binding 不再精确，那不是我们的目标。不动手，也不收口
-            # ——收口会把没关掉的那个浏览器的绑定抹掉，正是要避免的伤害。等 B 出现或窗口到顶。
+            # ——收口会把没关掉的那个浏览器的绑定抹掉，正是要避免的伤害。等待精确绑定重新可核验。
             self._in_flight = replace(stop, code="browser_binding_changed")
             return self.status
         closed = self._runtime.close_browser(stop.pending_browser)
@@ -625,10 +689,7 @@ class StopWatch:
         current = crawler_identity.registered(conn)
         if current is not None and StopTarget.of(current) != target:
             return
-        conn.execute("DELETE FROM crawler_process WHERE id=1 AND pid=? AND started_at=?",
-                     (target.pid, target.started_at))
-        conn.execute("DELETE FROM stop_requests WHERE id=1 AND target_pid=? "
-                     "AND target_started_at=?", (target.pid, target.started_at))
+        crawler_identity.delete_registration(conn, target.pid, target.started_at)
 
     def _finish(self, stop):
         self._runtime.release(stop.bound)

@@ -50,6 +50,72 @@ class CrawlerProcess:
                 "started_at": self.started_at, "note": self.note}
 
 
+def browser_cleanup_complete(state: str | None) -> bool:
+    """Positive evidence that this identity has no owned-browser cleanup debt."""
+    return state in ("NOT_STARTED", "BORROWED", "CLOSED")
+
+
+def taken_over(pid: int, registered_proof: str | None) -> bool:
+    """A different known creation proof means the original process is gone (PID reuse).
+
+    停止处置共用的唯一判据：`settle_dead_registration` 与 `StopWatch` 的浏览器结账都走这里。
+    """
+    actual = browser_proc.process_creation_proof(pid)
+    return (actual is not None and registered_proof is not None
+            and actual != registered_proof)
+
+
+def delete_registration(conn, pid: int, started_at: str) -> None:
+    """条件删除一条身份登记及其停止请求；调用方负责写事务与提交。"""
+    conn.execute("DELETE FROM crawler_process WHERE id=1 AND pid=? AND started_at=?",
+                 (int(pid), started_at))
+    conn.execute("DELETE FROM stop_requests WHERE id=1 AND target_pid=? "
+                 "AND target_started_at=?", (int(pid), started_at))
+
+
+def settle_dead_registration(conn, who: CrawlerProcess) -> bool:
+    """结清一条已无进程的残留身份行（显式中止遗留轮与收尾重试的必要一步）。
+
+    只在原进程**确已不在**时才动手：`process_alive` 为 False，或创建证明与登记值
+    分歧（PID 已被另一个创建身份接管）。核不实时一律保留欠账，返回 False——
+    「无法核验」不是许可。OWNED 浏览器只按行里的精确绑定关（pid + 创建证明），
+    关不掉且浏览器仍在的同样保留；BORROWED 一类的完整状态直接把登记清掉。
+
+    返回 True 表示身份行（及其停止请求）已删除（本来就不在也算已结清）。进程
+    本身从不被终止：这里没有终止动作，处置的只有登记事实与本次启动的浏览器。
+    """
+    alive = browser_proc.process_alive(who.pid)
+    if alive is not False and not taken_over(who.pid, who.process_os_started):
+        return False
+    if not browser_cleanup_complete(who.browser_state):
+        if (who.browser_state != "OWNED" or not who.browser_pid
+                or not who.browser_os_started):
+            return False
+        closed = browser_proc.close_browser(
+            who.browser_port, launched_by_us=True,
+            browser_pid=who.browser_pid, browser_os_started=who.browser_os_started)
+        if closed is None:
+            b_alive = browser_proc.process_alive(who.browser_pid)
+            if b_alive is not False and not taken_over(who.browser_pid,
+                                                       who.browser_os_started):
+                return False
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        current = registered(conn)
+        if current is None:
+            conn.rollback()
+            return True
+        if current.pid != who.pid or current.started_at != who.started_at:
+            conn.rollback()
+            return False
+        delete_registration(conn, who.pid, who.started_at)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return True
+
+
 def is_running(*, own_alive: bool = False) -> bool:
     """有采集进程在跑吗。
 
@@ -84,7 +150,7 @@ def current(conn, *, own_alive: bool = False, own_pid: int | None = None,
     """
     who = registered(conn)
     if not is_running(own_alive=own_alive):
-        if who is not None:
+        if who is not None and browser_cleanup_complete(who.browser_state):
             Database(conn).clear_crawler_process(
                 target_pid=who.pid, target_started_at=who.started_at)
         return None
@@ -114,11 +180,9 @@ def _registration_may_be_live(identity: CrawlerProcess | None) -> bool:
         return False
     if browser_proc.process_alive(identity.pid) is False:
         return False
-    actual = browser_proc.process_creation_proof(identity.pid)
     # A different known creation proof means the original process is gone
     # (PID reuse). Missing proof is unknown, not permission to ignore it.
-    return not (actual is not None and identity.process_os_started is not None
-                and actual != identity.process_os_started)
+    return not taken_over(identity.pid, identity.process_os_started)
 
 
 def _verified(identity: CrawlerProcess | None, other_space: Path, *, own_alive=False) -> CrawlerProcess:

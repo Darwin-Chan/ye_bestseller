@@ -19,10 +19,11 @@ BROWSER_IO_ERRORS = (PlaywrightError, TimeoutError, OSError, ConnectionError)
 class OpenedDetail:
     """一个 adapter 已取得的详情页；页面仍归取得它的调用方关闭。
 
-    只交页面：adapter 不替判据交证据——判据读的是页面上的地址、正文与可见验证容器（ADR-0029）。
+    交页面与访问意图：adapter 不替判据交证据——判据读的是页面上的地址、正文与可见验证容器（ADR-0029）。
     """
 
     page: object
+    target_url: str | None = None  # 访问意图，不是重定向后的页面证据。
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,7 @@ class ReadyDetailVisit:
     _emit: object = None
     _deny_tracker: DenyTracker | None = None
     _shop_key: str | None = None
+    _target_url: str | None = None
     _observed: bool = False
 
     def observe(self, product_url: str) -> detail.Observation | DeniedVisit:
@@ -69,6 +71,7 @@ class ReadyDetailVisit:
         if self._observed:
             raise RuntimeError("ReadyDetailVisit.observe() 只能调用一次")
         self._observed = True
+        self._target_url = product_url
 
         def probe():
             try:
@@ -121,6 +124,7 @@ class ReadyDetailVisit:
             return ready_detail_page(
                 self._page, self._cfg, emit=self._emit,
                 deny_tracker=self._deny_tracker, shop_key=self._shop_key,
+                target_url=self._target_url,
             )
         except BROWSER_IO_ERRORS as exc:
             return detail.Observation.read_failed(exc)
@@ -167,6 +171,7 @@ def begin_detail_visit(
         denied = ready_detail_page(
             opened.page, cfg, emit=emit,
             deny_tracker=deny_tracker, shop_key=shop_key,
+            target_url=opened.target_url,
         )
     except BROWSER_IO_ERRORS as exc:
         return ReadFailedVisit(exc, detail.Observation.read_failed(exc))
@@ -174,7 +179,7 @@ def begin_detail_visit(
         return DeniedVisit(_read_raw_html(opened.page))
     return ReadyDetailVisit(
         _page=opened.page, _cfg=cfg, _emit=emit, _deny_tracker=deny_tracker,
-        _shop_key=shop_key,
+        _shop_key=shop_key, _target_url=opened.target_url,
     )
 
 

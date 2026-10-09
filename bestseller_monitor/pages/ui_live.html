@@ -80,6 +80,7 @@
 
   <!-- 开始 -->
   <div class="panel active" id="panel-start">
+    <div class="card"><button class="btn ghost" id="loginBrowserBtn">打开专用 Edge / 登录 1688</button> <button class="btn ghost" id="refreshBrowserBtn">刷新浏览器状态</button><p id="browserFacts"></p><p class="muted">专用数据目录独立于日常 Edge，不复制 Cookie。浏览器打开不代表账号已登录。登录后请自行关闭手动窗口，再刷新并明确开始采集。</p></div>
     <div class="card">
       <div class="grid" style="grid-template-columns:repeat(3,1fr)">
         <div class="stat"><div class="l">今日已抓取商品</div><div class="n" id="stProducts">0</div></div>
@@ -94,6 +95,18 @@
       </div>
       <div style="text-align:right;margin-top:12px;display:none" id="crawlerActions">
         <button class="btn danger" id="abortForeignBtn">中止正在跑的这一轮（放弃）</button>
+      </div>
+    </div>
+    <div class="card" id="pendingCard" style="display:none">
+      <b>未结束的轮次（逐个处置）</b>
+      <p class="muted" style="margin:8px 0 0">每个轮次单独确认「中止此轮」；确认前不写终态，一次授权只处置它指向的那一轮。</p>
+      <div id="pendingRows" style="display:flex;flex-direction:column;gap:10px;margin-top:12px"></div>
+    </div>
+    <div class="card" id="residueCard" style="display:none">
+      <b>有待完成的收尾</b>
+      <p class="muted" id="residueInfo" style="margin:8px 0 0"></p>
+      <div style="text-align:right;margin-top:12px">
+        <button class="btn danger sm" id="residueBtn">重试收尾核验</button>
       </div>
     </div>
     <div class="card">
@@ -128,6 +141,7 @@
       <div class="muted" style="margin:10px 0 0" id="rProgressLine">正在启动…</div>
       <div class="bar"><i id="rBar" style="width:0%"></i></div>
       <div class="banner warn" id="rPaused" style="display:none">已暂停（轮次保留为「进行中」，点「继续」接着抓取本轮剩余任务）。</div>
+      <div class="banner err" id="rUnfinished" style="display:none"></div>
       <div class="banner warn" id="rStopping" style="display:none">正在停止采集进程…</div>
     </div>
     <div class="card">
@@ -142,8 +156,15 @@
       <div style="margin-top:16px;text-align:right;display:flex;gap:10px;justify-content:flex-end">
         <button class="btn ghost" id="resumeBtn" style="display:none">继续</button>
         <button class="btn ghost" id="pauseBtn">暂停本轮</button>
+        <button class="btn ghost" id="changeScopeBtn">改范围（中止后重选）</button>
         <button class="btn danger" id="abortBtn">中止本轮（放弃）</button>
       </div>
+    </div>
+    <div class="card" id="runLoginCard">
+      <b>暂停后处理登录</b>
+      <p class="muted" style="margin:8px 0 0">需要手动登录或处理验证时，可在这里打开程序专用 Edge。请先自行关闭该窗口，确认专用目录已释放，再点「继续」——关闭窗口不会自动继续本轮。</p>
+      <div style="margin-top:12px"><button class="btn ghost" id="runLoginBrowserBtn">打开专用 Edge / 登录 1688</button></div>
+      <p class="muted" id="runBrowserFacts" style="margin:10px 0 0"></p>
     </div>
   </div>
 
@@ -191,7 +212,7 @@
   <div class="modal-mask"></div>
   <div class="modal-box">
     <div class="modal-title" id="confirmTitle">确认终止本轮抓取？</div>
-    <div class="modal-sub" id="confirmSub">已抓取数据已被存储，未抓取数据将被忽略。</div>
+    <div class="modal-sub" id="confirmSub">本轮将结束且不能继续；已抓取数据保留。收尾完成后，需明确点击开始才能新建。</div>
     <div class="modal-actions">
       <button class="btn ghost" id="confirmCancel">取消</button>
       <button class="btn danger" id="confirmOk">确定</button>
@@ -335,6 +356,10 @@
   async function loadStart() {
     const d = await callApi("get_start");
     if (!d) return;
+    if (d.browser) {
+      $("browserFacts").textContent = "配置：" + d.browser.source + "；专用目录：" + d.browser.profile + "；" + d.browser.message + " " + d.browser.retry;
+      $("loginBrowserBtn").disabled = !d.browser.can_open || d.browser.state === "opening";
+    }
     $("stProducts").textContent = d.ov.products.toLocaleString();
     $("stSkus").textContent = d.ov.skus.toLocaleString();
     $("stRounds").textContent = d.summary.rounds;
@@ -362,12 +387,40 @@
     $("abortForeignBtn").disabled = !!d.stopping;
     $("crawlerActions").style.display = crawler ? "block" : "none";
 
+    // 遗留轮逐个处置（票 06）：没有采集在跑、也没有停止收尾时，每个未结束轮
+    // 单独给「中止此轮」；一次确认只处置按钮指向的那一轮，确认前不写任何终态。
+    const pending = (d.pending && d.pending.rounds) || [];
+    const showPending = pending.length > 0 && !crawler && !d.stopping;
+    $("pendingCard").style.display = showPending ? "block" : "none";
+    if (showPending) {
+      $("pendingRows").innerHTML = pending.map(r =>
+        `<div class="flex" style="gap:12px;align-items:center">` +
+        `<span style="flex:1;font-size:13px">${r.text}</span>` +
+        `<button class="btn danger sm" data-rid="${r.id}">中止此轮（放弃）</button></div>`
+      ).join("");
+      document.querySelectorAll("#pendingRows button").forEach(b => {
+        b.onclick = () => abortPendingRound(+b.dataset.rid);
+      });
+    }
+
+    // 已终态轮次留下的收尾欠账（票 06）：轮次卡消失后仍有产品内重试入口，
+    // 否则「收尾尚未核实」会永久拦住新建而没有可执行动作。
+    const residue = d.residue || null;
+    const showResidue = !!residue && !crawler && !d.stopping;
+    $("residueCard").style.display = showResidue ? "block" : "none";
+    if (showResidue) {
+      $("residueInfo").textContent = "原采集（轮次 #"
+        + (residue.round_id == null ? "未知" : residue.round_id)
+        + "）的浏览器或身份收尾尚未核实（状态 " + residue.state
+        + "）；新轮在收尾完成前被拦。重试只按原采集的精确绑定核验处理，不会误关日常 Edge。";
+    }
+
     // 闸门（本地没有本周计划）与「正在确认」锁住勾选与开始（ADR-0035）：
     // 拿不准的时候不开轮。
     const locked = !!d.plan_locked;
     $("selAllBtn").disabled = locked;
     $("selNoneBtn").disabled = locked;
-    $("startBtn").disabled = locked;
+    $("startBtn").disabled = locked || d.start_allowed === false;
     const total = d.total_shops;
     const rows = d.shops.map((s, i) => {
       const chk = s.default_checked ? "checked" : "";
@@ -476,7 +529,7 @@
       $("rBar").style.width = (d.progress * 100) + "%";
       const cur = d.current_shop ? d.current_shop + "（第 " + (d.done_count + 1) + " 家）" : "准备中";
       // 主动停顿（ADR-0037）：程序自己在给站点降温，说清楚还要等多久，别像卡死。
-      $("rProgressLine").textContent = (d.pacing_remaining_sec != null)
+      $("rProgressLine").textContent = d.verification ? d.verification.note : (d.pacing_remaining_sec != null)
         ? "进度：主动停顿中，剩余 " + d.pacing_remaining_text + " · 当前处理 " + cur
         : "进度：当前处理 " + cur + " · 已抓时长 " + d.elapsed_text;
       $("rDoneTitle").textContent = "已完成店铺（" + d.done_count + "）";
@@ -489,17 +542,51 @@
       const stopping = d.stopping || null;
       $("rStopping").style.display = stopping ? "block" : "none";
       if (stopping) $("rStopping").textContent = stoppingText(d);
-      $("rPaused").style.display = (!stopping && (d.manually_paused || d.awaiting_resume)) ? "block" : "none";
-      // 暂停态显示“继续”，运行态显示“暂停”；停止途中两个都不给点。
-      $("resumeBtn").style.display = (!stopping && (d.manually_paused || d.awaiting_resume)) ? "" : "none";
-      $("pauseBtn").style.display = (!stopping && !(d.manually_paused || d.awaiting_resume)) ? "" : "none";
-      $("abortBtn").disabled = !!stopping;
+      // 未正常结束 / 跨天（票 06）：没有采集在跑、也没有明确暂停时如实说明，
+      // 不给普通「继续」；处置入口是下面的「中止本轮」（确认后等待收尾）。
+      const crossDay = !!d.cross_day;
+      const orphan = !crossDay && !stopping && !d.running && !d.can_resume;
+      $("rUnfinished").style.display = (crossDay || orphan) ? "block" : "none";
+      $("rUnfinished").textContent = crossDay
+        ? (d.note || "本轮已跨天，不能继续；请中止本轮后开始新轮。")
+        : "采集已停止，本轮未正常结束；请确认中止并完成收尾后，再开始新轮。";
+      $("rPaused").style.display = (!stopping && d.can_resume) ? "block" : "none";
+      $("rPaused").textContent = d.resume_error
+        ? "继续启动未成功：" + d.resume_error + "。原轮暂停资格保留，请明确点击继续重试。"
+        : d.continue_gate
+          ? "已暂停（轮次保留为「进行中」），但还不能继续：" + d.continue_gate
+          : "已暂停（轮次保留为「进行中」，点「继续」接着抓取本轮剩余任务）。";
+      // 暂停后手动处理登录（票 05）：明确暂停且收尾完成后同一入口可用；采集、
+      // 验证等待、停止或收尾中禁用并说明。目录没释放时「继续」也不给点。
+      $("runLoginCard").style.display = "block";
+      if (d.browser) {
+        let facts = "配置：" + d.browser.source + "；专用目录：" + d.browser.profile + "；" + d.browser.message;
+        facts += d.login_refusal ? "（" + d.login_refusal + "）" : " " + d.browser.retry;
+        $("runBrowserFacts").textContent = facts;
+      } else {
+        $("runBrowserFacts").textContent = d.login_refusal
+          || "先暂停本轮并等停止收尾完成，才能在这里打开专用 Edge 处理登录。";
+      }
+      $("runLoginBrowserBtn").disabled = !(d.browser && d.browser.can_open);
+      // 暂停态显示“继续”，运行态显示“暂停”；停止途中与无进程的遗留态都不给点。
+      $("resumeBtn").style.display = (!stopping && d.can_resume) ? "" : "none";
+      $("resumeBtn").disabled = !!d.continue_gate;
+      $("pauseBtn").style.display = (!stopping && d.running && !d.can_resume) ? "" : "none";
+      $("changeScopeBtn").disabled = !d.can_abort;
+      $("abortBtn").disabled = !d.can_abort;
     } else {
+      $("resumeBtn").style.display = "none";
+      $("pauseBtn").style.display = "none";
+      $("rUnfinished").style.display = "none";
+      $("runLoginCard").style.display = "none";
+      $("changeScopeBtn").disabled = true;
+      $("abortBtn").disabled = true;
       $("rProgressLine").textContent = d.running ? "抓取进程正在启动…" : "本轮已结束，正在加载结果…";
     }
 
-    // 结束判定：子进程结束且非暂停 -> 看结果
-    if (!d.running && !(d.manually_paused || d.awaiting_resume) && hasStartedRun) {
+    // 结束判定：确实没有窗口内的轮次、子进程结束且非暂停 -> 看结果。
+    // 未正常结束/跨天的轮次留在过程页显式处置，不跳去结果页冒充「进行中」。
+    if (!d.has_round && !d.running && !d.can_resume && !d.stopping && hasStartedRun) {
       stopPolling();
       // 已经在链上：这里直接取，不能再排队，否则等的是自己。
       const res = await callApi("get_result");
@@ -524,21 +611,72 @@
   // 一次只问一件事：默认文案是中止本轮；带 opts 时换成那件事的文案与动作
   // （如逃生口确认，spec §6 降级表最后一行）。
   let confirmAction = null;
-  function openConfirm(opts) {
+  let rangeChangeRound = null;
+  async function changeScope() {
+    const prepared = await callApi("prepare_abort");
+    if (!prepared || !prepared.ok) { if (prepared) showNotice(prepared.error); return; }
+    await openConfirm({title: "中止原轮并改变范围？",
+      sub: "原轮将结束且不能继续；已抓取数据保留。等待停止及收尾完成后，回开始页重新选店并明确开始新轮。",
+      action: () => doAbort(prepared.confirmation, true)});
+  }
+  async function openConfirm(opts) {
     opts = opts || {};
+    let action = opts.action;
+    if (!action) {
+      const prepared = await callApi("prepare_abort");
+      if (!prepared || !prepared.ok) { if (prepared) showNotice(prepared.error); return; }
+      action = () => doAbort(prepared.confirmation);
+    }
     $("confirmTitle").textContent = opts.title || "确认终止本轮抓取？";
-    $("confirmSub").textContent = opts.sub || "已抓取数据已被存储，未抓取数据将被忽略。";
+    $("confirmSub").textContent = opts.sub || "本轮将结束且不能继续；已抓取数据保留。收尾完成后，需明确点击开始才能新建。";
     $("confirmOk").textContent = opts.ok || "确定";
-    confirmAction = opts.action || null;
+    confirmAction = action;
     $("confirmModal").classList.add("show");
   }
   function closeConfirm() { $("confirmModal").classList.remove("show"); }
-  async function doAbort() {
-    const r = await callApi("abort_run");
+  async function doAbort(confirmation, changeRange = false, stayOnStart = false) {
+    const r = await callApi("confirm_abort", confirmation);
     if (!r || !r.ok) { if (r) showNotice(r.error); return; }
+    // 收尾欠账未核清等事实要当场说清：请求成功不等于收尾成功。
+    if (r.note) showNotice(r.note);
+    if (stayOnStart) { stopPolling(); await refreshStart(); return; }
+    if (changeRange) rangeChangeRound = r.round_id;
     stopPolling();
     const res = await queued(() => callApi("get_result"));
-    if (res && res.has_round) { renderResult(res); switchTab("result"); }
+    if (res && res.has_round) { switchTab("result"); renderResult(res); }
+  }
+
+  // 遗留轮逐个处置（票 06）：先冻结「这一轮」再弹确认；取消不写终态、不起采。
+  async function abortPendingRound(rid) {
+    const prepared = await callApi("prepare_abort", rid);
+    if (!prepared || !prepared.ok) {
+      if (prepared) showNotice(prepared.error);
+      await refreshStart();
+      return;
+    }
+    const where = "轮次 #" + prepared.round_id + "（" + prepared.run_date + "，"
+      + (prepared.shops || []).join("、") + "）" + (prepared.cross_day ? "，已跨天" : "");
+    await openConfirm({
+      title: "确认中止此轮？",
+      sub: where + "将结束且不能继续；已抓取数据保留。等待收尾完成后，需明确点击开始才能新建。",
+      action: () => doAbort(prepared.confirmation, false, true),
+    });
+  }
+
+  // 收尾重试（票 06）：轮次已终态，只重核原采集的收尾欠账，不回写任何终态。
+  async function retryCleanup() {
+    const prepared = await callApi("prepare_cleanup_retry");
+    if (!prepared || !prepared.ok) {
+      if (prepared) showNotice(prepared.error);
+      await refreshStart();
+      return;
+    }
+    await openConfirm({
+      title: "确认重试收尾核验？",
+      sub: "将按原采集的精确绑定核验并处理仍属于本次采集的浏览器；"
+        + "无法核验时会保留欠账，不会误关日常 Edge。",
+      action: () => doAbort(prepared.confirmation, false, true),
+    });
   }
 
   // ---------- 结果页 ----------
@@ -562,9 +700,12 @@
     if (stopping) $("resStopping").textContent = stoppingText(d);
     if (stopping) {
       if (!resStopTimer) resStopTimer = setTimeout(refreshResultStopping, POLL_MS);
-    } else if (resStopTimer) {
-      clearTimeout(resStopTimer);
-      resStopTimer = null;
+    } else {
+      if (resStopTimer) { clearTimeout(resStopTimer); resStopTimer = null; }
+      if (rangeChangeRound === d.round_id && d.reason) {
+        rangeChangeRound = null;
+        switchTab("start"); // only navigation: never starts a collector
+      }
     }
   }
 
@@ -584,9 +725,18 @@
     api = window.pywebview.api;
     // 事件处理器包一层：onclick 会把事件对象当第一个参数传进来，不能让它冒充参数
     $("trialModeBtn").onclick = changeCollectionMode;
+    $("loginBrowserBtn").onclick = async () => {
+      $("loginBrowserBtn").disabled = true;
+      const r = await callApi("open_login_browser");
+      if (r && !r.ok) showNotice(r.error);
+      await refreshStart();
+    };
+    $("refreshBrowserBtn").onclick = () => refreshStart();
+    $("residueBtn").onclick = retryCleanup;
     $("startBtn").onclick = () => startRun();
     $("retryPrepBtn").onclick = retryPrepare;
     $("pauseBtn").onclick = pauseRun;
+    $("changeScopeBtn").onclick = changeScope;
     $("abortBtn").onclick = () => openConfirm();
     $("abortForeignBtn").onclick = () => openConfirm();
     $("confirmCancel").onclick = closeConfirm;
@@ -594,10 +744,16 @@
       const act = confirmAction;
       closeConfirm();
       confirmAction = null;
-      if (act) { await act(); return; }   // 弹窗问的那件事
-      await doAbort();
+      if (act) { await act(); }   // 只执行弹窗冻结的那件事，不回退到当前目标
     };
     $("resumeBtn").onclick = resumeRun;
+    $("runLoginBrowserBtn").onclick = async () => {
+      // 与开始页同一服务、同一条 API：重复点击不另开，占了就引导用现有窗口。
+      $("runLoginBrowserBtn").disabled = true;
+      const r = await callApi("open_login_browser");
+      if (r && !r.ok) showNotice(r.error);
+      await tickRun();
+    };
     $("backBtn").onclick = () => switchTab("start");
     $("selAllBtn").onclick = () => setAllShops(true);
     $("selNoneBtn").onclick = () => setAllShops(false);

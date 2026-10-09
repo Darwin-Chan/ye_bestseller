@@ -11,7 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
-from . import (browser_proc, browser_pw, click_listing, dedupe, detail, detail_visit, elapsed, plan_step, shop_progress,
+from . import (browser_proc, browser_pw, crawler_identity, click_listing, dedupe, detail, detail_visit, elapsed, plan_step, shop_progress,
                rounds, single_instance, stop_request, weekly_plan)
 from .guard import DenyTracker, RoundDenyExceeded, ShopDenyExceeded
 from .config import Config, Shop, load_shops
@@ -27,7 +27,7 @@ from .db import (
 )
 from .delay import Humanizer
 from .pacing import Pacing
-from .guard import RoundPauseRequired
+from .guard import IdentityVerificationTimeout, RoundPauseRequired
 from .rounds import Round, RoundRequest, ShopScope, TerminalReason
 from .stop_request import StopRequested
 from .listing import ListingLoadFailed, save_raw_listing_page
@@ -97,6 +97,14 @@ _STOP_OUTCOMES: dict[type, StopOutcome] = {
         notice="{note}。",
         log_level=logging.WARNING,
     ),
+    IdentityVerificationTimeout: StopOutcome(
+        round_end=TerminalReason.IDENTITY_VERIFICATION_TIMEOUT,
+        round_note="身份验证等待超时，本轮已自动中止，已保存数据保留，不可续跑",
+        shop_note="身份验证等待超时，本店未完成",
+        log_line="轮次 #{round_id}：{note}",
+        notice="{note}；安全收尾完成后可明确开始新轮。",
+        log_level=logging.ERROR,
+    ),
     RoundPauseRequired: StopOutcome(
         shop_note="人工介入未完成：{exc}",
         log_line="本轮暂停：{exc}",
@@ -140,6 +148,9 @@ def round_shops(db: Database, round_id: int, cfg: Config) -> list[Shop]:
     shops: list[Shop] = []
     for scope in rounds.scope_shops(db, round_id):
         known = configured.get(scope.key)
+        # A changed configured shop is not the original snapshot's navigation.
+        if known is not None and known.url != scope.url:
+            known = None
         shops.append(Shop(
             key=scope.key,
             name=scope.name,
@@ -220,12 +231,17 @@ class CrawlerAlreadyRunning(RuntimeError):
     """已有采集进程在跑：同一时刻至多一个，由会话锁保证（见 single_instance）。"""
 
 
-def run_round(cfg: Config, shops: list[Shop], *, deviations=(), elapsed_clock: Callable[[], float] | None = None) -> None:
+def run_round(cfg: Config, shops: list[Shop], *, deviations=(),
+              elapsed_clock: Callable[[], float] | None = None,
+              new_intent: rounds.NewRoundIntent | None = None,
+              resume_intent: rounds.ResumeRoundIntent | None = None) -> None:
     """开始或续跑一轮。
 
     shops 是本次调用请求的店铺范围：今天已有进行中的轮次时范围必须一致，否则
     open() 拒绝；跨日则由 open() 先给旧轮按跨天中止收尾再新建。真正交给驱动的
     处理列表永远取自轮次自身，续跑不会因为配置变化而增删店铺。
+    GUI 的 new_intent 则只允许新建：取得采集锁后复核日期、完整范围与轮次高水位，
+    未结束轮或预检事实变化都拒绝，不沿用普通 CLI 的续跑/跨天新建规则。
 
     `deviations` 是这次范围相对本周计划的偏离（越权 / 计划外，判定与文案见
     `plan_step.plan_deviations`）：轮次打开后写进轮次备注与本机计划外账——空元组
@@ -235,29 +251,44 @@ def run_round(cfg: Config, shops: list[Shop], *, deviations=(), elapsed_clock: C
     抢不到的那一方抛 CrawlerAlreadyRunning，不建轮次、不写快照（命令行入口在读配置
     时会顺手同步一次 shops 表，那不是采集数据）。
     """
+    if new_intent is not None and resume_intent is not None:
+        raise ScopeMismatch("新建与继续意图不能同时使用")
     lock = single_instance.acquire(single_instance.CRAWLER_LOCK)
     if lock is None:
         raise CrawlerAlreadyRunning(
             "已有采集进程在运行：同一时刻只能跑一轮，等它结束或在界面里中止它。"
         )
     try:
-        _run_round_locked(cfg, shops, deviations, elapsed_clock=elapsed_clock)
+        _run_round_locked(cfg, shops, deviations, elapsed_clock=elapsed_clock,
+                          new_intent=new_intent, resume_intent=resume_intent)
     finally:
         lock.release()
 
 
-def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *, elapsed_clock: Callable[[], float] | None = None) -> None:
+def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *,
+                      elapsed_clock: Callable[[], float] | None = None,
+                      new_intent: rounds.NewRoundIntent | None = None,
+                      resume_intent: rounds.ResumeRoundIntent | None = None) -> None:
     """拿到采集锁之后真正干活的部分。"""
+    from .dedicated_browser import verify_gui_settings
+    verify_gui_settings(cfg)
     cfg.ensure_dirs()
     conn = connect(cfg.db_file)
     db = Database(conn)
     started_at: str | None = None
+    opened = None
+    initializing = True
     try:
         request = RoundRequest(
             run_date=cst_date(),
             shops=tuple(ShopScope(shop.key, shop.url, shop.name) for shop in shops),
         )
-        opened = rounds.open(db, request)
+        if resume_intent is not None:
+            opened = rounds.open_resume(db, request, resume_intent, now=utcnow())
+        elif new_intent is not None:
+            opened = rounds.open_new(db, request, new_intent)
+        else:
+            opened = rounds.open(db, request)
         round_id = opened.round.id
         # 放行并上报（spec §6）：越权/计划外的店在轮次打开后立刻留痕（备注 + 本机账）。
         plan_step.record_deviations(db, opened.round, cfg.machine_id, deviations)
@@ -290,10 +321,15 @@ def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *, elapsed_
 
         stop_request.install(check_execution)
         try:
+            initializing = False
+            resume_options = ({"resume_intent": resume_intent}
+                              if resume_intent is not None else {})
             _run_pwcdp_round(db, cfg, round_id, work_shops,
-                             on_execution_end=segment.settle)
+                             on_execution_end=segment.settle,
+                             explicit_new=new_intent is not None,
+                             **resume_options)
         finally:
-            segment.settle()
+            _settle_execution(segment.settle)
         _finalize_round(db, cfg, opened.round)
     except STOP_WITH_OUTCOME as exc:
         # 停止这一族在这里统一收尾：分类与文案都来自 _STOP_OUTCOMES。
@@ -311,11 +347,19 @@ def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *, elapsed_
                 print(f"\n>>> {outcome.notice.format(**fields)}\n")
             else:
                 _report_late_stop(settled, outcome.round_end)
+    except Exception as exc:
+        if new_intent is not None and opened is not None and initializing:
+            rounds.finish_if_open(db, opened.round, TerminalReason.STARTUP_FAILED,
+                                  note=f"采集初始化失败，未进入采集：{exc}")
+        raise  # Collection failures after initialization retain their real semantics.
     finally:
         stop_request.uninstall()
-        db.clear_crawler_process(target_pid=os.getpid(), target_started_at=started_at)
-        # 消费过的停止请求只对这一个进程有效，走到这里就把它删掉（ADR-0009）。
-        db.clear_stop_request(target_pid=os.getpid(), target_started_at=started_at)
+        identity = db.crawler_process()
+        cleanup_complete = identity is None or crawler_identity.browser_cleanup_complete(identity["browser_state"])
+        if started_at is not None and cleanup_complete:
+            db.clear_crawler_process(target_pid=os.getpid(), target_started_at=started_at)
+            # Only clean facts published by this invocation.
+            db.clear_stop_request(target_pid=os.getpid(), target_started_at=started_at)
         conn.close()
 
 
@@ -403,14 +447,22 @@ def _finalize_round(db: Database, cfg: Config, run: Round) -> None:
 
 # ---------- Playwright 连接接管（pw_cdp）路径 ----------
 
+def _settle_execution(callback) -> None:
+    """Cleanup must not replace an already classified identity timeout."""
+    timeout = isinstance(sys.exc_info()[1], IdentityVerificationTimeout)
+    try:
+        callback()
+    except Exception:
+        if not timeout:
+            raise
+        log.exception("身份验证已超时，时长收尾失败；仍按原超时停止")
+
+
 def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
                      shops: list[Shop], started_at: str | None = None, *,
-                     on_execution_end: Callable[[], bool] | None = None) -> None:
-    if started_at is None:
-        row = db.crawler_process()
-        started_at = row["started_at"] if row is not None else None
-    config_hash = db.record_params(cfg)
-    emit = db.event_logger(round_id, config_hash)
+                     on_execution_end: Callable[[], bool] | None = None,
+                     explicit_new: bool = False,
+                     resume_intent: rounds.ResumeRoundIntent | None = None) -> None:
     def publish(state, port, browser_pid, browser_os_started):
         if started_at is None:
             return False
@@ -419,18 +471,54 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
             browser_state=state, browser_port=port, browser_pid=browser_pid,
             browser_os_started=browser_os_started)
 
-    pw, br, page, ctx = browser_pw.open_session(cfg, publish_browser=publish)
-    deny_tracker = DenyTracker(cfg.deny_window_minutes * 60)
     try:
+        if started_at is None:
+            row = db.crawler_process()
+            started_at = row["started_at"] if row is not None else None
+        config_hash = db.record_params(cfg)
+        emit = db.event_logger(round_id, config_hash)
+        deny_tracker = DenyTracker(cfg.deny_window_minutes * 60)
+        pw, br, page, ctx = browser_pw.open_session(cfg, publish_browser=publish)
+    except STOP_WITH_OUTCOME:
+        raise  # Preserve explicit stop and intervention semantics.
+    except Exception as exc:
+        if explicit_new:
+            # Retain the failed attempt as a real diagnostic, not an open empty
+            # round or a fictional user abort. Browser debt remains independent.
+            rounds.finish_if_open(db, rounds.load(db, round_id),
+                                  TerminalReason.STARTUP_FAILED,
+                                  note=f"采集启动失败，未进入采集：{exc}")
+        raise
+    identity_timeout = None
+    browser_binding = db.crawler_process()
+    try:
+        if resume_intent is not None:
+            # Durable execution acknowledgement; unlike diagnostic emit this
+            # must commit successfully before consuming GUI pause permission.
+            db.append_event(round_id, "resume_started", kind="run", note=resume_intent.attempt)
         _run_listing_pw(db, cfg, round_id, shops, page, emit=emit, deny_tracker=deny_tracker)
+    except IdentityVerificationTimeout as exc:
+        identity_timeout = exc
+        raise
     finally:
         # 采集已结束；浏览器归属清理不再贡献采集段时长。
         # callback 只表达执行结束事件，差值/保存/冻结知识仍属于 elapsed。
         try:
             if on_execution_end is not None:
-                on_execution_end()
+                _settle_execution(on_execution_end)
         finally:
-            browser_pw.close_session(pw, br, publish_browser=publish)
+            try:
+                browser_pw.close_session(pw, br, publish_browser=publish)
+            except Exception:
+                if identity_timeout is None:
+                    raise
+                # Preserve the classified timeout; cleanup debt is independently
+                # visible to the GUI and continues to block a new round.
+                publish("UNKNOWN",
+                        browser_binding["browser_port"] if browser_binding else cfg.attach_port,
+                        browser_binding["browser_pid"] if browser_binding else None,
+                        browser_binding["browser_os_started"] if browser_binding else None)
+                log.exception("身份验证已超时，浏览器收尾失败；保留收尾门禁")
 
 
 def _record_shop_stop(db: Database, round_id: int, shop: Shop, exc: BaseException,

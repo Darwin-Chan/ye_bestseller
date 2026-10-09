@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from . import click_events, elapsed, pacing, plan_step, rounds, shop_progress, weekly_plan
 from .config import effective_pages_limit, is_merge_only
-from .crawler_identity import CrawlerProcess
+from .crawler_identity import CrawlerProcess, browser_cleanup_complete
 from .db import CST, Database, RoundTally, cst_date
 
 
@@ -136,6 +136,12 @@ def _pacing_state(conn: sqlite3.Connection, round_id: int, *, now: str,
 
 
 _TERMINAL_TEXT = {
+    rounds.TerminalReason.IDENTITY_VERIFICATION_TIMEOUT: (
+        "身份验证超时中止", "身份验证等待超时，本轮自动中止；已抓取数据已保留、不可续跑。请完成安全收尾后明确开始新轮。",
+    ),
+    rounds.TerminalReason.STARTUP_FAILED: (
+        "启动失败", "本次新建在启动或初始化时失败，未进入采集；请核实收尾与配置后明确开始新轮。",
+    ),
     rounds.TerminalReason.COMPLETED: ("正常完成", "本轮正常完成。"),
     rounds.TerminalReason.DAY_BOUNDARY: (
         "跨天中止",
@@ -253,6 +259,64 @@ def _plan_mark(shop_key: str, plan: plan_step.StartPlan,
 _CARDS_PER_PAGE = 30
 
 
+def _round_can_resume(state: UiState, round_: rounds.Round, now: str) -> bool:
+    """这一轮在该界面此刻算不算「明确暂停、可继续」——开始页与过程页共用一条。
+
+    仅同界面明确暂停的原轮、同日、停止收尾完成且无采集进程才算数；数据库无终态、
+    进程消失或别的界面留下的记录都不授予继续资格（票 03/06）。
+    """
+    return (state.manually_paused and state.round_id == round_.id
+            and not state.crawler_running and not state.stopping
+            and round_.resumable_on(now))
+
+
+def _pending_round_text(row: rounds.Round, *, today: str, resumable: bool) -> str:
+    keys = "、".join(row.shop_keys) or "（无店铺）"
+    head = f"轮次 #{row.id}（{row.run_date}，{keys}）"
+    if resumable:
+        return (head + "：已暂停，可到过程页继续；如需换范围或新建，请先确认中止。")
+    if row.run_date != today:
+        return (head + "：采集已停止且已跨天，本轮未正常结束、不能继续；"
+                "请确认中止并等待收尾完成后开始新轮。")
+    return head + "：采集已停止，本轮未正常结束；请确认中止并等待收尾完成后开始新轮。"
+
+
+def _pending_payload(pending: tuple[rounds.Round, ...], state: UiState,
+                     now: str, today: str) -> list[dict]:
+    rows = []
+    for row in pending:
+        resumable = _round_can_resume(state, row, now)
+        rows.append({
+            "id": row.id,
+            "run_date": row.run_date,
+            "shops": list(row.shop_keys),
+            "cross_day": row.run_date != today,
+            "resumable": resumable,
+            "text": _pending_round_text(row, today=today, resumable=resumable),
+        })
+    return rows
+
+
+def _pending_hint(pending: tuple[rounds.Round, ...], state: UiState,
+                  now: str, today: str) -> str:
+    if len(pending) == 1 and _round_can_resume(state, pending[0], now):
+        row = pending[0]
+        return (f"轮次 #{row.id}（{row.run_date}）已暂停：请到过程页继续；"
+                "如需新建，请先确认中止本轮。")
+    heads = []
+    if any(row.run_date == today and not _round_can_resume(state, row, now)
+           for row in pending):
+        heads.append("采集已停止，本轮未正常结束")
+    if any(row.run_date != today for row in pending):
+        heads.append("有轮次已跨天，不能继续")
+    resumed = [row for row in pending if _round_can_resume(state, row, now)]
+    if resumed:
+        heads.append("、".join(f"轮次 #{row.id} 已暂停" for row in resumed))
+    ids = "、".join(f"#{row.id}（{row.run_date}）" for row in pending)
+    return (f"未结束的轮次：{ids}。" + "；".join(heads)
+            + "。请在下方逐个确认中止并等待收尾完成，再开始新轮。")
+
+
 def _start_shops(conn: sqlite3.Connection, shops, cfg, today: str, *,
                  plan: plan_step.StartPlan) -> list[dict]:
     out = []
@@ -334,32 +398,45 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
         notes.append("未能确认最新：这次没从计划库确认到本周计划，用的是本地已落库的那份"
                      "（发布后本周不重算，本地即权威）。")
     ov_products, ov_skus = _inventory_counts(conn, today)
-    current = rounds.active_round(db, today)
-    stale = None if current is not None else rounds.active_round(db)
-    # 今天已有进行中的轮次时，点「开始抓取」是续跑——范围以轮次自身为准（与 run.py
-    # 同一条规则），与闸门无关；所以闸门只锁「新建一轮」。
-    locked = state.plan_confirming or (plan.blocked and current is None)
-    if is_merge_only(cfg) and not trial:
-        # 本机不做采集：页首那句已经说清，这里不再给「点开始抓取会…」这类承诺
-        # （hint 只谈采集；库里留着进行中的轮次也不改这条）。
-        hint = ""
+    pending = rounds.pending_rounds(db)
+    # 已终态轮次留下的收尾欠账（浏览器/身份未核实）：没有待处置轮次时，
+    # 这里同样是新建被拦的原因，页面据此给出「重试收尾核验」入口。
+    identity = db.crawler_process()
+    residue = None
+    if (crawler is None and identity is not None
+            and not browser_cleanup_complete(identity["browser_state"])):
+        residue = {"round_id": identity["round_id"],
+                   "state": identity["browser_state"] or "UNKNOWN"}
+    # 开始页仅表达新建；无终态旧轮不是「可暂停续跑」的证明。
+    locked = state.plan_confirming or plan.blocked
+    start_allowed = not locked and not (is_merge_only(cfg) and not trial)
+    if state.stopping:
+        hint = "上一次停止仍在核验或收尾，请等待收尾完成再明确开始新轮。"
+        start_allowed = False
     elif crawler is not None:
         hint = _crawler_hint(crawler)
-    elif current is not None:
-        hint = (f"轮次 #{current.id} 正在进行（{current.run_date}），"
-                "点「开始抓取」会按它的店铺范围续跑。")
-    elif stale is not None:
-        hint = (f"轮次 #{stale.id}（{stale.run_date}）已经跨天，不会再续跑；"
-                + ("本周计划还没确认，先新建不了新一轮。" if locked
-                   else "点「开始抓取」会新建一轮。"))
+        start_allowed = False
+    elif pending:
+        hint = _pending_hint(pending, state, now, today)
+        start_allowed = False
     else:
         hint = ""
+        try:
+            rounds.check_new(db, rounds.RoundRequest(today, tuple(
+                rounds.ShopScope(s.key, s.url, s.name) for s in shops)))
+        except rounds.ScopeMismatch as exc:
+            hint = str(exc)
+            start_allowed = False
     return {
         "ov": {"products": ov_products, "skus": ov_skus},
         "summary": _start_summary(conn, today),
         "shops": _start_shops(conn, shops, cfg, today, plan=plan),
         "total_shops": len(shops),
         "start_hint": hint,
+        "start_allowed": start_allowed,
+        "pending": ({"rounds": _pending_payload(pending, state, now, today)}
+                    if pending else None),
+        "residue": residue,
         "plan_idle": idle,
         "plan_note": "\n".join(notes),
         "plan_gate": plan.blocked,
@@ -449,25 +526,60 @@ def _round_counts(conn: sqlite3.Connection, round_id: int) -> tuple[int, int]:
     return total, deny
 
 
+def _identity_wait(conn, round_id: int, state: UiState) -> dict | None:
+    """Only the running round's latest verification event can represent a wait."""
+    if not state.crawler_running or state.stopping or state.manually_paused:
+        return None
+    row = conn.execute(
+        "SELECT event, verification_type, note FROM event_log "
+        "WHERE round_id=? AND kind='verification' ORDER BY id DESC LIMIT 1",
+        (round_id,),
+    ).fetchone()
+    if not row or row["event"] != "verification_appear" or row["verification_type"] != "identity":
+        return None
+    values = dict(part.split("=", 1) for part in (row["note"] or "").split(";") if "=" in part)
+    try:
+        minutes = float(values["wait_minutes"])
+    except (KeyError, ValueError):
+        return None
+    return {"type": "identity", "wait_minutes": minutes,
+            "note": f"需要人工完成身份验证；本次最长等待 {minutes:g} 分钟，超时自动中止。"}
+
+
 def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str,
              max_attempts: int = shop_progress.DEFAULT_MAX_ATTEMPTS) -> dict:
     """过程页取数：本轮进度、各店明细、当前处理中的店。
 
     `state.start_error` 已置位（子进程被拒）时不读数据库，`conn` 可以传 None。
+    跨天的轮次只有「本界面明确暂停的那一轮」还留在这一页（界面保留到次日）：
+    继续被拒，说明跨天，用户可以从这里显式中止；其余历史遗留归开始页逐个处置。
     """
     if state.start_error is not None:
         return _refused_start(state.start_error)
-    active = rounds.active_round(Database(conn), cst_date(now))
+    today = cst_date(now)
+    db = Database(conn)
+    active = rounds.active_round(db, today)
+    cross_day = False
+    if active is None and state.manually_paused and state.round_id is not None:
+        # 认的就是本界面暂停的那一轮：库里可能有别的更新遗留，不能按最新一条猜。
+        try:
+            claimed = rounds.load(db, state.round_id)
+        except ValueError:
+            claimed = None
+        if claimed is not None and claimed.reason is None:
+            active, cross_day = claimed, True
     if active is None:
         return {
             "running": state.crawler_running,
             "manually_paused": state.manually_paused,
             "has_round": False,
+            "can_resume": False,
+            "can_abort": False,
             "stopping": state.stopping,
             "stop_grace_sec": state.stop_grace_sec,
         }
     round_id = active.id
-    tally = Database(conn).round_tally(round_id)
+    tally = db.round_tally(round_id)
     done, todo = _shop_breakdown(conn, round_id, tally, max_attempts)
     total, deny = _round_counts(conn, round_id)
     timing = elapsed.read(conn, round_id)
@@ -480,6 +592,11 @@ def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str,
         "stop_grace_sec": state.stop_grace_sec,
         "has_round": True,
         "round_id": round_id,
+        "cross_day": cross_day,
+        "note": ("本轮已跨天，不能继续；请中止本轮后开始新轮。" if cross_day else None),
+        "verification": _identity_wait(conn, round_id, state),
+        "can_resume": _round_can_resume(state, active, now),
+        "can_abort": True,
         "started_hhmm": _fmt_hhmm(active.started_at),
         "elapsed_sec": timing.seconds,
         "elapsed_text": timing.text,
@@ -519,6 +636,8 @@ def result_view(conn: sqlite3.Connection, *, state: UiState, now: str,
     if run is None:
         return {
             "has_round": False,
+            "can_resume": False,
+            "can_abort": False,
             "stopping": state.stopping,
             "stop_grace_sec": state.stop_grace_sec,
         }

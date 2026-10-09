@@ -70,8 +70,33 @@ class BrowserSessionEstablishmentTests(unittest.TestCase):
         kill.assert_called_once_with(proc.pid)
         self.assertEqual(
             states,
-            [("STARTING", 9222, None, None), ("UNKNOWN", 9222, None, None)],
+            [("STARTING", 9222, None, None), ("CLOSED", None, None, None)],
         )
+
+    def test_failed_establishment_cleanup_keeps_unknown_until_resources_are_gone(self):
+        proc = FakeProcess(20314)
+        factory = MagicMock()
+        factory.start.side_effect = RuntimeError("playwright startup failed")
+        states = []
+        with patch("playwright.sync_api.sync_playwright", return_value=factory), \
+                patch.object(browser_pw.subprocess, "Popen", return_value=proc), \
+                patch.object(browser_proc, "process_creation_proof", return_value="proof"), \
+                patch.object(browser_proc, "terminate_process_tree", return_value=False):
+            try:
+                with self.assertRaisesRegex(RuntimeError, "playwright startup failed"):
+                    browser_pw.open_session(
+                        self.cfg(), publish_browser=lambda *state: states.append(state) or True)
+                self.assertEqual(states, [
+                    ("STARTING", 9222, None, None), ("UNKNOWN", 9222, None, None)])
+                self.assertTrue(proc.alive)
+                with self.assertRaisesRegex(RuntimeError, "仍有资源待清理"):
+                    browser_pw.open_session(self.cfg())
+                self.assertNotIn(("CLOSED", None, None, None), states)
+            finally:
+                # Dispose only this test's simulated process and retained session.
+                proc.alive = False
+                with self.assertRaises(FileNotFoundError):
+                    browser_pw.open_session(self.cfg(chrome_path="missing-test-browser.exe"))
 
     def test_cdp_timeout_stops_playwright_and_our_process(self):
         proc = FakeProcess(20302)
@@ -101,11 +126,11 @@ class BrowserSessionEstablishmentTests(unittest.TestCase):
         self.assertFalse(proc.alive)
         self.assertEqual(
             states,
-            [("STARTING", 9222, None, None), ("UNKNOWN", 9222, None, None)],
+            [("STARTING", 9222, None, None), ("CLOSED", None, None, None)],
         )
 
     def test_stop_during_the_port_wait_cleans_up_then_propagates(self):
-        """等待期间被取消（A07）：清理序列照跑（停 Playwright、终止自启进程、发布 UNKNOWN），
+        """等待期间被取消（A07）：清理序列照跑（停 Playwright、终止自启进程、发布 CLOSED），
         随后 `StopRequested` 原样穿出——顶层按停止收尾（轮次保持可续跑），不是「无法连接」那条。
         """
         proc = FakeProcess(20313)
@@ -146,7 +171,7 @@ class BrowserSessionEstablishmentTests(unittest.TestCase):
         self.assertFalse(proc.alive)
         self.assertEqual(
             states,
-            [("STARTING", 9222, None, None), ("UNKNOWN", 9222, None, None)],
+            [("STARTING", 9222, None, None), ("CLOSED", None, None, None)],
         )
         outcome = pipeline.stop_outcome(raised.exception)
         self.assertIsNone(outcome.round_end, "顶层按停止收尾：轮次保持可续跑")
@@ -278,7 +303,7 @@ class BrowserSessionEstablishmentTests(unittest.TestCase):
         popen.assert_not_called()
         self.assertEqual(
             states,
-            [("STARTING", 9222, None, None), ("UNKNOWN", 9222, None, None)],
+            [("STARTING", 9222, None, None), ("CLOSED", None, None, None)],
         )
 
     def test_attach_mode_ignores_browser_path_and_never_terminates_external_browser(self):

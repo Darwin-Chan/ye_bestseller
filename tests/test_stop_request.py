@@ -203,12 +203,34 @@ class ProcessStopRuntimeTests(unittest.TestCase):
         """
         runtime = stop_request.ProcessStopRuntime(own_process=lambda: None)
 
-        with patch.object(browser_proc, "close_browser", return_value=None) as close:
-            effect = runtime.close_browser(stop_request.BoundBrowser(4242, 9222, None))
+        # 未知存活，或活着但原证明缺失：都不能据当前 PID 的证明推断原进程已退出。
+        for alive in (None, True):
+            with self.subTest(alive=alive), \
+                    patch.object(browser_proc, "close_browser", return_value=None) as close, \
+                    patch.object(browser_proc, "process_alive", return_value=alive), \
+                    patch.object(browser_proc, "process_creation_proof", return_value="current-proof"):
+                effect = runtime.close_browser(stop_request.BoundBrowser(4242, 9222, None))
 
-        close.assert_called_once_with(9222, launched_by_us=True, browser_pid=4242,
-                                      browser_os_started=None)
-        self.assertFalse(effect.ok, "对方拒绝关闭时如实上报，窗口据此进 cleanup_pending")
+                close.assert_called_once_with(9222, launched_by_us=True, browser_pid=4242,
+                                              browser_os_started=None)
+                self.assertFalse(effect.ok, "原创建证明缺失时保留 cleanup_pending，不猜测 PID 复用")
+
+    def test_an_unreadable_pid_with_a_diverged_proof_still_settles(self):
+        """存活读数不可用、但同 PID 的创建证明与登记值不符：目标已被顶替，可以结账。
+
+        证明分歧本身就是原进程不在的直接证据（与 `crawler_identity` 的停止处置同一判据）；
+        不留永远结不掉的欠账，也绝不对新进程做停止副作用（这一步本来就没关掉任何东西）。
+        """
+        runtime = stop_request.ProcessStopRuntime(own_process=lambda: None)
+
+        with patch.object(browser_proc, "close_browser", return_value=None), \
+                patch.object(browser_proc, "process_alive", return_value=None), \
+                patch.object(browser_proc, "process_creation_proof",
+                             return_value="somebody-elses-proof"):
+            effect = runtime.close_browser(
+                stop_request.BoundBrowser(4242, 9222, "browser-proof"))
+
+        self.assertTrue(effect.ok, "PID 已由另一创建身份接管，按已退出结账")
 
     def test_a_pid_taken_by_another_process_is_refused_and_the_handle_returned(self):
         """身份行记的创建证明与此刻同一 PID 上读到的不符：目标已被顶替，拒绝绑定。

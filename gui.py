@@ -30,6 +30,7 @@ import logging
 import logging.handlers
 import os
 import sqlite3
+import secrets
 import subprocess
 import sys
 import threading
@@ -55,6 +56,7 @@ from bestseller_monitor import single_instance
 from bestseller_monitor import shop_progress
 from bestseller_monitor import stop_request
 from bestseller_monitor import views
+from bestseller_monitor.dedicated_browser import DedicatedBrowser
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -161,6 +163,10 @@ def _collection_action(method):
 
 CLOSING_REFUSAL = "正在关闭程序，不能开始、续跑或暂停。"
 
+# 手动入口在这些浏览器状态下不提供：启动/观察失败、占用核不实、调试端口被无关实例占着、
+# 正在打开。「已打开/占用」放行——引导用户用已有窗口，不另开标签也不接管。
+_BROWSER_ENTRY_BLOCKED = ("failed", "unknown", "port_busy", "opening")
+
 
 class Api:
     """暴露给 pywebview 前端的方法。返回 JSON 可序列化的基本类型。
@@ -170,7 +176,7 @@ class Api:
     """
 
     def __init__(self, cfg=None, *, now=utcnow, open_conn=None, shops=None,
-                 stop_clock=None, config_file=None):
+                 stop_clock=None, config_file=None, browser_runtime=None):
         """构造 interface：配置、时刻、连接与店铺表都可以注入。
 
         `main()` 仍写 `Api()`——那时配置按项目默认位置读，「现在」取本机时间，
@@ -179,10 +185,11 @@ class Api:
         `stop_clock` 是停止窗口用的时钟（默认挂钟）：用例给它一个能推进的时钟，
         就能把 8 秒 / 10 秒那两段窗口走到点，而不必去改私有状态。
         """
-        self.cfg = cfg if cfg is not None else Config.from_file(
-            PROJECT_ROOT / "config" / "config.toml", root=PROJECT_ROOT)
+        source = Path(config_file) if config_file is not None else PROJECT_ROOT / "config/config.toml"
+        self.cfg = cfg if cfg is not None else Config.from_file(source)
         self._formal_cfg = self.cfg
         self.config_file = (Path(config_file) if config_file is not None else PROJECT_ROOT / "config/config.toml").resolve()
+        self._browser = DedicatedBrowser(self.cfg, self.config_file, runtime=browser_runtime)
         self._formal_open_conn = open_conn
         self._now = now
         self._open_conn = open_conn if open_conn is not None else (
@@ -202,7 +209,9 @@ class Api:
         self.round_id: int | None = None
         self.user_paused = False
         self._paused_round_id: int | None = None
+        self._resume_intent: rounds.ResumeRoundIntent | None = None
         self._closing_requested = False
+        self._abort_confirmation: tuple[str, CloseSnapshot] | None = None
         # 停止编排（窗口、回执、超时强杀）在 stop_request 里；**冻结目标之后的处置也在那里**，
         # 界面只交一件事实：本界面拉起的那个子进程。晚绑定 lambda 让 begin 那一刻读一次
         # `self.proc` 并冻进绑定，此后窗口不再读这个可变字段（ADR-0024）。
@@ -248,6 +257,7 @@ class Api:
             self.round_id = None
             self.user_paused = False
             self._paused_round_id = None
+            self._resume_intent = None
             return {"ok": True}
 
     def _collection_payload(self, payload: dict) -> dict:
@@ -269,11 +279,11 @@ class Api:
         code = self.proc.poll()
         if code == single_instance.CRAWLER_BUSY_EXIT_CODE:
             return "已有采集进程在运行：本次启动被拒绝了，等它跑完再试。"
+        if code == 3:
+            return "新建或继续被拒绝：轮次预检事实或范围已变化，请检查旧轮并重新确认。"
         if self.cfg.local_trial:
             if code == 2:
                 return "本机试采启动被拒绝：请检查本机清单、选店与隔离路径，查看试采 logs/run.log。"
-            if code == 3:
-                return "本机试采范围与当日进行中轮次不同，请按原范围续跑。"
         if code == plan_step.PLAN_REFUSED_EXIT_CODE:
             return ("开轮前准备没通过：本次启动被拒绝了——本机没有可用的本周计划"
                     "（拉不到计划库、本地也没落库）。")
@@ -284,7 +294,7 @@ class Api:
         return views.UiState(
             round_id=self.round_id,
             crawler_running=self._own_crawler_alive(),
-            manually_paused=self.user_paused,
+            manually_paused=(self.user_paused and self._paused_round_id == self.round_id),
             stopping=self._stop_watch.state,
             stop_grace_sec=self._stop_watch.grace_sec,
             start_error=self._refused_start_message(),
@@ -402,17 +412,13 @@ class Api:
     def _plan_block_reason(self, db: Database) -> str | None:
         """闸门判定（ADR-0035）：本地没有本周计划就不开轮——与开始页同一处判定。
 
-        **纯汇总机先判**：角色是配置事实，这台机器不做采集。今天已有进行中的轮次不拦：
-        那是续跑，范围以轮次自身为准（与 run.py 同一条规则）。闸门拦的只是新开轮；子
-        进程 run.py 开跑前自己还会准备一次，那里有同样的判定与同一条退出码（它的拒绝
-        在这里也有文案，见 `_refused_start_message`）。
+        纯汇总机先判角色。开始页只表达新建，不借数据库旧轮跳过计划门禁；
+        子进程 run.py 开跑前还会准备并核验一次。普通 CLI 的续跑能力保持独立。
         """
         if self.cfg.local_trial:
             return None
         if is_merge_only(self.cfg):
             return plan_step.MERGE_ONLY_REFUSAL
-        if rounds.active_round(db, self._today()) is not None:
-            return None
         plan = plan_step.start_plan(db, self.cfg, self._current_week(), self._prep)
         return plan.reason if plan.blocked else None
 
@@ -440,11 +446,73 @@ class Api:
             try:
                 self._stop_watch.tick(conn)
                 self._refresh_shops(conn)
-                return self._collection_payload(views.start_view(
+                self._consume_resume_ack(Database(conn))
+                view = self._collection_payload(views.start_view(
                     conn, cfg=self.cfg, shops=self.shops, state=self._ui_state(),
                     crawler=self.current_crawler(conn), now=self._now()))
+                browser, _, gate = self._browser_entry(conn)
+                view["browser"] = browser
+                if gate:
+                    view["start_allowed"] = False
+                    view["browser_error"] = gate
+                    if not view.get("start_hint"):
+                        view["start_hint"] = gate
+                return view
             finally:
                 conn.close()
+
+    def _browser_entry(self, conn):
+        """手动入口的事实、可用性与拦停原因：开始页与「明确暂停且收尾完成」的过程页同一判据。
+
+        返回 `(浏览器事实, 入口门禁原因, 拦开轮/拦继续的原因)`。占用态入口仍可点
+        （引导用已有窗口），但 `gate` 非空——采集不许借它启动，这与 `can_open` 是两件事。
+        """
+        refusal = self._login_refusal(conn)
+        browser = self._browser.status()
+        error = self._browser.configuration_error()
+        browser["can_open"] = (refusal is None and error is None
+                               and browser["state"] not in _BROWSER_ENTRY_BLOCKED)
+        gate = error or (None if browser["can_start"]
+                         else browser["message"] + browser["retry"])
+        return browser, refusal, gate
+
+    def _login_refusal(self, conn):
+        """同一专用浏览器服务的入口门禁：开始页与明确暂停后的过程页共用这一条。
+
+        停止/收尾未完成、采集或身份验证等待进行中一律拒绝。本界面明确暂停且停止
+        收尾已完成（停止窗口回到 idle、没有采集进程）时，过程页入口照常放行——
+        这是票 05 接入的那一格。前端禁用只是引导，真正的授权在这里。
+        """
+        if self._closing_requested:
+            return CLOSING_REFUSAL
+        if is_merge_only(self.cfg):
+            return "纯汇总机不允许打开采集专用 Edge。"
+        if self._stop_watch.status.phase is not stop_request.StopPhase.IDLE:
+            return "停止或收尾仍在进行，请稍后刷新重试。"
+        if self.current_crawler(conn) is not None:
+            return "采集或身份验证等待中，不能另开手动浏览器。"
+        debt = crawler_identity.registered(conn)
+        if debt is not None and not crawler_identity.browser_cleanup_complete(debt.browser_state):
+            # 已有终态但停止/浏览器收尾未结清（含界面重开后的残留欠账）：先完成收尾核验。
+            return "上一轮的停止/浏览器收尾仍未完成；请先在开始页完成收尾核验，再打开手动浏览器。"
+        return None
+
+    def open_login_browser(self):
+        with self._lock:
+            conn = self._open_conn()
+            try:
+                self._stop_watch.tick(conn)
+                reason = self._login_refusal(conn)
+                if reason:
+                    return {"ok": False, "error": reason}
+                # Reserve while the API gate is locked; OS creation itself must
+                # not block refresh, close or a duplicate click.
+                reserved = self._browser.reserve_open()
+            finally:
+                conn.close()
+        if reserved is not None:
+            return reserved
+        return self._browser.finish_open()
 
     # ---------- 过程页 ----------
     @_collection_action
@@ -453,29 +521,46 @@ class Api:
             state = self._ui_state()
             max_attempts = getattr(self.cfg, "max_attempts_per_page",
                                    shop_progress.DEFAULT_MAX_ATTEMPTS)
-            if state.start_error is not None:
+            if state.start_error is not None and self._resume_intent is None:
                 # 子进程因「已有采集在跑」被拒：不碰数据库，直接说清原因。
                 return self._collection_payload(views.run_view(None, state=state, now=self._now(),
                                      max_attempts=max_attempts))
             conn = self._open_conn()
             try:
                 self._stop_watch.tick(conn)
+                self._consume_resume_ack(Database(conn))
                 state = self._ui_state()
+                resume_error = state.start_error if self._resume_intent is not None else None
+                if self._resume_intent is not None:
+                    state = dataclasses.replace(state, start_error=None)
                 if self.cfg.local_trial:
                     identity = self.current_crawler(conn)
                     if identity is not None and identity.round_id is not None:
                         self.round_id = identity.round_id
-                    state = dataclasses.replace(self._ui_state(),
+                    state = dataclasses.replace(state,
                                                 crawler_running=identity is not None and identity.pid is not None)
                 view = views.run_view(conn, state=state, now=self._now(),
                                     max_attempts=max_attempts)
+                if resume_error is not None:
+                    view["resume_error"] = resume_error
                 if view.get("has_round"):
                     # 轮次由采集子进程创建，界面在这里随轮询认领它。
                     self.round_id = view["round_id"]
+                # 手动入口与继续门禁只在「本界面明确暂停且停止收尾完成」这一格才有意义
+                # （票 05）：其余状态一律禁用并给出原因。浏览器事实要跑一次进程枚举
+                # （秒级），而过程页每 2 秒轮询一次——不当暂停时不去查它。
+                if view.get("can_resume"):
+                    browser, refusal, gate = self._browser_entry(conn)
+                    view["browser"] = browser
+                    view["continue_gate"] = gate
+                    if refusal is not None:
+                        view["login_refusal"] = refusal
+                else:
+                    refusal = self._login_refusal(conn)
+                    if refusal is not None:
+                        view["login_refusal"] = refusal
                 if self.cfg.local_trial:
-                    active = rounds.active_round(Database(conn), self._today())
-                    view["awaiting_resume"] = (active is not None and active.resumable_on(self._now())
-                                                and not view["running"] and not self._stop_watch.state)
+                    view["awaiting_resume"] = view.get("can_resume", False)
                 return self._collection_payload(view)
             finally:
                 conn.close()
@@ -499,14 +584,20 @@ class Api:
             other_space=self._formal_cfg.db_file if self.cfg.local_trial else None,
         )
 
-    def _spawn_crawler(self, keys: list[str] | None = None):
-        """拉起采集子进程；keys 为空表示「开始或续跑」，范围由子进程按轮次决定。
+    def _spawn_crawler(self, keys: list[str] | None = None, *, new_intent=None, resume_intent=None):
+        """拉起采集子进程；新建和继续均携带明确意图，继续冻结原轮完整范围。
 
         界面不发 `--ignore-plan`：逃生口只在命令行（ADR-0035）。
         """
-        cmd = [_crawler_python(), str(PROJECT_ROOT / "run.py")]
+        cmd = [_crawler_python(), str(PROJECT_ROOT / "run.py"), "--config", str(self.config_file)]
+        if new_intent is not None:
+            cmd += ["--gui-browser-settings", self._browser.settings.to_json()]
+        if new_intent is not None:
+            cmd += ["--new-round-intent", new_intent.to_json()]
+        if resume_intent is not None:
+            cmd += ["--resume-round-intent", resume_intent.to_json()]
         if self.cfg.local_trial:
-            cmd += ["--local-trial", "--config", str(self.config_file)]
+            cmd += ["--local-trial"]
         limit = ",".join(k for k in (keys or []) if k)
         if limit:
             cmd += ["--limit-shops", limit]
@@ -514,7 +605,7 @@ class Api:
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         self.proc = subprocess.Popen(
             cmd,
-            cwd=str(PROJECT_ROOT),
+            cwd=self._browser.settings.root,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=flags,
@@ -555,18 +646,22 @@ class Api:
                 # 判据是环境事实，不是「本界面记不记得自己拉过子进程」。
                 if self.current_crawler(conn) is not None:
                     return {"ok": False, "error": _BUSY_ERROR}
-                # 只读地问一句会不会被拒：今天已有轮次但范围不同就给出可读理由。
+                # 只读新建预检：任何未结束轮都须明确中止，不隐式收养或结束它。
                 # 轮次本身由采集子进程创建，启动失败不会留下空的「进行中」轮次。
-                rounds.check_scope(db, request)
+                new_intent = rounds.plan_new(db, request)
             except ScopeMismatch as exc:
                 return {"ok": False, "error": str(exc)}
             finally:
                 conn.close()
+            reason = self._browser.start_error()
+            if reason:
+                return {"ok": False, "error": reason, "retryable": True}
             self.round_id = None
             self.user_paused = False
             self._paused_round_id = None
+            self._resume_intent = None
             try:
-                self._spawn_crawler(keys)
+                self._spawn_crawler(keys, new_intent=new_intent)
             except Exception as exc:  # noqa: BLE001
                 return {"ok": False, "error": f"启动抓取失败：{exc}"}
             return {"ok": True}
@@ -589,33 +684,52 @@ class Api:
                     return {"ok": False, "error": "上一次停止仍在核验或收尾，请稍后重试。",
                             "retryable": True}
                 db = Database(conn)
+                self._consume_resume_ack(db)
                 current = rounds.active_round(db, self._today())
                 if current is None:
                     stale = rounds.active_round(db)
                     if stale is not None:
                         return {"ok": False, "error": (
                             f"轮次 #{stale.id}（{stale.run_date}）已经跨天，不能再续跑；"
-                            "请点「开始抓取」新建一轮。"
+                            "请先明确中止旧轮并等待收尾，再开始新轮。"
                         )}
                     return {"ok": False, "error": "没有进行中的轮次可继续。"}
+                if not self.user_paused or self._paused_round_id != current.id:
+                    return {"ok": False, "error": "没有本界面明确暂停并完成收尾的轮次可继续；"
+                            "数据库尚未结束不等于已暂停，请先明确中止旧轮。"}
                 if not current.resumable_on(self._now()):
                     return {"ok": False, "error": (
                         f"轮次 #{current.id}（{current.run_date}）现在不可续跑；"
                         "请点「开始抓取」新建一轮。"
                     )}
                 rid = current.id
+                resume_intent = rounds.plan_resume(db, rid, now=self._now())
             finally:
                 conn.close()
+            # 续跑与新建同一道浏览器门禁（票 05）：手动窗口没关、专用目录仍被
+            # 占用或释不释放核不实，都不许继续——否则会借错误登录态或撞同一目录。
+            # 关键配置在这次启动后变化也一样拒绝，不静默换目录。
+            reason = self._browser.start_error()
+            if reason:
+                return {"ok": False, "error": reason, "retryable": True}
             self.round_id = rid
-            self.user_paused = False
-            self._paused_round_id = None
             try:
-                # 不带范围：子进程按「开始或续跑」处理，范围以轮次自身为准，
-                # 配置里删掉过的店铺也能继续跑完。
-                self._spawn_crawler()
+                # 子进程持锁复核预期轮次与完整快照，不采用开始页默认子集。
+                self._spawn_crawler(resume_intent=resume_intent)
             except Exception as exc:  # noqa: BLE001
                 return {"ok": False, "error": f"继续抓取失败：{exc}"}
+            # Popen success is not evidence that the driver entered execution.
+            # The exact attempt is consumed only by the child's committed event.
+            self._resume_intent = resume_intent
             return {"ok": True, "round_id": rid}
+
+    def _consume_resume_ack(self, db: Database) -> None:
+        """Only committed entry into execution consumes this GUI's pause."""
+        if (self._resume_intent is not None
+                and rounds.resume_execution_started(db, self._resume_intent)):
+            self.user_paused = False
+            self._paused_round_id = None
+            self._resume_intent = None
 
     def _note_paused(self) -> None:
         self.user_paused = True
@@ -630,6 +744,8 @@ class Api:
             if self._closing_requested:
                 return {"ok": False, "error": CLOSING_REFUSAL}
             if not self.cfg.local_trial:
+                # Preserve the existing unknown-pause close refusal; only the
+                # frozen round ID below grants an actual resume qualification.
                 self.user_paused = True
             conn = self._open_conn()
             try:
@@ -659,6 +775,9 @@ class Api:
                             stop_request.StopKind.PAUSE, target,
                             identity.round_id))
                     self._paused_round_id = self._stop_watch.status.round_id
+                    self.user_paused = True
+                    # A new explicit pause supersedes any previous start acknowledgment.
+                    self._resume_intent = None
                 except RuntimeError as exc:
                     return {"ok": False, "error": "暂时无法确认停止目标，请稍后重试。",
                             "retryable": True, "code": str(exc)}
@@ -670,6 +789,221 @@ class Api:
                 conn.close()
 
     @_collection_action
+    def prepare_abort(self, round_id: int | None = None) -> dict:
+        """Freeze the round and target before the page displays its confirmation.
+
+        指定 round_id 时冻结的是「没有活动采集的遗留轮」（开始页逐个显式处置）；
+        不给编号时沿用关窗快照：运行中 / 暂停中照旧，另外把「本界面认领过、但已无
+        进程且无终态」的那一轮也按遗留冻结（异常退出后仍停在过程页的那条路）。
+        """
+        with self._lock:
+            if self._closing_requested:
+                return {"ok": False, "error": CLOSING_REFUSAL}
+            if round_id is not None:
+                if not isinstance(round_id, int) or isinstance(round_id, bool):
+                    return {"ok": False, "error": "轮次编号无效，请刷新后重试。"}
+                return self._freeze_pending_abort(int(round_id))
+            snapshot = self.close_snapshot()
+            if (snapshot.kind in ("running", "paused", "aborting")
+                    and snapshot.round_id is not None):
+                token = secrets.token_urlsafe(24)
+                self._abort_confirmation = (token, snapshot)
+                return {"ok": True, "confirmation": token, "round_id": snapshot.round_id}
+            if snapshot.kind == "idle" and snapshot.round_id is not None:
+                return self._freeze_pending_abort(snapshot.round_id)
+            return {"ok": False, "error": "当前轮次或采集目标不可核实，请重新确认。"}
+
+    def _freeze_pending_abort(self, round_id: int) -> dict:
+        """没有活动采集时，按指定轮次冻结一次「中止此轮」授权。"""
+        conn = self._open_conn()
+        try:
+            self._stop_watch.tick(conn)
+            if self._stop_watch.status.phase is not stop_request.StopPhase.IDLE:
+                return {"ok": False, "error": "停止或收尾仍在进行，请稍后重试。",
+                        "retryable": True}
+            if self.any_crawler_running():
+                return {"ok": False, "error": _BUSY_ERROR}
+            db = Database(conn)
+            try:
+                target = rounds.load(db, round_id)
+            except ValueError:
+                return {"ok": False, "error": f"轮次 #{round_id} 不存在，请刷新后重试。"}
+            if target.reason is not None:
+                return {"ok": False, "error": f"轮次 #{round_id} 已经结束，无需中止。"}
+            identity = crawler_identity.registered(conn)
+            snapshot = CloseSnapshot("pending", stop_request.StopTarget.of(identity),
+                                     target.id)
+        finally:
+            conn.close()
+        token = secrets.token_urlsafe(24)
+        self._abort_confirmation = (token, snapshot)
+        return {"ok": True, "confirmation": token, "round_id": target.id,
+                "run_date": target.run_date, "shops": list(target.shop_keys),
+                "cross_day": target.run_date != self._today()}
+
+    def _confirm_pending_abort(self, expected: CloseSnapshot) -> dict:
+        """执行一次遗留轮中止：重核冻结事实，写终态，再结清可核实的收尾欠账。
+
+        授权只覆盖冻结的那一轮与当时可见的目标：执行前重核；出现新目标、新采集或
+        写库失败都拒绝或说明重试，不把旧确认套到后来出现的事实上。
+        """
+        conn = self._open_conn()
+        try:
+            self._stop_watch.tick(conn)
+            if self._stop_watch.status.phase is not stop_request.StopPhase.IDLE:
+                return {"ok": False, "error": "停止或收尾仍在进行，请稍后重试。",
+                        "retryable": True}
+            if self.any_crawler_running():
+                return {"ok": False, "error": "已有采集在运行，不能按本次确认处置；"
+                        "请先处置正在跑的这一轮。"}
+            db = Database(conn)
+            identity = crawler_identity.registered(conn)
+            current_target = stop_request.StopTarget.of(identity)
+            if current_target is not None and current_target != expected.target:
+                return {"ok": False, "error": "采集目标已变化，请重新确认中止。"}
+            try:
+                target = rounds.load(db, expected.round_id)
+            except ValueError:
+                return {"ok": False, "error": "轮次已不存在，请重新确认中止。"}
+            try:
+                settled = rounds.finish_if_open(db, target, TerminalReason.ABANDONED,
+                                                note="GUI 人工中止（放弃）")
+            except (sqlite3.Error, ValueError) as exc:
+                return {"ok": False, "error": f"中止或收尾尚未完成：{exc}",
+                        "retryable": True}
+            if self._paused_round_id == settled.id:
+                self.user_paused = False
+                self._paused_round_id = None
+            result = {"ok": True, "round_id": settled.id, "reason": settled.reason.value}
+            notes = []
+            if settled.reason is not TerminalReason.ABANDONED:
+                notes.append(f"轮次 #{settled.id} 已按其它方式结束，保留原终态，"
+                             "未改为人工中止。")
+            if identity is not None:
+                # 处置旧轮的这一刻顺手结清它的残留登记：进程确已不在时删行，
+                # OWNED 浏览器按精确绑定关；核不实就保留欠账，新轮继续被拦。
+                try:
+                    done = crawler_identity.settle_dead_registration(conn, identity)
+                except (OSError, sqlite3.Error) as exc:
+                    log.warning("遗留轮中止后身份收尾暂不可核验：%s", exc)
+                    done = False
+                if not done:
+                    if crawler_identity.browser_cleanup_complete(identity.browser_state):
+                        notes.append("原采集进程身份暂不可核验，残留登记已保留；"
+                                     "不影响开始新轮。")
+                    else:
+                        result["cleanup"] = "pending"
+                        notes.append("原采集浏览器或身份收尾暂未核清，"
+                                     "新轮在收尾完成前仍被拦；"
+                                     "可点「重试收尾核验」稍后再试。")
+            if notes:
+                result["note"] = "".join(notes)
+            return result
+        finally:
+            conn.close()
+
+    @_collection_action
+    def prepare_cleanup_retry(self) -> dict:
+        """冻结一次「重试收尾核验」：结清已无进程的残留登记与本次浏览器欠账。
+
+        轮次已终态、待处置卡消失之后，这是产品内唯一的重试入口（11-A12 的
+        「解释重试」）：没有终态不回写，只按原采集的精确绑定核验与清理。
+        """
+        with self._lock:
+            if self._closing_requested:
+                return {"ok": False, "error": CLOSING_REFUSAL}
+            conn = self._open_conn()
+            try:
+                self._stop_watch.tick(conn)
+                if self._stop_watch.status.phase is not stop_request.StopPhase.IDLE:
+                    return {"ok": False, "error": "停止或收尾仍在进行，请稍后重试。",
+                            "retryable": True}
+                if self.any_crawler_running():
+                    return {"ok": False, "error": _BUSY_ERROR}
+                identity = crawler_identity.registered(conn)
+                if identity is None:
+                    return {"ok": False, "error": "没有待完成的收尾。"}
+                snapshot = CloseSnapshot("cleanup", stop_request.StopTarget.of(identity),
+                                         identity.round_id)
+            finally:
+                conn.close()
+            token = secrets.token_urlsafe(24)
+            self._abort_confirmation = (token, snapshot)
+            return {"ok": True, "confirmation": token, "state": identity.browser_state}
+
+    def _confirm_cleanup_retry(self, expected: CloseSnapshot) -> dict:
+        """执行一次收尾重试：重核冻结目标，只清可核实的欠账。"""
+        conn = self._open_conn()
+        try:
+            self._stop_watch.tick(conn)
+            if self._stop_watch.status.phase is not stop_request.StopPhase.IDLE:
+                return {"ok": False, "error": "停止或收尾仍在进行，请稍后重试。",
+                        "retryable": True}
+            if self.any_crawler_running():
+                return {"ok": False, "error": "已有采集在运行，不能按本次确认处置；"
+                        "请先处置正在跑的这一轮。"}
+            identity = crawler_identity.registered(conn)
+            current_target = stop_request.StopTarget.of(identity)
+            if current_target is None:
+                return {"ok": True, "cleanup": "settled",
+                        "note": "残留登记已不存在，无需再核验。"}
+            if current_target != expected.target:
+                return {"ok": False, "error": "采集目标已变化，请重新确认重试。"}
+            try:
+                done = crawler_identity.settle_dead_registration(conn, identity)
+            except (OSError, sqlite3.Error) as exc:
+                log.warning("收尾重试暂不可核验：%s", exc)
+                done = False
+            if done:
+                return {"ok": True, "cleanup": "settled"}
+            return {"ok": True, "cleanup": "pending",
+                    "note": "收尾暂未核清，欠账保留；新轮仍被拦，可稍后再试。"}
+        finally:
+            conn.close()
+
+    @_collection_action
+    def confirm_abort(self, confirmation: str) -> dict:
+        """A page confirmation can only authorize its original round/target."""
+        with self._lock:
+            frozen = self._abort_confirmation
+            if (frozen is None or not isinstance(confirmation, str)
+                    or not secrets.compare_digest(confirmation, frozen[0])):
+                return {"ok": False, "error": "中止确认已失效，请重新确认。"}
+            expected = frozen[1]
+            if expected.kind == "pending":
+                return self._confirm_pending_abort(expected)
+            if expected.kind == "cleanup":
+                return self._confirm_cleanup_retry(expected)
+            current = self.close_snapshot()
+            if current.round_id != expected.round_id or current.kind == "unknown":
+                return {"ok": False, "error": "轮次或采集目标已变化，请重新确认中止。"}
+            if current.kind == "idle":
+                conn = self._open_conn()
+                try:
+                    settled = rounds.load(Database(conn), expected.round_id)
+                    if settled.reason is not None:
+                        return {"ok": True, "round_id": settled.id, "reason": settled.reason.value}
+                finally:
+                    conn.close()
+                return {"ok": False, "error": "原采集已退出但轮次未结束，请核实后重试。"}
+            if (current.target != expected.target
+                    and not (current.target is None and current.kind == "paused"
+                             and current.pause_phase == "paused")):
+                return {"ok": False, "error": "采集目标已变化，请重新确认中止。"}
+            return self.abort_run(expected_target=current.target,
+                                  expected_round_id=expected.round_id)
+
+    def _lock_abort_confirmation(self, conn, expected_target) -> bool:
+        """Serialize the frozen identity (including absence) and terminal write."""
+        conn.execute("BEGIN IMMEDIATE")
+        registered = crawler_identity.registered(conn)
+        if ((registered is not None and stop_request.StopTarget.of(registered) != expected_target)
+                or (expected_target is None and self.any_crawler_running())):
+            conn.rollback()
+            return False
+        return True
+
+    @_collection_action
     def abort_run(self, *, expected_target=None, expected_round_id=None) -> dict:
         """中止：先把轮次收尾为「人工放弃」，再等采集进程自己停下（ADR-0009）。
 
@@ -679,17 +1013,38 @@ class Api:
         停的可能是本界面拉起的子进程，也可能是别处起的（命令行、上一次界面留下的）。
         """
         with self._lock:
-            self.user_paused = False
             conn = self._open_conn()
             try:
-                self._stop_watch.tick(conn)
                 db = Database(conn)
+                if expected_round_id is not None:
+                    # Confirmation binds even an absent target. Serialize its final
+                    # identity check and terminal write against CLI publications.
+                    if not self._lock_abort_confirmation(conn, expected_target):
+                        return {"ok": False, "error": "采集目标已变化，请重新确认中止。"}
+                status = self._stop_watch.status
+                if status.phase is not stop_request.StopPhase.IDLE:
+                    # Promotion is authorized for the original frozen target only,
+                    # including when that process has exited and cleanup remains.
+                    if (status.round_id is None or (expected_round_id is not None and
+                            (status.target != expected_target
+                             or status.round_id != expected_round_id))):
+                        return {"ok": False, "error": "停止目标已变化，请重新确认。"}
+                    settled = rounds.finish_if_open(
+                        db, rounds.load(db, status.round_id), TerminalReason.ABANDONED,
+                        note="GUI 人工中止（放弃）")
+                    self.user_paused = False
+                    self._stop_watch.begin(conn, stop_request.StopCommand(
+                        stop_request.StopKind.ABORT, status.target, status.round_id))
+                    return {"ok": True, "round_id": settled.id,
+                            "reason": settled.reason.value,
+                            "stopping": self._stop_watch.state}
+                self._stop_watch.tick(conn)
                 # 这一处清理不是卫生，是语义：中止压过暂停——留下的暂停请求会让
                 # 采集进程把这次停止认领成「暂停」，日志与店铺备注就写错了原因。
                 identity = self.current_crawler(conn)
-                if expected_target is not None and (
+                if expected_round_id is not None and (
                         stop_request.StopTarget.of(identity) != expected_target
-                        or identity.round_id != expected_round_id):
+                        or (identity is not None and identity.round_id != expected_round_id)):
                     return {"ok": False, "error": "采集目标已变化，请重新确认关闭。"}
                 if self.round_id is None and identity is None:
                     return {"ok": True}  # 没起过任务、也没有采集在跑：不必连库
@@ -697,9 +1052,12 @@ class Api:
                     return {"ok": False, "error": "暂时无法确认停止目标，请稍后重试。",
                             "retryable": True}
                 rid = self._round_to_abandon(db, identity)
+                if expected_round_id is not None and rid != expected_round_id:
+                    return {"ok": False, "error": "轮次已变化，请重新确认中止。"}
                 if rid is not None:
                     rounds.finish_if_open(db, rounds.load(db, rid), TerminalReason.ABANDONED,
                                           note="GUI 人工中止（放弃）")
+                self.user_paused = False
                 if identity is None:
                     return {"ok": True, "round_id": rid}   # 采集进程已经不在了
                 # 同一条身份行只读这一次：它是「正在跑的是谁」，也是这次停止的目标。
@@ -716,6 +1074,8 @@ class Api:
                             "retryable": True, "code": str(exc)}
                 log.info("中止：轮次 #%s 已收尾为人工放弃，等采集进程自己停下。", rid)
                 return {"ok": True, "round_id": rid, "stopping": self._stop_watch.state}
+            except (sqlite3.Error, RuntimeError, ValueError) as exc:
+                return {"ok": False, "error": f"中止或收尾尚未完成：{exc}", "retryable": True}
             finally:
                 conn.close()
 
@@ -725,6 +1085,7 @@ class Api:
         with self._lock:
             conn = self._open_conn()
             try:
+                self._consume_resume_ack(Database(conn))
                 status = self._stop_watch.status
                 promotion_error = None
                 if (status.kind is stop_request.StopKind.PAUSE
@@ -799,6 +1160,8 @@ class Api:
             if current.kind == "paused":
                 conn = self._open_conn()
                 try:
+                    if not self._lock_abort_confirmation(conn, current.target):
+                        return {"ok": False, "error": "采集目标已变化，请重新确认关闭。"}
                     db = Database(conn)
                     rounds.finish_if_open(db, rounds.load(db, expected.round_id),
                                           TerminalReason.ABANDONED,
@@ -1026,7 +1389,11 @@ def main() -> int:
         _announce_already_open()
         return 0
     try:
-        api = Api()
+        try:
+            api = Api()
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            _notify(f"配置错误，不能打开采集界面：{exc}\n请修正本机配置后重新打开。")
+            return 2
         _configure_gui_logging(api.cfg)
         # 窗口等「开轮前准备」落定再建（ADR-0035）：开始页画出来时默认勾选就已经是
         # 本机份额那份（份额里今天已采够的默认不勾，票据 17）。等待上限 30 秒；等不到

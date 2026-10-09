@@ -85,6 +85,8 @@ _click_text_in_frames = listing.click_text_in_frames
 
 def open_session(cfg: Config, *, publish_browser=None):
     global _session
+    from .dedicated_browser import verify_gui_settings
+    verify_gui_settings(cfg)
     _clear_pending_before_open()
     from playwright.sync_api import sync_playwright
 
@@ -137,6 +139,13 @@ def open_session(cfg: Config, *, publish_browser=None):
             raise RuntimeError(
                 f"无法连接浏览器调试端口 {resources.port}（{last_exc}）")
 
+        if getattr(cfg, 'gui_browser_settings', None) is not None:
+            state, pid, proof = _browser_publication(resources)
+            if state != 'OWNED':
+                resources.br = None
+                # No context/page/navigation on a redirected or unknown instance.
+                raise RuntimeError('浏览器创建归属无法核实，拒绝采集，不接管已有实例。')
+
         stage = "context"
         if not resources.br.contexts:
             raise RuntimeError("浏览器没有可复用的默认 context")
@@ -156,12 +165,15 @@ def open_session(cfg: Config, *, publish_browser=None):
         return resources.pw, resources.br, resources.page, resources.ctx
     except BaseException:
         log.warning("浏览器会话建立失败（阶段 %s，端口 %s）。", stage, resources.port)
-        _cleanup(resources)
+        clean = _cleanup(resources)
         if publish_browser is not None and not resources.publication_failed:
+            # Only exact resource cleanup proves that this invocation owes no
+            # browser cleanup. A failed/unknown cleanup must remain blocked.
+            state = "CLOSED" if clean else "UNKNOWN"
             try:
-                publish_browser("UNKNOWN", resources.port, None, None)
+                publish_browser(state, None if clean else resources.port, None, None)
             except Exception as exc:  # noqa: BLE001 - preserve the establishment error
-                log.warning("发布浏览器 UNKNOWN 状态失败：%s", exc)
+                log.warning("发布浏览器 %s 状态失败：%s", state, exc)
         _release_if_clean(resources)
         raise
 
@@ -339,4 +351,4 @@ def navigate_detail(page, product_url: str, emit=None) -> OpenedDetail:
         m = re.search(r"/(?:offer|item)/(\d+)\.html", product_url)
         emit("detail_nav", offer_id=m.group(1) if m else None, phase="detail")
     page.goto(product_url, wait_until="domcontentloaded")
-    return OpenedDetail(page)
+    return OpenedDetail(page, target_url=product_url)

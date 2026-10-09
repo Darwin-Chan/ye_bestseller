@@ -2,6 +2,7 @@ import dataclasses
 import inspect
 import threading
 import unittest
+from helpers import readable_mock_page
 from unittest.mock import MagicMock, patch
 
 from playwright.sync_api import Error as PlaywrightError
@@ -48,7 +49,7 @@ class DetailVisitTests(unittest.TestCase):
         )
 
     def test_verification_html_is_not_observed_before_the_page_becomes_readable(self):
-        page = MagicMock()
+        page = readable_mock_page()
         page.url = PRODUCT_URL
         page.content.side_effect = ["<html>登录墙</html>", DETAIL_HTML]
 
@@ -100,7 +101,7 @@ class DetailVisitTests(unittest.TestCase):
                     )
                 self.assertIs(raised.exception, error)
 
-            page = MagicMock()
+            page = readable_mock_page()
             page.url = PRODUCT_URL
             with patch.object(detail_visit, "ready_detail_page",
                               side_effect=error):
@@ -112,7 +113,7 @@ class DetailVisitTests(unittest.TestCase):
                         )
                     self.assertIs(raised.exception, error)
 
-            page = MagicMock()
+            page = readable_mock_page()
             page.url = PRODUCT_URL
             page.content.side_effect = error
             with patch.object(detail_visit, "ready_detail_page", return_value=False), \
@@ -153,7 +154,7 @@ class DetailVisitTests(unittest.TestCase):
 
     def test_guard_browser_io_becomes_a_read_failed_visit(self):
         error = PlaywrightError("guard 读取失败")
-        page = MagicMock()
+        page = readable_mock_page()
         page.url = PRODUCT_URL
         with patch.object(detail_visit, "ready_detail_page", side_effect=error):
             result = self.begin(page)
@@ -163,7 +164,7 @@ class DetailVisitTests(unittest.TestCase):
         self.assertEqual(result.observation.kind, detail.FailureKind.READ)
 
     def test_guard_program_error_is_not_masqueraded_as_read_failure(self):
-        page = MagicMock()
+        page = readable_mock_page()
         page.url = PRODUCT_URL
         with patch.object(detail_visit, "ready_detail_page",
                           side_effect=TypeError("guard bug")):
@@ -171,7 +172,7 @@ class DetailVisitTests(unittest.TestCase):
                 self.begin(page)
 
     def test_confirmed_deny_with_a_failed_raw_read_keeps_an_empty_raw_page(self):
-        page = MagicMock()
+        page = readable_mock_page()
         page.url = "https://s.1688.com/bsop-punish?x=1"
         page.content.side_effect = PlaywrightError("页面已关闭")
 
@@ -182,7 +183,7 @@ class DetailVisitTests(unittest.TestCase):
         self.assertEqual(result.raw_html, "")
 
     def test_late_deny_is_returned_after_guard_records_it(self):
-        page = MagicMock()
+        page = readable_mock_page()
         page.url = PRODUCT_URL
         page.content.return_value = "<html>deny</html>"
         guard_calls = []
@@ -202,7 +203,7 @@ class DetailVisitTests(unittest.TestCase):
         self.assertEqual(len(guard_calls), 2)
 
     def test_late_intervention_reenters_guard_and_reads_after_resolution(self):
-        page = MagicMock()
+        page = readable_mock_page()
         page.url = PRODUCT_URL
         page.content.side_effect = ["<html>仍在渲染</html>", DETAIL_HTML]
         guard_calls = []
@@ -230,7 +231,7 @@ class DetailVisitTests(unittest.TestCase):
         那次读取会走超时出口、拿到不可读的正文，本用例判红。
         """
         clock = ScriptedClock([0.0, 1.0, 1.5, 5.0, 12.0, 12.5, 12.8, 12.9])
-        page = MagicMock()
+        page = readable_mock_page()
         page.url = PRODUCT_URL
         read_moments = []
 
@@ -259,7 +260,7 @@ class DetailVisitTests(unittest.TestCase):
         页面始终不可读 → `until` 超时返回 `None` → 出口再读一次当前页面、按现状翻译。
         窗口打小到 0.05 秒（test_listing 的先例），配合 `sleep` 打桩，用例不真等。
         """
-        page = MagicMock()
+        page = readable_mock_page()
         page.url = PRODUCT_URL
         page.content.return_value = "<html>仍在渲染</html>"
 
@@ -283,7 +284,7 @@ class DetailVisitTests(unittest.TestCase):
         StopRequested 抛出来。异常穿过 observe，而不是被翻译成一次读取失败——失败率
         不为「没真的读完的那次」记账（ADR-0009；spec §5 的那处行为变化）。
         """
-        page = MagicMock()
+        page = readable_mock_page()
         page.url = PRODUCT_URL
         page.content.return_value = "<html>仍在渲染</html>"     # 一直不可读 → 一直在等
         checks = []
@@ -307,7 +308,7 @@ class DetailVisitTests(unittest.TestCase):
         self.assertEqual(page.content.call_count, 1, "被认领之前已经探测过一轮")
 
     def test_observe_is_a_single_use_capability(self):
-        page = MagicMock()
+        page = readable_mock_page()
         page.url = PRODUCT_URL
         page.content.return_value = DETAIL_HTML
 

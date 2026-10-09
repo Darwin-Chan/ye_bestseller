@@ -123,14 +123,11 @@ class InterventionEvidenceTests(unittest.TestCase):
     # 正文与验证容器都读不到（没有 locator）——只剩地址一条证据
     PAGE = SimpleNamespace(url="https://detail.1688.com/offer/11.html")
 
-    def test_a_normal_address_alone_is_not_an_intervention(self):
-        """地址正常、正文与验证容器都读不到的页面：判据给 None。
-
-        这是 ADR-0020 记下的那个「响应里出现 punish 而后台地址正常」的场景，也是 ADR-0029
-        记的盲区所在：改前那个形参换不来别的返回值（差分核过），改后也没有第二条路认它。
-        所以本条钉的是「删掉等于行为不变」——盲区本身不在这里修。
-        """
-        self.assertIsNone(guard.intervention_kind(self.PAGE))
+    def test_a_normal_address_alone_is_unavailable_not_solved(self):
+        """A normal URL is not proof that failed DOM reads are usable."""
+        with self.assertRaises(guard.PageEvidenceUnavailable):
+            guard.intervention_kind(self.PAGE)
+        self.assertFalse(guard.resolved(self.PAGE))
 
     def test_the_judgment_admits_only_the_page(self):
         with self.assertRaises(TypeError):
@@ -175,7 +172,7 @@ class InterventionResolutionTests(unittest.TestCase):
                 self.assertIsNotNone(guard.intervention_kind(page))
                 self.assertFalse(guard.resolved(page))
 
-    def test_a_page_with_no_evidence_at_all_is_resolved(self):
+    def test_a_readable_business_page_without_intervention_is_resolved(self):
         page = FakePage(self.PRODUCT, body="这是一个正常的商品详情页")
 
         self.assertIsNone(guard.intervention_kind(page))

@@ -246,7 +246,7 @@ def prepare(page, url: str, cfg, human, *, describe: str, emit=None) -> None:
     if kind:
         wait_for_resolution(page, cfg.human_pause_minutes, emit=emit,
                             verification_type=vtype(kind),
-                            confirm_sec=cfg.intervention_confirmation_sec)
+                            confirm_sec=cfg.intervention_confirmation_sec, target_url=url)
     if not cards_ready and not wait_cards(page, min_count=1,
                                           describe=f"{describe}（验证后）商品卡片"):
         raise listing_load_failed(page, f"{describe}未加载商品卡片：{url}")

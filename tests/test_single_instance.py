@@ -2,6 +2,7 @@
 import os
 import subprocess
 import sys
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -67,7 +68,12 @@ class SingleInstanceTests(unittest.TestCase):
             holder.wait(timeout=10)
             holder.stdin.close()
             holder.stdout.close()
-        self.assertFalse(single_instance.is_held(name), "进程没了，锁要跟着没")
+        # wait() 的进程退出通知可能先于命名内核对象销毁；有限等待真实释放，
+        # 不把等待超时算成功，也不改变生产侧的锁探测／新建门禁。
+        deadline = time.monotonic() + 2.0
+        while single_instance.is_held(name) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertFalse(single_instance.is_held(name), "进程退出后命名锁必须在截止时间内释放")
 
 
 if __name__ == "__main__":

@@ -85,12 +85,14 @@ VERDICT = {EXIT_CLEAN: "干净", EXIT_NEEDS_LOOK: "有需要人看一眼的地�
 
 # 轮次终态 → 报告里那句人话（spec §8 的样例：「当天采集在详情预算耗尽后中止」）。
 _REASON_GLOSS = {
+    "IDENTITY_VERIFICATION_TIMEOUT": "当天采集因身份验证等待超时自动中止，已保存数据保留",
     "COMPLETED": "当天采集完成了，但这家店没有数据",
     "DETAIL_BUDGET_EXHAUSTED": "当天采集在详情预算耗尽后中止",
     "FAIL_RATE_EXCEEDED": "当天采集因失败率超限中止",
     "DAY_BOUNDARY": "当天采集撞上当日截止线中止",
     "DENY_EXCEEDED": "当天采集因被拒次数超限中止",
     "ABANDONED": "当天采集被中止（放弃）",
+    "STARTUP_FAILED": "当天采集启动或初始化时失败，未进入采集",
     "LEGACY_UNKNOWN": "当天采集的终态不详（旧数据）",
 }
 
