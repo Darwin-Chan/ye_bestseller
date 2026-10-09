@@ -719,7 +719,8 @@ function groupMeta(group) {
 function rankSummary(group, index) {
     const sku=currentSnapshot.member_kind==='sku';
     const representative=sku?skuRepresentative(group):groupProducts(group)[0];
-    return `<div class="product"><b>${String(index+1).padStart(2,'0')}</b>${rankingPhoto(representative)}<div class="product-title"><b>${esc(representative.display_name||representative.product_name||representative.offer_id)}</b>${sourceIcon(representative)}${sku?`<small class="image-source">${esc(skuImageSource(representative))}</small>${skuCode(representative)}`:""}</div></div><span class="number">${group.sales} <small>${sku?"组销量":"销量"}</small></span>`;
+    const heading=sku?`<div>${skuHeading(representative)}</div>`:`<div class="product-title"><b>${esc(representative.product_name||representative.offer_id)}</b>${sourceIcon(representative)}</div>`;
+    return `<div class="product"><b>${String(index+1).padStart(2,'0')}</b>${rankingPhoto(representative)}${heading}</div><span class="number">${group.sales} <small>${sku?"组销量":"销量"}</small></span>`;
 }
 function rankBody(group) {
     return `${currentSnapshot.member_kind==='sku'?`<p class="muted">${skuUnitsNote()}</p>`:""}${chart(group.points)}<p class="muted">${groupMeta(group)}</p><div class="bar tree-heading"><h3>同款构成</h3><button class="subtle-button expand-all" onclick="toggleSku(this)">展开全部</button></div>${treeHTML(group)}`;
