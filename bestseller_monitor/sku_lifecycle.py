@@ -42,6 +42,10 @@ class ModelWork:
         self.tasks[key] = task
         return key
 
+    def failure_reason(self, branch, context):
+        task = self.tasks[digest(dict(branch=branch, context=context))]
+        return task.get("error", task["reason"])
+
     def execute(self, branch, context, members, rule, cache_key, call):
         cfg = self.config
         signature = digest({**signature_parts(cfg), "rule": rule}) if cfg and cfg.mode != "disabled" else None
@@ -103,6 +107,7 @@ class ModelWork:
         tasks = list(self.tasks.values())
         unfinished_members = {member for t in tasks if not t["completed"] for member in t["members"]}
         self.snapshot["matching"] = dict(
+            recheckable=sum(t["state"] == "missing_evidence" for t in tasks),
             unfinished_members=len(unfinished_members),
             completed_members=len(self.snapshot["members"]) - len(unfinished_members),
             completed=sum(t["completed"] for t in tasks), unfinished=sum(not t["completed"] for t in tasks),

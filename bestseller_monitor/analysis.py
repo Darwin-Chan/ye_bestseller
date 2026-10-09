@@ -385,26 +385,7 @@ class AnalysisService:
             if snapshot.get('member_kind') == 'sku':
                 # SKU decisions live only in the versioned SKU draft. Never read
                 # the legacy product ledger or copy a product decision to a SKU.
-                latest = self.store.latest()
-                saved_sku_payload = None
-                if latest:
-                    stored = self.store.read(latest['id'])
-                    if stored and stored.payload.get('member_kind') == 'sku':
-                        saved_sku_payload = stored.payload
-                        apply_saved_sku(snapshot, stored.payload)
-                        snapshot["model_tasks"] = copy.deepcopy(stored.payload.get("model_tasks", {}))
-                        snapshot["matching_options"] = copy.deepcopy(stored.payload.get("matching_options", {}))
-                apply_sku_codes(snapshot)
-                from .sku_matching import apply as apply_sku_images
-                def reload_manual():
-                    nonlocal saved_sku_payload
-                    latest = self.store.latest()
-                    stored = self.store.read(latest['id']) if latest else None
-                    if stored and stored.payload.get('member_kind') == 'sku' and stored.payload != saved_sku_payload:
-                        saved_sku_payload = stored.payload
-                        apply_saved_sku(snapshot, stored.payload)
-                        apply_sku_codes(snapshot)
-                apply_sku_images(snapshot, self.config.matching, stop=progress.stop_requested, reload_manual=reload_manual)
+                self._apply_sku_model_work(snapshot, None, self._latest_sku_payload, progress.stop_requested)
                 with self._lock:
                     self._snapshots[snapshot['id']] = snapshot
                 progress.update(products=len(snapshot['members']),
@@ -506,6 +487,32 @@ class AnalysisService:
     def _guard_sku_operation(self, snapshot):
         if snapshot.get('member_kind') != 'sku':
             raise ValueError('该操作仅适用于 SKU 分析')
+    def _latest_sku_payload(self):
+        latest = self.store.latest()
+        stored = self.store.read(latest['id']) if latest else None
+        return stored.payload if stored and stored.payload.get('member_kind') == 'sku' else None
+
+    def _apply_sku_model_work(self, snapshot, previous, read_saved, stop):
+        """Share replay/revalidation, preserving latest-vs-specific read semantics."""
+        saved_payload = read_saved()
+        if previous is None or not previous.get('dirty', True):
+            previous = saved_payload or previous
+        if previous:
+            apply_saved_sku(snapshot, previous)
+            snapshot['model_tasks'] = copy.deepcopy(previous.get('model_tasks', {}))
+            snapshot['matching_options'] = copy.deepcopy(previous.get('matching_options', {}))
+        apply_sku_codes(snapshot)
+        def reload_manual():
+            nonlocal saved_payload
+            latest = read_saved()
+            if latest and latest.get('member_kind') == 'sku' and latest != saved_payload:
+                saved_payload = latest
+                apply_saved_sku(snapshot, latest)
+                apply_sku_codes(snapshot)
+        from .sku_matching import apply as apply_sku_images
+        apply_sku_images(snapshot, self.config.matching, stop=stop, reload_manual=reload_manual,
+                         previous_snapshot=previous)
+
     def retry_matching(self, analysis_id, progress=None, stop=None):
         with self._lock:
             if analysis_id not in self._snapshots:
@@ -515,21 +522,10 @@ class AnalysisService:
                 # Re-freeze current selected historical evidence, then replay only
                 # current manual constraints; automatic results must revalidate.
                 current = self._freeze(analysis_id, snapshot['start'], snapshot['end'])
-                apply_saved_sku(current, snapshot)
-                current['model_tasks'] = copy.deepcopy(snapshot.get('model_tasks', {}))
-                current['matching_options'] = copy.deepcopy(snapshot.get('matching_options', {}))
-                apply_sku_codes(current)
-                from .sku_matching import apply as apply_sku_images
-                stored = self.store.read(analysis_id)
-                saved_payload = stored.payload if stored else None
-                def reload_manual():
-                    nonlocal saved_payload
-                    latest = self.store.read(analysis_id)
-                    if latest and latest.payload != saved_payload:
-                        saved_payload = latest.payload
-                        apply_saved_sku(current, latest.payload)
-                        apply_sku_codes(current)
-                apply_sku_images(current, self.config.matching, stop=stop, reload_manual=reload_manual)
+                def read_saved():
+                    stored = self.store.read(analysis_id)
+                    return stored.payload if stored else None
+                self._apply_sku_model_work(current, snapshot, read_saved, stop)
                 current['dirty'] = True
                 self._snapshots[analysis_id] = current
                 return copy.deepcopy(current)

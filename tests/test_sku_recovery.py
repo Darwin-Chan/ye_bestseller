@@ -341,6 +341,42 @@ class SkuRecoveryTests(unittest.TestCase):
         restored.retry_matching(first["id"])
         self.assertEqual(3, len(self.recommend_calls))
 
+    def test_existing_valid_membership_survives_new_candidate_failure(self):
+        a = self.seed("#A#", image=product_picture("red"))
+        b = self.seed("无码", shop="B01", image=product_picture("blue"))
+        first = self.analyze()
+        self.service.save_draft(first["id"])
+        self.seed("#C#", shop="C01", image=product_picture("green"))
+        def fail(content):
+            raise ModelFailure("新候选请求失败")
+        self.result = fail
+        final = self.service.retry_matching(first["id"])
+        self.assertEqual(self.group_for(first, b)["id"], self.group_for(final, b)["id"])
+        self.assertEqual(2, len(self.calls))
+        self.assertEqual(1, final["matching"]["reasons"]["failed"])
+        self.assertIn("调用失败", self.evidence(final, b)["matching_note"])
+        self.seed("改变后的无码", shop="B01", image=product_picture("purple"))
+        changed = self.service.retry_matching(first["id"])
+        self.assertNotEqual(self.group_for(changed, a)["id"], self.group_for(changed, b)["id"])
+
+    def test_existing_valid_membership_survives_missing_config_and_stopped_new_work(self):
+        from dataclasses import replace
+        a = self.seed("#A#", image=product_picture("red"))
+        b = self.seed("无码", shop="B01", image=product_picture("blue"))
+        first = self.analyze()
+        self.service.save_draft(first["id"])
+        self.seed("#C#", shop="C01", image=product_picture("green"))
+        config = self.service.config
+        self.service.config = replace(config, matching=None)
+        missing = self.service.retry_matching(first["id"])
+        self.assertEqual(self.group_for(first, b)["id"], self.group_for(missing, b)["id"])
+        self.assertEqual(1, missing["matching"]["reasons"]["needs_config"])
+        self.service.config = config
+        stopped = self.service.retry_matching(first["id"], stop=lambda: True)
+        self.assertEqual(self.group_for(first, b)["id"], self.group_for(stopped, b)["id"])
+        self.assertEqual(1, stopped["matching"]["reasons"]["stopped"])
+        self.assertEqual(1, len(self.calls))
+
     def test_retry_recommendation_rechecks_manual_save_during_external_call(self):
         a, b, c, d, _ = self.split_code_anchors()
         def fail(context):
@@ -432,7 +468,9 @@ class SkuRecoveryBrowserTests(unittest.TestCase):
         self.page.locator("#runMatching").click()
         expect(self.page.locator("#matchingStatus")).to_contain_text("已完成 1")
         expect(self.page.locator("#matchingStatus")).to_contain_text("缺少图片证据")
-        expect(self.page.locator("#runMatching")).to_be_disabled()
+        expect(self.page.locator("#runMatching")).to_be_enabled()
+        self.page.locator("#runMatching").click()
+        expect(self.page.locator("#matchingStatus")).to_contain_text("缺少图片证据")
         self.assertEqual(1, len(self.calls))
         self.retain("config-restored-legal-pending")
 
@@ -466,3 +504,20 @@ class SkuRecoveryBrowserTests(unittest.TestCase):
         self.assertEqual(3, len(self.recommend_calls))
         expect(self.page.locator("#runMatching")).to_be_disabled()
         self.retain("recommendation-resumed-uncertain")
+
+    def test_page_missing_picture_only_can_recheck_after_evidence_restored(self):
+        from playwright.sync_api import expect
+        self.seed("#A#", image=product_picture("red"))
+        self.seed("无码", shop="B01")
+        self.begin()
+        expect(self.page.locator("#matchingStatus")).to_contain_text("缺少图片证据")
+        self.page.locator("#saveDraft").click()
+        expect(self.page.locator("#saveStatus")).to_contain_text("已保存")
+        self.seed("无码", shop="B01", image=product_picture("blue"))
+        self.page.reload()
+        expect(self.page.locator("#runMatching")).to_be_enabled()
+        self.page.locator("#runMatching").click()
+        expect(self.page.locator("#matchingStatus")).to_contain_text("未完成 0")
+        self.assertEqual(1, len(self.calls))
+        expect(self.page.locator("#snapshotInfo")).to_contain_text("同款组：1")
+        self.retain("picture-restored-original-draft")

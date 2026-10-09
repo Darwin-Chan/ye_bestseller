@@ -412,7 +412,7 @@ function skuModelWork(m) {
 function skuMatchingLine(summary) {
     const states=(summary.states||[]).filter(s=>s.count).map(s=>`${s.reason} ${s.count}`).join('；');
     return `SKU 模型任务：已完成 ${summary.completed||0}，未完成 ${summary.unfinished||0}；${states}；成员已完成 ${summary.completed_members||0}，未完成 ${summary.unfinished_members||0}；本次业务调用 ${summary.requested||0}（不含图像核验），复用 ${summary.cached||0}`
-        + ((summary.retryable||0)>0?'；只补未完成项。需要配置时请修改分析配置、保存草稿并重启，再继续选择性重试。':'；没有可重试的未完成调用。')
+        + ((summary.retryable||0)>0?'；只补未完成项。需要配置时请修改分析配置、保存草稿并重启，再继续选择性重试。':summary.recheckable>0?'；缺证据项可在补齐后重新检查，不重复调用已完成结果。':'；没有可重试的未完成调用。')
         + ` ${(currentSnapshot.limitations||[]).join('；')}`;
 }
 function renderSkuMember(m,g){
@@ -644,9 +644,9 @@ function renderMatching() {
     if(currentSnapshot?.member_kind==='sku'){
         const summary=currentSnapshot.matching||{};
         $('runMatching').textContent='选择性重试未完成项';
-        $('runMatching').disabled=!(summary.retryable>0)||busy;
+        $('runMatching').disabled=!(summary.retryable>0 || summary.recheckable>0)||busy;
         $('matchingStatus').textContent=skuMatchingLine(summary);
-        $('matchControl').title=summary.retryable>0?'重新检查当前证据和人工约束，只补未完成调用':'有效已完成结果不再调用；缺证据需先补齐';
+        $('matchControl').title=summary.retryable>0 || summary.recheckable>0?'重新检查当前证据和人工约束，只补未完成调用':'有效已完成结果不再调用；缺证据需先补齐';
         return;
     }
     $('runMatching').textContent='模型匹配同款';
