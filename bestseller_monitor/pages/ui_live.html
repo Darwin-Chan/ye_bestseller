@@ -147,6 +147,12 @@
         <button class="btn danger" id="abortBtn">中止本轮（放弃）</button>
       </div>
     </div>
+    <div class="card" id="runLoginCard">
+      <b>暂停后处理登录</b>
+      <p class="muted" style="margin:8px 0 0">需要手动登录或处理验证时，可在这里打开程序专用 Edge。请先自行关闭该窗口，确认专用目录已释放，再点「继续」——关闭窗口不会自动继续本轮。</p>
+      <div style="margin-top:12px"><button class="btn ghost" id="runLoginBrowserBtn">打开专用 Edge / 登录 1688</button></div>
+      <p class="muted" id="runBrowserFacts" style="margin:10px 0 0"></p>
+    </div>
   </div>
 
   <!-- 结果 -->
@@ -498,15 +504,30 @@
       $("rPaused").style.display = (!stopping && d.can_resume) ? "block" : "none";
       $("rPaused").textContent = d.resume_error
         ? "继续启动未成功：" + d.resume_error + "。原轮暂停资格保留，请明确点击继续重试。"
-        : "已暂停（轮次保留为「进行中」，点「继续」接着抓取本轮剩余任务）。";
+        : d.continue_gate
+          ? "已暂停（轮次保留为「进行中」）。继续前请先关闭专用 Edge 并确认目录已释放：" + d.continue_gate
+          : "已暂停（轮次保留为「进行中」，点「继续」接着抓取本轮剩余任务）。";
+      // 暂停后手动处理登录（票 05）：明确暂停且收尾完成后同一入口可用；采集、
+      // 验证等待、停止或收尾中禁用并说明。目录没释放时「继续」也不给点。
+      $("runLoginCard").style.display = "block";
+      if (d.browser) {
+        let facts = "配置：" + d.browser.source + "；专用目录：" + d.browser.profile + "；" + d.browser.message;
+        facts += d.login_refusal ? "（" + d.login_refusal + "）" : " " + d.browser.retry;
+        $("runBrowserFacts").textContent = facts;
+        $("runLoginBrowserBtn").disabled = !d.can_open_login;
+      } else {
+        $("runLoginBrowserBtn").disabled = true;
+      }
       // 暂停态显示“继续”，运行态显示“暂停”；停止途中两个都不给点。
       $("resumeBtn").style.display = (!stopping && d.can_resume) ? "" : "none";
+      $("resumeBtn").disabled = !!d.continue_gate;
       $("pauseBtn").style.display = (!stopping && !d.can_resume) ? "" : "none";
       $("changeScopeBtn").disabled = !d.can_abort;
       $("abortBtn").disabled = !d.can_abort;
     } else {
       $("resumeBtn").style.display = "none";
       $("pauseBtn").style.display = "none";
+      $("runLoginCard").style.display = "none";
       $("changeScopeBtn").disabled = true;
       $("abortBtn").disabled = true;
       $("rProgressLine").textContent = d.running ? "抓取进程正在启动…" : "本轮已结束，正在加载结果…";
@@ -637,6 +658,13 @@
       if (act) { await act(); }   // 只执行弹窗冻结的那件事，不回退到当前目标
     };
     $("resumeBtn").onclick = resumeRun;
+    $("runLoginBrowserBtn").onclick = async () => {
+      // 与开始页同一服务、同一条 API：重复点击不另开，占了就引导用现有窗口。
+      $("runLoginBrowserBtn").disabled = true;
+      const r = await callApi("open_login_browser");
+      if (r && !r.ok) showNotice(r.error);
+      await tickRun();
+    };
     $("backBtn").onclick = () => switchTab("start");
     $("selAllBtn").onclick = () => setAllShops(true);
     $("selNoneBtn").onclick = () => setAllShops(false);

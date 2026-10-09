@@ -229,7 +229,9 @@ class ManualEdgeTests(unittest.TestCase):
         self.assertEqual(len(self.os.starts),0)
         proc.poll.return_value = 0
         self.api.get_run()
-        self.assertFalse(self.api.open_login_browser()['ok'])  # ticket 05 deliberately absent
+        # 票 05 起，明确暂停且停止收尾完成后，过程页的手动入口与开始页同一服务放行；
+        # 采集与停止/收尾中的拒绝（上面两条）仍是这条门禁的保护意图。
+        self.assertTrue(self.api.open_login_browser()['ok'])
     def test_moved_root_and_changed_cwd_use_one_resolved_contract(self):
         import os
         from bestseller_monitor.dedicated_browser import Settings

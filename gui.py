@@ -459,6 +459,12 @@ class Api:
                 conn.close()
 
     def _login_refusal(self, conn):
+        """同一专用浏览器服务的入口门禁：开始页与明确暂停后的过程页共用这一条。
+
+        停止/收尾未完成、采集或身份验证等待进行中一律拒绝。本界面明确暂停且停止
+        收尾已完成（停止窗口回到 idle、没有采集进程）时，过程页入口照常放行——
+        这是票 05 接入的那一格。前端禁用只是引导，真正的授权在这里。
+        """
         if self._closing_requested:
             return CLOSING_REFUSAL
         if is_merge_only(self.cfg):
@@ -467,8 +473,6 @@ class Api:
             return "停止或收尾仍在进行，请稍后刷新重试。"
         if self.current_crawler(conn) is not None:
             return "采集或身份验证等待中，不能另开手动浏览器。"
-        if self.user_paused:
-            return "本入口仅用于开始页；暂停后的登录入口尚未开放。"
         return None
 
     def open_login_browser(self):
@@ -520,6 +524,20 @@ class Api:
                 if view.get("has_round"):
                     # 轮次由采集子进程创建，界面在这里随轮询认领它。
                     self.round_id = view["round_id"]
+                # 过程页也暴露手动浏览器事实与继续门禁（票 05）：明确暂停、收尾完成
+                # 后同一入口可用；采集/验证等待/停止收尾中禁用并给出原因。目录没
+                # 释放或核不实时，「继续」也不给点。
+                refusal = self._login_refusal(conn)
+                browser = self._browser.status()
+                browser["can_open"] = (
+                    refusal is None
+                    and browser["state"] not in ("failed", "unknown", "port_busy", "opening"))
+                view["browser"] = browser
+                view["can_open_login"] = browser["can_open"]
+                if refusal is not None:
+                    view["login_refusal"] = refusal
+                if view.get("can_resume"):
+                    view["continue_gate"] = self._browser.start_error()
                 if self.cfg.local_trial:
                     view["awaiting_resume"] = view.get("can_resume", False)
                 return self._collection_payload(view)
@@ -667,6 +685,12 @@ class Api:
                 resume_intent = rounds.plan_resume(db, rid, now=self._now())
             finally:
                 conn.close()
+            # 续跑与新建同一道浏览器门禁（票 05）：手动窗口没关、专用目录仍被
+            # 占用或释不释放核不实，都不许继续——否则会借错误登录态或撞同一目录。
+            # 关键配置在这次启动后变化也一样拒绝，不静默换目录。
+            reason = self._browser.start_error()
+            if reason:
+                return {"ok": False, "error": reason, "retryable": True}
             self.round_id = rid
             try:
                 # 子进程持锁复核预期轮次与完整快照，不采用开始页默认子集。
