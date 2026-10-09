@@ -24,12 +24,14 @@ class MatchingStopTests(unittest.TestCase):
     seed = editing.GroupEditingTests.seed
     model = mask_fixture.MatchingMaskTests.model
     enter = mask_fixture.MatchingMaskTests.enter
+    wait_judged = mask_fixture.MatchingMaskTests.wait_judged
 
     def stopped_run(self):
         """跑起来、判完两对就点停止，返回（遮罩, 假传输）——各用例的公共前置。"""
         transport = self.model(pass_first=2)
         self.seed(4)
         mask = self.enter()
+        self.wait_judged(2)                    # 先等服务读数判完两对，再看遮罩文本（慢一个轮询周期）
         expect(mask.locator('#maskMain')).to_have_text('已完成 2 / 6 对')
         expect(mask.locator('#maskStopNote')).to_be_hidden()   # 还没停：这两句先不说
         mask.get_by_role('button', name='停止匹配').click()
