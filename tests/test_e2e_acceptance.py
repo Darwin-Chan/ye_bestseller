@@ -24,6 +24,7 @@ from playwright.sync_api import expect
 from helpers import new_round
 from test_matching import ModelTransport, picture
 import test_analysis as fixture
+from snapshot_sync import sync_after_save, wait_initial_presentation
 from bestseller_monitor.analysis import AnalysisService
 from bestseller_monitor.matching import MatchingConfig, MatchingService
 
@@ -344,7 +345,10 @@ class EndToEndAcceptanceTests(unittest.TestCase):
 
     def test_new_range_reuses_confirmation_in_the_browser_and_recomputes_sales(self):
         """换到更长的日期区间：页面按新数据重算销量，适用的已保存人工确认自动复用，
-        不必重新确认（A37 的组合证据；服务层边界由 test_analysis_reuse 覆盖）。"""
+        不必重新确认（A37 的组合证据；服务层边界由 test_analysis_reuse 覆盖）。
+
+        后台并组、确认、保存后经 S/R/U 同步（issue 07）才继续业务断言；短/长区间与
+        旧分析的销量按字面值核对，原断言一条不少。"""
         # 名字不同，模型不会自动并组；同款关系留给人工确认。
         self.use_model(names=['同款杯1', '异名杯'])
         self.drop_fixture_product()
@@ -363,14 +367,24 @@ class EndToEndAcceptanceTests(unittest.TestCase):
                     collected_at=f'{day}T04:00:00+00:00', attempt=1)
 
         sid = self.dates()
+        # 稳定时序（issue 07）：等页面真正呈现初始未确认分组，不等 hash 即继续。
+        self.assertEqual(wait_initial_presentation(self.page, products=2, groups=2, pending=2), sid)
         snapshot = self.service.get(sid)
         pair = self.group_with(snapshot, 'A011')
         other = self.group_with(snapshot, 'A021')
         self.assertNotEqual(pair['id'], other['id'])
         self.service.edit_group(sid, 'move', other['id'], other['members'][0], pair['id'])
         self.service.confirm(sid, pair['id'])
-        self.service.save_draft(sid)
+        saved = self.service.save_draft(sid)
         first_sales = next(g for g in self.service.get(sid)['groups'] if g['id'] == pair['id'])['sales']
+
+        # 保存后同步（issue 07）：S 保存返回 → R 恰一次刷新读回 → U 页面呈现与落屏；没同步成不继续。
+        fetched = sync_after_save(self.page, sid, saved)
+        # 短区间数值核对（R 读回的页面快照）：两店各自 100→95，商品各 5、组 10。
+        first_products = {(p['shop_key'], p['offer_id']): p['sales'] for p in fetched['products']}
+        self.assertEqual(first_products[('A01', 'A011')], 5)
+        self.assertEqual(first_products[('A02', 'A021')], 5)
+        self.assertEqual(first_sales, 10)
 
         # 页面上换一个更长的区间：销量按新数据重算。
         # 这一组已确认、草稿也暂存过：这趟落屏由门禁定（票 06 起就是结果屏），回确认屏再换区间。
@@ -378,6 +392,8 @@ class EndToEndAcceptanceTests(unittest.TestCase):
         self.back_to_review()
         self.page.get_by_role('button', name='重新选择日期').click()
         second_sid = self.dates(end='2026-09-21')
+        # 新分析同样以真正呈现为就绪（spec §4）：2 商品、复用出的 1 组已确认、0 待确认。
+        self.assertEqual(wait_initial_presentation(self.page, products=2, groups=1, pending=0), second_sid)
         self.assertNotEqual(second_sid, sid)
         second = self.service.get(second_sid)
         reused = self.group_with(second, 'A011')
@@ -388,6 +404,10 @@ class EndToEndAcceptanceTests(unittest.TestCase):
         self.assertEqual(reused['sales'],
                          sum(sales[(m['shop_key'], m['offer_id'])] for m in reused['members']))
         self.assertNotEqual(reused['sales'], first_sales)
+        # 不是只验证与原来不同：长区间按字面值核对（5+20 与 5+30，组 60）。
+        self.assertEqual(sales[('A01', 'A011')], 25)
+        self.assertEqual(sales[('A02', 'A021')], 35)
+        self.assertEqual(reused['sales'], 60)
         # 旧分析仍保留自己的区间与销量，没被新分析改写。
         original = self.service.get(sid)
         self.assertEqual(original['end'], '2026-09-14')
@@ -399,6 +419,16 @@ class EndToEndAcceptanceTests(unittest.TestCase):
         expect(self.page.locator('#snapshotInfo')).to_contain_text('2 个商品')
         self.switch_tab('已确认')
         expect(self.page.locator('.group-choice')).to_have_count(1)
+        # 名单按身份核（AC14）：这一组就是那两件商品、销量是重算后的 60，而不是计数碰巧相同。
+        self.page.locator('.group-choice').first.click()
+        detail = self.page.locator('#groupDetail')
+        expect(detail).to_contain_text('2 个商品')
+        expect(detail).to_contain_text('同款杯1')
+        expect(detail).to_contain_text('异名杯')
+        expect(detail).to_contain_text('区间销量 25')
+        expect(detail).to_contain_text('区间销量 35')
+        expect(detail).to_contain_text('同款组销量 60')
+        expect(detail).to_contain_text('已确认')
 
     def test_draft_holding_all_four_states_survives_restart_and_source_changes(self):
         """一份草稿同时含已确认、待确认、排除与撤回，暂存后终止应用、再改源库存；

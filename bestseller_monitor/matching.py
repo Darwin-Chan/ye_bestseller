@@ -57,17 +57,30 @@ RULE_VERSION = 'physical-style-v1'
 _SIGNATURE_FIELDS = ('provider', 'model', 'vision_model', 'rule')
 
 
+def signature_parts_of(endpoint, model, vision_model=None):
+    """署名四件从模型三件推：字段组装唯一一处。
+
+    交换台那半（判断集收取的门禁与采纳口径）没有整份配置对象，也走这一口——
+    「本机当前契约署名」的推导与分析消费认的是同一份口径。
+    """
+    return {'provider': urlsplit(endpoint).hostname, 'model': model,
+            'vision_model': vision_model, 'rule': RULE_VERSION}
+
+
 def signature_parts(config):
     """本机当前配置的署名四件：与判断结果里写的四个字段同源。"""
-    return {'provider': urlsplit(config.model.endpoint).hostname,
-            'model': config.model.model,
-            'vision_model': config.vision.model if config.vision else None,
-            'rule': RULE_VERSION}
+    return signature_parts_of(config.model.endpoint, config.model.model,
+                              config.vision.model if config.vision else None)
 
 
 def signature_of(config):
     """本机配置的署名摘要：缓存命中与分组正例都按它认。"""
     return signature_of_result(signature_parts(config))
+
+
+def signature_of_model(endpoint, model, vision_model=None):
+    """模型三件的署名摘要（= `signature_of` 那份）：交换台按它认本机当前分析契约。"""
+    return signature_of_result(signature_parts_of(endpoint, model, vision_model))
 
 
 def signature_of_result(result):

@@ -1,5 +1,7 @@
 """测试共用件：建轮只走轮次模块这一条路；锁名字按用例隔离；判断账本的三样小件。"""
-from contextlib import contextmanager
+import gzip
+import sqlite3
+from contextlib import closing, contextmanager
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -33,6 +35,21 @@ def ledger_of(*, relations=(), standalone=(), excluded=()):
     return {"relations": list(relations),
             "standalone": [list(entry) for entry in standalone],
             "excluded": [list(pair) for pair in excluded]}
+
+
+def tamper_package(box, clone: Path, rel: str, mutate) -> None:
+    """把克隆工作区里那份已发布的包拆出来、`mutate(conn)` 改一处、重新压回并推送（真推送）。
+
+    给门禁用例造坏包/异格式包（`box` 是 `tests.git_repos.GitSandbox`，`clone` 是那条库的
+    克隆、`rel` 是包在该库里的相对路径）。改 meta 的包内容摘要不变（meta 不进摘要）、
+    改行内容的摘要会变——两种都按用例自己挑。
+    """
+    with tempfile.TemporaryDirectory(prefix="bestseller-tamper-") as tmp:
+        package = Path(tmp) / "tampered.db"
+        package.write_bytes(gzip.decompress((clone / rel).read_bytes()))
+        with closing(sqlite3.connect(package)) as conn, conn:
+            mutate(conn)
+        box.commit_push(clone, {rel: gzip.compress(package.read_bytes(), mtime=0)})
 
 # 采集配置替身存档原始页的地方（失败路径真会写文件；用例要断言就覆盖成本地 tmp）。
 _RAW_PAGE_DIR = Path(tempfile.gettempdir()) / "bestseller-test-raw"
@@ -103,6 +120,7 @@ def crawler_cfg(**overrides):
         "machine_id": "m-test",
         "role": ROLE_COLLECTOR,
         "exchange_root": _RAW_PAGE_DIR / "exchange",
+        "gitee_owner": "",
         "cos_bucket": "test-bucket",
         "git_access": ACCESS_READWRITE,
         "cos_access": ACCESS_READWRITE,

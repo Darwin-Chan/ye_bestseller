@@ -36,13 +36,13 @@ from bestseller_monitor.analysis import AnalysisConfig, AnalysisService
 from bestseller_monitor.analysis_store import DraftStore
 from bestseller_monitor.db import CST, Database, connect
 from bestseller_monitor.judgment_set import (FORMAT_VERSION, META_TABLE, PACKAGE_REL,
-                                             build_package, collect, package_digest, publish,
-                                             read_package_meta)
+                                             build_package, collect, current_adoption,
+                                             package_digest, publish, read_package_meta)
 from bestseller_monitor.matching import (STATUS_CACHE, STATUS_MODEL, MatchingConfig,
                                          MatchingService, ModelConfig, identity, prepare_cache,
-                                         version)
+                                         signature_of_model, version)
 from tests.git_repos import GitSandbox, WorldTemplate
-from helpers import group, ledger_of, member, submit_offer
+from helpers import group, ledger_of, member, submit_offer, tamper_package
 from test_exchange import FakeImageStore
 from test_matching import ModelTransport, product, singles
 
@@ -428,14 +428,43 @@ class CollectTests(JudgmentSetCase):
         self.assertTrue(result.published, result.failure)
         return result
 
-    def collect(self, machine_id="m4", *, cache=None, store=None):
-        return collect(self.exchange, machine_id, cache or self.cache, store or self.store)
+    def collect(self, machine_id="m4", *, cache=None, store=None, snapshot_version="",
+                contract_signature=""):
+        return collect(self.exchange, machine_id, cache or self.cache, store or self.store,
+                       snapshot_version=snapshot_version,
+                       contract_signature=contract_signature)
+
+    def published_signature(self) -> str:
+        """`publish_from` 判那批判的署名（真配置的摘要）：门禁用例按它当本机当前契约。"""
+        return signature_of_model(ModelConfig().endpoint, "deepseek-chat")
+
+    def republish_tampered(self, mutate, *, machine="m1") -> None:
+        """把 judged-<机器> 已发布的那份包改一处再推（真推送）：坏包/异格式包交给用例挑。"""
+        tamper_package(self.box, self.exchange / f"judged-{machine}", PACKAGE_REL, mutate)
 
     def dump(self, cache=None):
         """缓存里三类表 + 导入账的全部行：幂等断言比这个（比计数严）。"""
         with closing(sqlite3.connect(cache or self.cache)) as conn:
             return {name: conn.execute(f"SELECT * FROM {name} ORDER BY 1, 2").fetchall()
                     for name in ("judgments", "evidence", "visual_evidence", "judgment_imports")}
+
+    def ledger_row(self, digest=None):
+        """导入账里那行（缺省取唯一一行）的具名列字典。"""
+        with closing(sqlite3.connect(self.cache)) as conn:
+            conn.row_factory = sqlite3.Row
+            if digest is None:
+                return dict(conn.execute("SELECT * FROM judgment_imports").fetchone())
+            return dict(conn.execute("SELECT * FROM judgment_imports WHERE digest=?",
+                                     (digest,)).fetchone())
+
+    def package_conn(self, machine="m1") -> sqlite3.Connection:
+        """打开交换区里 judged-<机器> 那份发布包（发布即已落在工作区）。"""
+        path = self.root / f"published-{machine}.db"
+        path.write_bytes(gzip.decompress(
+            (self.exchange / f"judged-{machine}" / PACKAGE_REL).read_bytes()))
+        conn = sqlite3.connect(path)
+        self.addCleanup(conn.close)
+        return conn
 
     def test_collect_imports_the_other_machines_judgments_and_records_the_ledger(self):
         published = self.publish_from("m1")
@@ -584,6 +613,26 @@ class CollectTests(JudgmentSetCase):
         self.assertTrue(outcome.notes)
         self.assertIn("judged", outcome.notes[0])
 
+    def test_an_explicit_source_list_replaces_the_local_enumeration(self):
+        """票 02：来源清单接入之后，收取按点名名单走（被阻断的来源根本不在名单里）。"""
+        self.publish_from("m1")
+        _take_world(self.box, "judged-m2")             # 本地也有这本，但名单不点它
+        listed = (("m1", self.exchange / "judged-m1"),)
+
+        outcome = collect(self.exchange, "m4", self.cache, self.store, sources=listed)
+
+        self.assertFalse(outcome.failed, [r.failure for r in outcome.results])
+        self.assertEqual([r.machine for r in outcome.results], ["m1"])
+
+    def test_an_empty_explicit_source_list_means_nothing_to_collect(self):
+        self.publish_from("m1")                        # 交换区里其实有这本，但名单是空的
+
+        outcome = collect(self.exchange, "m4", self.cache, self.store, sources=())
+
+        self.assertEqual(outcome.results, ())
+        self.assertTrue(outcome.notes, "没有可收的来源要如实说一句")
+        self.assertFalse(self.cache.exists(), "名单没点名：连缓存都不碰")
+
     def test_the_machines_own_judged_repo_is_not_collected_for_itself(self):
         self.publish_from("m4", cache=self.cache)                # 本机自己发布的那本
 
@@ -632,6 +681,289 @@ class CollectTests(JudgmentSetCase):
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM judgments").fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT digest FROM judgment_imports").fetchone()[0],
                              published.digest)
+
+    def test_collect_records_the_package_provenance_in_the_ledger(self):
+        """票 03：导入账带上来源提交、清单版本、格式与署名/证据摘要——每条都能对回现场。"""
+        self.publish_from("m1")
+
+        outcome = self.collect(snapshot_version="0e10232")
+
+        result = outcome.results[0]
+        self.assertFalse(result.failed, result.failure)
+        source_head = self.box.must("rev-parse", "--short", "HEAD",
+                                    cwd=self.exchange / "judged-m1").strip()
+        self.assertEqual(result.source_commit, source_head,
+                         "来源提交 = 读包时来源库 HEAD 的短哈希")
+        self.assertEqual(result.snapshot_version, "0e10232")
+        self.assertEqual(result.remote,
+                         self.box.must("remote", "get-url", "origin",
+                                       cwd=self.exchange / "judged-m1").strip())
+        row = self.ledger_row(result.digest)
+        self.assertEqual(row["source_commit"], source_head)
+        self.assertEqual(row["snapshot_version"], "0e10232")
+        self.assertEqual(row["format_version"], FORMAT_VERSION)
+        package = self.package_conn("m1")
+        signature = package.execute("SELECT signature FROM judgments").fetchone()[0]
+        versions = dict(package.execute("SELECT version, COUNT(*) FROM evidence GROUP BY version"))
+        self.assertEqual(json.loads(row["model_summary"]),
+                         {"signatures": {signature: 1}, "visual_models": {}})
+        self.assertEqual(json.loads(row["evidence_summary"]), {"versions": versions})
+
+    def test_collecting_the_same_content_again_replays_the_same_provenance(self):
+        """重复收取：审计列从账里回放——回放的是那次真收下时记的，不按这次的新参数改。"""
+        self.publish_from("m1")
+        first = self.collect(snapshot_version="0e10232")
+        before = self.dump()
+
+        second = self.collect(snapshot_version="deadbee")
+
+        replay = second.results[0]
+        self.assertTrue(replay.skipped)
+        self.assertEqual(self.dump(), before, "账本一个字不变")
+        self.assertEqual(replay.source_commit, first.results[0].source_commit)
+        self.assertEqual(replay.snapshot_version, "0e10232")
+        self.assertEqual(replay.remote, first.results[0].remote)
+
+    def test_an_old_import_ledger_gains_the_provenance_columns(self):
+        """票 03 之前建的导入账：一次性补上审计列，老行照旧可读（新列按默认值补）。"""
+        published = self.publish_from("m1")
+        with closing(sqlite3.connect(self.cache)) as conn, conn:
+            conn.execute(
+                "CREATE TABLE judgment_imports (digest TEXT PRIMARY KEY,"
+                " source_machine TEXT NOT NULL, package_rel TEXT NOT NULL,"
+                " imported_at TEXT NOT NULL, rows_total INTEGER NOT NULL DEFAULT 0,"
+                " rows_added INTEGER NOT NULL DEFAULT 0, rows_detail TEXT NOT NULL DEFAULT '{}')")
+            conn.execute("INSERT INTO judgment_imports VALUES"
+                         " ('old-digest','m9','judged-m9/data/judgments.db.gz',"
+                         " '2026-01-01T00:00:00+00:00',3,3,'{}')")
+
+        outcome = self.collect()
+
+        self.assertFalse(outcome.results[0].failed, outcome.results[0].failure)
+        self.assertEqual(self.ledger_row("old-digest")["source_commit"], "",
+                         "老行照旧可读：补上的列是空默认值")
+        self.assertTrue(self.ledger_row(published.digest)["source_commit"],
+                        "新收的行带上了来源提交")
+        self.assertEqual(json.loads(self.ledger_row("old-digest")["gate_summary"]), {},
+                         "票 04 的门禁回执也照默认值补：老行没记过，空摘要")
+        self.assertEqual(self.ledger_row("old-digest")["contract_signature"], "")
+
+    # ---- 门禁（票 04、spec §4）：格式与自洽拒绝整包；署名/证据版本不符 gated_out ----
+
+    def test_an_unsupported_package_format_is_rejected_whole(self):
+        """格式门禁不过的包整包拒绝——一条不导、不写账，原因点名两个版本号。"""
+        self.publish_from("m1")
+        self.republish_tampered(mutate=lambda conn: conn.execute(
+            "UPDATE judgment_meta SET value='v9' WHERE key='format_version'"))
+
+        outcome = self.collect()
+
+        result = outcome.results[0]
+        self.assertTrue(result.failed)
+        self.assertIn("v9", result.failure)
+        self.assertIn(FORMAT_VERSION, result.failure)
+        self.assertEqual(self.dump(), {name: [] for name in
+                                       ("judgments", "evidence", "visual_evidence",
+                                        "judgment_imports")},
+                         "整包拒绝：缓存与导入账都空着（不产生可采用的判断）")
+
+    def test_a_package_with_a_broken_content_digest_is_rejected_whole(self):
+        """包内容摘要（判断的版本对 = 两端证据版本的摘要）对不上 → 整包拒绝。
+
+        坏的是三条里的一条；没被改的那两条也不许静默导入——不许部分采纳。
+        """
+        self.publish_from("m1", products=("red", "blue", "green"))
+        self.republish_tampered(mutate=lambda conn: conn.execute(
+            "UPDATE judgments SET pair='被改过的' WHERE rowid=(SELECT MIN(rowid) FROM judgments)"))
+
+        outcome = self.collect()
+
+        result = outcome.results[0]
+        self.assertTrue(result.failed)
+        self.assertIn("自洽校验", result.failure)
+        self.assertIn("1 条判断的版本对摘要与内容对不上", result.failure)
+        self.assertEqual(self.dump()["judgments"], [], "整包拒绝：一条判断都没导")
+        self.assertEqual(self.dump()["judgment_imports"], [])
+
+    def test_a_package_with_a_broken_evidence_digest_is_rejected_whole(self):
+        """证据摘要（版本 = 内容摘要）对不上 → 整包拒绝，判断也不静默部分导入。"""
+        self.publish_from("m1")
+        self.republish_tampered(mutate=lambda conn: conn.execute(
+            "UPDATE evidence SET version='被改过的' WHERE rowid=(SELECT MIN(rowid) FROM evidence)"))
+
+        outcome = self.collect()
+
+        result = outcome.results[0]
+        self.assertTrue(result.failed)
+        self.assertIn("自洽校验", result.failure)
+        self.assertIn("1 条证据的版本与内容对不上", result.failure)
+        self.assertEqual(self.dump()["evidence"], [])
+        self.assertEqual(self.dump()["judgments"], [], "整包拒绝，不是部分导入")
+        self.assertEqual(self.dump()["judgment_imports"], [])
+
+    def test_a_rejected_package_does_not_replace_the_currently_imported_version(self):
+        """门禁失败不能覆盖当前有效版本——账还指着先前收下的那份，缓存一行不动。"""
+        published = self.publish_from("m1")
+        first = self.collect()
+        self.assertFalse(first.results[0].failed, first.results[0].failure)
+        before = self.dump()
+        self.republish_tampered(mutate=lambda conn: conn.execute(
+            "UPDATE judgments SET pair='被改过的' WHERE rowid=(SELECT MIN(rowid) FROM judgments)"))
+
+        outcome = self.collect()
+
+        result = outcome.results[0]
+        self.assertTrue(result.failed)
+        self.assertEqual(self.dump(), before, "当前有效版本没被覆盖：缓存与导入账原样")
+        self.assertEqual(self.ledger_row()["digest"], published.digest)
+
+    def test_rows_under_the_current_contract_are_gated(self):
+        """署名等于本机当前契约、证据版本有着落 → gated（可用的那部分），零挂出。"""
+        published = self.publish_from("m1")
+
+        outcome = self.collect(contract_signature=self.published_signature())
+
+        result = outcome.results[0]
+        self.assertFalse(result.failed, result.failure)
+        self.assertEqual(result.gated_out, 0)
+        self.assertEqual(result.gate_summary,
+                         {"gated": 1, "signature": 0, "evidence_version": 0, "unevaluated": 0})
+        self.assertEqual(result.contract_signature, self.published_signature())
+        row = self.ledger_row(published.digest)
+        self.assertEqual(json.loads(row["gate_summary"]), result.gate_summary,
+                         "门禁回执落进导入账：报告里的数能对回账上这一行")
+        self.assertEqual(row["contract_signature"], self.published_signature())
+
+    def test_mismatched_signatures_are_imported_but_gated_out(self):
+        """异署名行照收留档（行在缓存里、转发也在）、记 gated_out；重复收取回放同一份回执。"""
+        self.publish_from("m1")
+
+        outcome = self.collect(contract_signature="另一个署名")
+
+        result = outcome.results[0]
+        self.assertFalse(result.failed, result.failure)
+        self.assertEqual(result.added["judgments"], 1, "留档：行照收，不驱动当前分析")
+        self.assertEqual(result.gated_out, 1)
+        self.assertEqual(result.gate_summary["signature"], 1)
+        with closing(sqlite3.connect(self.cache)) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM judgments").fetchone()[0], 1)
+        replay = self.collect(contract_signature="另一个署名").results[0]
+        self.assertTrue(replay.skipped)
+        self.assertEqual(replay.gated_out, 1, "重复收取：门禁回执从账里回放")
+        self.assertEqual(replay.gate_summary, result.gate_summary)
+        self.assertEqual(replay.contract_signature, "另一个署名")
+
+    def test_rows_whose_evidence_versions_have_no_record_are_gated_out(self):
+        """证据版本在本机毫无着落（包与本机都没有这条版本）→ gated_out，留档待数据到齐。"""
+        self.publish_from("m1")
+        self.republish_tampered(mutate=lambda conn: conn.execute("DELETE FROM evidence"))
+
+        outcome = self.collect(contract_signature=self.published_signature())
+
+        result = outcome.results[0]
+        self.assertFalse(result.failed, result.failure)
+        self.assertEqual(result.added["judgments"], 1, "不是拒收：行照收留档")
+        self.assertEqual(result.gate_summary["evidence_version"], 1)
+        self.assertEqual(result.gated_out, 1)
+
+    def test_without_a_contract_the_gates_are_unevaluated(self):
+        """契约读不出（没传署名）→ 如实记「未评估」，不猜哪边、也不拦导入。"""
+        self.publish_from("m1")
+
+        result = self.collect().results[0]
+
+        self.assertFalse(result.failed, result.failure)
+        self.assertEqual(result.gated_out, 0)
+        self.assertEqual(result.gate_summary,
+                         {"gated": 0, "signature": 0, "evidence_version": 0, "unevaluated": 1})
+        self.assertEqual(result.contract_signature, "")
+
+
+class AdoptionTests(JudgmentSetCase):
+    """票 03／票 04：采用读数（`current_adoption`）从实际库现读——契约署名下的行才算、
+    证据版本要在本机证据索引里有着落；本机还没在当前署名下写过行记未评估，不拿导入数
+    当采用数、也不伪造零（spec §3 的 adopted、§4 的当前分析契约）。"""
+
+    CONTRACT = "sig-contract"
+
+    def seed_judgment_row(self, pair, signature, *, machine, cache=None, vouched=True):
+        """一行判断（带两端证据版本）；`vouched` 说这两条版本在本机证据索引里有没有着落。"""
+        with closing(sqlite3.connect(cache or self.cache)) as conn, conn:
+            prepare_cache(conn, machine)
+            conn.execute("INSERT OR REPLACE INTO judgments(pair,signature,machine_id,"
+                         "evidence_a,evidence_b,result) VALUES (?,?,?,?,?,?)",
+                         (pair, signature, machine, f"ev-{pair}-a", f"ev-{pair}-b",
+                          '{"same": true}'))
+            if vouched:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO evidence(identity,version,name,image_hash,"
+                    "image_data,origin) VALUES (?,?,?,?,?,?)",
+                    [(f"成员-{pair}-a", f"ev-{pair}-a", "商品", None, None, "新商品"),
+                     (f"成员-{pair}-b", f"ev-{pair}-b", "商品", None, None, "新商品")])
+
+    def adopt(self, sources=("m1",), *, contract=CONTRACT):
+        return current_adoption(self.cache, self.store, "m4", sources,
+                                contract_signature=contract)
+
+    def test_without_a_local_analysis_under_the_contract_the_side_is_unevaluated(self):
+        """本机一条当前署名下自己写的行都没有 = 还没在当前配置下跑过分析：未评估，而不是 0。"""
+        self.seed_judgment_row("pair-x", self.CONTRACT, machine="m1")
+
+        (adoption,) = self.adopt()
+
+        self.assertEqual(adoption.machine, "m1")
+        self.assertFalse(adoption.evaluated)
+        self.assertIsNone(adoption.judgments)
+        self.assertEqual(adoption.decisions, 0)
+
+    def test_a_machine_running_an_older_signature_is_not_evaluated(self):
+        """票 04 收紧：换过模型配置、还没在新署名下跑过分析——「历次署名都算」不算了。"""
+        self.seed_judgment_row("pair-old", "sig-old", machine="m4")
+        self.seed_judgment_row("pair-x", "sig-old", machine="m1")
+
+        (adoption,) = self.adopt()
+
+        self.assertFalse(adoption.evaluated, "旧署名不是当前契约：采用口径还没有")
+
+    def test_only_rows_under_the_contract_signature_count_as_adopted(self):
+        self.seed_judgment_row("pair-local", self.CONTRACT, machine="m4")
+        self.seed_judgment_row("pair-hit", self.CONTRACT, machine="m1")
+        self.seed_judgment_row("pair-other", "sig-other", machine="m1")
+
+        (adoption,) = self.adopt()
+
+        self.assertTrue(adoption.evaluated)
+        self.assertEqual(adoption.judgments, 1, "本机当前契约署名下、证据版本有着落的行才算")
+
+    def test_rows_whose_evidence_versions_have_no_local_record_do_not_count(self):
+        self.seed_judgment_row("pair-local", self.CONTRACT, machine="m4")
+        self.seed_judgment_row("pair-float", self.CONTRACT, machine="m1", vouched=False)
+
+        (adoption,) = self.adopt()
+
+        self.assertTrue(adoption.evaluated)
+        self.assertEqual(adoption.judgments, 0, "证据版本没有着落的行与门禁同一口径：不算采用")
+
+    def test_an_evaluated_zero_is_a_real_zero(self):
+        self.seed_judgment_row("pair-local", self.CONTRACT, machine="m4")
+        self.seed_judgment_row("pair-other", "sig-other", machine="m1")
+
+        (adoption,) = self.adopt()
+
+        self.assertTrue(adoption.evaluated)
+        self.assertEqual(adoption.judgments, 0)
+
+    def test_decisions_in_effect_are_counted_and_withdrawn_ones_are_not(self):
+        self.seed_ledger(ledger_of(
+            relations=[group("11", "22", machine="m1"),
+                       group("33", "44", machine="m1", confirmed=False)],
+            standalone=[[member("55"), "v55", "m1"]],
+            excluded=[[member("66"), member("77"), "m1"]]))
+
+        (adoption,) = self.adopt()
+
+        self.assertEqual(adoption.decisions, 3,
+                         "已确认的关系 + 单独成组 + 排除对；撤回过的中间态不驱动分析、不算")
 
 
 class ChannelIndependenceTests(JudgmentSetCase):
@@ -889,9 +1221,9 @@ class DecisionCarryTests(DecisionCarryCase):
 class ConflictLedgerTests(DecisionCarryCase):
     """票 04：冲突进冲突账——两边都不动、只增不自动消解、重复遇到只核对不重记。"""
 
-    def merge(self, decisions, *, store=None, source="m1"):
+    def merge(self, decisions, *, store=None, source="m1", source_commit=""):
         return DraftStore(store or self.store, "m4").merge_incoming(
-            decisions, source=source, seen_at=STAMP_ISO)
+            decisions, source=source, seen_at=STAMP_ISO, source_commit=source_commit)
 
     def test_a_group_here_and_an_exclusion_there_land_in_the_conflict_ledger(self):
         self.seed_ledger(ledger_of(excluded=[[member("11"), member("22"), "m4"]]))
@@ -1120,6 +1452,70 @@ class ConflictLedgerTests(DecisionCarryCase):
         self.assertFalse(result.conflicts[0].recorded, "重复遇到只核对不重记")
         self.assertEqual(result.adopted["manual_standalone"], 1)
         self.assertEqual(len(self.conflicts()), 1, "冲突账只增不自动消解：还是那一笔")
+
+    def test_merge_incoming_records_the_source_commit(self):
+        """票 04：冲突两侧的来源、来源提交与时刻一起留档；读回冲突账同一份。"""
+        self.seed_ledger(ledger_of(excluded=[[member("11"), member("22"), "m4"]]))
+        seeded = self.ledger()
+
+        result = self.merge(ledger_of(relations=[group("11", "22", "33")]),
+                            source_commit="abc1234")
+
+        conflict = result.conflicts[0]
+        self.assertEqual(conflict.source_commit, "abc1234")
+        self.assertEqual(conflict.incoming_machine, "m1")
+        self.assertEqual(conflict.local_machines, ("m4",))
+        self.assertEqual(conflict.seen_at, STAMP_ISO)
+        self.assertEqual(self.conflicts()[0].source_commit, "abc1234")
+        self.assertEqual(self.ledger(), seeded, "两边都不动")
+
+    def test_a_conflict_through_collect_keeps_the_packages_source_commit(self):
+        """票 04：经收取记下的冲突，带入包那份包的来源提交（重复遇到不重写）。"""
+        self.seed_ledger(ledger_of(excluded=[[member("11"), member("22"), "m4"]]))
+        m1_store = self.root / "m1-store.sqlite"
+        self.seed_ledger(ledger_of(relations=[group("11", "22", "33")]), store=m1_store)
+        self.publish_from("m1", self.root / "m1-cache.sqlite", m1_store)
+        source_commit = self.box.must("rev-parse", "--short", "HEAD",
+                                      cwd=self.exchange / "judged-m1").strip()
+
+        first = self.collect_to("m4", self.cache, self.store)
+
+        result = first.results[0]
+        self.assertFalse(result.failed, result.failure)
+        conflict = result.conflicts[0]
+        self.assertTrue(conflict.recorded)
+        self.assertEqual(conflict.source_commit, source_commit,
+                         "冲突行随行带来源提交：追溯得到它是搭哪一版包来的")
+        self.assertEqual(result.adopted["manual_relations"], 0, "冲突项不进入 adopted")
+        self.assertEqual(self.conflicts()[0].source_commit, source_commit)
+
+        repeat = self.collect_to("m4", self.cache, self.store)
+
+        self.assertTrue(repeat.results[0].skipped, "同一包重复收取：什么都不做")
+        self.assertEqual(self.conflicts()[0].source_commit, source_commit,
+                         "重遇同一条冲突：账不变、提交不重写")
+
+    def test_an_old_conflict_ledger_gains_the_source_commit_column(self):
+        """票 04：老冲突账缺来源提交列——打开即补；老行照旧可读（空串），新记的行带提交。"""
+        with closing(sqlite3.connect(self.store)) as conn, conn:
+            conn.execute(
+                "CREATE TABLE decision_conflicts (digest TEXT PRIMARY KEY, kind TEXT NOT NULL,"
+                " members TEXT NOT NULL, incoming_machine TEXT NOT NULL, incoming TEXT NOT NULL,"
+                " local_machines TEXT NOT NULL, local TEXT NOT NULL, seen_at TEXT NOT NULL,"
+                " resolved_at TEXT NOT NULL DEFAULT '')")
+            conn.execute(
+                "INSERT INTO decision_conflicts VALUES ('old','different_groups','[\"a\"]',"
+                "'m1','{}','[\"m4\"]','[]','2026-01-01T00:00:00+00:00','')")
+        self.seed_ledger(ledger_of(excluded=[[member("11"), member("22"), "m4"]]))
+
+        result = self.merge(ledger_of(relations=[group("11", "22", "33")]),
+                            source_commit="abc1234")
+
+        stored = self.conflicts()
+        self.assertEqual([row.source_commit for row in stored], ["", "abc1234"],
+                         "老行按空默认值照旧可读；新记的带上提交")
+        self.assertEqual(stored[0].digest, "old", "老行原样留着")
+        self.assertEqual(result.conflicts[0].source_commit, "abc1234")
 
 
 class DecisionLifecycleTests(DecisionCarryCase):

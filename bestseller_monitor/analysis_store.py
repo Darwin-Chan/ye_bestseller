@@ -10,8 +10,8 @@
 只作显示与冲突说明、不参与键；写入时行上带了就照它写，没带就记本机。
 
 外来决定经判断集收取并进来（票 04、`merge_incoming`）：不冲突即生效、冲突写进冲突账
-`decision_conflicts`（两侧来源机器与内容、记下的时刻），只增不自动消解——人在页面上
-裁决后本机账本按现有编辑动作变化、下一次发布带走，冲突行留着作历史。
+`decision_conflicts`（两侧来源机器与内容、记下的时刻；外来那侧随行的来源提交是 issue 06 票 04 加的），只增不
+自动消解——人在页面上裁决后本机账本按现有编辑动作变化、下一次发布带走，冲突行留着作历史。
 """
 from __future__ import annotations
 
@@ -45,7 +45,8 @@ _CONFLICT_DDL = f"""CREATE TABLE IF NOT EXISTS {CONFLICT_TABLE} (
     local_machines TEXT NOT NULL,
     local TEXT NOT NULL,
     seen_at TEXT NOT NULL,
-    resolved_at TEXT NOT NULL DEFAULT '')"""
+    resolved_at TEXT NOT NULL DEFAULT '',
+    source_commit TEXT NOT NULL DEFAULT '')"""
 
 # 冲突里「一侧说了什么」的三种形态（`_relation_content` 们铸、页面与周报照它渲染）。
 SIDE_RELATION = 'relation'
@@ -112,6 +113,10 @@ class Conflict:
 
     `resolved_at` 是人裁决过的时刻（票 07）：页面上用现有编辑动作裁决后、下一次保存
     记下它；空串＝还没裁决。行照旧只增，裁决只标时刻。
+
+    `source_commit` 是外来那一侧随行的来源提交（issue 06 票 04，spec §5）：这份决定搭乘的
+    包所在的来源库提交短哈希；记第一次收到的那笔（同一条冲突再遇到不重写），
+    本机一侧没有提交可言——本机决定来自分析保存，不是一个 git 提交。
     """
 
     digest: str
@@ -124,6 +129,7 @@ class Conflict:
     seen_at: str
     recorded: bool = True
     resolved_at: str = ''
+    source_commit: str = ''
 
 
 @dataclasses.dataclass(frozen=True)
@@ -161,6 +167,7 @@ class DraftStore:
             draft_id TEXT NOT NULL UNIQUE)""")
         conn.execute(_CONFLICT_DDL)
         self._add_resolved_column(conn)
+        self._add_source_commit_column(conn)
         return conn
 
     def _add_resolved_column(self, conn):
@@ -170,6 +177,14 @@ class DraftStore:
         with conn:
             conn.execute(f'ALTER TABLE {CONFLICT_TABLE}'
                          " ADD COLUMN resolved_at TEXT NOT NULL DEFAULT ''")
+
+    def _add_source_commit_column(self, conn):
+        """老库补上来源提交列（一次性，issue 06 票 04）：补列前的冲突没记过外来包的来源提交，空串即未记。"""
+        if 'source_commit' in {row[1] for row in conn.execute(f'PRAGMA table_info({CONFLICT_TABLE})')}:
+            return
+        with conn:
+            conn.execute(f'ALTER TABLE {CONFLICT_TABLE}'
+                         " ADD COLUMN source_commit TEXT NOT NULL DEFAULT ''")
 
     def _add_machine_column(self, conn, table):
         """老库补上来源机器列（一次性，票 02）：补列前的行只有本机能写，记本机编号。"""
@@ -235,7 +250,7 @@ class DraftStore:
         finally:
             conn.close()
 
-    def merge_incoming(self, decisions, *, source, seen_at):
+    def merge_incoming(self, decisions, *, source, seen_at, source_commit=''):
         """把外来账本并进本机账本（票 04、spec §6）：不冲突即生效，冲突写进冲突账。
 
         `decisions` 与 `ledger()` 同形（关系是带键的行、独立确认与排除对是按位置的行）；
@@ -244,7 +259,7 @@ class DraftStore:
 
         - 已经是同一条（成员与版本一一对应）→ 什么都不做（重复收取幂等）。
         - 与本机决定相对 → **两边都不动**：这一行不并、本机一行不改，冲突写进冲突账
-          （两侧来源机器与内容、记下的时刻）；只增不自动消解。
+          （两侧来源机器与内容、记下的时刻、外来那侧随行的来源提交）；只增不自动消解。
         - 整段出自同一台机器的旧话（它先前发布过、本机收下过的那几行）→ 让位：删掉旧的
           再并新的——同一台机器在给自己更新（组扩大了、缩小了、改成了单独成组、或把排除
           对翻成了成组），不是两台机器的分歧。掺着别的话（含本机自己的决定）时就不让位。
@@ -262,11 +277,13 @@ class DraftStore:
 
         来源：行上带了就用行的（转发的决定仍点名原来那台机器），没带记 `source`。
         让位与冲突都以行的来源为界：转发来的别人的话，仍算别人的。
-        `seen_at` 是记下的时刻（收取时刻，UTC ISO）。
+        `seen_at` 是记下的时刻（收取时刻，UTC ISO）；`source_commit` 是这份外来账本
+        所搭乘的包的来源提交（issue 06 票 04，随冲突行留档；直接调用没有提交可言时留空）。
         """
         conn = self._connect()
         try:
-            merge = _LedgerMerge(conn, source=source, seen_at=seen_at)
+            merge = _LedgerMerge(conn, source=source, seen_at=seen_at,
+                                 source_commit=source_commit)
             with conn:
                 merge.run(decisions)
         finally:
@@ -278,7 +295,8 @@ class DraftStore:
 
         按记下的先后返回；形状与并入结果里的 `Conflict` 一致（`recorded` 恒为真——
         记下来的都已经在账上）。人裁决过的带 `resolved_at`（票 07）：页面按它把
-        已裁决的冲突从展示里摘掉，行本身照旧留着作历史。
+        已裁决的冲突从展示里摘掉，行本身照旧留着作历史。`source_commit` 是记下这条
+        冲突时外来那侧随行的来源提交（issue 06 票 04）。
         """
         if not self.path.exists():
             return []
@@ -286,13 +304,15 @@ class DraftStore:
         try:
             rows = conn.execute(
                 f'SELECT digest,kind,members,incoming_machine,incoming,'
-                f'local_machines,local,seen_at,resolved_at FROM {CONFLICT_TABLE} ORDER BY rowid').fetchall()
+                f'local_machines,local,seen_at,resolved_at,source_commit FROM {CONFLICT_TABLE} '
+                'ORDER BY rowid').fetchall()
         finally:
             conn.close()
         return [Conflict(digest=row[0], kind=row[1], members=tuple(json.loads(row[2])),
                          incoming_machine=row[3], incoming=json.loads(row[4]),
                          local_machines=tuple(json.loads(row[5])),
-                         local=tuple(json.loads(row[6])), seen_at=row[7], resolved_at=row[8])
+                         local=tuple(json.loads(row[6])), seen_at=row[7], resolved_at=row[8],
+                         source_commit=row[9])
                 for row in rows]
 
     # ---- SKU 人工决定的账本（票 08）：读取、并入与冲突账 ----
@@ -590,10 +610,11 @@ class _LedgerMerge:
     已经把它的闭包定死了（同一个组的行可能不止一条），逐行再判只会把行序变成一个因素。
     """
 
-    def __init__(self, conn, *, source, seen_at):
+    def __init__(self, conn, *, source, seen_at, source_commit=''):
         self.conn = conn
         self.source = source
         self.seen_at = seen_at
+        self.source_commit = source_commit
         self.local = _ledger_state(conn)
         self.groups = _ConfirmedGroups(self.local['relations'], self.local['standalone'])
         self.known = {row[0] for row in conn.execute(f'SELECT digest FROM {CONFLICT_TABLE}')}
@@ -742,7 +763,11 @@ class _LedgerMerge:
         self.adopted[table] += self.conn.execute(statement, values).rowcount
 
     def _conflict(self, kind, incoming, local_contents):
-        """记一条冲突：本机一行不动、外来那一行也不并；同一条重复遇到只核对不重记。"""
+        """记一条冲突：本机一行不动、外来那一行也不并；同一条重复遇到只核对不重记。
+
+        `source_commit`（外来包随行的来源提交，issue 06 票 04）只随**第一次**记下的那笔留档：
+        同一条冲突再遇到时不重写——与判断行的来源「先到者保留」同规。
+        """
         local_contents = sorted(local_contents,
                                 key=lambda content: json.dumps(content, sort_keys=True,
                                                                ensure_ascii=False))
@@ -755,16 +780,17 @@ class _LedgerMerge:
             self.known.add(conflict_digest)
             self.conn.execute(
                 f'INSERT INTO {CONFLICT_TABLE}(digest,kind,members,incoming_machine,incoming,'
-                'local_machines,local,seen_at) VALUES(?,?,?,?,?,?,?,?)',
+                'local_machines,local,seen_at,source_commit) VALUES(?,?,?,?,?,?,?,?,?)',
                 (conflict_digest, kind, json.dumps(members, ensure_ascii=False),
                  incoming['machine'], json.dumps(incoming, ensure_ascii=False),
                  json.dumps(machines, ensure_ascii=False),
-                 json.dumps(local_contents, ensure_ascii=False), self.seen_at))
+                 json.dumps(local_contents, ensure_ascii=False), self.seen_at,
+                 self.source_commit))
         self.conflicts.append(Conflict(
             digest=conflict_digest, kind=kind, members=tuple(members),
             incoming_machine=incoming['machine'], incoming=incoming,
             local_machines=tuple(machines), local=tuple(local_contents),
-            seen_at=self.seen_at, recorded=recorded))
+            seen_at=self.seen_at, recorded=recorded, source_commit=self.source_commit))
 
 
 # ---- 外来 SKU 决定的并入（票 08）：判法在 `_SkuLedgerMerge`，这里是把判法写出来的那几件 ----
