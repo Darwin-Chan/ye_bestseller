@@ -7,6 +7,8 @@ from datetime import datetime
 
 from .db import cst_date, SKU_IMAGE_OWN
 from .parse import DEFAULT_SKU_ID, sku_name_source
+from .sku_grouping import _new_group, refresh
+from .sku_codes import code_evidence
 
 
 def _time(value):
@@ -56,6 +58,7 @@ def _evidence(conn, shop, offer, sku_id, latest, end):
     result.update(image)
     result['product_name'] = title
     result['matching_input']['product_name'] = title
+    result.update(code_evidence(result))
     return result
 
 
@@ -78,19 +81,25 @@ def freeze(conn, analysis_id, start, end, calculate, frozen_at):
             for i in range(len(parts[0]['points'])):
                 active=[s['points'][i] for s in parts if s['points'][i]['stock'] is not None]
                 points.append(dict(active[0]) if active else dict(parts[0]['points'][i]))
+                points[-1]['segment_start'] = bool(active) and bucket['points'][i].get('segment_start', False)
             members.append(dict(shop_key=shop,offer_id=offer,sku_id=sku_id,
                 product_name=latest['product_name'],raw_sku_name=latest['sku_name'],
                 stock=latest['stock'],price=latest['price'],sales=sum(s['sales'] for s in parts),
-                points=points,matching_state='unjudged',confirmed=False))
+                points=points,shape_switches=bucket['shape_switches'],matching_state='unjudged',confirmed=False))
             members[-1].update(_evidence(conn,shop,offer,sku_id,latest,end))
-    groups=[dict(id='sku-'+str(i+1),members=[dict(shop_key=m['shop_key'],offer_id=m['offer_id'],sku_id=m['sku_id'])],
-                 confirmed=False,sales=m['sales'],status='尚未判断') for i,m in enumerate(members)]
-    return dict(id=analysis_id,start=start,end=end,frozen_at=frozen_at,member_kind='sku',
-                draft_version=2,inventory=rows,members=members,products=[],groups=groups,
+    groups=[]
+    for member in members:
+        group=_new_group(member, group_id='sku-'+str(len(groups)+1))
+        group['status']='待确认'
+        groups.append(group)
+    snapshot=dict(id=analysis_id,start=start,end=end,frozen_at=frozen_at,member_kind='sku',
+                draft_version=3,inventory=rows,members=members,products=[],groups=groups,
                 shops=[dict(s) for s in conn.execute('SELECT * FROM shops ORDER BY shop_key')],
-                dirty=True,saved_at=None,conflicts=[],review_order=[g['id'] for g in groups],
-                limitations=['SKU 自动匹配、人工分组、排行报告和共享尚未开放'])
-
+                dirty=True,saved_at=None,conflicts=[],excluded=[],
+                review_order=[g['id'] for g in groups],
+                limitations=[])
+    refresh(snapshot)
+    return snapshot
 
 def _image(conn, tables, batch, sku, shop, offer, sku_id):
     observed_at=batch['observed_at']
@@ -121,3 +130,18 @@ def _image(conn, tables, batch, sku, shop, offer, sku_id):
         error=error or '当次 SKU 图与商品主图均缺失'
     return batch['product_name'], dict(image_source=source,image_hash=image_hash,image_data=data,image_url=url,
                 image_error=error,image_observed_at=observed_at)
+
+
+def restore_curve_boundaries(snapshot, calculate):
+    """Backfill display boundaries in ticket 01/02 drafts from frozen rows only."""
+    if all('shape_switches' in member for member in snapshot['members']):
+        return
+    buckets = calculate(snapshot['inventory'], snapshot['start'], snapshot['end'])
+    for member in snapshot['members']:
+        bucket = buckets.get((member['shop_key'], member['offer_id']))
+        if not bucket:
+            continue
+        member.setdefault('shape_switches', bucket['shape_switches'])
+        starts = {point['date'] for point in bucket['points'] if point.get('segment_start')}
+        for point in member['points']:
+            point['segment_start'] = point['stock'] is not None and point['date'] in starts

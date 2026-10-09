@@ -23,8 +23,10 @@ from pathlib import Path
 from typing import NamedTuple
 
 from .matching import digest as _digest
+from .sku_grouping import identity as _sku_identity
 
 SCHEMA_VERSION = 1
+SKU_SCHEMA_VERSION = 3
 
 # 冲突账（票 04）：冲突是「没能并进来的那些决定」——与本机账本同一个文件，
 # 同生同死说得清；只增不自动消解，人在页面上裁决的是账本，不是它。
@@ -50,7 +52,7 @@ SIDE_RELATION = 'relation'
 SIDE_STANDALONE = 'standalone'
 SIDE_EXCLUSION = 'exclusion'
 
-# 账本三张表：关系按成员清单整行存（帶确认状态），独立确认与排除按主键逐行存。
+# 账本三张表：关系按成员清单整行存（带确认状态），独立确认与排除按主键逐行存。
 # 保存时整版覆盖：一次保存就是一个完整的人工决策版本。
 _DECISION_TABLES = {
     'manual_relations': """CREATE TABLE IF NOT EXISTS manual_relations (
@@ -63,6 +65,26 @@ _DECISION_TABLES = {
         pair_a TEXT NOT NULL, pair_b TEXT NOT NULL, saved_at TEXT NOT NULL,
         machine_id TEXT NOT NULL DEFAULT '', PRIMARY KEY(pair_a, pair_b))""",
 }
+
+# SKU 人工决定的账本（票 08）：与商品账本同层但分表——商品保存整版覆盖商品三表，SKU
+# 保存只动这三张；两套决定互不掺和。行身份＝成员集合（成员身份+证据版本，与包内一致）；
+# 组 ID 随行保存，跨机回放后推荐语境摘要才能对上。冲突账独立一张（sku_decision_conflicts），
+# 内容形状与商品冲突账同规（kind/members/incoming/local），只是成员是 SKU 身份。
+SKU_DECISION_TABLES = {
+    'sku_manual_groups': """CREATE TABLE IF NOT EXISTS sku_manual_groups (
+        members TEXT PRIMARY KEY, confirmed INTEGER NOT NULL, excluded INTEGER NOT NULL,
+        group_id TEXT NOT NULL, saved_at TEXT NOT NULL, machine_id TEXT NOT NULL DEFAULT '')""",
+    'sku_excluded_skus': """CREATE TABLE IF NOT EXISTS sku_excluded_skus (
+        identity TEXT PRIMARY KEY, saved_at TEXT NOT NULL, machine_id TEXT NOT NULL DEFAULT '')""",
+    'sku_excluded_pairs': """CREATE TABLE IF NOT EXISTS sku_excluded_pairs (
+        pair_a TEXT NOT NULL, pair_b TEXT NOT NULL, saved_at TEXT NOT NULL,
+        machine_id TEXT NOT NULL DEFAULT '', PRIMARY KEY(pair_a, pair_b))""",
+}
+SKU_CONFLICT_TABLE = 'sku_decision_conflicts'
+_SKU_CONFLICT_DDL = f"""CREATE TABLE IF NOT EXISTS {SKU_CONFLICT_TABLE} (
+    digest TEXT PRIMARY KEY, kind TEXT NOT NULL, members TEXT NOT NULL,
+    incoming_machine TEXT NOT NULL, incoming TEXT NOT NULL,
+    local_machines TEXT NOT NULL, local TEXT NOT NULL, seen_at TEXT NOT NULL)"""
 
 
 def source_of(entry, default):
@@ -131,6 +153,9 @@ class DraftStore:
         for table, statement in _DECISION_TABLES.items():
             conn.execute(statement)
             self._add_machine_column(conn, table)
+        for statement in SKU_DECISION_TABLES.values():
+            conn.execute(statement)
+        conn.execute(_SKU_CONFLICT_DDL)
         conn.execute("""CREATE TABLE IF NOT EXISTS analysis_draft_save_order (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
             draft_id TEXT NOT NULL UNIQUE)""")
@@ -270,14 +295,90 @@ class DraftStore:
                          local=tuple(json.loads(row[6])), seen_at=row[7], resolved_at=row[8])
                 for row in rows]
 
+    # ---- SKU 人工决定的账本（票 08）：读取、并入与冲突账 ----
+
+    def sku_ledger(self):
+        """已保存与已收取的 SKU 人工决定；从未有决定时为空（形状见 `_read_sku_ledger`）。"""
+        if not self.path.exists():
+            return {'groups': [], 'excluded_skus': [], 'excluded_pairs': []}
+        conn = self._connect()
+        try:
+            return _read_sku_ledger(conn)
+        finally:
+            conn.close()
+
+    def merge_incoming_sku(self, decisions, *, source, seen_at):
+        """把外来的 SKU 人工决定并进本机 SKU 账本（票 08）。
+
+        判法与商品账本同规（见 `_SkuLedgerMerge`）：同一条决定跳过（幂等）、同一台机器
+        的旧话让位（它在给自己更新）、异源矛盾记 `sku_decision_conflicts` 两边都不动、
+        其余原样并入。`decisions` 与 `sku_ledger()` 同形。
+        """
+        conn = self._connect()
+        try:
+            merge = _SkuLedgerMerge(conn, source=source, seen_at=seen_at)
+            with conn:
+                merge.run(decisions)
+        finally:
+            conn.close()
+        return MergeResult(adopted=merge.adopted, conflicts=tuple(merge.conflicts))
+
+    def sku_conflicts(self):
+        """本机的 SKU 冲突账（票 08）：只增不自动消解，形状与 `conflicts()` 同规。"""
+        if not self.path.exists():
+            return []
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                f'SELECT digest,kind,members,incoming_machine,incoming,'
+                f'local_machines,local,seen_at FROM {SKU_CONFLICT_TABLE} ORDER BY rowid').fetchall()
+        finally:
+            conn.close()
+        return [Conflict(digest=row[0], kind=row[1], members=tuple(json.loads(row[2])),
+                         incoming_machine=row[3], incoming=json.loads(row[4]),
+                         local_machines=tuple(json.loads(row[5])),
+                         local=tuple(json.loads(row[6])), seen_at=row[7])
+                for row in rows]
+
+    def record_sku_replay_conflicts(self, conflicts, *, seen_at):
+        """记一批回放期冲突（票 08）：与并入期冲突同一个账（`sku_decision_conflicts`）。
+
+        `conflicts` 是 `apply_shared` 交来的行（`{kind, incoming, local}`，行形状见那里）；
+        这里统一成冲突内容、算内容摘要——同一条（摘要相同）只记一次，重复分析只核对不重记。
+        返回这次新记下的条数。
+        """
+        if not conflicts:
+            return 0
+        conn = self._connect()
+        try:
+            known = {row[0] for row in conn.execute(f'SELECT digest FROM {SKU_CONFLICT_TABLE}')}
+            recorded = 0
+            with conn:
+                for entry in conflicts:
+                    incoming = _format_sku_entry(entry["incoming"])
+                    local_contents = sorted((_format_sku_entry(item) for item in entry["local"]),
+                                            key=lambda content: json.dumps(content, sort_keys=True,
+                                                                           ensure_ascii=False))
+                    _, fresh, _, _ = _insert_sku_conflict(
+                        conn, known, kind=entry["kind"], incoming=incoming,
+                        local_contents=local_contents, seen_at=seen_at)
+                    recorded += fresh
+            return recorded
+        finally:
+            conn.close()
+
     @staticmethod
     def _mark_saved(conn, analysis_id):
         # 两代本地草稿共用保存次序；同秒保存/再次保存不能按随机 UUID 猜最新。
         conn.execute('INSERT OR REPLACE INTO analysis_draft_save_order(draft_id) VALUES (?)',
                      (analysis_id,))
 
-    def write_sku(self, payload):
-        """单独本地格式，不改旧草稿或商品人工账本，旧程序也不会读成商品。"""
+    def write_sku(self, payload, decisions=None):
+        """单独本地格式，不改旧草稿或商品人工账本，旧程序也不会读成商品。
+
+        `decisions` 给了就同一事务把本机 SKU 人工决定并进 SKU 账本（票 08）：
+        草稿版本与账本一起生效，中途失败整体回滚（与商品草稿保存同规）。
+        """
         conn = self._connect()
         try:
             with conn:
@@ -285,10 +386,16 @@ class DraftStore:
                     id TEXT PRIMARY KEY, saved_at TEXT NOT NULL, schema_version INTEGER NOT NULL,
                     start TEXT NOT NULL, end TEXT NOT NULL, payload TEXT NOT NULL)""")
                 conn.execute("""INSERT INTO sku_analysis_drafts VALUES (?,?,?,?,?,?)
-                    ON CONFLICT(id) DO UPDATE SET saved_at=excluded.saved_at,payload=excluded.payload""",
-                    (payload['id'], payload['saved_at'], 2, payload['start'], payload['end'],
+                    ON CONFLICT(id) DO UPDATE SET saved_at=excluded.saved_at,
+                    schema_version=excluded.schema_version,start=excluded.start,
+                    end=excluded.end,payload=excluded.payload""",
+                    (payload['id'], payload['saved_at'], SKU_SCHEMA_VERSION, payload['start'], payload['end'],
                      json.dumps(payload, ensure_ascii=False)))
                 self._mark_saved(conn, payload['id'])
+                if decisions is not None:
+                    present = {_sku_identity(member) for member in payload.get('members', [])}
+                    _write_sku_ledger(conn, present, decisions, machine=self.machine,
+                                      saved_at=payload['saved_at'])
         finally:
             conn.close()
 
@@ -314,7 +421,7 @@ class DraftStore:
             if conn.execute("SELECT 1 FROM sqlite_master WHERE name='sku_analysis_drafts'").fetchone():
                 sku = conn.execute('SELECT * FROM sku_analysis_drafts WHERE id=?', (analysis_id,)).fetchone()
                 if sku:
-                    if sku['schema_version'] != 2:
+                    if sku['schema_version'] not in (2, SKU_SCHEMA_VERSION):
                         raise ValueError('SKU 草稿版本不兼容，未做任何修改')
                     return StoredDraft(json.loads(sku['payload']), sku['saved_at'])
             row = conn.execute("SELECT * FROM analysis_drafts WHERE id=?", (analysis_id,)).fetchone()
@@ -658,3 +765,331 @@ class _LedgerMerge:
             incoming_machine=incoming['machine'], incoming=incoming,
             local_machines=tuple(machines), local=tuple(local_contents),
             seen_at=self.seen_at, recorded=recorded))
+
+
+# ---- 外来 SKU 决定的并入（票 08）：判法在 `_SkuLedgerMerge`，这里是把判法写出来的那几件 ----
+
+def _read_sku_ledger(conn):
+    """SKU 账本三张表读成 `sku_ledger()` 那份形状：组解出成员对、其余按位置带来源。"""
+    return {
+        'groups': [{'members': json.loads(row[0]), 'confirmed': bool(row[1]),
+                    'excluded': bool(row[2]), 'group_id': row[3], 'machine_id': row[4]}
+                   for row in conn.execute(
+                       'SELECT members,confirmed,excluded,group_id,machine_id FROM sku_manual_groups')],
+        'excluded_skus': [[row[0], row[1]] for row in conn.execute(
+            'SELECT identity,machine_id FROM sku_excluded_skus')],
+        'excluded_pairs': [[row[0], row[1], row[2]] for row in conn.execute(
+            'SELECT pair_a,pair_b,machine_id FROM sku_excluded_pairs')],
+    }
+
+
+def _sku_group_key(members):
+    """一组 SKU 成员的规范行键（身份+证据版本、排序后 JSON）：与表主键同一口径。"""
+    return json.dumps(sorted((member, member_version) for member, member_version in members),
+                      ensure_ascii=False)
+
+
+def _sku_group_content(members, row, machine):
+    return {'kind': SIDE_RELATION, 'confirmed': bool(row['confirmed']),
+            'excluded': bool(row.get('excluded')),
+            'members': [[member, member_version] for member, member_version in members],
+            'machine': machine or ''}
+
+
+def _sku_exclusion_content(entry):
+    return {'kind': SIDE_STANDALONE, 'members': [[entry[0], None]],
+            'machine': entry[1] if len(entry) > 1 else ''}
+
+
+def _sku_pair_content(pair):
+    return {'kind': SIDE_EXCLUSION, 'members': [[pair[0], None], [pair[1], None]],
+            'machine': pair[2] if len(pair) > 2 else ''}
+
+
+def _insert_sku_conflict(conn, known, *, kind, incoming, local_contents, seen_at):
+    """把一条 SKU 冲突写进 `sku_decision_conflicts`（票 08）：并入期与回放期共用这一件。
+
+    `incoming` 与 `local_contents` 都是格式化后的内容；摘要按内容算，`known` 是调用方
+    已读到的既有摘要集合（新记的同步补进，同一批里重复也不再算新记）。返回
+    `(摘要, 这次是否新记, 冲突牵涉的身份, 本地侧来源机器)`——同一条重复遇到只核对不重记，
+    调用方直接拿这些字段组装 `Conflict`，不再重算。
+    """
+    conflict_digest = _digest({'kind': kind, 'incoming': incoming, 'local': local_contents})
+    members = sorted({member for content in [incoming, *local_contents]
+                      for member, _ in content['members']})
+    machines = sorted({content['machine'] for content in local_contents})
+    if conflict_digest in known:
+        return conflict_digest, False, members, machines
+    known.add(conflict_digest)
+    conn.execute(
+        f'INSERT INTO {SKU_CONFLICT_TABLE}(digest,kind,members,incoming_machine,incoming,'
+        'local_machines,local,seen_at) VALUES(?,?,?,?,?,?,?,?)',
+        (conflict_digest, kind, json.dumps(members, ensure_ascii=False),
+         incoming['machine'], json.dumps(incoming, ensure_ascii=False),
+         json.dumps(machines, ensure_ascii=False),
+         json.dumps(local_contents, ensure_ascii=False), seen_at))
+    return conflict_digest, True, members, machines
+
+
+def _format_sku_entry(entry):
+    """回放期冲突行的统一格式（票 08）：`apply_shared` 交来的 `{side, …}` 折成与
+    并入期冲突同一份内容形状（组／排除身份／排除对三种 `side`）。"""
+    side = entry.get('side') or 'group'
+    if side == 'sku':
+        return _sku_exclusion_content([entry['members'][0][0], entry.get('machine') or ''])
+    if side == 'pair':
+        return _sku_pair_content([entry['members'][0][0], entry['members'][1][0],
+                                  entry.get('machine') or ''])
+    return _sku_group_content([(member, version) for member, version in entry['members']],
+                              entry, entry.get('machine') or '')
+
+
+def _sku_exclusion_source(entry, default):
+    """排除身份行 [身份, 来源?] 的来源：第 2 位是来源；没带记通道来源 `default`。
+
+    与商品账本的 `source_of` 分开的点就在这：SKU 的排除身份行没有版本位，
+    按 `source_of` 的位置读会把来源读空。
+    """
+    return entry[1] if len(entry) > 1 and entry[1] else default
+
+
+def _sku_pair_source(pair, default):
+    """排除对 [a, b, 来源?] 的来源：第 3 位才是来源（第 2 位是另一半身份，
+    按末位读会在只带两端的行上把身份当来源）。没带记通道来源 `default`。
+    """
+    return pair[2] if len(pair) > 2 and pair[2] else default
+
+
+def _write_sku_ledger(conn, present, decisions, *, machine, saved_at):
+    """保存时把本机 SKU 决定并进账本（票 08）：产品 `merge_decisions` 的 SKU 版。
+
+    判法（三张表同一条，由 `_rewrite_sku_ledger_rows` 落）：
+
+    - 旧行成员全在场（`present`＝本次快照的成员身份）：新决定里有同一成员集 → 按新行
+      改写（版本／确认／排除刷新），来源沿用旧行（收进来的决定往返一次不被改写）；
+      没有 → 删掉旧行（本机视图是权威：人改过的组、撤掉的排除都以这次保存为准）。
+    - 旧行有缺席成员：原样保留——保存局部区间不能抹掉全局历史。
+    - 排除身份、排除对同规（排除对两端都在场才可改写）。
+    """
+    old = _read_sku_ledger(conn)
+    new_groups = {frozenset(member for member, _ in row['members']): row
+                  for row in decisions['groups']}
+    _rewrite_sku_ledger_rows(
+        old['groups'], new_groups, machine=machine,
+        key_of=lambda row: frozenset(member for member, _ in row['members']),
+        present_ok=lambda row: {member for member, _ in row['members']} <= present,
+        source_of_old=lambda row: source_of(row, machine),
+        delete=lambda row: conn.execute('DELETE FROM sku_manual_groups WHERE members=?',
+                                        (_sku_group_key(row['members']),)),
+        insert=lambda row, source: _insert_sku_group(conn, row, source=source, saved_at=saved_at))
+    new_skus = {entry[0]: entry for entry in decisions['excluded_skus']}
+    _rewrite_sku_ledger_rows(
+        old['excluded_skus'], new_skus, machine=machine,
+        key_of=lambda entry: entry[0],
+        present_ok=lambda entry: entry[0] in present,
+        source_of_old=lambda entry: _sku_exclusion_source(entry, machine),
+        delete=lambda entry: conn.execute('DELETE FROM sku_excluded_skus WHERE identity=?',
+                                          (entry[0],)),
+        insert=lambda entry, source: conn.execute(
+            'INSERT OR IGNORE INTO sku_excluded_skus(identity,saved_at,machine_id) VALUES(?,?,?)',
+            (entry[0], saved_at, source)))
+    new_pairs = {frozenset((row[0], row[1])): row for row in decisions['excluded_pairs']}
+    _rewrite_sku_ledger_rows(
+        old['excluded_pairs'], new_pairs, machine=machine,
+        key_of=lambda pair: frozenset((pair[0], pair[1])),
+        present_ok=lambda pair: {pair[0], pair[1]} <= present,
+        source_of_old=lambda pair: _sku_pair_source(pair, machine),
+        delete=lambda pair: conn.execute('DELETE FROM sku_excluded_pairs WHERE pair_a=? AND pair_b=?',
+                                         (pair[0], pair[1])),
+        insert=lambda pair, source: conn.execute(
+            'INSERT OR IGNORE INTO sku_excluded_pairs(pair_a,pair_b,saved_at,machine_id)'
+            ' VALUES(?,?,?,?)', (pair[0], pair[1], saved_at, source)))
+
+
+def _rewrite_sku_ledger_rows(old_rows, new_by_key, *, machine, key_of, present_ok,
+                             source_of_old, delete, insert):
+    """一张 SKU 账本表的保存侧改写：在场旧行删掉后按新视图重写（同键沿用原来源），
+    缺席旧行原样保留；新视图里没被旧行接上的按本机来源补插。三张表共用这一条判法。
+    """
+    handled = set()
+    for old_row in old_rows:
+        if not present_ok(old_row):
+            continue                                    # 有缺席成员：原样保留
+        delete(old_row)
+        key = key_of(old_row)
+        if key not in new_by_key:
+            continue                                    # 本机视图里这条决定没了：撤下
+        handled.add(key)
+        insert(new_by_key[key], source_of_old(old_row))
+    for key, row in new_by_key.items():
+        if key not in handled:
+            insert(row, machine)
+
+
+def _insert_sku_group(conn, row, *, source, saved_at):
+    conn.execute(
+        'INSERT OR IGNORE INTO sku_manual_groups(members,confirmed,excluded,group_id,saved_at,machine_id)'
+        ' VALUES(?,?,?,?,?,?)',
+        (_sku_group_key(row['members']), int(bool(row['confirmed'])), int(bool(row.get('excluded'))),
+         row['group_id'], saved_at, source))
+
+
+class _SkuLedgerMerge:
+    """一次收取（或种子写入）里的 SKU 账本并入（票 08）。
+
+    每条都对着收取前那一刻的本机账本判，同一条包里的行不互相判——来源那台自己的账本
+    已经把它的决定定死了，逐行再判只会把行序变成一个因素（与商品账本同规）。
+    同源（同一台机器）的旧话让位：它先前发布的组/排除被新的替换，不是两台机器的分歧；
+    掺着别家的话就不让位，记冲突、两边都不动。行上带了来源就用行的（转发的决定仍点名
+    原来那台机器），没带记 `source`。
+    """
+
+    def __init__(self, conn, *, source, seen_at):
+        self.conn = conn
+        self.source = source
+        self.seen_at = seen_at
+        self.local = _read_sku_ledger(conn)
+        self.known = {row[0] for row in conn.execute(f'SELECT digest FROM {SKU_CONFLICT_TABLE}')}
+        self.adopted = {table: 0 for table in SKU_DECISION_TABLES}
+        self.conflicts = []
+
+    def run(self, decisions):
+        for row in decisions['groups']:
+            self.group(row)
+        for entry in decisions['excluded_skus']:
+            self.excluded_sku(entry)
+        for pair in decisions['excluded_pairs']:
+            self.excluded_pair(pair)
+
+    def group(self, row):
+        """一条外来人工组：同一条跳过或同源更新、矛盾记冲突、其余并入（含状态更新）。"""
+        members = [(member, member_version) for member, member_version in row['members']]
+        idents = {member for member, _ in members}
+        source = source_of(row, self.source)
+        content = _sku_group_content(members, row, source)
+        # 同一成员集就是同一条决定：版本只是内容刷新，不作第二行并存（否则重复行会越积越多）。
+        same = [other for other in self.local['groups']
+                if {member for member, _ in other['members']} == idents]
+        if same and any(source_of(other, '') != source for other in same):
+            return                                 # 别的机器已记过同一决定：先到者保留，幂等跳过
+        opponents, superseded = [], []
+        for other in self.local['groups']:
+            other_idents = {member for member, _ in other['members']}
+            if other_idents == idents or not (other_idents & idents):
+                continue                           # 同一成员集在上面判过；不相交与这条无关
+            if source_of(other, '') == source:
+                superseded.append(('group', other))
+            else:
+                kind = (CONFLICT_GROUP_VS_EXCLUSION if other.get('excluded')
+                        else CONFLICT_DIFFERENT_GROUPS)
+                opponents.append((kind,
+                                  _sku_group_content(other['members'], other, source_of(other, ''))))
+        for pair in self.local['excluded_pairs']:
+            if not {pair[0], pair[1]} <= idents:
+                continue
+            if _sku_pair_source(pair, '') == source:
+                superseded.append(('pair', pair))
+            else:
+                opponents.append((CONFLICT_GROUP_VS_EXCLUSION, _sku_pair_content(pair)))
+        for entry in self.local['excluded_skus']:
+            if entry[0] not in idents:
+                continue
+            if _sku_exclusion_source(entry, '') == source:
+                superseded.append(('sku', entry))
+            else:
+                opponents.append((CONFLICT_GROUP_VS_EXCLUSION, _sku_exclusion_content(entry)))
+        if opponents:
+            self._conflict_kinds(opponents, content)
+            return
+        # 让位只在不矛盾时才执行：矛盾时两边都不动（先删会让共享行永久丢失，审查 B1）。
+        if same:
+            self._retire_groups(same)              # 同一台机器在更新自己（版本/确认/排除）
+        self._retire(superseded)
+        self._adopt('sku_manual_groups',
+                    'INSERT OR IGNORE INTO sku_manual_groups'
+                    '(members,confirmed,excluded,group_id,saved_at,machine_id) VALUES(?,?,?,?,?,?)',
+                    (_sku_group_key(members), int(bool(row['confirmed'])), int(bool(row.get('excluded'))),
+                     row['group_id'], self.seen_at, source))
+
+    def excluded_sku(self, entry):
+        """一条外来排除身份：同一条跳过或同源更新、与本机组矛盾记冲突、其余并入。"""
+        ident = entry[0]
+        source = _sku_exclusion_source(entry, self.source)
+        content = _sku_exclusion_content([ident, source])
+        current = [other for other in self.local['excluded_skus'] if other[0] == ident]
+        if current and not all(_sku_exclusion_source(other, '') == source for other in current):
+            return
+        rows = [row for row in self.local['groups']
+                if ident in {member for member, _ in row['members']}]
+        opponents = [(CONFLICT_GROUP_VS_EXCLUSION,
+                      _sku_group_content(row['members'], row, source_of(row, '')))
+                     for row in rows if source_of(row, '') != source]
+        if opponents:
+            self._conflict_kinds(opponents, content)
+            return
+        self._retire([('sku', other) for other in current])   # 让位在确认无矛盾之后（审查 B1）
+        self._retire([('group', row) for row in rows])
+        self._adopt('sku_excluded_skus',
+                    'INSERT OR IGNORE INTO sku_excluded_skus(identity,saved_at,machine_id)'
+                    ' VALUES(?,?,?)',
+                    (ident, self.seen_at, source))
+
+    def excluded_pair(self, pair):
+        """一条外来排除对：同一条跳过或同源更新、两端同组矛盾记冲突、其余并入。"""
+        left, right = pair[0], pair[1]
+        source = _sku_pair_source(pair, self.source)
+        content = _sku_pair_content([left, right, source])
+        current = [other for other in self.local['excluded_pairs']
+                   if {other[0], other[1]} == {left, right}]
+        if current and not all(_sku_pair_source(other, '') == source for other in current):
+            return
+        rows = [row for row in self.local['groups']
+                if {left, right} <= {member for member, _ in row['members']}]
+        opponents = [(CONFLICT_GROUP_VS_EXCLUSION,
+                      _sku_group_content(row['members'], row, source_of(row, '')))
+                     for row in rows if source_of(row, '') != source]
+        if opponents:
+            self._conflict_kinds(opponents, content)
+            return
+        self._retire([('pair', other) for other in current])  # 让位在确认无矛盾之后（审查 B1）
+        self._retire([('group', row) for row in rows])
+        self._adopt('sku_excluded_pairs',
+                    'INSERT OR IGNORE INTO sku_excluded_pairs(pair_a,pair_b,saved_at,machine_id)'
+                    ' VALUES(?,?,?,?)',
+                    (left, right, self.seen_at, source))
+
+    def _retire_groups(self, rows):
+        self._retire([('group', row) for row in rows])
+
+    def _retire(self, stale):
+        """让位：删掉同一台机器先前的话（旧组、旧排除身份或旧排除对）。"""
+        for kind, row in stale:
+            if kind == 'group':
+                self.conn.execute('DELETE FROM sku_manual_groups WHERE members=?',
+                                  (_sku_group_key(row['members']),))
+            elif kind == 'sku':
+                self.conn.execute('DELETE FROM sku_excluded_skus WHERE identity=?', (row[0],))
+            else:
+                self.conn.execute('DELETE FROM sku_excluded_pairs WHERE pair_a=? AND pair_b=?',
+                                  (row[0], row[1]))
+
+    def _adopt(self, table, statement, values):
+        self.adopted[table] += self.conn.execute(statement, values).rowcount
+
+    def _conflict_kinds(self, opponents, incoming):
+        """按冲突类分组各记一条；同一条重复遇到只核对不重记。"""
+        for kind in dict.fromkeys(kind for kind, _ in opponents):
+            local_contents = sorted((content for own_kind, content in opponents if own_kind == kind),
+                                    key=lambda content: json.dumps(content, sort_keys=True,
+                                                                   ensure_ascii=False))
+            self._conflict(kind, incoming, local_contents)
+
+    def _conflict(self, kind, incoming, local_contents):
+        conflict_digest, recorded, members, machines = _insert_sku_conflict(
+            self.conn, self.known, kind=kind, incoming=incoming,
+            local_contents=local_contents, seen_at=self.seen_at)
+        self.conflicts.append(Conflict(
+            digest=conflict_digest, kind=kind, members=tuple(members),
+            incoming_machine=incoming['machine'], incoming=incoming,
+            local_machines=tuple(machines),
+            local=tuple(local_contents), seen_at=self.seen_at, recorded=recorded))

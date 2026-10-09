@@ -11,7 +11,7 @@
 #groupDetail>aside.conflict{border:1px solid var(--red);border-radius:6px;padding:10px 12px;margin:10px 0;background:#fef2f2}
 #groupDetail>aside.conflict b{color:var(--red)}
 #groupDetail>aside.conflict p{margin:4px 0}
-.match-bar{justify-content:flex-start;margin:12px 0}#matchControl button:disabled{cursor:not-allowed}#matchingStatus{color:var(--mut)}
+.match-bar{justify-content:flex-start;margin:12px 0}#matchControl{flex-shrink:0}#matchControl button{white-space:nowrap}#matchControl button:disabled{cursor:not-allowed}#matchingStatus{color:var(--mut)}
 /* 结果条目不自带白底：白由所在面板承担，条目只留自己的边框与内边距（分析界面反馈批·票 02）。 */
 .rank{border:1px solid var(--line);border-radius:9px;padding:8px 14px;margin:12px 0}.rank>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer}.rank .product{display:flex;align-items:center;gap:12px}.rank .product img,.tree .product img{width:58px;height:58px;object-fit:contain;background:white;border:1px solid #eef2f7;border-radius:8px}.product-title{display:flex;gap:7px;align-items:center;min-width:0}.number{font-size:28px;font-weight:650;color:var(--pri);white-space:nowrap}.chart-block{margin:12px 0}.chart{overflow-x:auto;margin-top:6px}.chart svg{min-width:690px;width:100%;height:262px}.chart-toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-top:12px}.chart-key{display:flex;gap:20px;font-size:11px;margin:6px 0}.chart-key .sales{color:var(--pri)}.stock-legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;justify-content:flex-end;font-size:11px;margin-left:auto}.green{color:var(--grn)}.stock-point.green{fill:var(--grn)}.yellow{color:var(--amb)}.stock-point.yellow{fill:var(--amb)}.red{color:var(--red)}.stock-point.red{fill:var(--red)}.stock-line{stroke:var(--grn)}.sales-line{stroke:var(--pri)}.sales-point{fill:#fff;stroke:var(--pri)}.grid-line{stroke:var(--line)}.date-label,.stock-axis,.stock-title{fill:var(--mut)}.sales-axis,.sales-value,.sales-title{fill:var(--pri)}.stock-value{fill:var(--grn)}.point-label{paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round}.tree{padding-left:22px;border-left:2px solid var(--line);margin:12px}.tree .product{margin:15px 0}.tree .product p{margin:6px 0}.tree-heading{justify-content:flex-start;gap:8px;margin-top:16px}.tree-heading h3{margin:8px 0}.subtle-button{font-size:12px;padding:4px 8px;background:transparent;border-color:transparent;color:var(--mut)}.subtle-button:hover{background:#f1f4f9;border-color:var(--line)}.sku-row{margin:10px 0 10px 18px}.sku-row summary{display:flex;align-items:center;justify-content:space-between;cursor:pointer}.sku-row[open]{border:1px solid var(--line);border-radius:7px;padding:6px}.switch-note{margin:6px 0 6px 18px;font-size:13px}.ranking-controls{justify-content:flex-start;margin:12px 0}.rank-pager{justify-content:flex-start;gap:14px;margin:12px 0}.export-bar{justify-content:flex-start;gap:14px;margin:12px 0}.empty{padding:32px;text-align:center;color:var(--mut)}.tip{position:fixed;background:#1f2937;color:white;padding:10px 14px;border-radius:6px;pointer-events:none;z-index:2147483647;max-width:320px}
 /* 阶段图例：与「库存数据抓取」页同一组件（ui_live.html 的 .tabs/.step），改这里时两页一起改。 */
@@ -67,7 +67,7 @@
 <section><label>开始日期 <input id="start" type="date"></label><h3>当日真实抓取</h3><div id="startCoverage">请选择日期</div></section>
 <section><label>结束日期 <input id="end" type="date"></label><h3>当日真实抓取</h3><div id="endCoverage">请选择日期</div></section></div>
 <p><button id="begin" class="primary">下一步、进入同款确认</button></p></section>
-<section id="reviewPage" class="panel" hidden><div class="bar"><h2>确认同款</h2><button id="back">重新选择日期</button></div><div id="snapshotInfo"></div><p class="muted">建议分组均待人工确认；低把握判断保留缓存，需人工核对。</p><div class="bar match-bar"><span id="matchControl" title=""><button id="runMatching" onclick="runMatching()">模型匹配同款</button></span><span id="matchingStatus" role="status"></span></div><div class="review-layout"><div class="review-side"><nav id="products" aria-label="同款分组列表"></nav><div class="bar review-pager"><button id="prev">上一页</button><span id="pageInfo"></span><button id="next">下一页</button></div></div><article id="groupDetail"></article></div><div class="bar save-bar"><span id="saveStatus" role="status"></span><button id="saveDraft" data-mutation>暂时保存</button><button id="saveAndView" class="primary" data-mutation disabled>保存分组并查看畅销品</button></div></section><section id="results" class="panel" hidden><div class="bar"><h2>畅销品</h2><button id="backToReview">返回修改同款分组</button></div><div id="ranking"></div><div class="bar export-bar"><button id="exportReport">导出 HTML 报告</button><span id="exportStatus" role="status"></span></div><div class="bar rank-pager"><button id="rankPrev" aria-label="畅销品上一页">上一页</button><span id="rankPageInfo"></span><button id="rankNext" aria-label="畅销品下一页">下一页</button></div></section>
+<section id="reviewPage" class="panel" hidden><div class="bar"><h2>确认同款</h2><button id="back">重新选择日期</button></div><div id="snapshotInfo"></div><p class="muted">建议分组均待人工确认；不确定判断保持待处理，需人工核对。</p><div class="bar match-bar"><span id="matchControl" title=""><button id="runMatching" onclick="runMatching()">模型匹配同款</button></span><span id="matchingStatus" role="status"></span></div><div class="review-layout"><div class="review-side"><nav id="products" aria-label="同款分组列表"></nav><div class="bar review-pager"><button id="prev">上一页</button><span id="pageInfo"></span><button id="next">下一页</button></div></div><article id="groupDetail"></article></div><div class="bar save-bar"><span id="saveStatus" role="status"></span><button id="saveDraft" data-mutation>暂时保存</button><button id="saveAndView" class="primary" data-mutation disabled>保存分组并查看畅销品</button></div></section><section id="results" class="panel" hidden><div class="bar"><h2>畅销品</h2><button id="backToReview">返回修改同款分组</button></div><div id="ranking"></div><div class="bar export-bar"><button id="exportReport">导出 HTML 报告</button><span id="exportStatus" role="status"></span></div><div class="bar rank-pager"><button id="rankPrev" aria-label="畅销品上一页">上一页</button><span id="rankPageInfo"></span><button id="rankNext" aria-label="畅销品下一页">下一页</button></div></section>
 </main><dialog id="bulkDialog" class="modal" aria-label="确认同款商品分组"><h2>确认同款商品分组</h2><p id="bulkScope"></p><p id="bulkMultiple"></p><div class="modal-actions"><span class="spacer"></span><button onclick="$('bulkDialog').close()">取消</button><button id="bulkOK" data-mutation onclick="confirmBulk()">确认</button></div></dialog>
 <div id="tip" class="tip" hidden></div>
 <dialog id="notice"><p id="noticeText"></p><div class="modal-actions"><span class="spacer"></span><button id="noticeCancel" hidden>取消</button><button id="noticeOK">继续</button></div></dialog>
@@ -79,7 +79,7 @@
 <dialog id="matchMask" aria-label="匹配进度"><h2 id="maskTitle">正在匹配同款</h2><p class="phase" id="maskPhase"></p>
 <ul class="mask-steps" id="maskSteps"></ul>
 <div id="maskNumbers" hidden><div class="pbar"><div class="pfill" id="maskBar"></div></div><p class="big" id="maskMain"></p><p class="sub" id="maskSub"></p><p class="sub" id="maskTime"></p></div>
-<p class="sub" id="maskStopNote" hidden>停下后自动进入本页；没判断的对记为「失败」，点「模型匹配同款」可以接着判<br>点「停止匹配」与点关窗确认里的「关闭并停止」进的都是这一态；收尾完成前窗口不消失</p>
+<p class="sub" id="maskStopNote" hidden></p>
 <div id="maskError" class="error" role="alert" hidden></div>
 <p class="warn">匹配期间程序只做这一件事，完成后自动回到本页。<br><b>请勿关闭窗口。</b>已判断的会保存，重新开始会接着算，不会重复花钱；但这一趟的分析结果会没。</p>
 <div class="acts" id="maskLive" hidden><button id="maskStop">停止匹配</button><span class="spacer"></span><span class="muted" id="maskStopHint">停下后已判断的会留下，稍后可从本页继续</span></div>
@@ -174,6 +174,7 @@ const reviewControls=document.createElement('div');
 // 徽标是页签名字的一部分（读屏能听到组数），不是纯装饰；计数口径见 renderProducts 里的页签块。
 reviewControls.innerHTML=`<p id="dirtyStatus" role="status"></p><div class="review-tabs" role="tablist" aria-label="确认状态"><button role="tab" data-tab="pending" aria-selected="true">待确认 <span class="tab-count">0</span></button><button role="tab" data-tab="confirmed" aria-selected="false">已确认 <span class="tab-count">0</span></button><button role="tab" data-tab="all" aria-selected="false">全部 <span class="tab-count">0</span></button></div><div class="review-filters filter-panel"><label>搜索分组商品 <input id="reviewQuery" placeholder="商品名称、编号或店铺"></label><div class="filter-row" role="group" aria-label="商品来源"><b>商品来源</b><label><input type="checkbox" data-filter="origin" value="新商品">新商品</label><label><input type="checkbox" data-filter="origin" value="信息变更">信息变更</label></div><div class="filter-row" role="group" aria-label="匹配状态"><b>匹配状态</b><label><input type="checkbox" data-filter="match" value="暂无匹配同款">暂无匹配同款</label><label><input type="checkbox" data-filter="match" value="匹配唯一同款">匹配唯一同款</label><label><input type="checkbox" data-filter="match" value="匹配多组同款">匹配多组同款</label></div><small>标签属于商品；同一商品同时符合两类条件才命中。命中后展示完整组，突出匹配成员。</small></div><div class="review-filters" id="batchRow"><button id="batchSelected" onclick="openBulk(false)"></button><button id="batchFiltered" onclick="openBulk(true)"></button><span id="selectionCount"></span></div>`;
 $('reviewPage').insertBefore(reviewControls,document.querySelector('.review-layout'));
+reviewControls.insertAdjacentHTML('beforeend', `<div id="skuReviewControls" hidden><div class="review-filters filter-panel"><label>搜索 SKU 分组 <input id="skuQuery" placeholder="商品名称、SKU 名称、商家编码、商品编号、平台 SKU 编号或同款分组编号"></label><small>搜索命中任一成员时展示完整同款组；按同款分组编号可直接定位该组及其成员。</small></div></div>`);
 // 页签按钮专属绑定：阶段图例的节点也带 data-tab，别把它卷进来（票 16）。切页签清掉匹配结果。
 document.querySelectorAll('.review-tabs [data-tab]').forEach(button=>button.onclick=()=>{reviewTab=button.dataset.tab;matchResult=null;resetReview();});
 $('reviewQuery').addEventListener('input',resetReview);
@@ -255,10 +256,10 @@ async function confirmBulk(){
     if(await updateDraft({action,groups:bulkTargets}))$('bulkDialog').close();
 }
 function snapshotInfoHTML(snapshot){
-    if(snapshot.member_kind==='sku')return `<p>${esc(snapshot.start)} — ${esc(snapshot.end)} · ${snapshot.members.length} 个 SKU · ${snapshot.groups.length} 个尚未判断的独立组</p>`;
+    if(snapshot.member_kind==='sku')return `<p>${esc(snapshot.start)} — ${esc(snapshot.end)} · ${snapshot.members.length} 个 SKU · ${snapshot.groups.length} 组（${pendingCount(snapshot)} 组待确认）</p>`;
     const pending=pendingCount(snapshot);
     return `<p class="snapshot-meta"><span><b>日期区间</b>：${esc(snapshot.start)} — ${esc(snapshot.end)}</span><span><b>数据固定于</b>：${fmtMomentSecond(snapshot.frozen_at)}</span></p>`
-        +`<p class="snapshot-tally">${snapshot.products.length} 个商品 · ${snapshot.groups.length} 组同款（其中 ${pending} 组待确认）</p>`;
+        +`<p class="snapshot-tally">${snapshot.member_kind==='sku'?new Set(snapshot.members.map(m=>JSON.stringify([m.shop_key,m.offer_id]))).size:snapshot.products.length} 个商品 · ${snapshot.groups.length} 组同款（其中 ${pending} 组待确认）</p>`;
 }
 // 阶段图例＝「正在显示哪一屏」的镜像，与库存抓取页同规：当前屏蓝、其左绿、可逆（票 16）。
 const STAGE_ORDER=['dates','review','result'];
@@ -282,7 +283,7 @@ function showScreen(name){
 }
 // 落屏门禁（票 06，与既有结果可见性判定同一口径）：已保存（不脏）且没有待确认组。
 function resultsReady(snapshot){
-    if(snapshot.member_kind==='sku'||snapshot.migration_note)return false;
+    if(snapshot.migration_note)return false;
     return !snapshot.dirty&&snapshot.groups.length>0&&snapshot.groups.every(g=>groupConfirmed(g));
 }
 function show(snapshot) {
@@ -349,48 +350,114 @@ function memberCard(p, full=false) {
         ${full&&!currentSnapshot.migration_note&&group.members.length>1?`<button class="remove-member" data-mutation aria-label="从当前分组移除商品" title="从当前分组移除商品" onclick="requestRemoval(${index})"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg></button>`:''}</section>`;
 }
 function selectGroup(id) {selectedGroup=id;matchResult=null;renderProducts();}
+function skuMemberKey(m){return JSON.stringify([m.shop_key,m.offer_id,m.sku_id]);}
+function skuMemberIndex(m){return currentSnapshot.members.findIndex(item=>skuMemberKey(item)===skuMemberKey(m));}
+function skuGroupFor(m){return currentSnapshot.groups.find(g=>g.members.some(item=>skuMemberKey(item)===skuMemberKey(m)));}
+function skuShopName(m){return currentSnapshot.shops.find(s=>s.shop_key===m.shop_key)?.shop_name||m.shop_key;}
+function skuGroupMembers(g){return g.members.map(ref=>currentSnapshot.members.find(m=>skuMemberKey(m)===skuMemberKey(ref)));}
+function skuRepresentative(g){return currentSnapshot.members.find(m=>skuMemberKey(m)===skuMemberKey(g.representative));}
+function skuUnitsNote(){return '组销量是不同 SKU 销售单位数量合计，并非统一实物数量；不按单个装、双件套等换算倍数。';}
+function skuCode(m){
+    if(m.code_ambiguous)return `<span class="merchant-code">编码有歧义：${(m.merchant_codes||[]).map(esc).join('、')}</span>`;
+    return m.merchant_code?`<span class="merchant-code">商家编码：${esc(m.merchant_code)}</span>`:'';
+}
+function skuGroupEvidence(g){
+    const codes=(g.merchant_codes||[]).map(esc).join('、');
+    return `<p>归组依据：${esc(g.grouping_basis||'人工归组')}${codes?` · 组内商家编码：${codes}`:''}</p>${g.added_members?.length?'<aside class="change">自动增员，整个组需要重新确认；新增 SKU 见卡片。</aside>':''}${g.evidence_changed?'<aside class="change">证据变化，保留原人工归属，整个组需要重新确认。</aside>':''}${g.code_conflict?`<aside class="change"><b>编码冲突</b>：新编码与组内其他编码不同（${codes}）；保留原人工归属，由人工决定是否移走。</aside>`:''}`;
+}
+function skuHeading(m){return `<div class="product-title"><b>${esc(m.display_name)}</b>${sourceIcon(m)}</div><small class="image-source">${esc(skuImageSource(m))}</small>${skuCode(m)}`;}
+function skuSummary(g){const m=skuRepresentative(g);return `<div class="sku-group-summary product">${rankingPhoto(m)}<div>${skuHeading(m)}<p>组销量 ${g.sales}</p>${skuGroupEvidence(g)}<p class="muted">${skuUnitsNote()}</p></div></div>`;}
+function skuTreeHTML(g){
+    const shops=[...new Set(g.products.map(p=>p.shop_key))];
+    return shops.map(shop=>`<div class="tree" data-shop="${esc(shop)}"><b>▾ ${esc(skuShopName({shop_key:shop}))}</b>${g.products.filter(p=>p.shop_key===shop).map(p=>`<div class="tree" data-product="${esc(p.offer_id)}"><b>${esc(p.product_name)}</b><p>本组内销量小计 <b>${p.sales}</b></p>${switchNotes(p)}${chart(p.points,false,'本组内商品')}${p.members.map(ref=>{const m=currentSnapshot.members.find(item=>skuMemberKey(item)===skuMemberKey(ref));return `<details class="sku-row" data-sku-id="${esc(m.sku_id)}"><summary><div class="product">${rankingPhoto(m)}<div>${skuHeading(m)}</div></div><span class="sku-total">销量 <b>${m.sales}</b></span></summary><p>原始商品名称：${esc(m.product_name)} · 原始 SKU 名称：${esc(m.raw_sku_name||'（空）')}</p><p>平台 SKU：${esc(m.sku_id)} · 观测：${esc(m.observed_at||m.observed_date)}${m.evidence_note?' · '+esc(m.evidence_note):''}</p>${chart(m.points,true)}</details>`;}).join('')}</div>`).join('')}</div>`).join('');
+}
+function skuStatus(g){return g.excluded_group?'人工排除':g.confirmed?'已确认':'待确认';}
+function skuImageSource(m){return ({sku:'SKU 专图',product_main_same_observation:'同次商品主图代填',missing:'当次缺图'})[m.image_source]||'未知来源';}
+function skuSearchValues(g){return g.members.flatMap(ref=>{const m=currentSnapshot.members.find(item=>skuMemberKey(item)===skuMemberKey(ref))||{};return [m.product_name,m.raw_sku_name,m.merchant_code,...(m.merchant_codes||[]),m.offer_id,m.sku_id,m.shop_key,skuShopName(m),g.id];}).map(v=>String(v||'').toLocaleLowerCase());}
+function skuConfirm(id){return updateDraft({action:'confirm_groups',groups:[id]});}
+function skuWithdraw(id){return updateDraft({action:'withdraw_groups',groups:[id]});}
+function skuEdit(action,index,target=null){
+    const m=currentSnapshot.members[index], source=skuGroupFor(m);
+    if(!m||!source)return false;
+    return updateDraft({action,group:source.id,member:{shop_key:m.shop_key,offer_id:m.offer_id,sku_id:m.sku_id},target});
+}
+function skuMove(index){
+    const m=currentSnapshot.members[index], source=skuGroupFor(m);
+    if(!m||!source)return;
+    const choices=currentSnapshot.groups.filter(g=>g.id!==source.id&&!g.excluded_group).map(g=>g.id);
+    if(!choices.length){error(new Error('当前没有可加入的其他 SKU 组'));return;}
+    const target=window.prompt(`请输入目标同款分组编号（可选：${choices.join('、')}）`,choices[0]);
+    if(target&&choices.includes(target))skuEdit('move',index,target);
+}
+function skuRemove(index){skuEdit('remove',index);}
+function skuExclude(index){skuEdit('exclude',index);}
+function skuUndoExclude(index){skuEdit('undo_exclude',index);}
+function skuGroupActions(g){
+    const id=esc(g.id);
+    if(g.excluded_group)return `<button data-mutation data-group="${id}" onclick="skuUndoExclude(${skuMemberIndex(g.members[0])})">撤销人工排除</button>`;
+    return `${g.confirmed?`<button data-mutation data-group="${id}" onclick="skuWithdraw(this.dataset.group)">撤回确认</button>`:`<button data-mutation data-group="${id}" onclick="skuConfirm(this.dataset.group)">确认当前分组</button>`}<button data-mutation onclick="openAdd()">添加 SKU</button>`;
+}
+function skuRecommendation(m){
+    const r=m.recommendation;
+    if(!r)return '';
+    const alternatives=(m.candidate_groups||[]).filter(id=>id!==r.group_id);
+    const heading=r.group_id?`多候选推荐：${esc(r.group_id)} · 并非人工确认`:'多个候选，无法确定归属';
+    const choices=alternatives.map(id=>{const g=currentSnapshot.groups.find(g=>g.id===id);return g?`${esc(id)} · ${esc(skuRepresentative(g)?.display_name||'')} · ${g.members.length} 个 SKU（${esc(skuStatus(g))}）`:`${esc(id)}（历史候选，当前已不存在）`;}).join('；');
+    return `<aside class="change sku-recommendation"><b>${heading}</b><p>推荐理由：${esc(r.reason)}</p><p>其他候选（比较时）：${choices||'无'}；可用“移到其他组”人工调整。</p><small>${r.cached?'复用有效候选语境':'模型候选比较'}；自动建议不替代当前人工决定。</small></aside>`;
+}
+function skuModelWork(m) {
+    if(!m.model_work?.length)return '';
+    return `<aside class="change sku-model-work">${m.model_work.map(t=>`<p><b>${t.branch==='judgment'?'普通图文判断':'多候选推荐'}</b>：${esc(t.reason)}${t.retryable?'；可以选择性重试':t.completed?'；已保存，不重复调用':'；补齐证据后重新检查'}</p>`).join('')}</aside>`;
+}
+function skuMatchingLine(summary) {
+    const states=(summary.states||[]).filter(s=>s.count).map(s=>`${s.reason} ${s.count}`).join('；');
+    return `SKU 模型任务：已完成 ${summary.completed||0}，未完成 ${summary.unfinished||0}；${states}；成员已完成 ${summary.completed_members||0}，未完成 ${summary.unfinished_members||0}；本次业务调用 ${summary.requested||0}（不含图像核验），复用 ${summary.cached||0}`
+        + ((summary.retryable||0)>0?'；只补未完成项。需要配置时请修改分析配置、保存草稿并重启，再继续选择性重试。':summary.recheckable>0?'；缺证据项可在补齐后重新检查，不重复调用已完成结果。':'；没有可重试的未完成调用。')
+        + ` ${(currentSnapshot.limitations||[]).join('；')}`;
+}
+function renderSkuMember(m,g){
+    const index=skuMemberIndex(m), source=skuImageSource(m);
+    const evidence=m.evidence_note?`<aside class="change"><b>证据说明</b><p>${esc(m.evidence_note)}</p></aside>`:'';
+    const basis=g.manual_reason||m.grouping_basis||g.grouping_basis||'暂时独立，尚未人工确认';
+    const changes=m.evidence_changes?.length?`<aside class="change"><b>证据变化</b>：${m.evidence_changes.map(esc).join('、')}；保留原人工归属，需重新确认。</aside>`:'';
+    const addition=m.added_to_group?`<aside class="change"><b>新增 SKU</b> · ${m.grouping_basis === "同码归组" ? `同码依据：${esc(m.merchant_code)}` : `自动依据：${esc(m.grouping_basis||g.grouping_basis)}`}；整个组待重新确认。</aside>`:'';
+    const pending=m.matching_note?`<aside class="change">${esc(m.matching_note)}${m.candidate_groups?.length?` · 候选组：${m.candidate_groups.map(esc).join('、')}`:''}</aside>`:'';
+    return `<section class="matching-member sku-evidence-card" data-sku="${esc(m.sku_id)}"><div>${productPhoto(m)}</div><div class="member-info"><h4>${esc(m.product_name||m.offer_id)} ${sourceIcon(m)}</h4><p>原始 SKU 名称：${esc(m.raw_sku_name||'（空）')}</p><p>匹配商品名称：${esc(m.matching_input?.product_name||m.product_name||'')}</p><p>匹配 SKU 名称：${esc(m.matching_input?.sku_name||'空')}</p><p>店铺：${esc(skuShopName(m))} · 商品编号：${esc(m.offer_id)} · 平台 SKU：${esc(m.sku_id)}（平台 SKU 编号）</p><p><b>区间销量：${esc(m.sales)}</b>（SKU 销售单位，不换算实物数量）</p><p>观测库存：${esc(m.stock??'未知')} · 价格：${esc(m.price??'未知')}</p><p>观测时间：${esc(m.observed_at||((m.observed_date||'')+'（精确时间不可恢复）'))}</p><p>完整观测：${m.observation_complete?`${esc(m.observation_sku_count)} 个 SKU`:'无法证明'} · 单 SKU：${m.single_sku===null?'无法证明':m.single_sku?'是':'否'}</p><p>SKU 图片来源：${esc(source)}${m.image_observed_at?` · 观测于 ${esc(m.image_observed_at)}`:''}</p>${skuCode(m)}${m.image_judgments?.length?`<p>图文依据：${m.image_judgments.map(j=>esc(j.reason)).join("；")}（${m.image_judgments.every(j=>j.cached)?"复用有效判断":"SKU 图文判断"}）</p>`:""}<p>归组依据：${esc(basis)}</p>${addition}${skuRecommendation(m)}${changes}${pending}${skuModelWork(m)}${evidence}<div class="group-actions"><button data-mutation onclick="skuMove(${index})">移到其他组</button>${g.excluded_group?`<button data-mutation onclick="skuUndoExclude(${index})">撤销排除</button>`:`<button data-mutation onclick="skuRemove(${index})">移出／独立</button><button data-mutation onclick="skuExclude(${index})">排除</button>`}</div></div></section>`;
+}
 function renderSkuDraft() {
     const s=currentSnapshot;
-    reviewControls.hidden=true;
-    $('runMatching').disabled=true;
-    $('matchingStatus').textContent=s.limitations.join('；');
-    const skuIdLabel=m=>m.sku_id_source==='platform'?'平台 SKU':m.sku_id_source==='system_default'?'系统默认 SKU':'SKU（非平台已证实编号）';
-    const findSkuMember=id=>s.members.find(m=>m.shop_key===id.shop_key&&m.offer_id===id.offer_id&&m.sku_id===id.sku_id);
-    const groups=s.groups, start=productPage*GROUPS_PER_PAGE;
-    if(!groups.slice(start,start+GROUPS_PER_PAGE).some(g=>g.id===selectedGroup))selectedGroup=groups[start]?.id;
-    $('products').innerHTML=groups.slice(start,start+GROUPS_PER_PAGE).map(g=>{
-        const id=g.members[0], m=findSkuMember(id);
-        return `<button class="group-choice" data-sku-group="${esc(g.id)}">${esc(m.product_name)} · ${esc(m.single_sku?'单 SKU':m.raw_sku_name)}<br>${skuIdLabel(m)}：${esc(m.sku_id)} · ${esc(m.sales)} · 尚未判断</button>`;
-    }).join('');
+    reviewControls.hidden=false;
+    reviewControls.querySelector('.review-tabs').hidden=true;
+    reviewControls.querySelector('.filter-panel').hidden=true;
+    $('batchRow').hidden=true;
+    $('skuReviewControls').hidden=false;
+    renderMatching();
+    const query=($('skuQuery').value||'').trim().toLocaleLowerCase();
+    const ordered=(s.review_order||s.groups.map(g=>g.id)).map(id=>s.groups.find(g=>g.id===id)).filter(Boolean);
+    const filtered=query?ordered.filter(g=>skuSearchValues(g).some(v=>v.includes(query))):ordered;
+    const pages=Math.max(1,Math.ceil(filtered.length/GROUPS_PER_PAGE));
+    productPage=Math.min(productPage,pages-1);
+    const start=productPage*GROUPS_PER_PAGE, visible=filtered.slice(start,start+GROUPS_PER_PAGE);
+    if(!visible.some(g=>g.id===selectedGroup))selectedGroup=visible[0]?.id;
+    $('products').innerHTML=visible.map(g=>{const lead=skuRepresentative(g);return `<button class="group-choice" aria-pressed="${g.id===selectedGroup}" data-sku-group="${esc(g.id)}"><b>${esc(g.id)} · ${g.sku_count||g.members.length} 个 SKU</b>${rankingPhoto(lead)}<small>${esc(lead?.display_name||'')} · ${esc(skuImageSource(lead||{}))} · 组销量 ${esc(g.sales||0)}</small><small>店铺 ${esc(g.shop_count||0)} · 商品 ${esc(g.product_count||0)} · ${esc(skuStatus(g))}</small></button>`;}).join('')||'<p class="muted">没有匹配的 SKU 分组</p>';
     $('products').querySelectorAll('[data-sku-group]').forEach(b=>b.onclick=()=>{selectedGroup=b.dataset.skuGroup;renderSkuDraft();});
-    const g=groups.find(g=>g.id===selectedGroup), id=g?.members[0];
-    const m=id&&findSkuMember(id);
-    const source={'sku':'SKU 专图','product_main_same_observation':'同次商品主图代填','missing':'当次缺图'};
-    $('groupDetail').innerHTML=m?`<section class="sku-evidence-card"><h3>${esc(m.product_name)}${m.single_sku?'':` · ${esc(m.raw_sku_name)}`}</h3>
-        <p>尚未判断 · 独立成组；不是确定非同款，也不是人工已确认</p>
-        <p>店铺：${esc(m.shop_key)} · 商品编号：${esc(m.offer_id)} · ${skuIdLabel(m)}：${esc(m.sku_id)}</p>
-        <p><b>区间销量：${esc(m.sales)}</b>（SKU 销售单位，不换算实物数量）</p>
-        <p>观测库存：${esc(m.stock)} · 价格：${esc(m.price??'未知')}</p>
-        <p>观测时间：${esc(m.observed_at||((m.observed_date||'')+'（精确时间不可恢复）'))}</p>
-        <p>原始商品名称：${esc(m.product_name)}<br>原始 SKU 名称：${esc(m.raw_sku_name)}<br>名称来源：${m.name_source==='system_default'?'系统默认占位':'真实观测'}</p>
-        <p>完整观测：${m.observation_complete?`${m.observation_sku_count} 个 SKU`:'无法证明'} · 单 SKU：${m.single_sku===null?'无法证明':m.single_sku?'是':'否'}</p>
-        ${m.evidence_note?`<p class="error">${esc(m.evidence_note)}</p>`:''}
-        <p>匹配商品名称：${esc(m.matching_input.product_name)}<br>匹配 SKU 名称：${esc(m.matching_input.sku_name||'空')}</p>
-        <p>图片来源：${esc(source[m.image_source])}<br>图片观测时间：${esc(m.image_observed_at||'不可恢复')}<br>原图片地址：${esc(m.image_url||'无')}</p>
-        ${m.image_data?`<img data-sku-image src="${esc(m.image_data)}" alt="SKU 历史证据图片" style="max-width:240px;max-height:240px;cursor:zoom-in">`:`<p class="muted">${esc(m.image_error||'当次缺图')}</p>`}
-        </section>`:'暂无可展示的 SKU';
-    const image=$('groupDetail').querySelector('[data-sku-image]');
-    if(image)image.onclick=()=>{$('largeImage').src=m.image_data;$('largeImage').alt='SKU 历史证据图片';$('imageViewer').showModal();};
-    $('prev').disabled=productPage===0;
-    $('next').disabled=start+GROUPS_PER_PAGE>=groups.length;
-    $('pageInfo').textContent=`${Math.min(start+1,groups.length)}–${Math.min(start+GROUPS_PER_PAGE,groups.length)} / ${groups.length} 个 SKU`;
+    const g=s.groups.find(item=>item.id===selectedGroup);
+    $('groupDetail').innerHTML=g?`<div class="bar"><h3>${esc(g.id)} · ${esc(g.sku_count||g.members.length)} 个 SKU</h3><div class="group-actions">${skuGroupActions(g)}</div></div><p>店铺数 <b>${esc(g.shop_count||0)}</b> · 商品数 <b>${esc(g.product_count||0)}</b> · SKU 数 <b>${esc(g.sku_count||g.members.length)}</b> · 组内销量 <b>${esc(g.sales||0)}</b> · <span class="group-status">${esc(skuStatus(g))}</span></p>${skuSummary(g)}${g.manual_reason?`<aside><b>人工依据</b><p>${esc(g.manual_reason)}</p></aside>`:''}${skuGroupMembers(g).slice().sort((a,b)=>b.sales-a.sales||skuMemberKey(a).localeCompare(skuMemberKey(b))).map(m=>renderSkuMember(m,g)).join('')}`:'暂无符合条件的 SKU 分组';
+    $('snapshotInfo').innerHTML=`<p class="snapshot-meta"><span><b>日期区间</b>：${esc(s.start)} — ${esc(s.end)}</span><span><b>SKU 成员</b>：${esc(s.members.length)} 个 SKU</span><span><b>同款组</b>：${esc(s.groups.length)}</span></p>`;
     $('dirtyStatus').textContent=s.dirty?'未保存':'';
+    $('pageInfo').textContent=filtered.length?`${start+1}–${Math.min(start+GROUPS_PER_PAGE,filtered.length)} / ${filtered.length} 个 SKU 分组`:'0 / 0 个 SKU 分组';
+    $('prev').disabled=productPage===0;$('next').disabled=start+GROUPS_PER_PAGE>=filtered.length;
     updateSaveGate();
 }
+$('skuQuery').addEventListener('input',()=>{productPage=0;selectedGroup=null;renderSkuDraft();});
 
 function renderProducts() {
     if(currentSnapshot.member_kind==='sku')return renderSkuDraft();
     reviewControls.hidden=false;
+    reviewControls.querySelector('.review-tabs').hidden=false;
+    reviewControls.querySelector('.filter-panel').hidden=false;
+    skuReviewControls.hidden=true;
+    batchRow.hidden=false;
     const snapshot=currentSnapshot;
     productsByKey=new Map(snapshot.products.map(p=>[productKey(p),p]));
     groupsByProduct=new Map(snapshot.groups.flatMap(g=>g.members.map(m=>[productKey(m),g])));
@@ -477,6 +544,7 @@ function requestRemoval(index) {
     if(memberGroup(currentSnapshot.products[index]).members.length>1)$('removeDialog').showModal();
 }
 async function mutate(action,index,target=null) {
+    if(currentSnapshot.member_kind==='sku')return skuEdit(action,index,target);
     const p=currentSnapshot.products[index], source=memberGroup(p);
     return updateDraft({action,group:source.id,member:{shop_key:p.shop_key,offer_id:p.offer_id},target});
 }
@@ -498,7 +566,7 @@ function updateSaveGate() {
     $('saveDraft').disabled=!!snapshot?.migration_note;
     if(snapshot?.member_kind==='sku'){
         $('saveStatus').textContent=!snapshot.dirty&&snapshot.saved_at?`已保存 · ${fmtDayTime(snapshot.saved_at)}`:'';
-        $('saveAndView').disabled=true;
+        $('saveAndView').disabled=snapshot.groups.some(g=>!groupConfirmed(g));
         return;
     }
     $('saveStatus').textContent=snapshot&&!snapshot.dirty&&snapshot.saved_at?`已保存 · ${fmtDayTime(snapshot.saved_at)}`:'';
@@ -517,12 +585,31 @@ async function removeMember() {
 async function joinCandidate() {
     if(candidateTarget&&await mutate('move',compareProduct,candidateTarget))$('compareDialog').close();
 }
-function openAdd() {addPage=0;$('addQuery').value='';renderAddResults();$('addDialog').showModal();}
+function openAdd() {
+    const sku=currentSnapshot?.member_kind==='sku';
+    addPage=0;
+    addDialog.querySelector('h2').textContent=sku?'组内新增 SKU':'组内新增商品';
+    addDialog.setAttribute('aria-label',sku?'组内新增 SKU':'组内新增商品');
+    addQuery.setAttribute('aria-label',sku?'搜索 SKU':'搜索商品');
+    addQuery.placeholder=sku?'商品名称、SKU 名称、商家编码、商品编号、平台 SKU 编号、店铺或分组编号':'商品名称、编号或店铺';
+    addQuery.value='';
+    renderAddResults();
+    addDialog.showModal();
+}
 function renderAddResults() {
+    if(currentSnapshot.member_kind==='sku')return renderSkuAddResults();
     const q=$('addQuery').value.trim().toLocaleLowerCase();
     const matches=currentSnapshot.products.filter(p=>memberGroup(p).id!==selectedGroup&&[p.product_name,p.offer_id,p.shop_key,shopName(p)].some(v=>String(v||'').toLocaleLowerCase().includes(q)));
     $('addCount').textContent=`${matches.length} 个商品 · ${addPage+1} / ${Math.max(1,Math.ceil(matches.length/30))}`;
     $('addResults').innerHTML=matches.slice(addPage*30,addPage*30+30).map(p=>`<section class="search-item">${productPhoto(p)}<div class="member-info"><h4>${esc(p.product_name)} ${sourceIcon(p)}</h4><p>${esc(shopName(p))} · ${esc(p.offer_id)} · 销量 ${p.sales}</p><p>${esc(memberGroup(p).id)} · ${groupConfirmed(memberGroup(p))?'已确认':'待确认'}</p></div><button data-mutation onclick="addMember(${memberIndex(p)})">添加到当前组</button></section>`).join('')||'<p>没有匹配商品</p>';
+    $('addPrev').disabled=addPage===0;$('addNext').disabled=(addPage+1)*30>=matches.length;
+    $('addResults').scrollTop=0;refreshSourceLinks();
+}
+function renderSkuAddResults(){
+    const q=$('addQuery').value.trim().toLocaleLowerCase();
+    const matches=currentSnapshot.members.filter(m=>skuGroupFor(m)?.id!==selectedGroup&&[m.product_name,m.raw_sku_name,m.merchant_code,...(m.merchant_codes||[]),m.offer_id,m.sku_id,m.shop_key,skuShopName(m),skuGroupFor(m)?.id].some(v=>String(v||'').toLocaleLowerCase().includes(q)));
+    $('addCount').textContent=`${matches.length} 个 SKU · ${addPage+1} / ${Math.max(1,Math.ceil(matches.length/30))}`;
+    $('addResults').innerHTML=matches.slice(addPage*30,addPage*30+30).map(m=>{const g=skuGroupFor(m);return `<section class="search-item">${productPhoto(m)}<div class="member-info"><h4>${esc(m.product_name||m.offer_id)} ${sourceIcon(m)}</h4><p>${esc(m.raw_sku_name||'（空）')} · ${esc(skuShopName(m))} · ${esc(m.offer_id)} · 平台 SKU ${esc(m.sku_id)} · 销量 ${esc(m.sales)}</p>${skuCode(m)}<p>${esc(g?.id||'')} · ${esc(skuStatus(g||{}))}</p></div><button data-mutation onclick="addMember(${skuMemberIndex(m)})">添加到当前组</button></section>`;}).join('')||'<p>没有匹配 SKU</p>';
     $('addPrev').disabled=addPage===0;$('addNext').disabled=(addPage+1)*30>=matches.length;
     $('addResults').scrollTop=0;refreshSourceLinks();
 }
@@ -554,7 +641,16 @@ function matchDisabledReason(summary) {
     return summary.missing_evidence?`没有可判断的商品：${MISSING_EVIDENCE}`:'没有可判断的商品';
 }
 function renderMatching() {
-    if(currentSnapshot?.member_kind==='sku'||currentSnapshot?.migration_note){$('runMatching').disabled=true;$('matchingStatus').textContent=currentSnapshot.migration_note||currentSnapshot.limitations.join('；');return;}
+    if(currentSnapshot?.member_kind==='sku'){
+        const summary=currentSnapshot.matching||{};
+        $('runMatching').textContent='选择性重试未完成项';
+        $('runMatching').disabled=!(summary.retryable>0 || summary.recheckable>0)||busy;
+        $('matchingStatus').textContent=skuMatchingLine(summary);
+        $('matchControl').title=summary.retryable>0 || summary.recheckable>0?'重新检查当前证据和人工约束，只补未完成调用':'有效已完成结果不再调用；缺证据需先补齐';
+        return;
+    }
+    $('runMatching').textContent='模型匹配同款';
+    if(currentSnapshot?.migration_note){$('runMatching').disabled=true;$('matchingStatus').textContent=currentSnapshot.migration_note||currentSnapshot.limitations.join('；');return;}
     const summary=currentSnapshot.matching||{}, usable=(summary.retryable||0)>0;
     $('runMatching').disabled=!usable;
     $('matchControl').title=usable?'':matchDisabledReason(summary);
@@ -608,7 +704,7 @@ function chartLayout(points){
     for(const limit of limits){let score=0;for(let i=0;i<points.length;i++){if(points[i].stock===null)continue;const gap=Math.abs(stockY(points[i].stock)-(bottom-cumulative[i]/limit*height));score+=Math.max(0,23-gap)**2*(i===points.length-1?6:1)}score+=total?limit/total*.05:0;if(score<best){best=score;salesHigh=limit}}
     return {low,high,salesHigh,cumulative,top,bottom,height};
 }
-function chart(points, sku=false){
+function chart(points, sku=false, label=null){
     const {low,high,salesHigh,cumulative,top,bottom,height}=chartLayout(points), n=points.length;
     const X=i=>98+i*696/Math.max(1,n-1), Y=v=>bottom-(v-low)/(high-low)*height, S=v=>bottom-v/salesHigh*height;
     let lines='', salesLine='';
@@ -625,7 +721,7 @@ function chart(points, sku=false){
         return `${showLabel?`<text class="date-label" x="${X(i)}" y="242" text-anchor="middle" font-size="11">${p.date.slice(5)}</text>`:''}<path class="sales-point" data-date="${p.date}" data-x="${X(i)}" data-y="${sy}" d="M ${X(i)} ${sy-4} l 4 4 -4 4 -4 -4 z" stroke-width="1.6"/>${showLabel?`<text class="point-label sales-value" x="${X(i)}" y="${labelSales}" text-anchor="middle" font-size="11">${chartNumber(cumulative[i])}</text>`:''}${iy===null?'':`<circle class="stock-point ${p.color}" data-date="${p.date}" data-stock="${p.stock}" cx="${X(i)}" cy="${iy}" r="5"${tip?` data-tip="${tip}"`:''}/>${showLabel?`<text class="point-label stock-value" x="${X(i)}" y="${labelStock}" text-anchor="middle" font-size="11">${chartNumber(p.stock)}</text>`:''}`}`;
     }).join('');
     const ticks=[0,.5,1].map(t=>`<line class="grid-line" x1="88" x2="808" y1="${bottom-t*height}" y2="${bottom-t*height}"/><text class="axis-label stock-axis" x="77" y="${bottom-t*height+4}" text-anchor="end" font-size="10">${chartNumber(low+(high-low)*t)}</text><text class="axis-label sales-axis" x="826" y="${bottom-t*height+4}" font-size="10">${chartNumber(salesHigh*t)}</text>`).join('');
-    return `<div class="chart-block" data-sku="${sku}"><div class="chart-toolbar"><div class="chart-key"><span>━ 库存（左轴）</span><span class="sales">┄ ◇ 累计销量（右轴）</span></div><div class="stock-legend"><span class="green">● 正常观测</span>${sku?'<span class="yellow">● 当日未抓取库存</span>':''}<span class="red">● 疑似补货</span></div></div><div class="chart"><svg class="inventory-chart" viewBox="0 0 920 262" role="img" aria-label="${sku?'SKU':'同款组'}库存与累计销量"><text class="axis-title stock-title" x="77" y="17" text-anchor="end" font-size="11">库存</text><text class="axis-title sales-title" x="826" y="17" font-size="11">累计销量</text>${ticks}${lines}${salesLine}${plot}</svg></div></div>`;
+    return `<div class="chart-block" data-sku="${sku}"><div class="chart-toolbar"><div class="chart-key"><span>━ 库存（左轴）</span><span class="sales">┄ ◇ 累计销量（右轴）</span></div><div class="stock-legend"><span class="green">● 正常观测</span>${sku?'<span class="yellow">● 当日未抓取库存</span>':''}<span class="red">● 疑似补货</span></div></div><div class="chart"><svg class="inventory-chart" viewBox="0 0 920 262" role="img" aria-label="${label||(sku?'SKU':'同款组')}库存与累计销量"><text class="axis-title stock-title" x="77" y="17" text-anchor="end" font-size="11">库存</text><text class="axis-title sales-title" x="826" y="17" font-size="11">累计销量</text>${ticks}${lines}${salesLine}${plot}</svg></div></div>`;
 }
 function toggleSku(button){
     const rows=[...button.closest('.rank').querySelectorAll('.sku-row')], open=!rows.every(row=>row.open);
@@ -645,21 +741,25 @@ function switchNotes(product) {
     return (product.shape_switches||[]).map(sw=>`<p class="muted switch-note">${esc(switchNote(sw))}</p>`).join('');
 }
 function treeHTML(group) {
+    if(currentSnapshot.member_kind==='sku')return skuTreeHTML(group);
     const members=groupProducts(group), shops=[...new Set(members.map(p=>shopName(p)))];
     return shops.map(shop=>`<div class="tree"><b>▾ ${esc(shop)}</b>${members.filter(p=>shopName(p)===shop).map(p=>`<div class="tree"><div class="product">${rankingPhoto(p)}<div><div class="product-title"><b>${esc(p.product_name||p.offer_id)}</b>${sourceIcon(p)}</div><p class="muted">商品销量 <b>${p.sales}</b></p></div></div>${switchNotes(p)}${p.skus.map(sku=>`<details class="sku-row"><summary><span>▸ ${esc(sku.name)}</span><span class="sku-total">销量 <b>${sku.sales}</b></span></summary>${chart(sku.points,true)}</details>`).join('')}</div>`).join('')}</div>`).join('');
 }
 function groupMeta(group) {
+    if(currentSnapshot.member_kind==='sku')return `${group.shop_count} 家店铺 · ${group.product_count} 个商品 · ${group.sku_count} 个 SKU`;
     const members=groupProducts(group);
     const stores=new Set(members.map(p=>shopName(p))).size;
     return `${stores} 家店铺 · ${members.length} 个商品 · ${members.reduce((count,p)=>count+p.skus.length,0)} 个 SKU`;
 }
 // 排名行的骨架只有这一份：在线懒渲染与离线报告共用，避免两边各存一套。
 function rankSummary(group, index) {
-    const representative=groupProducts(group)[0];
-    return `<div class="product"><b>${String(index+1).padStart(2,'0')}</b>${rankingPhoto(representative)}<div class="product-title"><b>${esc(representative.product_name||representative.offer_id)}</b>${sourceIcon(representative)}</div></div><span class="number">${group.sales} <small>销量</small></span>`;
+    const sku=currentSnapshot.member_kind==='sku';
+    const representative=sku?skuRepresentative(group):groupProducts(group)[0];
+    const heading=sku?`<div>${skuHeading(representative)}</div>`:`<div class="product-title"><b>${esc(representative.product_name||representative.offer_id)}</b>${sourceIcon(representative)}</div>`;
+    return `<div class="product"><b>${String(index+1).padStart(2,'0')}</b>${rankingPhoto(representative)}${heading}</div><span class="number">${group.sales} <small>${sku?"组销量":"销量"}</small></span>`;
 }
 function rankBody(group) {
-    return `${chart(group.points)}<p class="muted">${groupMeta(group)}</p><div class="bar tree-heading"><h3>同款构成</h3><button class="subtle-button expand-all" onclick="toggleSku(this)">展开全部</button></div>${treeHTML(group)}`;
+    return `${currentSnapshot.member_kind==='sku'?`<p class="muted">${skuUnitsNote()}</p>${skuGroupEvidence(group)}`:""}${chart(group.points)}<p class="muted">${groupMeta(group)}</p><div class="bar tree-heading"><h3>同款构成</h3><button class="subtle-button expand-all" onclick="toggleSku(this)">展开全部</button></div>${treeHTML(group)}`;
 }
 function renderRankDetail(details) {
     if(!details.open||details.dataset.rendered)return;
@@ -698,7 +798,7 @@ function buildReport(snapshot, urls) {
         const script=['const $ = id => document.getElementById(id);',`${tipOver}`,`${tipOut}`,`${toggleSku}`,
             "document.addEventListener('pointerover', tipOver);","document.addEventListener('pointerout', tipOut);"]
             .join('\n').replace(/<\/script/gi,'<\\/script');
-        return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>销量分析报告 ${esc(snapshot.start)} — ${esc(snapshot.end)}</title><style>${document.querySelector('style').textContent}</style><header><h1>销量分析报告</h1><span>离线副本 · 无需本地服务与网络</span></header><main><section class="panel"><h2>${esc(snapshot.start)} — ${esc(snapshot.end)}</h2><p>数据固定于 <b>${fmtMomentSecond(snapshot.frozen_at)}</b>${snapshot.saved_at?`，保存于 <b>${fmtMomentSecond(snapshot.saved_at)}</b>`:''}，导出于 ${fmtMomentSecond(new Date().toISOString())}。</p><p class="muted">分析 ${esc(snapshot.id)} · ${snapshot.products.length} 个商品 · ${snapshot.groups.length} 个同款组（含零销量组），随附全部 SKU 明细与库存 / 累计销量图。商品源图标指向导出时的详情地址，打开它需要网络，不影响本页离线阅读。</p></section><section class="panel"><h2>畅销品排名</h2><div id="ranking">${rows||'<p class="empty">本区间没有符合条件的畅销品。</p>'}</div></section></main><div id="tip" class="tip" hidden></div><script>${script}<\/script></body></html>`;
+        return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>销量分析报告 ${esc(snapshot.start)} — ${esc(snapshot.end)}</title><style>${document.querySelector('style').textContent}</style><header><h1>销量分析报告</h1><span>离线副本 · 无需本地服务与网络</span></header><main><section class="panel"><h2>${esc(snapshot.start)} — ${esc(snapshot.end)}</h2><p>数据固定于 <b>${fmtMomentSecond(snapshot.frozen_at)}</b>${snapshot.saved_at?`，保存于 <b>${fmtMomentSecond(snapshot.saved_at)}</b>`:''}，导出于 ${fmtMomentSecond(new Date().toISOString())}。</p><p class="muted">分析 ${esc(snapshot.id)} · ${snapshot.member_kind==='sku'?new Set(snapshot.members.map(m=>JSON.stringify([m.shop_key,m.offer_id]))).size:snapshot.products.length} 个商品 · ${snapshot.groups.length} 个同款组（含零销量组）${snapshot.member_kind==='sku'?` · ${snapshot.members.length} 个 SKU；${skuUnitsNote()}`:''}，随附全部 SKU 明细与库存 / 累计销量图。商品源图标指向导出时的详情地址，打开它需要网络，不影响本页离线阅读。</p></section><section class="panel"><h2>畅销品排名</h2><div id="ranking">${rows||'<p class="empty">本区间没有符合条件的畅销品。</p>'}</div></section></main><div id="tip" class="tip" hidden></div><script>${script}<\/script></body></html>`;
     } finally {
         exportSources=null;
     }
@@ -825,6 +925,11 @@ function showMask() {
 }
 // 停止按钮那行与「停下后」的说明行：运行中亮着、正在停止时换成说明（票 02）。
 function setStopRow(state) {
+    const sku = (maskRetry ? currentSnapshot?.member_kind : settings?.member_kind) === 'sku';
+    $('maskStopNote').innerHTML = (sku
+        ? '停下后自动进入本页；未完成项保留原因，稍后可以继续判断'
+        : '停下后自动进入本页；没判断的对记为「失败」，点「模型匹配同款」可以接着判')
+        + '<br>点「停止匹配」与点关窗确认里的「关闭并停止」进的都是这一态；收尾完成前窗口不消失';
     $('maskLive').hidden = state === 'off';
     $('maskStopNote').hidden = state !== 'stopping';
     $('maskStopHint').hidden = state === 'stopping';
@@ -953,9 +1058,10 @@ async function stopMatching() {
 async function finishMask(id, reading) {
     try {
         const snapshot = await api('/api/analysis?id=' + encodeURIComponent(id));
-        const stopped = reading.stop_requested && reading.judged < reading.todo;
+        const stopped = reading.stop_requested && (snapshot.member_kind==='sku'?snapshot.matching?.reasons?.stopped>0:reading.judged < reading.todo);
         closeMask();
         if (maskRetry) applySnapshot(snapshot); else show(snapshot);
+        if(snapshot.member_kind==='sku'){renderMatching();return;}
         if (stopped) {
             matchResult = stoppedLine(reading, snapshot.matching || {});
             renderMatching();

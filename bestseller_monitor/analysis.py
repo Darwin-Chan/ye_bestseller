@@ -14,6 +14,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+from .stock_series import aggregate_points as _aggregate_points
 from . import crawler_identity
 from .analysis_store import DraftStore, SIDE_EXCLUSION, SIDE_STANDALONE, source_of
 from .config import machine_id_of
@@ -23,6 +24,7 @@ from .matching import (MATCH_DISABLED, PHASE_ASSEMBLE, PHASE_JUDGE, PHASE_RECALL
                        STATUS_DISABLED, identity, matching_summary, offer_of, state_of_status,
                        summarize_group, version)
 from .report import report_name, write_report
+from .sku_grouping import apply_saved as apply_saved_sku, edit_group as edit_sku_group, refresh as refresh_sku, apply_codes as apply_sku_codes, bind_manual_members, shareable_decisions as shareable_sku_decisions, apply_shared as apply_shared_sku
 
 log = logging.getLogger(__name__)
 
@@ -281,7 +283,7 @@ class AnalysisService:
 
     def settings(self):
         return {"full_capture_weekday": self.config.full_capture_weekday,
-                "machine": self.config.machine}
+                "machine": self.config.machine, "member_kind": self.config.member_kind}
 
     def coverage(self, day):
         date.fromisoformat(day)
@@ -381,6 +383,9 @@ class AnalysisService:
             # 「继续上次分析」读原快照；新日期区间走这里：重算销量后，把已保存的
             # 人工分组按商品版本套回来（票 09），不适用的留在待确认由人工处理。
             if snapshot.get('member_kind') == 'sku':
+                # SKU decisions live only in the versioned SKU draft. Never read
+                # the legacy product ledger or copy a product decision to a SKU.
+                self._apply_sku_model_work(snapshot, None, self._latest_sku_payload, progress.stop_requested)
                 with self._lock:
                     self._snapshots[snapshot['id']] = snapshot
                 progress.update(products=len(snapshot['members']),
@@ -475,15 +480,63 @@ class AnalysisService:
 
     def _guard_product_operation(self, snapshot):
         if snapshot.get('member_kind') == 'sku':
-            raise ValueError('SKU 人工分组、自动匹配与排行报告尚未开放')
+            raise ValueError('SKU 草稿请使用 SKU 级人工分组接口')
         if self.config.member_kind == 'sku':
             raise ValueError('旧商品级草稿仅供查阅，请重新发起 SKU 分析')
+
+    def _guard_sku_operation(self, snapshot):
+        if snapshot.get('member_kind') != 'sku':
+            raise ValueError('该操作仅适用于 SKU 分析')
+    def _latest_sku_payload(self):
+        latest = self.store.latest()
+        stored = self.store.read(latest['id']) if latest else None
+        return stored.payload if stored and stored.payload.get('member_kind') == 'sku' else None
+
+    def _apply_sku_model_work(self, snapshot, previous, read_saved, stop):
+        """Share replay/revalidation, preserving latest-vs-specific read semantics."""
+        saved_payload = read_saved()
+        if previous is None or not previous.get('dirty', True):
+            previous = saved_payload or previous
+        if previous:
+            apply_saved_sku(snapshot, previous)
+            snapshot['model_tasks'] = copy.deepcopy(previous.get('model_tasks', {}))
+            snapshot['matching_options'] = copy.deepcopy(previous.get('matching_options', {}))
+        def apply_shared():
+            # 收取进来的 SKU 决定在本地草稿回放之后、编码规则之前套上（票 08）；
+            # 与本地人工主张矛盾的记进 SKU 冲突账，本地决定永不被覆盖。
+            _, conflicts = apply_shared_sku(snapshot, self.store.sku_ledger())
+            if conflicts:
+                self.store.record_sku_replay_conflicts(conflicts, seen_at=utcnow())
+        apply_shared()
+        apply_sku_codes(snapshot)
+        def reload_manual():
+            nonlocal saved_payload
+            latest = read_saved()
+            if latest and latest.get('member_kind') == 'sku' and latest != saved_payload:
+                saved_payload = latest
+                apply_saved_sku(snapshot, latest)
+                apply_shared()
+                apply_sku_codes(snapshot)
+        from .sku_matching import apply as apply_sku_images
+        apply_sku_images(snapshot, self.config.matching, stop=stop, reload_manual=reload_manual,
+                         previous_snapshot=previous, machine=self.config.machine)
 
     def retry_matching(self, analysis_id, progress=None, stop=None):
         with self._lock:
             if analysis_id not in self._snapshots:
                 raise ValueError('分析已不存在')
             snapshot = copy.deepcopy(self._snapshots[analysis_id])
+            if snapshot.get('member_kind') == 'sku':
+                # Re-freeze current selected historical evidence, then replay only
+                # current manual constraints; automatic results must revalidate.
+                current = self._freeze(analysis_id, snapshot['start'], snapshot['end'])
+                def read_saved():
+                    stored = self.store.read(analysis_id)
+                    return stored.payload if stored else None
+                self._apply_sku_model_work(current, snapshot, read_saved, stop)
+                current['dirty'] = True
+                self._snapshots[analysis_id] = current
+                return copy.deepcopy(current)
             self._guard_product_operation(snapshot)
             # 信息变更是本次分析展示的事实（重开的草稿也带着它）：重试只重跑匹配，
             # 不把已经标出的变更刷回未标注。
@@ -510,7 +563,8 @@ class AnalysisService:
             snapshot = self._snapshots.get(analysis_id)
             if snapshot is None:
                 raise ValueError('分析已不存在')
-            self._guard_product_operation(snapshot)
+            if snapshot.get('member_kind') != 'sku':
+                self._guard_product_operation(snapshot)
             start, end = snapshot['start'], snapshot['end']
         progress = _Progress(analysis_id, start, end, self._clock, phase_index=1, retry=True,
                              stop_timeout=self._stop_timeout())
@@ -575,7 +629,22 @@ class AnalysisService:
     def _restore(self, stored):
         """把磁盘上的草稿还原成内存工作草稿：已保存版本没有未保存修改。"""
         if stored.payload.get('member_kind') == 'sku':
-            return copy.deepcopy(stored.payload)
+            snapshot = copy.deepcopy(stored.payload)
+            from .sku_drafts import restore_curve_boundaries
+            restore_curve_boundaries(snapshot, calculate_inventory)
+            # Older SKU drafts already freeze sufficient names/source evidence.
+            # Enrich only missing fields, never read live inventory or regroup.
+            from .sku_codes import code_evidence
+            for member in snapshot['members']:
+                if 'merchant_codes' not in member:
+                    member.update(code_evidence(member))
+            for group in snapshot['groups']:
+                if group.get('confirmed') or group.get('adjusted') or group.get('excluded_group'):
+                    group.setdefault('manual_membership', True)
+            refresh_sku(snapshot)
+            from .sku_matching import LIMITATIONS
+            snapshot['limitations'] = list(LIMITATIONS)
+            return snapshot
         snapshot = self._rehydrate(stored.payload)
         if self.config.member_kind == 'sku':
             snapshot['member_kind'] = 'product'
@@ -632,8 +701,8 @@ class AnalysisService:
         result = {"available": True, "id": latest['id'], "start": latest['start'],
                   "end": latest['end'], "saved_at": latest['saved_at']}
         if self.config.member_kind == 'sku':
-            result.update(member_kind='sku' if latest['schema_version'] == 2 else 'product',
-                          migration_note='' if latest['schema_version'] == 2 else '旧商品级草稿仅供查阅，请重新发起 SKU 分析')
+            result.update(member_kind='sku' if latest['schema_version'] in (2, 3) else 'product',
+                          migration_note='' if latest['schema_version'] in (2, 3) else '旧商品级草稿仅供查阅，请重新发起 SKU 分析')
         return result
 
     def save_draft(self, analysis_id):
@@ -648,12 +717,13 @@ class AnalysisService:
             if snapshot is None:
                 raise ValueError('分析已不存在，请重新选择日期')
             if snapshot.get('member_kind') == 'sku':
-                if require_confirmed:
-                    raise ValueError('SKU 结果排行尚未开放，请保存草稿')
+                if require_confirmed and pending_groups(snapshot):
+                    raise ValueError('还有待确认的同款组，请先完成确认')
+                refresh_sku(snapshot)
                 saved_at = utcnow()
                 payload = copy.deepcopy(snapshot)
                 payload.update(dirty=False, saved_at=saved_at)
-                self.store.write_sku(payload)
+                self.store.write_sku(payload, decisions=shareable_sku_decisions(payload))
                 snapshot.update(dirty=False, saved_at=saved_at)
                 return copy.deepcopy(snapshot)
             self._guard_product_operation(snapshot)
@@ -753,6 +823,25 @@ class AnalysisService:
             snapshot = self._snapshots.get(analysis_id)
             if snapshot is None:
                 raise ValueError("分析已不存在，请重新选择日期")
+            if snapshot.get('member_kind') == 'sku':
+                self._guard_sku_operation(snapshot)
+                targets = set(group_ids)
+                groups = [g for g in snapshot['groups'] if g['id'] in targets]
+                if len(groups) != len(targets):
+                    raise ValueError("同款组不存在")
+                if confirmed and any(group.get('excluded_group') for group in groups):
+                    raise ValueError('人工排除的 SKU 不能确认，请先撤销排除')
+                changed = False
+                for group in groups:
+                    if group.get('confirmed', False) != confirmed:
+                        group['confirmed'] = confirmed
+                        bind_manual_members(snapshot, group, confirmed=confirmed)
+                        group['adjusted'] = True
+                        changed = True
+                if changed:
+                    snapshot['dirty'] = True
+                refresh_sku(snapshot)
+                return copy.deepcopy(snapshot)
             self._guard_product_operation(snapshot)
             targets = set(group_ids)
             groups = [g for g in snapshot['groups'] if g['id'] in targets]
@@ -787,8 +876,10 @@ class AnalysisService:
                 if stored is None:
                     raise ValueError("分析已不存在，请重新选择日期")
                 snapshot = stored.payload
-            self._guard_product_operation(snapshot)
-            offers = sorted({product['offer_id'] for product in snapshot['products']})
+            if snapshot.get('member_kind') != 'sku':
+                self._guard_product_operation(snapshot)
+            members = snapshot['members'] if snapshot.get('member_kind') == 'sku' else snapshot['products']
+            offers = sorted({member['offer_id'] for member in members})
         urls = {}
         with self._read() as conn:
             for offset in range(0, len(offers), 400):
@@ -807,7 +898,8 @@ class AnalysisService:
             snapshot = self._snapshots.get(analysis_id)
             if snapshot is None:
                 raise ValueError("分析已不存在，请重新选择日期")
-            self._guard_product_operation(snapshot)
+            if snapshot.get('member_kind') != 'sku':
+                self._guard_product_operation(snapshot)
             if snapshot.get('dirty'):
                 raise ValueError('当前分析有未保存的修改，请先保存再导出')
             if pending_groups(snapshot):
@@ -819,11 +911,16 @@ class AnalysisService:
 
     def edit_group(self, analysis_id, action, group_id, member, target_id=None):
         """Commit an atomic edit only to the in-memory analysis draft."""
-        from .grouping import edit_group
         with self._lock:
             if analysis_id not in self._snapshots:
                 raise ValueError('分析已不存在')
             snapshot = copy.deepcopy(self._snapshots[analysis_id])
+            if snapshot.get('member_kind') == 'sku':
+                self._guard_sku_operation(snapshot)
+                edit_sku_group(snapshot, action, group_id, member, target_id)
+                self._snapshots[analysis_id] = snapshot
+                return copy.deepcopy(snapshot)
+            from .grouping import edit_group
             self._guard_product_operation(snapshot)
             moved = identity(member)
             edit_group(snapshot, action, group_id, member, target_id, self.matcher)
@@ -984,22 +1081,6 @@ def order_review_groups(snapshot: dict) -> None:
         snapshot['groups'], key=lambda group: (-len(group['members']), -group.get('sales', 0)))]
 
 
-def _aggregate_points(series: list[list[dict]]) -> list[dict]:
-    """把多个成员的逐日点聚合成上一层：库存只累加当日有效观测（全缺即未知），销量求和，补货向上汇总。"""
-    if not series:
-        return []
-    aggregated = []
-    for index, lead in enumerate(series[0]):
-        active = [member[index] for member in series if member[index]['stock'] is not None]
-        aggregated.append({
-            'date': lead['date'],
-            'stock': sum(point['stock'] for point in active) if active else None,
-            'sales': sum(member[index]['sales'] for member in series),
-            'color': 'red' if any(member[index]['color'] == 'red' for member in series) else 'green',
-            'segment_start': any(member[index].get('segment_start') for member in series),
-        })
-    return aggregated
-
 
 def product_versions(products: list[dict]) -> dict:
     """商品身份 → 当前证据版本：复用与信息变更标注都以此为准。"""
@@ -1026,7 +1107,7 @@ def pending_groups(snapshot: dict) -> list[dict]:
     冲突组按待确认算（页面上的页签、计数与保存门都用这一条）——「回到人面前」。
     """
     return [group for group in snapshot['groups']
-            if not group['confirmed'] or group['conflicts']]
+            if not group['confirmed'] or group.get('conflicts')]
 
 
 def attach_conflicts(snapshot: dict) -> None:

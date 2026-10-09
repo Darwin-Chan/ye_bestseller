@@ -18,6 +18,7 @@ import contextlib
 import datetime as dt
 import gzip
 import io
+import json
 import shutil
 import sqlite3
 import tempfile
@@ -32,7 +33,7 @@ from unittest.mock import patch
 import exchange
 from bestseller_monitor import db as dbmod
 from bestseller_monitor import exchange as exchange_mod
-from bestseller_monitor import export, judgment_set, merge, single_instance
+from bestseller_monitor import export, judgment_set, merge, single_instance, sku_sharing
 from bestseller_monitor.analysis_store import DraftStore
 from bestseller_monitor.config import ROLE_COLLECTOR, ROLE_MERGE_ONLY
 from bestseller_monitor.db import CST
@@ -1655,6 +1656,89 @@ class WindowConfigFailureTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("pywebview", err.getvalue())
         self.assertIn("pip install -r requirements.txt", err.getvalue())
+
+
+class SkuJudgmentSetTests(JudgmentSetCase):
+    """整趟里的 SKU 判断集通道（票 08）：发布与收取都在之内；周报记账；版本闸门给硬失败。"""
+
+    def seed_sku_judgments(self, cache, machine):
+        from bestseller_monitor.sku_lifecycle import ensure_tables
+        conn = sqlite3.connect(cache)
+        try:
+            with conn:
+                ensure_tables(conn, machine)
+                conn.execute("INSERT OR REPLACE INTO sku_judgments(pair,signature,machine_id,result)"
+                             " VALUES(?,?,?,?)",
+                             (f"{machine}-pair", f"{machine}-sig", machine,
+                              json.dumps({"same": True, "confidence": .95}, ensure_ascii=False)))
+        finally:
+            conn.close()
+
+    def sku_publish_from(self, machine, *, groups=(), version=None):
+        """别的机器发布 SKU 判断集：经它的旁路克隆推到裸库（真打包，与旧通道同一条路）。"""
+        cache = self.world.box.tmp / f"sku-{machine}-cache.sqlite"
+        store = self.world.box.tmp / f"sku-{machine}-drafts.sqlite"
+        self.seed_sku_judgments(cache, machine)
+        if groups:
+            DraftStore(store, machine).merge_incoming_sku(
+                {"groups": [dict(row) for row in groups], "excluded_skus": [],
+                 "excluded_pairs": []},
+                source=machine, seen_at="2026-09-22T20:00:00+08:00")
+        package = self.world.box.tmp / f"sku-judgments-{machine}.db"
+        sku_sharing.build_package(cache, store, package, machine_id=machine,
+                                  generated_at=dt.datetime(2026, 9, 20, 19, 0, tzinfo=CST))
+        if version is not None:
+            with contextlib.closing(sqlite3.connect(package)) as conn:
+                conn.execute("UPDATE sku_meta SET value=? WHERE key='format_version'", (version,))
+                conn.commit()
+        self.world.box.commit_push(self.world.judged_work[machine],
+                                   {sku_sharing.SKU_PACKAGE_REL:
+                                    gzip.compress(package.read_bytes(), mtime=0)},
+                                   message=f"judged publish sku {machine}")
+
+    def test_a_full_run_publishes_and_collects_the_sku_channel(self):
+        self.seed_sku_judgments(self.world.cache, "m1")
+        self.sku_publish_from("m2", groups=[{"members": [['["A01", "11", "s"]', "v1"]],
+                                             "confirmed": True, "excluded": False,
+                                             "group_id": "sku-manual-aaaa", "machine_id": "m2"}])
+
+        outcome = self.world.run()
+
+        self.assertEqual(outcome.exit_code, 0, outcome.failures)
+        self.assertIsNotNone(self.world.judged_local_bytes("m1", sku_sharing.SKU_PACKAGE_REL),
+                             "本机那本真发布了 SKU 包")
+        report = self.world.report()
+        self.assertIn("- 发布：判断 2 条", report, "旧通道照常")
+        self.assertIn("- 发布 SKU：判断 1 条 · 推荐 0 条 · 人工决定 0 条 → judged-m1 @ ", report)
+        self.assertIn("- 收取 SKU：judged-m2 —— 新增 2 行（并进决定 1 条）", report)
+        self.assertIn("- 收取 SKU：judged-m3 没有 SKU 判断集可收", report)
+        groups = DraftStore(self.world.judgment_store, "m-test").sku_ledger()["groups"]
+        self.assertEqual(1, len(groups))
+        self.assertEqual("m2", groups[0]["machine_id"], "来源随行带走")
+
+    def test_an_unknown_sku_format_version_is_a_hard_failure_named_in_the_report(self):
+        self.sku_publish_from("m2", version="sku-v2")
+
+        outcome = self.world.run()
+
+        self.assertEqual(outcome.exit_code, 2, "明确拒绝＝没做成事，需要升级的那台自己解决")
+        self.assertTrue(any("SKU 判断集没导成" in failure and "升级" in failure
+                            for failure in outcome.failures), outcome.failures)
+        self.assertIn("judged-m2 这本没收成", self.world.report())
+        self.assertEqual([], DraftStore(self.world.judgment_store, "m-test").sku_ledger()["groups"])
+
+    def test_a_second_run_skips_and_the_legacy_path_keeps_working(self):
+        self.seed_sku_judgments(self.world.cache, "m1")
+        self.sku_publish_from("m2")
+        self.world.run()
+
+        outcome = self.world.run()
+
+        self.assertEqual(outcome.exit_code, 0, outcome.failures)
+        report = self.world.report()
+        self.assertIn("- 发布 SKU：", report)
+        self.assertIn("与已发布那份同内容（无新提交）", report)
+        self.assertIn("- 收取 SKU：judged-m2 —— 已收过（无变化）", report)
 
 
 if __name__ == "__main__":

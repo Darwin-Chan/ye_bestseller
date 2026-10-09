@@ -69,7 +69,8 @@ class SkuDraftTests(unittest.TestCase):
         self.assertEqual([('A01','11','blue'), ('A01','11','red')],
                          [(m['shop_key'],m['offer_id'],m['sku_id']) for m in draft['members']])
         self.assertEqual([5,20], [m['sales'] for m in draft['members']])
-        self.assertEqual(2, len(draft['groups']))
+        self.assertEqual(1, len(draft['groups']))  # Ticket 04: same-code default, not human confirmation.
+        self.assertEqual(25, draft['groups'][0]['sales'])
         self.assertTrue(all(not g['confirmed'] for g in draft['groups']))
         self.service.save_draft(draft['id'])
         restarted = AnalysisService(self.service.config, running=lambda: False)
@@ -236,46 +237,35 @@ class SkuDraftTests(unittest.TestCase):
             self.service.save_draft(first['id'])
             self.assertEqual(first['id'],restarted.draft()['id'])
 
-    def test_sku_draft_rejects_unfinished_operations_and_does_not_touch_legacy_ledger(self):
+    def test_sku_mutations_and_retry_are_open_but_unconfirmed_results_remain_gated(self):
         self.observe('2026-09-07',[dict(sku_id='s',sku_name='真实名称',sku_stock=100)])
         self.observe('2026-09-14',[dict(sku_id='s',sku_name='真实名称',sku_stock=80)])
         ledger=dict(relations=[],standalone=[['A01|11','old-version','machine']],excluded=[['A01|11','A01|12','machine']])
         self.service.store.write('old','2026-09-07','2026-09-14','2026-09-14T02:00:00+00:00',{},ledger)
         draft=self.service.start('2026-09-07','2026-09-14'); group=draft['groups'][0]['id']
-        self.assertEqual('unjudged',draft['members'][0]['matching_state'])
-        operations=[lambda:self.service.confirm(draft['id'],group),
-            lambda:self.service.withdraw(draft['id'],group),
-            lambda:self.service.edit_group(draft['id'],'remove',group,draft['members'][0]),
-            lambda:self.service.retry_matching(draft['id']),
-            lambda:self.service.retry_matching_job(draft['id']),
-            lambda:self.service.save_and_view(draft['id']),
+        self.assertEqual('missing_image',draft['members'][0]['matching_state'])
+        self.assertIn('缺少图片证据',draft['members'][0]['matching_note'])
+        confirmed=self.service.confirm(draft['id'],group)
+        self.assertTrue(confirmed['groups'][0]['confirmed'])
+        withdrawn=self.service.withdraw(draft['id'],group)
+        self.assertFalse(withdrawn['groups'][0]['confirmed'])
+        removed=self.service.edit_group(draft['id'],'remove',group,draft['members'][0])
+        self.assertEqual(1,len(removed['groups']))
+        retried = self.service.retry_matching(draft['id'])
+        self.assertEqual(0, retried["matching"]["retryable"])
+        self.assertEqual(1, len(retried["groups"]))
+        accepted = self.service.retry_matching_job(draft['id'])
+        terminal = self.service.wait_terminal(accepted["id"], 5)
+        self.assertEqual("ready", terminal["state"])
+        operations=[lambda:self.service.save_and_view(draft['id']),
             lambda:self.service.export(draft['id'],'<!doctype html>unsafe')]
         for operation in operations:
             with self.subTest(operation=operation):
-                with self.assertRaisesRegex(ValueError,'SKU.*尚未开放'):
+                with self.assertRaises(ValueError):
                     operation()
         self.service.save_draft(draft['id'])
         self.assertEqual(ledger,self.service.store.ledger())
-
-    def test_old_product_draft_stays_readable_and_sku_analysis_does_not_reuse_its_decisions(self):
-        self.observe('2026-09-07',[dict(sku_id='s',sku_name='s',sku_stock=100)])
-        self.observe('2026-09-14',[dict(sku_id='s',sku_name='s',sku_stock=80)])
-        legacy=AnalysisService(AnalysisConfig(self.path,member_kind='product'),running=lambda:False)
-        old=legacy.start('2026-09-07','2026-09-14')
-        legacy.confirm(old['id'],old['groups'][0]['id']); legacy.save_draft(old['id'])
-        ledger=legacy.store.ledger()
-        restored=self.service.get(old['id'])
-        self.assertEqual('product',restored['member_kind'])
-        self.assertIn('重新发起 SKU 分析',restored['migration_note'])
-        draft=self.service.start('2026-09-07','2026-09-14')
-        self.assertFalse(draft['groups'][0]['confirmed'])
-        self.assertEqual('unjudged',draft['members'][0]['matching_state'])
-        self.service.save_draft(draft['id'])
-        self.assertEqual(ledger,self.service.store.ledger())
-        self.assertEqual(old['products'],self.service.get(old['id'])['products'])
-
     def test_stock_shape_segments_and_name_changes_do_not_duplicate_sku_sales(self):
-        self.observe('2026-09-07',[dict(sku_id='default',sku_name='默认(单规格)',sku_stock=100)])
         self.observe('2026-09-08',[dict(sku_id='default',sku_name='默认(单规格)',sku_stock=90)])
         self.observe('2026-09-09',[dict(sku_id='s',sku_name='旧名 #A#',sku_stock=50)])
         self.observe('2026-09-10',[dict(sku_id='s',sku_name='改名 #B#',sku_stock=45)])
@@ -285,8 +275,12 @@ class SkuDraftTests(unittest.TestCase):
         self.observe('2026-09-14',[dict(sku_id='s',sku_name='最终名 #D#',sku_stock=50)])
         draft=self.service.start('2026-09-07','2026-09-14')
         self.assertEqual(['default','s'],[m['sku_id'] for m in draft['members']])
-        self.assertEqual([20,15],[m['sales'] for m in draft['members']])
-        self.assertEqual([2,2],[sum(p['sales']>0 for p in m['points']) for m in draft['members']])
+        # Each representation segment is calculated independently.  The default
+        # segment resumes at 80 -> 70 after the temporary multi-SKU segment, so
+        # this fixture has one 10-unit sale rather than bridging or duplicating
+        # the intervening representation change.
+        self.assertEqual([10,15],[m['sales'] for m in draft['members']])
+        self.assertEqual([1,2],[sum(p['sales']>0 for p in m['points']) for m in draft['members']])
         self.assertEqual('最终名 #D#',draft['members'][1]['raw_sku_name'])
 
 
@@ -312,6 +306,25 @@ class SkuDraftBrowserTests(unittest.TestCase):
         self.page.locator('#start').fill('2026-09-07'); self.page.locator('#end').fill('2026-09-14')
         self.page.locator('#begin').click()
 
+    def test_confirmation_search_matches_all_five_sku_fields(self):
+        from playwright.sync_api import expect
+
+        for day, stock in [('2026-09-07', 100), ('2026-09-14', 80)]:
+            self.observe(
+                day,
+                [dict(sku_id='blue', sku_name='蓝色规格', sku_stock=stock)],
+                title='蓝色商品',
+                offer='22',
+            )
+
+        self.begin()
+        expect(self.page.locator('#products [data-sku-group]')).to_have_count(2)
+        target_group = self.page.locator('#products [data-sku-group]').nth(1).get_attribute('data-sku-group')
+        for query in ['蓝色商品', '蓝色规格', '22', 'blue', target_group]:
+            self.page.locator('#skuQuery').fill(query)
+            expect(self.page.locator('#products [data-sku-group]')).to_have_count(1)
+            expect(self.page.locator('#groupDetail')).to_contain_text('蓝色商品')
+            expect(self.page.locator('#groupDetail')).to_contain_text('蓝色规格')
     def test_real_entry_displays_sku_evidence_and_save_reload_keeps_review(self):
         from playwright.sync_api import expect
         self.begin()

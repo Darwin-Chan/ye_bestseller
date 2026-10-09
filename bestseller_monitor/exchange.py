@@ -55,7 +55,7 @@ import sqlite3
 import tomllib
 from collections.abc import Callable
 
-from bestseller_monitor import export, judgment_set, merge, plan_step, rounds, weekly_plan
+from bestseller_monitor import export, judgment_set, merge, plan_step, rounds, sku_sharing, weekly_plan
 from bestseller_monitor.analysis_store import (CONFLICT_CONFIRM_VS_WITHDRAW,
                                                CONFLICT_DIFFERENT_GROUPS,
                                                CONFLICT_GROUP_VS_EXCLUSION, DraftStore)
@@ -240,6 +240,10 @@ class RunOutcome:
     judgment_publish: judgment_set.PublishResult | None = None
     judgment_collect: judgment_set.CollectOutcome | None = None
     judgment_conflicts: tuple = ()
+    # SKU 判断集这半（票 08）：同一两个源库、同一 judged-<机器> 库，包走新路径
+    # （data/sku-judgments.db.gz）；None = 这趟没跑（与判断集同一条件）。
+    sku_publish: sku_sharing.SkuPublishResult | None = None
+    sku_collect: sku_sharing.SkuCollectOutcome | None = None
 
 
 def _emitter(emit: Callable[[str], None] | None) -> Callable[[str], None]:
@@ -477,12 +481,18 @@ def run_once(cfg, *, only: str | None = None, week: str | None = None,
 
         judgments, judgment_note = judgment_paths(cfg)   # 读不出时检查段已给了同一句说明
         judgment_publish: judgment_set.PublishResult | None = None
+        sku_publish: sku_sharing.SkuPublishResult | None = None
         if judgments is not None and only in (None, ONLY_PUBLISH):
             say("发布本机的判断集…")
             judgment_publish = judgment_set.publish(cfg.exchange_root, machine_id,
                                                     cache=judgments.cache,
                                                     store=judgments.store, now=now)
             say(_judgment_publish_line(judgment_publish))
+            say("发布本机的 SKU 判断集…")
+            sku_publish = sku_sharing.publish(cfg.exchange_root, machine_id,
+                                              cache=judgments.cache,
+                                              store=judgments.store, now=now)
+            say(_sku_publish_line(sku_publish))
 
         # ---- 拉取 + 汇总这半 ----
         pulls: tuple[PullNote, ...] = ()
@@ -495,6 +505,7 @@ def run_once(cfg, *, only: str | None = None, week: str | None = None,
 
         # ---- 收取判断集（名单 = 交换区里实际存在的 judged-* 库，spec §9）----
         judgment_collect: judgment_set.CollectOutcome | None = None
+        sku_collect: sku_sharing.SkuCollectOutcome | None = None
         if judgments is not None and only in (None, ONLY_COLLECT):
             say("收取别的机器的判断集…")
             judgment_collect = judgment_set.collect(
@@ -502,13 +513,20 @@ def run_once(cfg, *, only: str | None = None, week: str | None = None,
                 store=judgments.store,
                 now=now.astimezone(dt.timezone.utc))   # 账上的收到时刻按 UTC 记（票 03 的口径）
             say(_judgment_collect_line(judgment_collect))
+            say("收取别的机器的 SKU 判断集…")
+            sku_collect = sku_sharing.collect(
+                cfg.exchange_root, machine_id, cache=judgments.cache,
+                store=judgments.store,
+                now=now.astimezone(dt.timezone.utc))
+            say(_sku_collect_line(sku_collect))
 
         outcome = _assemble(cfg, db, week=week, now=now, machine_id=machine_id, role=role,
                             check=check, export_result=export_result, export_note=export_note,
                             pulls=pulls, imported=imported, merge_ran=merge_ran, only=only,
                             judgments=judgments, judgment_note=judgment_note,
                             judgment_publish=judgment_publish,
-                            judgment_collect=judgment_collect)
+                            judgment_collect=judgment_collect,
+                            sku_publish=sku_publish, sku_collect=sku_collect)
         report_path = pathlib.Path(cfg.exchange_root) / REPORT_DIR / f"{week}.md"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(_render(outcome), encoding="utf-8")
@@ -540,9 +558,59 @@ def _judgment_collect_line(outcome: judgment_set.CollectOutcome) -> str:
     return "收取判断集：" + "；".join(_judgment_collect_texts(outcome))
 
 
+def _sku_publish_line(result: sku_sharing.SkuPublishResult) -> str:
+    """SKU 发布这一趟的进度行（正文与报告第三节共用一处措辞）。"""
+    return "发布 SKU 判断集：" + _sku_publish_text(result)
+
+
+def _sku_collect_line(outcome: sku_sharing.SkuCollectOutcome) -> str:
+    """SKU 收取这一趟的进度行：一家一句，没得收也说明一句。"""
+    return "收取 SKU 判断集：" + "；".join(_sku_collect_texts(outcome))
+
+
+def _sku_publish_text(result: sku_sharing.SkuPublishResult) -> str:
+    """SKU 发布结果的正文（报告「- 发布 SKU：」与命令行共用这一处措辞）。"""
+    decided = sum(result.rows.get(name, 0) for name in sku_sharing.LEDGER_TABLES)
+    counts = (f"判断 {result.rows.get('sku_judgments', 0)} 条 · "
+              f"推荐 {result.rows.get('sku_recommendations', 0)} 条 · "
+              f"人工决定 {decided} 条")
+    if result.failed:
+        return f"{counts} —— 没发出去（{_first_line(result.failure)}）"
+    if result.note is not None:
+        return result.note
+    if result.unchanged:
+        return f"{counts} —— 与已发布那份同内容（无新提交）"
+    return f"{counts} → {sku_sharing.REPO_PREFIX}{result.machine_id} @ {result.commit}"
+
+
+def _sku_collect_texts(collect: sku_sharing.SkuCollectOutcome) -> list[str]:
+    """SKU 收取结果每个来源一句（没有可收的、整趟没做成也是一句）：报告与命令行共用。"""
+    if collect.failure is not None:
+        return [f"没做成（{_first_line(collect.failure)}）"]
+    if not collect.results:
+        note = f"（{collect.notes[0]}）" if collect.notes else ""
+        return [f"没有 SKU 判断集可收{note}"]
+    texts = []
+    for result in collect.results:
+        name = f"{sku_sharing.REPO_PREFIX}{result.machine}"
+        if result.failed:
+            what = "拉不动" if result.unreachable else "没收成"
+            texts.append(f"{name} 这本{what}（{_first_line(result.failure)}）")
+        elif result.note is not None:
+            texts.append(f"{name} 没有 SKU 判断集可收 —— {result.note}")
+        elif result.skipped:
+            texts.append(f"{name} —— 已收过（无变化）")
+        else:
+            conflict_note = f"，冲突 {len(result.conflicts)} 条" if result.conflicts else ""
+            texts.append(f"{name} —— 新增 {sum(result.added.values()):,} 行"
+                         f"（并进决定 {result.adopted_total} 条）{conflict_note}")
+    return texts
+
+
 def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_result,
               export_note, pulls, imported, merge_ran, only, judgments=None,
-              judgment_note=None, judgment_publish=None, judgment_collect=None) -> RunOutcome:
+              judgment_note=None, judgment_publish=None, judgment_collect=None,
+              sku_publish=None, sku_collect=None) -> RunOutcome:
     """把这次运行与库里的现成事实折成报告模型（状态累积，不是运行日志相加）。"""
     root = pathlib.Path(cfg.exchange_root)
     plan = plan_step.stored_plan(db, week)
@@ -583,10 +651,11 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
     if only == ONLY_EXPORT and role == ROLE_MERGE_ONLY:
         failures.append("本机是纯汇总机：导出这半没有可做的事")
     failures += _judgment_failures(judgment_publish, judgment_collect)
+    failures += _sku_failures(sku_publish, sku_collect)
     soft = bool(gaps) or bool(conflicts) or bool(missing) or any(not p.ok for p in pulls) \
         or (export_result is not None and export_result.images is not None
             and export_result.images.failure is not None) or image_missing_total > 0 \
-        or bool(judgment_conflicts) or _judgment_soft(judgment_collect)
+        or bool(judgment_conflicts) or _judgment_soft(judgment_collect) or _sku_soft(sku_collect)
 
     return RunOutcome(
         week=week, machine_id=machine_id, role=role, ran_at=now, check=check, only=only,
@@ -603,7 +672,8 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
         plan_known=plan is not None, plan_of_shop=plan_of_shop,
         judgments=judgments, judgment_note=judgment_note,
         judgment_publish=judgment_publish, judgment_collect=judgment_collect,
-        judgment_conflicts=judgment_conflicts)
+        judgment_conflicts=judgment_conflicts,
+        sku_publish=sku_publish, sku_collect=sku_collect)
 
 
 def _judgment_conflicts(judgments, machine_id: str, *, week: str) -> tuple:
@@ -658,6 +728,25 @@ def _judgment_soft(collect) -> bool:
 
     本周记下的决定冲突另算（`_assemble` 里与采集侧的冲突并列）。
     """
+    return bool(collect) and any(result.failed and result.unreachable
+                                 for result in collect.results)
+
+
+def _sku_failures(publish, collect) -> list[str]:
+    """SKU 判断集这半的硬失败（退出码 2）：与判断集同规——版本不认识的明确拒绝也算。"""
+    failures: list[str] = []
+    if publish is not None and publish.failed:
+        failures.append(f"SKU 判断集没发出去：{publish.failure}")
+    if collect is not None:
+        if collect.failure is not None:
+            failures.append(f"SKU 判断集没收进来：{collect.failure}")
+        failures += [f"judged-{result.machine} 的 SKU 判断集没导成：{result.failure}"
+                     for result in collect.results if result.failed and not result.unreachable]
+    return failures
+
+
+def _sku_soft(collect) -> bool:
+    """需要人看一眼的 SKU 状况（退出码 1）：某家 judged 库拉不动（同判断集口径）。"""
     return bool(collect) and any(result.failed and result.unreachable
                                  for result in collect.results)
 
@@ -976,9 +1065,14 @@ def _judgment_section(outcome: RunOutcome) -> list[str]:
     out += _judgment_collect_rows(outcome)
     out.append(_judgment_adopt_row(outcome))
     out += _judgment_conflict_rows(outcome)
+    if outcome.sku_publish is not None:
+        out.append("- 发布 SKU：" + _sku_publish_text(outcome.sku_publish))
+    if outcome.sku_collect is not None:
+        out += ["- 收取 SKU：" + text for text in _sku_collect_texts(outcome.sku_collect)]
     out.append("- 口径：判断集走 judged-<机器> 这条独立通道（spec §3）；同内容重复发布/"
                "重复收取都是空操作；人工决定不冲突即生效、冲突只记不动两边的决定，"
-               "在分析页面上裁决（冲突账只增不自动消解，这里只列本周记下的）")
+               "在分析页面上裁决（冲突账只增不自动消解，这里只列本周记下的）；"
+               "SKU 判断集走同库新文件（data/sku-judgments.db.gz），与旧商品级包互不相扰")
     return out + [""]
 
 
