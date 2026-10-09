@@ -41,7 +41,7 @@ ROOT = Path(__file__).resolve().parent
 
 sys.path.insert(0, str(ROOT))
 
-from bestseller_monitor.config import Config, is_merge_only, load_shops  # noqa: E402
+from bestseller_monitor.config import Shop, Config, is_merge_only, load_shops  # noqa: E402
 from bestseller_monitor.db import Database, connect, cst_date  # noqa: E402
 from bestseller_monitor.pipeline import (  # noqa: E402
     CrawlerAlreadyRunning,
@@ -69,7 +69,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pages-per-shop", type=int, default=None, help="覆盖每家店翻页上限")
     p.add_argument("--max-detail", type=int, default=None, help="覆盖单轮详情预算（商品机会数）")
     p.add_argument("--limit-shops", type=str, default=None, help="逗号分隔的 shop_key 白名单")
-    p.add_argument("--new-round-intent", type=rounds.NewRoundIntent.from_json, default=None,
+    intents = p.add_mutually_exclusive_group()
+    intents.add_argument("--resume-round-intent", type=rounds.ResumeRoundIntent.from_json, default=None,
+                         help="GUI 明确继续的原轮快照；持锁复核，不接管或新建")
+    intents.add_argument("--new-round-intent", type=rounds.NewRoundIntent.from_json, default=None,
                    help="GUI 明确新建的只读预检事实；持锁后重新核对，不隐式续跑")
     p.add_argument("--ignore-plan", action="store_true",
                    help="拉不到计划库且本地没有本周计划时仍开轮（自由采集 + 记账为计划外）")
@@ -149,6 +152,8 @@ def main() -> int:
         # 自身的范围续跑（续跑不得增删店铺），否则取本周计划里归本机的店；逃生口放行
         # （free）时取本机清单里启用的店。
         shops = requested_round_shops(cfg, limit_keys, week=prep.week, free=free)
+        if args.resume_round_intent is not None and limit_keys is None:
+            shops = [Shop(s.key, s.name, s.url) for s in args.resume_round_intent.request.shops]
         # 越权/计划外的店：放行并上报——记账落在轮次备注与本机计划外账（run_round 里写）。
         deviations = plan_step.plan_deviations(plan, cfg.machine_id,
                                                [shop.key for shop in shops])
@@ -171,7 +176,7 @@ def main() -> int:
         print("本机清单里没有有效店铺（active=1）。")
         return EXIT_NOT_DONE
 
-    return _collect(cfg, shops, deviations=deviations, new_intent=args.new_round_intent)
+    return _collect(cfg, shops, deviations=deviations, new_intent=args.new_round_intent, resume_intent=args.resume_round_intent)
 
 
 def _run_local_trial(formal: Config, args: argparse.Namespace) -> int:
@@ -182,20 +187,21 @@ def _run_local_trial(formal: Config, args: argparse.Namespace) -> int:
         prepare_trial_storage(cfg)
         # First-open database migrations log too: isolate before preparing shops.
         with _collection_logging(cfg):
-            shops = trial_shops(cfg, keys)
+            shops = ([Shop(s.key, s.name, s.url) for s in args.resume_round_intent.request.shops]
+                     if args.resume_round_intent is not None and keys is None else trial_shops(cfg, keys))
             print(f"\n>>> 本机试采，不共享；数据库：{cfg.db_file}；日志：{cfg.logs_dir}。"
                   "沿用试采历史，同日已采商品可能跳过。\n")
             cfg.ensure_dirs()
-            return _run_collection(cfg, shops, new_intent=args.new_round_intent)
+            return _run_collection(cfg, shops, new_intent=args.new_round_intent, resume_intent=args.resume_round_intent)
     except (TrialUnavailable, OSError, ValueError, sqlite3.Error) as exc:
         print(f"\n>>> 本机试采无法开始：{exc}；请检查本机清单与隔离空间，不会回退到正式数据。\n")
         return EXIT_NOT_DONE
 
 
-def _collect(cfg: Config, shops, *, deviations=(), new_intent=None) -> int:
+def _collect(cfg: Config, shops, *, deviations=(), new_intent=None, resume_intent=None) -> int:
     cfg.ensure_dirs()
     with _collection_logging(cfg):
-        return _run_collection(cfg, shops, deviations=deviations, new_intent=new_intent)
+        return _run_collection(cfg, shops, deviations=deviations, new_intent=new_intent, resume_intent=resume_intent)
 
 
 @contextmanager
@@ -223,10 +229,12 @@ def _collection_logging(cfg: Config):
         logger.setLevel(level)
 
 
-def _run_collection(cfg: Config, shops, *, deviations=(), new_intent=None) -> int:
+def _run_collection(cfg: Config, shops, *, deviations=(), new_intent=None, resume_intent=None) -> int:
     sound.configure(cfg.alarm_on_intervention)
     try:
         intent_args = {"new_intent": new_intent} if new_intent is not None else {}
+        if resume_intent is not None:
+            intent_args["resume_intent"] = resume_intent
         run_round(cfg, shops, deviations=deviations, **intent_args)
     except CrawlerAlreadyRunning as exc:
         # 同一时刻至多一个采集进程：抢不到锁就说清楚，并用一个只表示这件事的退出码，

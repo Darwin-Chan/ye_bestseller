@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from uuid import uuid4
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from enum import Enum
 
@@ -101,6 +102,42 @@ class NewRoundIntent:
                        data["after_round"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("无效的新建轮次意图") from exc
+
+
+@dataclass(frozen=True)
+class ResumeRoundIntent:
+    """Explicit GUI resume: expected round and its immutable complete snapshot."""
+    request: RoundRequest
+    round_id: int
+    attempt: str = field(default_factory=lambda: uuid4().hex)
+
+    def to_json(self) -> str:
+        data = json.loads(NewRoundIntent(self.request, self.round_id).to_json())
+        data["attempt"] = self.attempt
+        return json.dumps(data, ensure_ascii=False)
+
+    @classmethod
+    def from_json(cls, value: str) -> ResumeRoundIntent:
+        parsed = NewRoundIntent.from_json(value)
+        if parsed.after_round < 1:
+            raise ValueError("无效的继续轮次意图")
+        attempt = json.loads(value).get("attempt")
+        if not isinstance(attempt, str) or len(attempt) != 32 or any(c not in "0123456789abcdef" for c in attempt):
+            raise ValueError("无效的继续启动标识")
+        return cls(parsed.request, parsed.after_round, attempt)
+
+
+def resume_execution_started(db: Database, intent: ResumeRoundIntent) -> bool:
+    return db.conn.execute(
+        "SELECT 1 FROM event_log WHERE round_id=? AND event='resume_started' AND note=?",
+        (intent.round_id, intent.attempt)).fetchone() is not None
+
+
+def plan_resume(db: Database, round_id: int, *, now) -> ResumeRoundIntent:
+    current = load(db, round_id)
+    if not current.resumable_on(now):
+        raise ScopeMismatch("原轮已结束或跨天，不能继续；请明确处置旧轮。")
+    return ResumeRoundIntent(RoundRequest(current.run_date, scope_shops(db, round_id)), round_id)
 
 
 @dataclass(frozen=True)
@@ -291,6 +328,32 @@ def plan_new(db: Database, request: RoundRequest) -> NewRoundIntent:
     check_new(db, request)
     previous = latest(db)
     return NewRoundIntent(request, previous.id if previous else 0)
+
+
+def open_resume(db: Database, request: RoundRequest, intent: ResumeRoundIntent, *, now=None) -> OpenResult:
+    """Locked explicit resume never adopts another round, creates, or ends one."""
+    db.conn.execute("BEGIN IMMEDIATE")
+    try:
+        current = load(db, intent.round_id)
+        recent = latest(db)
+        active = _active_rounds(db)
+        snapshot = RoundRequest(current.run_date, scope_shops(db, current.id))
+        if (not current.resumable_on(now or utcnow())
+                or recent is None or recent.id != intent.round_id
+                or len(active) != 1 or active[0].id != intent.round_id
+                or request.run_date != snapshot.run_date
+                or intent.request.run_date != snapshot.run_date
+                or set(intent.request.shops) != set(snapshot.shops)
+                or set(request.shops) != set(snapshot.shops)
+                or db.crawler_process() is not None
+                or resume_execution_started(db, intent)):
+            raise ScopeMismatch("继续预检事实已变化或原目标尚未收尾，本次启动被拒绝；不能接管或新建轮次。")
+        check_scope(db, request)
+        db.conn.commit()
+        return OpenResult(current, created=False)
+    except Exception:
+        db.conn.rollback()
+        raise
 
 
 def open_new(db: Database, request: RoundRequest, intent: NewRoundIntent, *, now=None) -> OpenResult:

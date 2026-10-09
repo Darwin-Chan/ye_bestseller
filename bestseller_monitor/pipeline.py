@@ -148,6 +148,9 @@ def round_shops(db: Database, round_id: int, cfg: Config) -> list[Shop]:
     shops: list[Shop] = []
     for scope in rounds.scope_shops(db, round_id):
         known = configured.get(scope.key)
+        # A changed configured shop is not the original snapshot's navigation.
+        if known is not None and known.url != scope.url:
+            known = None
         shops.append(Shop(
             key=scope.key,
             name=scope.name,
@@ -230,7 +233,8 @@ class CrawlerAlreadyRunning(RuntimeError):
 
 def run_round(cfg: Config, shops: list[Shop], *, deviations=(),
               elapsed_clock: Callable[[], float] | None = None,
-              new_intent: rounds.NewRoundIntent | None = None) -> None:
+              new_intent: rounds.NewRoundIntent | None = None,
+              resume_intent: rounds.ResumeRoundIntent | None = None) -> None:
     """开始或续跑一轮。
 
     shops 是本次调用请求的店铺范围：今天已有进行中的轮次时范围必须一致，否则
@@ -247,6 +251,8 @@ def run_round(cfg: Config, shops: list[Shop], *, deviations=(),
     抢不到的那一方抛 CrawlerAlreadyRunning，不建轮次、不写快照（命令行入口在读配置
     时会顺手同步一次 shops 表，那不是采集数据）。
     """
+    if new_intent is not None and resume_intent is not None:
+        raise ScopeMismatch("新建与继续意图不能同时使用")
     lock = single_instance.acquire(single_instance.CRAWLER_LOCK)
     if lock is None:
         raise CrawlerAlreadyRunning(
@@ -254,14 +260,15 @@ def run_round(cfg: Config, shops: list[Shop], *, deviations=(),
         )
     try:
         _run_round_locked(cfg, shops, deviations, elapsed_clock=elapsed_clock,
-                          new_intent=new_intent)
+                          new_intent=new_intent, resume_intent=resume_intent)
     finally:
         lock.release()
 
 
 def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *,
                       elapsed_clock: Callable[[], float] | None = None,
-                      new_intent: rounds.NewRoundIntent | None = None) -> None:
+                      new_intent: rounds.NewRoundIntent | None = None,
+              resume_intent: rounds.ResumeRoundIntent | None = None) -> None:
     """拿到采集锁之后真正干活的部分。"""
     cfg.ensure_dirs()
     conn = connect(cfg.db_file)
@@ -274,8 +281,12 @@ def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *,
             run_date=cst_date(),
             shops=tuple(ShopScope(shop.key, shop.url, shop.name) for shop in shops),
         )
-        opened = (rounds.open(db, request) if new_intent is None
-                  else rounds.open_new(db, request, new_intent))
+        if resume_intent is not None:
+            opened = rounds.open_resume(db, request, resume_intent)
+        elif new_intent is not None:
+            opened = rounds.open_new(db, request, new_intent)
+        else:
+            opened = rounds.open(db, request)
         round_id = opened.round.id
         # 放行并上报（spec §6）：越权/计划外的店在轮次打开后立刻留痕（备注 + 本机账）。
         plan_step.record_deviations(db, opened.round, cfg.machine_id, deviations)
@@ -311,7 +322,8 @@ def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *,
             initializing = False
             _run_pwcdp_round(db, cfg, round_id, work_shops,
                              on_execution_end=segment.settle,
-                             explicit_new=new_intent is not None)
+                             explicit_new=new_intent is not None,
+                             resume_intent=resume_intent)
         finally:
             _settle_execution(segment.settle)
         _finalize_round(db, cfg, opened.round)
@@ -445,7 +457,8 @@ def _settle_execution(callback) -> None:
 def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
                      shops: list[Shop], started_at: str | None = None, *,
                      on_execution_end: Callable[[], bool] | None = None,
-                     explicit_new: bool = False) -> None:
+                     explicit_new: bool = False,
+                     resume_intent: rounds.ResumeRoundIntent | None = None) -> None:
     def publish(state, port, browser_pid, browser_os_started):
         if started_at is None:
             return False
@@ -475,6 +488,10 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
     identity_timeout = None
     browser_binding = db.crawler_process()
     try:
+        if resume_intent is not None:
+            # Durable execution acknowledgement; unlike diagnostic emit this
+            # must commit successfully before consuming GUI pause permission.
+            db.append_event(round_id, "resume_started", kind="run", note=resume_intent.attempt)
         _run_listing_pw(db, cfg, round_id, shops, page, emit=emit, deny_tracker=deny_tracker)
     except IdentityVerificationTimeout as exc:
         identity_timeout = exc

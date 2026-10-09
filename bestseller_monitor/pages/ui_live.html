@@ -142,6 +142,7 @@
       <div style="margin-top:16px;text-align:right;display:flex;gap:10px;justify-content:flex-end">
         <button class="btn ghost" id="resumeBtn" style="display:none">继续</button>
         <button class="btn ghost" id="pauseBtn">暂停本轮</button>
+        <button class="btn ghost" id="changeScopeBtn">改范围（中止后重选）</button>
         <button class="btn danger" id="abortBtn">中止本轮（放弃）</button>
       </div>
     </div>
@@ -490,13 +491,18 @@
       $("rStopping").style.display = stopping ? "block" : "none";
       if (stopping) $("rStopping").textContent = stoppingText(d);
       $("rPaused").style.display = (!stopping && d.can_resume) ? "block" : "none";
+      $("rPaused").textContent = d.resume_error
+        ? "继续启动未成功：" + d.resume_error + "。原轮暂停资格保留，请明确点击继续重试。"
+        : "已暂停（轮次保留为「进行中」，点「继续」接着抓取本轮剩余任务）。";
       // 暂停态显示“继续”，运行态显示“暂停”；停止途中两个都不给点。
       $("resumeBtn").style.display = (!stopping && d.can_resume) ? "" : "none";
       $("pauseBtn").style.display = (!stopping && !d.can_resume) ? "" : "none";
+      $("changeScopeBtn").disabled = !d.can_abort;
       $("abortBtn").disabled = !d.can_abort;
     } else {
       $("resumeBtn").style.display = "none";
       $("pauseBtn").style.display = "none";
+      $("changeScopeBtn").disabled = true;
       $("abortBtn").disabled = true;
       $("rProgressLine").textContent = d.running ? "抓取进程正在启动…" : "本轮已结束，正在加载结果…";
     }
@@ -527,6 +533,14 @@
   // 一次只问一件事：默认文案是中止本轮；带 opts 时换成那件事的文案与动作
   // （如逃生口确认，spec §6 降级表最后一行）。
   let confirmAction = null;
+  let rangeChangeRound = null;
+  async function changeScope() {
+    const prepared = await callApi("prepare_abort");
+    if (!prepared || !prepared.ok) { if (prepared) showNotice(prepared.error); return; }
+    await openConfirm({title: "中止原轮并改变范围？",
+      sub: "原轮将结束且不能继续；已抓取数据保留。等待停止及收尾完成后，回开始页重新选店并明确开始新轮。",
+      action: () => doAbort(prepared.confirmation, true)});
+  }
   async function openConfirm(opts) {
     opts = opts || {};
     let action = opts.action;
@@ -542,12 +556,13 @@
     $("confirmModal").classList.add("show");
   }
   function closeConfirm() { $("confirmModal").classList.remove("show"); }
-  async function doAbort(confirmation) {
+  async function doAbort(confirmation, changeRange = false) {
     const r = await callApi("confirm_abort", confirmation);
     if (!r || !r.ok) { if (r) showNotice(r.error); return; }
+    if (changeRange) rangeChangeRound = r.round_id;
     stopPolling();
     const res = await queued(() => callApi("get_result"));
-    if (res && res.has_round) { renderResult(res); switchTab("result"); }
+    if (res && res.has_round) { switchTab("result"); renderResult(res); }
   }
 
   // ---------- 结果页 ----------
@@ -571,9 +586,12 @@
     if (stopping) $("resStopping").textContent = stoppingText(d);
     if (stopping) {
       if (!resStopTimer) resStopTimer = setTimeout(refreshResultStopping, POLL_MS);
-    } else if (resStopTimer) {
-      clearTimeout(resStopTimer);
-      resStopTimer = null;
+    } else {
+      if (resStopTimer) { clearTimeout(resStopTimer); resStopTimer = null; }
+      if (rangeChangeRound === d.round_id && d.reason) {
+        rangeChangeRound = null;
+        switchTab("start"); // only navigation: never starts a collector
+      }
     }
   }
 
@@ -596,6 +614,7 @@
     $("startBtn").onclick = () => startRun();
     $("retryPrepBtn").onclick = retryPrepare;
     $("pauseBtn").onclick = pauseRun;
+    $("changeScopeBtn").onclick = changeScope;
     $("abortBtn").onclick = () => openConfirm();
     $("abortForeignBtn").onclick = () => openConfirm();
     $("confirmCancel").onclick = closeConfirm;

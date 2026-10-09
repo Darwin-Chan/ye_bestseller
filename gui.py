@@ -203,6 +203,7 @@ class Api:
         self.round_id: int | None = None
         self.user_paused = False
         self._paused_round_id: int | None = None
+        self._resume_intent: rounds.ResumeRoundIntent | None = None
         self._closing_requested = False
         self._abort_confirmation: tuple[str, CloseSnapshot] | None = None
         # 停止编排（窗口、回执、超时强杀）在 stop_request 里；**冻结目标之后的处置也在那里**，
@@ -250,6 +251,7 @@ class Api:
             self.round_id = None
             self.user_paused = False
             self._paused_round_id = None
+            self._resume_intent = None
             return {"ok": True}
 
     def _collection_payload(self, payload: dict) -> dict:
@@ -438,6 +440,7 @@ class Api:
             try:
                 self._stop_watch.tick(conn)
                 self._refresh_shops(conn)
+                self._consume_resume_ack(Database(conn))
                 return self._collection_payload(views.start_view(
                     conn, cfg=self.cfg, shops=self.shops, state=self._ui_state(),
                     crawler=self.current_crawler(conn), now=self._now()))
@@ -451,22 +454,28 @@ class Api:
             state = self._ui_state()
             max_attempts = getattr(self.cfg, "max_attempts_per_page",
                                    shop_progress.DEFAULT_MAX_ATTEMPTS)
-            if state.start_error is not None:
+            if state.start_error is not None and self._resume_intent is None:
                 # 子进程因「已有采集在跑」被拒：不碰数据库，直接说清原因。
                 return self._collection_payload(views.run_view(None, state=state, now=self._now(),
                                      max_attempts=max_attempts))
             conn = self._open_conn()
             try:
                 self._stop_watch.tick(conn)
+                self._consume_resume_ack(Database(conn))
                 state = self._ui_state()
+                resume_error = state.start_error if self._resume_intent is not None else None
+                if self._resume_intent is not None:
+                    state = dataclasses.replace(state, start_error=None)
                 if self.cfg.local_trial:
                     identity = self.current_crawler(conn)
                     if identity is not None and identity.round_id is not None:
                         self.round_id = identity.round_id
-                    state = dataclasses.replace(self._ui_state(),
+                    state = dataclasses.replace(state,
                                                 crawler_running=identity is not None and identity.pid is not None)
                 view = views.run_view(conn, state=state, now=self._now(),
                                     max_attempts=max_attempts)
+                if resume_error is not None:
+                    view["resume_error"] = resume_error
                 if view.get("has_round"):
                     # 轮次由采集子进程创建，界面在这里随轮询认领它。
                     self.round_id = view["round_id"]
@@ -495,14 +504,16 @@ class Api:
             other_space=self._formal_cfg.db_file if self.cfg.local_trial else None,
         )
 
-    def _spawn_crawler(self, keys: list[str] | None = None, *, new_intent=None):
-        """拉起采集子进程；明确新建带意图，继续不带 keys、按原轮次范围。
+    def _spawn_crawler(self, keys: list[str] | None = None, *, new_intent=None, resume_intent=None):
+        """拉起采集子进程；新建和继续均携带明确意图，继续冻结原轮完整范围。
 
         界面不发 `--ignore-plan`：逃生口只在命令行（ADR-0035）。
         """
         cmd = [_crawler_python(), str(PROJECT_ROOT / "run.py")]
         if new_intent is not None:
             cmd += ["--new-round-intent", new_intent.to_json()]
+        if resume_intent is not None:
+            cmd += ["--resume-round-intent", resume_intent.to_json()]
         if self.cfg.local_trial:
             cmd += ["--local-trial", "--config", str(self.config_file)]
         limit = ",".join(k for k in (keys or []) if k)
@@ -563,6 +574,7 @@ class Api:
             self.round_id = None
             self.user_paused = False
             self._paused_round_id = None
+            self._resume_intent = None
             try:
                 self._spawn_crawler(keys, new_intent=new_intent)
             except Exception as exc:  # noqa: BLE001
@@ -587,6 +599,7 @@ class Api:
                     return {"ok": False, "error": "上一次停止仍在核验或收尾，请稍后重试。",
                             "retryable": True}
                 db = Database(conn)
+                self._consume_resume_ack(db)
                 current = rounds.active_round(db, self._today())
                 if current is None:
                     stale = rounds.active_round(db)
@@ -605,18 +618,27 @@ class Api:
                         "请点「开始抓取」新建一轮。"
                     )}
                 rid = current.id
+                resume_intent = rounds.plan_resume(db, rid, now=self._now())
             finally:
                 conn.close()
             self.round_id = rid
-            self.user_paused = False
-            self._paused_round_id = None
             try:
-                # 不带范围：子进程按「开始或续跑」处理，范围以轮次自身为准，
-                # 配置里删掉过的店铺也能继续跑完。
-                self._spawn_crawler()
+                # 子进程持锁复核预期轮次与完整快照，不采用开始页默认子集。
+                self._spawn_crawler(resume_intent=resume_intent)
             except Exception as exc:  # noqa: BLE001
                 return {"ok": False, "error": f"继续抓取失败：{exc}"}
+            # Popen success is not evidence that the driver entered execution.
+            # The exact attempt is consumed only by the child's committed event.
+            self._resume_intent = resume_intent
             return {"ok": True, "round_id": rid}
+
+    def _consume_resume_ack(self, db: Database) -> None:
+        """Only committed entry into execution consumes this GUI's pause."""
+        if (self._resume_intent is not None
+                and rounds.resume_execution_started(db, self._resume_intent)):
+            self.user_paused = False
+            self._paused_round_id = None
+            self._resume_intent = None
 
     def _note_paused(self) -> None:
         self.user_paused = True
@@ -631,6 +653,8 @@ class Api:
             if self._closing_requested:
                 return {"ok": False, "error": CLOSING_REFUSAL}
             if not self.cfg.local_trial:
+                # Preserve the existing unknown-pause close refusal; only the
+                # frozen round ID below grants an actual resume qualification.
                 self.user_paused = True
             conn = self._open_conn()
             try:
@@ -660,6 +684,9 @@ class Api:
                             stop_request.StopKind.PAUSE, target,
                             identity.round_id))
                     self._paused_round_id = self._stop_watch.status.round_id
+                    self.user_paused = True
+                    # A new explicit pause supersedes any previous start acknowledgment.
+                    self._resume_intent = None
                 except RuntimeError as exc:
                     return {"ok": False, "error": "暂时无法确认停止目标，请稍后重试。",
                             "retryable": True, "code": str(exc)}
@@ -801,6 +828,7 @@ class Api:
         with self._lock:
             conn = self._open_conn()
             try:
+                self._consume_resume_ack(Database(conn))
                 status = self._stop_watch.status
                 promotion_error = None
                 if (status.kind is stop_request.StopKind.PAUSE

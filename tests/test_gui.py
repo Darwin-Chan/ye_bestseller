@@ -833,7 +833,10 @@ class GuiRoundScopeTests(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             self.assertEqual(result["round_id"], rid)
-            spawn.assert_called_once_with()
+            spawn.assert_called_once()
+            intent = spawn.call_args.kwargs["resume_intent"]
+            self.assertEqual(intent.round_id, rid)
+            self.assertEqual(intent.request.shops, (ShopScope("A01", "https://A01.example/", "店铺A"),))
 
 
 class _FakeWindow:
@@ -1438,7 +1441,10 @@ class GuiApiConstructionTests(unittest.TestCase):
 
         self.assertTrue(result["ok"], result.get("error"))
         self.assertEqual(result["round_id"], round_id)
-        spawn.assert_called_once_with()
+        spawn.assert_called_once()
+        intent = spawn.call_args.kwargs["resume_intent"]
+        self.assertEqual(intent.round_id, round_id)
+        self.assertEqual(intent.request.run_date, self.YESTERDAY)
 
 
 if __name__ == "__main__":
