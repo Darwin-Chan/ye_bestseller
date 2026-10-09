@@ -14,6 +14,7 @@
   - `0e2fee3` test(joint): record TICKET07 chain summaries for the acceptance evidence
   - `be8fda6` fix: gate the manual login entry on unsettled cleanup debt (ticket 07 review)（两轴审查 r1 整改）
   - `fe36da7` test(stop): pin proof-divergence settlement for an unreadable pid (ticket 07 review r2)（复审补强）
+  - `bc064fa` docs: ticket07 joint acceptance, replay, full-suite and two-axis review record（本交付与审查记录；仅归档文档，不改已测运行代码——最终全量与回放对象为 `fe36da7`）
 - 整改后产品代码改动仅两处：`gui.Api._login_refusal` 补「收尾欠账未结清」门禁（spec 行 59）；`crawler_identity.taken_over` 单点化并供 `StopWatch` 浏览器结账复用（判据行为差异：存活读数不可用但创建证明分歧时按已退出结账）。
 
 ## 联合验收链（J-A01–J-A04）
