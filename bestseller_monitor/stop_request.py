@@ -691,10 +691,7 @@ class StopWatch:
         current = crawler_identity.registered(conn)
         if current is not None and StopTarget.of(current) != target:
             return
-        conn.execute("DELETE FROM crawler_process WHERE id=1 AND pid=? AND started_at=?",
-                     (target.pid, target.started_at))
-        conn.execute("DELETE FROM stop_requests WHERE id=1 AND target_pid=? "
-                     "AND target_started_at=?", (target.pid, target.started_at))
+        crawler_identity.delete_registration(conn, target.pid, target.started_at)
 
     def _finish(self, stop):
         self._runtime.release(stop.bound)

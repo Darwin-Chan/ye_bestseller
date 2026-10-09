@@ -515,5 +515,121 @@ class LeftoverRoundTests(unittest.TestCase):
             self.assertTrue(self.api.resume_run()["ok"])
 
 
+    # ---------- 11-A12 复审整改：收尾欠账保留后必须仍有重试入口 ----------
+    def test_kept_cleanup_debt_exposes_retry_entry_and_settles(self):
+        rid = self.open_round()
+        self.record_dead_identity(rid, state="OWNED", browser_pid=9201,
+                                  browser_os_started="browser-proof", port=9222)
+        prepared = self.api.prepare_abort(rid)
+        with self.gone(4321), \
+                self.proof({9201: "browser-proof"}), \
+                patch("bestseller_monitor.browser_proc.close_browser", return_value=None):
+            first = self.api.confirm_abort(prepared["confirmation"])
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["cleanup"], "pending")
+        start = self.api.get_start()
+        self.assertFalse(start["start_allowed"], "欠账未结清不放行新建")
+        residue = start.get("residue") or {}
+        self.assertEqual(residue.get("round_id"), rid)
+        self.assertEqual(residue.get("state"), "OWNED")
+        # 轮次已有终态，pending 卡消失后仍有产品内重试入口
+        retry = self.api.prepare_cleanup_retry()
+        self.assertTrue(retry["ok"], retry)
+        with self.gone(4321), \
+                self.proof({9201: "unrelated-new-browser"}), \
+                patch("bestseller_monitor.browser_proc.close_browser", return_value=None):
+            done = self.api.confirm_abort(retry["confirmation"])
+        self.assertTrue(done["ok"], done)
+        self.assertNotEqual(done.get("cleanup"), "pending")
+        self.assertIsNone(self.identity_row())
+        self.assertTrue(self.api.get_start()["start_allowed"])
+        self.assertIsNone(self.api.get_start().get("residue"))
+
+    def test_cleanup_retry_without_residue_refuses_and_cancel_writes_nothing(self):
+        rid = self.open_round()
+        self.assertFalse(self.api.prepare_cleanup_retry()["ok"])
+        # 取消路径：冻结之后不确认，什么都不发生
+        self.record_dead_identity(rid, state="OWNED", browser_pid=9201,
+                                  browser_os_started="browser-proof", port=9222)
+        prepared = self.api.prepare_cleanup_retry()
+        self.assertTrue(prepared["ok"])
+        self.assertIsNotNone(self.identity_row())
+        self.assertTrue(self.load(rid).in_progress)
+
+    def test_leftover_abort_keeps_real_terminal_and_cleanup_notes_together(self):
+        rid = self.open_round()
+        self.record_dead_identity(rid, state="OWNED", browser_pid=9201,
+                                  browser_os_started="browser-proof", port=9222)
+        prepared = self.api.prepare_abort(rid)
+        with closing(connect(self.db_path)) as conn:
+            db = Database(conn)
+            rounds.finish(db, rounds.load(db, rid), rounds.TerminalReason.COMPLETED)
+        with self.gone(4321), \
+                self.proof({9201: "browser-proof"}), \
+                patch("bestseller_monitor.browser_proc.close_browser", return_value=None):
+            result = self.api.confirm_abort(prepared["confirmation"])
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "COMPLETED")
+        self.assertEqual(result["cleanup"], "pending")
+        note = result.get("note", "")
+        self.assertIn("保留原终态", note, "真实终态的事实不能被收尾说明吞掉")
+        self.assertIn("收尾", note)
+        self.assertIn("重试收尾核验", note)
+
+    def test_unverifiable_process_with_complete_row_is_explained(self):
+        rid = self.open_round()
+        self.record_dead_identity(rid, state="NOT_STARTED")
+        prepared = self.api.prepare_abort(rid)
+        with patch("bestseller_monitor.browser_proc.process_alive", return_value=None), \
+                patch("bestseller_monitor.browser_proc.process_creation_proof", return_value=None):
+            result = self.api.confirm_abort(prepared["confirmation"])
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("cleanup", result, "完整状态不构成收尾欠账")
+        self.assertIn("残留登记", result.get("note", ""), "核不实要解释，不静默成功")
+
+    def test_cross_day_paused_shown_even_when_another_leftover_is_newer(self):
+        rid_paused = self.open_round(keys=("A",), day="2026-09-13")
+        self.open_round(keys=("D",), day="2026-09-12")  # 更旧的遗留行，但不是本界面暂停的那一轮
+        self.api.round_id = rid_paused
+        self.api.user_paused = True
+        self.api._paused_round_id = rid_paused
+
+        run = self.api.get_run()
+
+        self.assertTrue(run["has_round"], "跨天暂停轮不是最新遗留也要能显示")
+        self.assertEqual(run["round_id"], rid_paused)
+        self.assertTrue(run["cross_day"])
+        self.assertFalse(run["can_resume"])
+
+    def test_start_page_retry_settles_residue_debt(self):
+        from playwright.sync_api import expect
+        rid = self.open_round()
+        with closing(connect(self.db_path)) as conn:
+            db = Database(conn)
+            rounds.finish(db, rounds.load(db, rid), rounds.TerminalReason.ABANDONED)
+        self.record_dead_identity(rid, state="OWNED", browser_pid=9201,
+                                  browser_os_started="browser-proof", port=9222)
+        page = self.page()
+
+        expect(page.locator("#startBtn")).to_be_disabled()
+        expect(page.locator("#residueCard")).to_be_visible()
+        expect(page.locator("#residueInfo")).to_contain_text("收尾")
+        with self.gone(4321), \
+                self.proof({9201: "browser-proof"}), \
+                patch("bestseller_monitor.browser_proc.close_browser", return_value=None):
+            page.locator("#residueBtn").click()
+            expect(page.locator("#confirmSub")).to_contain_text("不会误关日常 Edge")
+            page.locator("#confirmOk").click()
+            expect(page.locator("#apiError")).to_be_visible(timeout=8000)
+            expect(page.locator("#residueCard")).to_be_visible()
+        with self.gone(4321), \
+                self.proof({9201: "unrelated-new-browser"}), \
+                patch("bestseller_monitor.browser_proc.close_browser", return_value=None):
+            page.locator("#residueBtn").click()
+            page.locator("#confirmOk").click()
+            expect(page.locator("#residueCard")).to_be_hidden(timeout=8000)
+            expect(page.locator("#startBtn")).to_be_enabled()
+
+
 if __name__ == "__main__":
     unittest.main()

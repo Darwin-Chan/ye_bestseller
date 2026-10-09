@@ -15,9 +15,10 @@ log = logging.getLogger(__name__)
 class CloseSnapshot:
     """关窗/中止的冻结事实。
 
-    kind 取值：`idle` / `running` / `paused` / `aborting` / `unknown` 由本 module 的
-    `Api.close_snapshot()` 产出；`pending` 只由 `Api.prepare_abort` 在「没有活动采集的
-    遗留轮」上冻结（票 06）——它不参与关窗判定，关窗读取永远不会返回它。
+    kind 取值：`idle` / `running` / `paused` / `aborting` / `unknown` 由 `gui.Api` 的
+    `close_snapshot()` 产出；`pending`（没有活动采集的遗留轮中止）与 `cleanup`
+    （残留收尾重试）只由 `gui.Api.prepare_abort` / `prepare_cleanup_retry` 冻结
+    （票 06）——两者都不参与关窗判定，关窗读取永远不会返回它们。
     """
 
     kind: str

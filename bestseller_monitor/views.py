@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from . import click_events, elapsed, pacing, plan_step, rounds, shop_progress, weekly_plan
 from .config import effective_pages_limit, is_merge_only
-from .crawler_identity import CrawlerProcess
+from .crawler_identity import CrawlerProcess, browser_cleanup_complete
 from .db import CST, Database, RoundTally, cst_date
 
 
@@ -399,6 +399,14 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
                      "（发布后本周不重算，本地即权威）。")
     ov_products, ov_skus = _inventory_counts(conn, today)
     pending = rounds.pending_rounds(db)
+    # 已终态轮次留下的收尾欠账（浏览器/身份未核实）：没有待处置轮次时，
+    # 这里同样是新建被拦的原因，页面据此给出「重试收尾核验」入口。
+    identity = db.crawler_process()
+    residue = None
+    if (crawler is None and identity is not None
+            and not browser_cleanup_complete(identity["browser_state"])):
+        residue = {"round_id": identity["round_id"],
+                   "state": identity["browser_state"] or "UNKNOWN"}
     # 开始页仅表达新建；无终态旧轮不是「可暂停续跑」的证明。
     locked = state.plan_confirming or plan.blocked
     start_allowed = not locked and not (is_merge_only(cfg) and not trial)
@@ -428,6 +436,7 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
         "start_allowed": start_allowed,
         "pending": ({"rounds": _pending_payload(pending, state, now, today)}
                     if pending else None),
+        "residue": residue,
         "plan_idle": idle,
         "plan_note": "\n".join(notes),
         "plan_gate": plan.blocked,
@@ -552,9 +561,13 @@ def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str,
     active = rounds.active_round(db, today)
     cross_day = False
     if active is None and state.manually_paused and state.round_id is not None:
-        stale = rounds.active_round(db)
-        if stale is not None and stale.id == state.round_id:
-            active, cross_day = stale, True
+        # 认的就是本界面暂停的那一轮：库里可能有别的更新遗留，不能按最新一条猜。
+        try:
+            claimed = rounds.load(db, state.round_id)
+        except ValueError:
+            claimed = None
+        if claimed is not None and claimed.reason is None:
+            active, cross_day = claimed, True
     if active is None:
         return {
             "running": state.crawler_running,

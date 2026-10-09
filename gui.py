@@ -871,9 +871,10 @@ class Api:
                 self.user_paused = False
                 self._paused_round_id = None
             result = {"ok": True, "round_id": settled.id, "reason": settled.reason.value}
+            notes = []
             if settled.reason is not TerminalReason.ABANDONED:
-                result["note"] = (f"轮次 #{settled.id} 已按其它方式结束，"
-                                  "保留原终态，未改为人工中止。")
+                notes.append(f"轮次 #{settled.id} 已按其它方式结束，保留原终态，"
+                             "未改为人工中止。")
             if identity is not None:
                 # 处置旧轮的这一刻顺手结清它的残留登记：进程确已不在时删行，
                 # OWNED 浏览器按精确绑定关；核不实就保留欠账，新轮继续被拦。
@@ -882,12 +883,77 @@ class Api:
                 except (OSError, sqlite3.Error) as exc:
                     log.warning("遗留轮中止后身份收尾暂不可核验：%s", exc)
                     done = False
-                if not done and not crawler_identity.browser_cleanup_complete(
-                        identity.browser_state):
-                    result["cleanup"] = "pending"
-                    result["note"] = ("中止已提交；原采集浏览器或身份收尾暂未核清，"
-                                      "新轮在收尾完成前仍被拦，可稍后重试。")
+                if not done:
+                    if crawler_identity.browser_cleanup_complete(identity.browser_state):
+                        notes.append("原采集进程身份暂不可核验，残留登记已保留；"
+                                     "不影响开始新轮。")
+                    else:
+                        result["cleanup"] = "pending"
+                        notes.append("原采集浏览器或身份收尾暂未核清，"
+                                     "新轮在收尾完成前仍被拦；"
+                                     "可点「重试收尾核验」稍后再试。")
+            if notes:
+                result["note"] = "".join(notes)
             return result
+        finally:
+            conn.close()
+
+    @_collection_action
+    def prepare_cleanup_retry(self) -> dict:
+        """冻结一次「重试收尾核验」：结清已无进程的残留登记与本次浏览器欠账。
+
+        轮次已终态、待处置卡消失之后，这是产品内唯一的重试入口（11-A12 的
+        「解释重试」）：没有终态不回写，只按原采集的精确绑定核验与清理。
+        """
+        with self._lock:
+            if self._closing_requested:
+                return {"ok": False, "error": CLOSING_REFUSAL}
+            conn = self._open_conn()
+            try:
+                self._stop_watch.tick(conn)
+                if self._stop_watch.status.phase is not stop_request.StopPhase.IDLE:
+                    return {"ok": False, "error": "停止或收尾仍在进行，请稍后重试。",
+                            "retryable": True}
+                if self.any_crawler_running():
+                    return {"ok": False, "error": _BUSY_ERROR}
+                identity = crawler_identity.registered(conn)
+                if identity is None:
+                    return {"ok": False, "error": "没有待完成的收尾。"}
+                snapshot = CloseSnapshot("cleanup", stop_request.StopTarget.of(identity),
+                                         identity.round_id)
+            finally:
+                conn.close()
+            token = secrets.token_urlsafe(24)
+            self._abort_confirmation = (token, snapshot)
+            return {"ok": True, "confirmation": token, "state": identity.browser_state}
+
+    def _confirm_cleanup_retry(self, expected: CloseSnapshot) -> dict:
+        """执行一次收尾重试：重核冻结目标，只清可核实的欠账。"""
+        conn = self._open_conn()
+        try:
+            self._stop_watch.tick(conn)
+            if self._stop_watch.status.phase is not stop_request.StopPhase.IDLE:
+                return {"ok": False, "error": "停止或收尾仍在进行，请稍后重试。",
+                        "retryable": True}
+            if self.any_crawler_running():
+                return {"ok": False, "error": "已有采集在运行，不能按本次确认处置；"
+                        "请先处置正在跑的这一轮。"}
+            identity = crawler_identity.registered(conn)
+            current_target = stop_request.StopTarget.of(identity)
+            if current_target is None:
+                return {"ok": True, "cleanup": "settled",
+                        "note": "残留登记已不存在，无需再核验。"}
+            if current_target != expected.target:
+                return {"ok": False, "error": "采集目标已变化，请重新确认重试。"}
+            try:
+                done = crawler_identity.settle_dead_registration(conn, identity)
+            except (OSError, sqlite3.Error) as exc:
+                log.warning("收尾重试暂不可核验：%s", exc)
+                done = False
+            if done:
+                return {"ok": True, "cleanup": "settled"}
+            return {"ok": True, "cleanup": "pending",
+                    "note": "收尾暂未核清，欠账保留；新轮仍被拦，可稍后再试。"}
         finally:
             conn.close()
 
@@ -902,6 +968,8 @@ class Api:
             expected = frozen[1]
             if expected.kind == "pending":
                 return self._confirm_pending_abort(expected)
+            if expected.kind == "cleanup":
+                return self._confirm_cleanup_retry(expected)
             current = self.close_snapshot()
             if current.round_id != expected.round_id or current.kind == "unknown":
                 return {"ok": False, "error": "轮次或采集目标已变化，请重新确认中止。"}
