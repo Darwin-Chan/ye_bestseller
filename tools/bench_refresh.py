@@ -51,11 +51,14 @@ def refresh_api(db_file: Path, *, now: str = NOW, open_conn=None):
     `gui` 只在用到时才导入——它拖着 pywebview 那一套，别的 tools 不依赖。
     """
     from gui import Api
+    from bestseller_monitor.config import ROLE_COLLECTOR
 
+    # 这个替身要跟真 Config 同形：get_run/get_start 会读 role（角色门禁）与浏览器那几项。
     return Api(cfg=SimpleNamespace(db_file=db_file, max_pages_per_shop=3, local_trial=False,
                                    root=db_file.parent, chrome_path="",
                                    user_data_path=db_file.parent / "unused-profile",
-                                   attach_port=9222, start_browser=False),
+                                   attach_port=9222, start_browser=False,
+                                   role=ROLE_COLLECTOR),
                shops=[], now=lambda: now, open_conn=open_conn)
 
 
