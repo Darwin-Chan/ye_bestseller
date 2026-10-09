@@ -247,8 +247,8 @@ class JointAcceptanceTests(unittest.TestCase):
         self.os.state = 'free'
 
         # 开始：真实按钮携带明确新轮意图与同一专用目录快照
-        cmd, intent = self.start_via_page(ui)
-        self.assertEqual(intent.request.shop_keys, ('A', 'B', 'C', 'D'))
+        cmd, start_intent = self.start_via_page(ui)
+        self.assertEqual(start_intent.request.shop_keys, ('A', 'B', 'C', 'D'))
         settings = json.loads(cmd[cmd.index('--gui-browser-settings') + 1])
         self.assertEqual(settings['profile'], profile)
 
@@ -274,6 +274,7 @@ class JointAcceptanceTests(unittest.TestCase):
             return f'https://detail.1688.com/offer/{offer}.html'
         self.assertEqual(visits, [detail_url(o) for o in
                                   ('A1', 'A2', 'B1', 'B2', 'C1', 'C2', '501', '502')])
+        paused_visits = list(visits)
         run = self.load(rid)
         self.assertIsNone(run.reason, '暂停保留本轮，不写终态')
         events = self.verification_events(rid)
@@ -321,6 +322,16 @@ class JointAcceptanceTests(unittest.TestCase):
         self.assertEqual(run.reason, rounds.TerminalReason.COMPLETED)
         self.assertEqual(run.shop_keys, ('A', 'B', 'C', 'D'))
         self.assertEqual(self.api.get_run()['can_resume'], False)
+        print('TICKET07_JA01_CHAIN ' + json.dumps({
+            'def_profiles': sorted({s.profile for s in self.os.starts}),
+            'manual_starts': len(self.os.starts),
+            'start_scope': list(start_intent.request.shop_keys),
+            'paused_round': rid,
+            'pre_pause_navigation': [v.rsplit('/', 1)[-1] for v in paused_visits],
+            'resume_scope': list(intent.request.shop_keys),
+            'resumed_navigation': [v.rsplit('/', 1)[-1] for v in visits],
+            'members': list(run.shop_keys),
+            'reason': run.reason.value, 'offline': True}, ensure_ascii=False))
 
     # ---------- J-A02 ----------
     def test_ja02_identity_timeout_ends_round_and_new_run_waits_for_explicit_start(self):
@@ -364,6 +375,11 @@ class JointAcceptanceTests(unittest.TestCase):
             self.assertTrue(self.api.start_run(['A', 'B'])['ok'])
         cmd, raw = self.spawn_intent(spawn, '--new-round-intent')
         self.assertEqual(rounds.NewRoundIntent.from_json(raw).request.shop_keys, ('A', 'B'))
+        print('TICKET07_JA02_TIMEOUT ' + json.dumps({
+            'timed_out_round': rid, 'reason': 'IDENTITY_VERIFICATION_TIMEOUT',
+            'wait_limit_minutes': 0.1,
+            'visited_before_stop': [v.rsplit('/', 1)[-1] for v in visits],
+            'resumable': False, 'new_run_scope': 'A/B', 'offline': True}, ensure_ascii=False))
 
     # ---------- J-A03 ----------
     def test_ja03_confirmed_close_versus_abnormal_exit_reopen(self):
@@ -423,6 +439,11 @@ class JointAcceptanceTests(unittest.TestCase):
         self.assertEqual(self.load(crashed).reason, rounds.TerminalReason.ABANDONED)
         with patch.object(gui.subprocess, 'Popen') as spawn:
             self.assertTrue(reopened2.start_run(['C'])['ok'])
+        print('TICKET07_JA03_REOPEN ' + json.dumps({
+            'confirmed_close': {'round': rid, 'reason': 'ABANDONED', 'resume_offered': False},
+            'abnormal_exit': {'round': crashed, 'shown_as': '采集已停止，本轮未正常结束',
+                              'reason_written_by': 'explicit confirm only', 'resume_offered': False},
+            'offline': True}, ensure_ascii=False))
 
     # ---------- J-A04 ----------
     def test_ja04_four_shop_original_scope_resumes_and_unproven_history_is_disposed(self):
@@ -496,6 +517,15 @@ class JointAcceptanceTests(unittest.TestCase):
         self.assertEqual(run.shop_keys, ('A', 'B', 'C', 'D'))
         self.assertEqual(rounds.latest(self.dbconn()).id, rid)
         self.assertEqual(self.dbconn().round_tally(rid).handled, 92)   # 前三店 90 + D 2
+        print('TICKET07_JA04_FOUR_SHOP ' + json.dumps({
+            'original_conditions': {'round_scope': ['A', 'B', 'C', 'D'],
+                                    'satisfied_today': ['A', 'B', 'C'],
+                                    'default_checked': ['D']},
+            'old_start_path': 'refused with disposal explanation',
+            'resume_scope': list(intent.request.shop_keys),
+            'resumed_navigation': [v.rsplit('/', 1)[-1] for v in visits],
+            'handled': 92, 'members': list(run.shop_keys), 'reason': run.reason.value,
+            'offline': True}, ensure_ascii=False))
 
         # 无暂停依据的历史记录：跨天遗留显式处置，不伪造历史暂停
         legacy = self.seed_round(offers={'D': ['701']}, day='2026-09-13')
