@@ -62,6 +62,7 @@ def apply(snapshot, config, *, stop=None, reload_manual=None):
     config.cache.parent.mkdir(parents=True, exist_ok=True)
     positive = {}
     negative = set()
+    failed_pairs = {}
     with closing(sqlite3.connect(config.cache)) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS sku_judgments (pair TEXT, signature TEXT, result TEXT NOT NULL, PRIMARY KEY(pair, signature))")
         for (i, j), score in sorted(scored_pairs(eligible, config.candidates).items()):
@@ -86,6 +87,7 @@ def apply(snapshot, config, *, stop=None, reload_manual=None):
                 try:
                     result = judge.compare(left, right)
                 except ModelFailure as exc:
+                    failed_pairs[frozenset((a, b))] = str(exc)
                     for key in (a, b):
                         if key not in protected:
                             members[key].update(matching_state="pending", matching_note=str(exc) + "；图文判断未完成")
@@ -116,11 +118,22 @@ def apply(snapshot, config, *, stop=None, reload_manual=None):
     groups = list(snapshot["groups"])
     group_of = {identity(ref): g for g in groups for ref in g["members"]}
     protected = {identity(ref) for g in groups if g.get("manual_membership") or g.get("excluded_group") for ref in g["members"]}
+    # A failed recalled alternative is unknown, not evidence for uniqueness.
+    # Recheck current manual constraints so an in-flight human choice still wins.
+    failed_members = set()
+    for edge, error in failed_pairs.items():
+        a, b = sorted(edge)
+        if group_of[a] is group_of[b] or not _legal(snapshot, members[a], members[b]):
+            continue
+        for key in (a, b):
+            if key not in protected:
+                failed_members.add(key)
+                members[key].update(matching_state="pending", matching_note=error + "；图文判断未完成；暂时独立")
     # Freeze targets before any addition. A no-code SKU is never a bridge.
     proposals = {}
     for key, member in members.items():
         source = group_of[key]
-        if key in protected or len(source["members"]) != 1 or member.get("matching_state") == "pending_candidates":
+        if key in protected or key in failed_members or len(source["members"]) != 1 or member.get("matching_state") == "pending_candidates":
             continue
         targets = []
         for target in groups:
@@ -145,7 +158,7 @@ def apply(snapshot, config, *, stop=None, reload_manual=None):
         target_ids = [identity(ref) for ref in target["members"]]
         if len(source["members"]) != 1 or not target["members"]:
             continue
-        if key in moved or any(members[other].get("matching_state") == "pending_candidates" for other in target_ids):
+        if key in moved or any(other in failed_members or members[other].get("matching_state") == "pending_candidates" for other in target_ids):
             continue
         if target.get("merchant_codes") and member.get("merchant_code"):
             continue

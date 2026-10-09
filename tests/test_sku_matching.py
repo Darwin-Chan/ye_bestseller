@@ -202,6 +202,31 @@ class SkuMatchingTests(unittest.TestCase):
         self.assertEqual(4, len(self.calls))
         self.assertEqual(1, len(result["groups"]))
 
+    def test_failed_alternative_cannot_be_hidden_by_positive_or_negative_judgment(self):
+        import json
+        from bestseller_monitor.matching import ModelFailure
+        a = self.seed("#A#", title="锚点A", image=product_picture("red"))
+        b = self.seed("#B#", shop="B01", title="锚点B", image=product_picture("green"))
+        x = self.seed("无码", shop="C01", image=product_picture("blue"))
+        for same in (True, False):
+            with self.subTest(completed_same=same):
+                def verdict(content):
+                    names = [json.loads(c["text"])["product_name"] for c in content if c["type"] == "text"]
+                    if ("锚点B" if same else "锚点A") in names:
+                        raise ModelFailure("另一候选请求失败")
+                    return dict(same=same, confidence=.95, reason="已完成候选判断")
+                self.result = verdict
+                # A's valid result is reusable within this run, not between subcases.
+                self.service.config.matching.cache.unlink(missing_ok=True)
+                result = self.service.start("2026-09-07", "2026-09-14")
+                self.assertEqual(3, len(result["groups"]))
+                member = next(m for m in result["members"] if m["shop_key"] == "C01")
+                self.assertEqual("pending", member["matching_state"])
+                self.assertIn("另一候选请求失败", member["matching_note"])
+                self.assertNotEqual(self.group_for(result, a)["id"], self.group_for(result, x)["id"])
+                self.assertNotEqual(self.group_for(result, b)["id"], self.group_for(result, x)["id"])
+                self.assertEqual(30, sum(g["sales"] for g in result["groups"]))
+
     def test_saved_image_basis_survives_confirmed_normal_reanalysis(self):
         self.seed("#A#", image=product_picture("red"))
         self.seed("无码", shop="B01", image=product_picture("blue"))
