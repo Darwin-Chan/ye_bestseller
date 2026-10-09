@@ -26,15 +26,20 @@ class PausedBrowserOS:
     def __init__(self):
         self.state = 'free'
         self.starts = []
+        self.observes = 0
+        self.fail_launch = False
 
     def config_error(self, settings):
         from bestseller_monitor.dedicated_browser import BrowserRuntime
         return BrowserRuntime().config_error(settings)
 
     def observe(self, settings):
+        self.observes += 1
         return SimpleNamespace(state=self.state, message='测试 OS 事实：' + self.state)
 
     def launch(self, settings):
+        if self.fail_launch:
+            raise OSError('offline launch failed')
         self.starts.append(settings)
         self.state = 'occupied'
         return SimpleNamespace(pid=123, poll=lambda: 0)
@@ -89,6 +94,10 @@ class PausedManualLoginTests(unittest.TestCase):
         self.proc.poll.return_value = 0
         self.assertTrue(self.api.get_run()['can_resume'])
 
+    def login_available(self):
+        """过程页手动入口能不能点：`browser.can_open`；没有浏览器事实（未查）即不可点。"""
+        return self.api.get_run().get('browser', {}).get('can_open', False)
+
     def page(self, browser=None):
         from playwright.sync_api import sync_playwright
         if browser is None:
@@ -114,14 +123,14 @@ class PausedManualLoginTests(unittest.TestCase):
         self.start_round()
         page = self.page()
         # 采集中：入口禁用，API 拒绝，不建窗口
-        self.assertFalse(self.api.get_run()['can_open_login'])
+        self.assertFalse(self.login_available())
         self.assertFalse(self.api.open_login_browser()['ok'])
         self.assertEqual(self.os.starts, [])
         self.assertTrue(page.locator('#runLoginBrowserBtn').is_disabled())
         # 暂停停止/收尾中：仍禁用
         self.assertTrue(self.api.pause_run()['ok'])
         page.evaluate('tickRun()')
-        self.assertFalse(self.api.get_run()['can_open_login'])
+        self.assertFalse(self.login_available())
         self.assertTrue(page.locator('#runLoginBrowserBtn').is_disabled())
         self.assertFalse(self.api.open_login_browser()['ok'])
         self.assertEqual(self.os.starts, [])
@@ -130,7 +139,7 @@ class PausedManualLoginTests(unittest.TestCase):
         self.assertTrue(self.api.get_run()['can_resume'])
         page.evaluate('tickRun()')
         expect(page.locator('#runLoginBrowserBtn')).to_be_enabled()
-        self.assertTrue(self.api.get_run()['can_open_login'])
+        self.assertTrue(self.login_available())
         page.click('#runLoginBrowserBtn')
         page.wait_for_function(
             "document.querySelector('#runBrowserFacts').textContent.includes('占用')")
@@ -147,6 +156,20 @@ class PausedManualLoginTests(unittest.TestCase):
         self.assertTrue(page.locator('#runLoginBrowserBtn').is_disabled())
         page.wait_for_function(
             "document.querySelector('#runBrowserFacts').textContent.includes('不能另开手动浏览器')")
+
+    # ---------- 轮询成本：采集中不查浏览器 OS 事实 ----------
+    def test_collecting_refresh_does_not_query_browser_os_facts(self):
+        # 过程页每 2 秒轮询一次，而真实进程枚举是秒级的：暂停前不得每轮都查。
+        self.start_round()
+        self.api.get_run()
+        self.assertEqual(self.os.observes, 0)
+        for _ in range(3):
+            self.assertFalse(self.login_available())
+        self.assertEqual(self.os.observes, 0)
+        self.pause_and_settle()
+        self.assertEqual(self.os.observes, 1)      # 暂停态这一次刷新查了一次
+        self.assertTrue(self.login_available())
+        self.assertEqual(self.os.observes, 2)      # 每一次刷新只查一次，不是两次
 
     # ---------- 08-A11：手动窗口未关就能继续 ----------
     def test_continue_is_refused_while_the_manual_window_holds_the_profile(self):
@@ -256,14 +279,45 @@ class PausedManualLoginTests(unittest.TestCase):
     def test_confirm_close_still_ends_the_paused_round(self):
         self.start_round()
         self.pause_and_settle()
+        # 手动窗口开着也不改关窗语义：取消（不调 begin_close）保留暂停与原窗口
+        self.assertTrue(self.api.open_login_browser()['ok'])
+        self.assertEqual(self.api.close_snapshot().kind, 'paused')
+        self.assertTrue(self.api.get_run()['can_resume'])
         snapshot = self.api.close_snapshot()
-        self.assertEqual(snapshot.kind, 'paused')
         self.assertTrue(self.api.begin_close(snapshot)['ok'])
         self.assertTrue(self.api.close_ready(snapshot))
         with closing(connect(self.cfg.db_file)) as conn:
             self.assertEqual(rounds.load(Database(conn), self.rid).reason,
                              rounds.TerminalReason.ABANDONED)
         self.assertFalse(self.api.resume_run()['ok'])
+
+    # ---------- 11-A01：停止/收尾期间继续被拒；登录失败不动原轮 ----------
+    def test_continue_is_refused_while_the_pause_is_still_stopping(self):
+        self.start_round()
+        self.assertTrue(self.api.pause_run()['ok'])
+        with patch.object(gui.subprocess, 'Popen') as spawn:
+            self.assertFalse(self.api.resume_run()['ok'])
+            spawn.assert_not_called()
+        self.assertFalse(self.api.get_run()['can_resume'])
+        self.proc.poll.return_value = 0
+        self.assertTrue(self.api.get_run()['can_resume'])
+
+    def test_failed_manual_open_leaves_the_paused_round_untouched(self):
+        self.start_round()
+        self.pause_and_settle()
+        self.os.fail_launch = True
+        result = self.api.open_login_browser()
+        self.assertFalse(result['ok'])
+        self.assertIn('失败', result['error'])
+        self.assertEqual(self.os.starts, [])
+        with closing(connect(self.cfg.db_file)) as conn:      # 原轮没有终态、成员与进度不变
+            self.assertIsNone(rounds.load(Database(conn), self.rid).reason)
+        view = self.api.get_run()
+        self.assertTrue(view['can_resume'])
+        # 打开失败后状态是「失败」：与开始页同源，继续保守拒绝，不带着未知状态启动
+        with patch.object(gui.subprocess, 'Popen') as spawn:
+            self.assertFalse(self.api.resume_run()['ok'])
+            spawn.assert_not_called()
 
     # ---------- 11-A01/A03：手动登录之后真实调度仍跳过已完成任务 ----------
     def test_manual_login_then_explicit_continue_reaches_real_scheduling(self):

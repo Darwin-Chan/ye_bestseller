@@ -505,7 +505,7 @@
       $("rPaused").textContent = d.resume_error
         ? "继续启动未成功：" + d.resume_error + "。原轮暂停资格保留，请明确点击继续重试。"
         : d.continue_gate
-          ? "已暂停（轮次保留为「进行中」）。继续前请先关闭专用 Edge 并确认目录已释放：" + d.continue_gate
+          ? "已暂停（轮次保留为「进行中」），但还不能继续：" + d.continue_gate
           : "已暂停（轮次保留为「进行中」，点「继续」接着抓取本轮剩余任务）。";
       // 暂停后手动处理登录（票 05）：明确暂停且收尾完成后同一入口可用；采集、
       // 验证等待、停止或收尾中禁用并说明。目录没释放时「继续」也不给点。
@@ -514,10 +514,11 @@
         let facts = "配置：" + d.browser.source + "；专用目录：" + d.browser.profile + "；" + d.browser.message;
         facts += d.login_refusal ? "（" + d.login_refusal + "）" : " " + d.browser.retry;
         $("runBrowserFacts").textContent = facts;
-        $("runLoginBrowserBtn").disabled = !d.can_open_login;
       } else {
-        $("runLoginBrowserBtn").disabled = true;
+        $("runBrowserFacts").textContent = d.login_refusal
+          || "先暂停本轮并等停止收尾完成，才能在这里打开专用 Edge 处理登录。";
       }
+      $("runLoginBrowserBtn").disabled = !(d.browser && d.browser.can_open);
       // 暂停态显示“继续”，运行态显示“暂停”；停止途中两个都不给点。
       $("resumeBtn").style.display = (!stopping && d.can_resume) ? "" : "none";
       $("resumeBtn").disabled = !!d.continue_gate;

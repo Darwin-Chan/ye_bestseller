@@ -163,6 +163,10 @@ def _collection_action(method):
 
 CLOSING_REFUSAL = "正在关闭程序，不能开始、续跑或暂停。"
 
+# 手动入口在这些浏览器状态下不提供：启动/观察失败、占用核不实、调试端口被无关实例占着、
+# 正在打开。「已打开/占用」放行——引导用户用已有窗口，不另开标签也不接管。
+_BROWSER_ENTRY_BLOCKED = ("failed", "unknown", "port_busy", "opening")
+
 
 class Api:
     """暴露给 pywebview 前端的方法。返回 JSON 可序列化的基本类型。
@@ -446,17 +450,31 @@ class Api:
                 view = self._collection_payload(views.start_view(
                     conn, cfg=self.cfg, shops=self.shops, state=self._ui_state(),
                     crawler=self.current_crawler(conn), now=self._now()))
-                view["browser"] = self._browser.status()
-                view["browser"]["can_open"] = self._login_refusal(conn) is None and view["browser"]["state"] not in ("failed", "unknown", "port_busy", "opening")
-                reason = self._browser.start_error()
-                if reason:
+                browser, _, gate = self._browser_entry(conn)
+                view["browser"] = browser
+                if gate:
                     view["start_allowed"] = False
-                    view["browser_error"] = reason
+                    view["browser_error"] = gate
                     if not view.get("start_hint"):
-                        view["start_hint"] = reason
+                        view["start_hint"] = gate
                 return view
             finally:
                 conn.close()
+
+    def _browser_entry(self, conn):
+        """手动入口的事实、可用性与拦停原因：开始页与「明确暂停且收尾完成」的过程页同一判据。
+
+        返回 `(浏览器事实, 入口门禁原因, 拦开轮/拦继续的原因)`。占用态入口仍可点
+        （引导用已有窗口），但 `gate` 非空——采集不许借它启动，这与 `can_open` 是两件事。
+        """
+        refusal = self._login_refusal(conn)
+        browser = self._browser.status()
+        error = self._browser.configuration_error()
+        browser["can_open"] = (refusal is None and error is None
+                               and browser["state"] not in _BROWSER_ENTRY_BLOCKED)
+        gate = error or (None if browser["can_start"]
+                         else browser["message"] + browser["retry"])
+        return browser, refusal, gate
 
     def _login_refusal(self, conn):
         """同一专用浏览器服务的入口门禁：开始页与明确暂停后的过程页共用这一条。
@@ -524,20 +542,19 @@ class Api:
                 if view.get("has_round"):
                     # 轮次由采集子进程创建，界面在这里随轮询认领它。
                     self.round_id = view["round_id"]
-                # 过程页也暴露手动浏览器事实与继续门禁（票 05）：明确暂停、收尾完成
-                # 后同一入口可用；采集/验证等待/停止收尾中禁用并给出原因。目录没
-                # 释放或核不实时，「继续」也不给点。
-                refusal = self._login_refusal(conn)
-                browser = self._browser.status()
-                browser["can_open"] = (
-                    refusal is None
-                    and browser["state"] not in ("failed", "unknown", "port_busy", "opening"))
-                view["browser"] = browser
-                view["can_open_login"] = browser["can_open"]
-                if refusal is not None:
-                    view["login_refusal"] = refusal
+                # 手动入口与继续门禁只在「本界面明确暂停且停止收尾完成」这一格才有意义
+                # （票 05）：其余状态一律禁用并给出原因。浏览器事实要跑一次进程枚举
+                # （秒级），而过程页每 2 秒轮询一次——不当暂停时不去查它。
                 if view.get("can_resume"):
-                    view["continue_gate"] = self._browser.start_error()
+                    browser, refusal, gate = self._browser_entry(conn)
+                    view["browser"] = browser
+                    view["continue_gate"] = gate
+                    if refusal is not None:
+                        view["login_refusal"] = refusal
+                else:
+                    refusal = self._login_refusal(conn)
+                    if refusal is not None:
+                        view["login_refusal"] = refusal
                 if self.cfg.local_trial:
                     view["awaiting_resume"] = view.get("can_resume", False)
                 return self._collection_payload(view)
