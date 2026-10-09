@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
+from urllib.parse import urlsplit
 
 from playwright.sync_api import Error as PlaywrightError
 
@@ -385,8 +386,16 @@ class PlaywrightCard:
         self.index = index
         self._detail_page = None
         self._popup = None
-        self.url = ""
-        self.offer_id: str | None = None
+
+    @property
+    def url(self) -> str:
+        # guard can settle a redirected verification page before ingestion reads this.
+        return (self._detail_page.url or "") if self._detail_page is not None else ""
+
+    @property
+    def offer_id(self) -> str | None:
+        found = re.search(r"/(?:offer|item)/(\d+)\.html", self.url)
+        return found.group(1) if found else None
 
     @property
     def card_ref(self) -> click_events.CardRef:
@@ -404,16 +413,20 @@ class PlaywrightCard:
     def acquire(self) -> detail_visit.OpenedDetail | None:
         owner = self._owner
         image = owner.page.locator(listing.PRODUCT_IMG_SEL).nth(self.index)
+        # Freeze navigation intent before clicking; the popup URL may already be verification.
+        try:
+            target_url = image.evaluate("el => el.closest('a[href]')?.href || ''")
+        except PlaywrightError:
+            target_url = ""
+        if not isinstance(target_url, str) or not (
+                urlsplit(target_url).hostname == "detail.1688.com" and
+                re.search(r"^/(?:offer|item)/\d+\.html$", urlsplit(target_url).path)):
+            target_url = None
         self._detail_page, self._popup = click_card(
-            owner.page, image, owner.cfg, emit=owner._emit)
+            owner.page, image, owner.cfg, emit=owner._emit, target_url=target_url)
         if self._detail_page is None:
-            self.url = ""
-            self.offer_id = None
             return None
-        self.url = self._detail_page.url or ""
-        found = re.search(r"/(?:offer|item)/(\d+)\.html", self.url)
-        self.offer_id = found.group(1) if found else None
-        return detail_visit.OpenedDetail(self._detail_page)
+        return detail_visit.OpenedDetail(self._detail_page, target_url=target_url)
 
     def close(self) -> None:
         close_popup_or_back(self._detail_page, self._popup, self._owner.page)
@@ -470,7 +483,7 @@ def read_card_title(page, idx: int) -> str:
         return ""
 
 
-def click_card(page, image, cfg: Config, emit=None):
+def click_card(page, image, cfg: Config, emit=None, *, target_url: str | None = None):
     """点商品图的「可点击父元素」并等详情打开；返回 (详情页, 弹窗)。
 
     弹窗没出现时，页面可能就地跳到了详情。这里只负责「把页面打开」；打开之后的 deny
@@ -478,6 +491,7 @@ def click_card(page, image, cfg: Config, emit=None):
     是页面的原始状态，不再被隐式的等待挡住。
     """
     popup = None
+    before_url = page.url or ""
     try:
         with page.expect_popup(timeout=WAIT_POPUP_MS) as pending:
             image.evaluate(
@@ -512,7 +526,8 @@ def click_card(page, image, cfg: Config, emit=None):
             return None, None
         return popup, popup
 
-    if "detail.1688.com/offer/" not in (page.url or ""):
+    if ("detail.1688.com/offer/" not in (page.url or "")
+            and not (target_url and page.url != before_url)):
         return None, None
     try:
         page.wait_for_load_state("domcontentloaded", timeout=cfg.timeout_ms)

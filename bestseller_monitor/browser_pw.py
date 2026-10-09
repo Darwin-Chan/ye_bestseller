@@ -342,4 +342,4 @@ def navigate_detail(page, product_url: str, emit=None) -> OpenedDetail:
         m = re.search(r"/(?:offer|item)/(\d+)\.html", product_url)
         emit("detail_nav", offer_id=m.group(1) if m else None, phase="detail")
     page.goto(product_url, wait_until="domcontentloaded")
-    return OpenedDetail(page)
+    return OpenedDetail(page, target_url=product_url)

@@ -250,7 +250,8 @@ def resolved(page, *, target_url: str | None = None) -> bool:
 
 def ready_detail_page(page, cfg: Config, *, emit=None,
                       deny_tracker: DenyTracker | None = None,
-                      shop_key: str | None = None) -> bool:
+                      shop_key: str | None = None,
+                      target_url: str | None = None) -> bool:
     """一个刚打开的详情页能不能用：先认 deny（记账 + 阈值），不是 deny 才判人工介入并等人解决。
 
     两条详情访问（点击式列表的弹窗、逐店补采的详情页）打开页面之后都先走这里，「deny 该不该
@@ -279,12 +280,13 @@ def ready_detail_page(page, cfg: Config, *, emit=None,
     if kind:
         wait_for_resolution(page, cfg.human_pause_minutes, emit=emit,
                             verification_type=vtype(kind),
-                            confirm_sec=cfg.intervention_confirmation_sec)
+                            confirm_sec=cfg.intervention_confirmation_sec,
+                            target_url=target_url)
     return False
 
 
 def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | None = None,
-                        confirm_sec: float = 2.0) -> None:
+                        confirm_sec: float = 2.0, *, target_url: str | None = None) -> None:
     """需要人工介入时：先过确认窗口过滤瞬时报错信号，再持续响铃直到解决。
 
     两段等待都走 `waiting.until`：每一轮都问一次「该不该停」（ADR-0009）——这时用户最
@@ -292,7 +294,7 @@ def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | 
     取消钩子由原语默认接上（与睡眠分片同一个判据），本模块不再手写检查点。
     """
     vtype_name = verification_type or "slider"
-    target_url = page.url if vtype_name == "identity" else None
+    target_url = (target_url or page.url) if vtype_name == "identity" else None
     deadline = None
     def probe():
         if vtype_name == "identity":

@@ -245,7 +245,7 @@ class IdentityLifecycleTests(unittest.TestCase):
         api.proc = SimpleNamespace(pid=os.getpid(), poll=lambda: None)
         context = self.browser.new_context()
         self.addCleanup(context.close)
-        context.route('**/*', lambda route: route.fulfill(content_type='text/html', body=(Path(__file__).resolve().parents[1] / 'bestseller_monitor/pages/ui_live.html').read_text(encoding='utf-8')) if route.request.is_navigation_request() else route.abort())
+        context.route('**/*', lambda route: route.fulfill(content_type='text/html; charset=utf-8', body=(Path(__file__).resolve().parents[1] / 'bestseller_monitor/pages/ui_live.html').read_text(encoding='utf-8')) if route.request.is_navigation_request() else route.abort())
         ui = context.new_page()
         ui.expose_function('ticketApi', lambda name, args: getattr(api, name)(*args))
         ui.add_init_script("window.pywebview={api:new Proxy({}, {get:(_, name)=>(...args)=>window.ticketApi(name,args)})};window.alert=()=>{};")
@@ -279,6 +279,108 @@ class IdentityLifecycleTests(unittest.TestCase):
         self.assertEqual(self.db.round_tally(self.rid).handled, 3)
         self.assertEqual(self.requests, [PRODUCT, 'https://detail.1688.com/offer/222.html', 'https://detail.1688.com/offer/333.html'])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM event_log WHERE event='verification_solved'").fetchone()[0], 1)
+
+    def test_redirected_identity_restores_original_target_and_finishes_round(self):
+        pipeline, rounds = self.prepare_round()
+        verification = 'https://detail.1688.com/identity'
+        self.context = self.browser.new_context()
+        self.addCleanup(self.context.close)
+        self.page = self.context.new_page()
+        restored = []
+        sku_html = BUSINESS.replace('</body>', '<script>{"skuInfoMap":{"red":{"skuId":"red","name":"red","price":10,"canBookCount":3}}}</script></body>')
+        self.context.unroute('**/*')
+        def route(r):
+            self.requests.append(r.request.url)
+            if not r.request.is_navigation_request():
+                r.abort()
+            elif r.request.url == PRODUCT and not restored:
+                r.fulfill(content_type='text/html; charset=utf-8', body=self.html + '<script>history.replaceState(null, \"\", \"/identity\")</script>')
+            else:
+                r.fulfill(content_type='text/html; charset=utf-8', body=sku_html if restored else self.html)
+        self.context.route('**/*', route)
+        def restore():
+            if self.clock.now >= 5 and not restored:
+                self.assertEqual(self.page.url, verification)
+                restored.append(True)
+                self.page.goto(PRODUCT, wait_until='domcontentloaded')
+        self.clock.on_sleep = restore
+        pipeline.run_round(self.cfg, self.shops, elapsed_clock=self.clock.monotonic)
+        self.assertEqual(rounds.load(self.db, self.rid).reason, rounds.TerminalReason.COMPLETED, str(self.events) + str(self.requests))
+        self.assertEqual(rounds.latest(self.db).id, self.rid)
+        self.assertEqual(self.db.round_tally(self.rid).handled, 3)
+        self.assertEqual(self.requests, [PRODUCT, PRODUCT,
+            'https://detail.1688.com/offer/222.html', 'https://detail.1688.com/offer/333.html'])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM event_log WHERE event='verification_solved'").fetchone()[0], 1)
+
+    def test_redirected_listing_restores_requested_shop_page(self):
+        from types import SimpleNamespace
+        from bestseller_monitor import listing
+        self.prepare_round()
+        self.context = self.browser.new_context()
+        self.addCleanup(self.context.close)
+        self.page = self.context.new_page()
+        shop_url = 'https://shop.offline.example/sales'
+        restored = []
+        business = '<body><div class="offer-list"><img class="main-picture" width="40" height="40">测试商品</div></body>'
+        self.context.route('**/*', lambda r: r.fulfill(content_type='text/html; charset=utf-8', body=(business if restored else self.html + '<script>history.replaceState(null, "", "/identity")</script>')) if r.request.is_navigation_request() else r.abort())
+        appeared = []
+        def emit(event, **fields):
+            self.emit(event, **fields)
+            if event == 'verification_appear': appeared.append(self.clock.now)
+        def restore():
+            if appeared and self.clock.now >= appeared[0] + 3 and not restored:
+                self.assertEqual(self.page.url, 'https://shop.offline.example/identity')
+                restored.append(True)
+                self.page.goto(shop_url, wait_until='domcontentloaded')
+        self.clock.on_sleep = restore
+        human = SimpleNamespace(after_load=lambda: None, before_action=lambda: None)
+        listing.prepare(self.page, shop_url, self.cfg, human, describe='offline shop', emit=emit)
+        self.assertEqual(self.page.url, shop_url)
+        self.assertEqual([e for e, _ in self.events], ['verification_appear', 'verification_solved', 'list_load'])
+
+    def test_redirected_popup_restores_clicked_product_identity(self):
+        self.redirected_card_restoration(new_tab=True)
+
+    def test_redirected_in_place_click_restores_clicked_product_identity(self):
+        self.redirected_card_restoration(new_tab=False)
+
+    def redirected_card_restoration(self, *, new_tab):
+        from types import SimpleNamespace
+        from bestseller_monitor import click_listing, detail_visit
+        self.prepare_round()
+        self.context = self.browser.new_context()
+        self.addCleanup(self.context.close)
+        self.page = self.context.new_page()
+        restored = []
+        def route(r):
+            if not r.request.is_navigation_request(): r.abort()
+            elif r.request.url == 'https://shop.offline.example/sales':
+                r.fulfill(content_type='text/html; charset=utf-8', body=f'<a href="{PRODUCT}" target="{"_blank" if new_tab else "_self"}"><img class="main-picture" width="40" height="40"></a>')
+            else:
+                r.fulfill(content_type='text/html; charset=utf-8', body=BUSINESS if restored else self.html + '<script>history.replaceState(null, "", "/identity")</script>')
+        self.context.route('**/*', route)
+        self.page.goto('https://shop.offline.example/sales', wait_until='domcontentloaded')
+        self.cfg.timeout_ms = 3000  # Actual offline popup, not the 1ms legacy fake default.
+        owner = click_listing.PlaywrightListing(self.page, self.shops[0], self.cfg, SimpleNamespace())
+        owner.page_no = 1
+        card = owner.card(0)
+        appeared = []
+        def emit(event, **fields):
+            self.emit(event, **fields)
+            if event == 'verification_appear': appeared.append(self.clock.now)
+        def restore():
+            if appeared and self.clock.now >= appeared[0] + 3 and not restored:
+                popup = self.context.pages[-1]
+                self.assertEqual(popup.url, 'https://detail.1688.com/identity')
+                restored.append(True)
+                popup.goto(PRODUCT, wait_until='domcontentloaded')
+        self.clock.on_sleep = restore
+        visit = detail_visit.begin_detail_visit(card.acquire, self.cfg, emit=emit)
+        self.assertIsInstance(visit, detail_visit.ReadyDetailVisit)
+        self.assertEqual(card.url, PRODUCT)
+        self.assertEqual(card.offer_id, '521844920352')
+        self.assertEqual([e for e, _ in self.events], ['verification_appear', 'verification_solved'])
+        card.close()
 
     def test_public_export_gap_explains_automatic_identity_timeout(self):
         from bestseller_monitor import exchange
