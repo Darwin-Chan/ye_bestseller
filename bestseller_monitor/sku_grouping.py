@@ -7,7 +7,7 @@ platform SKU id together.
 from __future__ import annotations
 
 import json
-from uuid import uuid4
+from hashlib import sha256
 
 from .stock_series import aggregate_points
 from .sku_codes import changed_evidence
@@ -30,7 +30,7 @@ def member_key(member: dict) -> tuple[str, str, str]:
 
 def _new_group(member: dict, *, group_id: str | None = None, excluded: bool = False) -> dict:
     return {
-        "id": group_id or "sku-" + uuid4().hex[:12],
+        "id": group_id or "sku-" + sha256(identity(member).encode("utf-8")).hexdigest()[:12],
         "members": [dict(shop_key=member["shop_key"], offer_id=member["offer_id"], sku_id=member["sku_id"])],
         "confirmed": False,
         "adjusted": False,
@@ -59,6 +59,8 @@ def _group_member_ids(group: dict) -> list[str]:
 def _grouping_basis(group: dict, present: list[dict]) -> str:
     if group.get("excluded_group"):
         return "人工排除"
+    if any(m.get("matching_state") == "recommended" for m in present):
+        return "人工归组＋多候选推荐增员" if group.get("manual_membership") else "多候选推荐归组"
     if group.get("image_grouping"):
         return "人工归组＋图文增员" if group.get("manual_membership") else "图文归组"
     if group.get("manual_membership"):
@@ -150,7 +152,8 @@ def bind_manual_members(snapshot: dict, group: dict, *, confirmed: bool = False)
         member["grouping_basis"] = "人工排除" if group.get("excluded_group") else "人工归组"
         member["matching_state"] = "manual"
         member["matching_note"] = ""
-        member["candidate_groups"] = []
+        if not member.get("recommendation"):
+            member["candidate_groups"] = []
         member["added_to_group"] = False
         if confirmed:
             member["evidence_changes"] = []
@@ -286,6 +289,11 @@ def apply_saved(snapshot: dict, saved: dict) -> None:
     from .sku_matching import evidence_version
     for key, member in members.items():
         before = previous_members.get(key)
+        if before and key in used and before.get("recommendation"):
+            # Historical recommendation is audit evidence, never a manual override.
+            member["recommendation"] = dict(before["recommendation"])
+            member["multiple_candidates"] = True
+            member["candidate_groups"] = list(before.get("candidate_groups", []))
         if before and evidence_version(before) == evidence_version(member):
             member["image_judgments"] = [dict(judgment, cached=True) for judgment in before.get("image_judgments", [])
                 if judgment["member"] in members and judgment["member"] in previous_members
@@ -330,7 +338,8 @@ def apply_codes(snapshot: dict) -> None:
     for member in snapshot["members"]:
         key = identity(member)
         code = member.get("merchant_code")
-        member["candidate_groups"] = []
+        if key not in protected or not member.get("recommendation"):
+            member["candidate_groups"] = []
         if key in protected:
             member["matching_state"] = "manual"
             member["matching_note"] = ""
@@ -352,7 +361,7 @@ def apply_codes(snapshot: dict) -> None:
             member["grouping_basis"] = "暂时独立（待候选比较）"
             member["candidate_groups"] = [g["id"] for g in targets]
             member["matching_state"] = "pending_candidates"
-            member["matching_note"] = "多个候选，无法确定归属；候选比较尚未开放"
+            member["matching_note"] = "多个候选，无法确定归属；等待候选比较"
             groups.append(_new_group(member))
         elif code and code in automatic and all(frozenset((key, other)) not in excluded for other in _group_member_ids(automatic[code])):
             automatic[code]["members"].append({field: member[field] for field in ("shop_key", "offer_id", "sku_id")})

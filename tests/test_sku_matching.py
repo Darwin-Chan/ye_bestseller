@@ -24,6 +24,8 @@ class SkuMatchingTests(unittest.TestCase):
                 image = Image.open(io.BytesIO(base64.b64decode(content[0]["image_url"]["url"].split(",", 1)[1])))
                 colors = {(255, 0, 0): "red", (0, 255, 0): "green", (0, 0, 255): "blue"}
                 return {"colors": [colors[image.getpixel((i * 50 + 25, 25))] for i in range(5)]}
+            if kwargs.get("kind") == "recommend":
+                return dict(group_id=None, reason="多个图文候选，无法唯一支持归属")
             self.calls.append((content, instruction))
             return self.result(content) if callable(self.result) else self.result
         boundary = patch("bestseller_monitor.matching.request_json", side_effect=respond)

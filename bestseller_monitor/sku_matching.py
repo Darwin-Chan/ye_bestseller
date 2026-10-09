@@ -9,7 +9,7 @@ from .matching import ImageJudge, ModelFailure, digest, scored_pairs, signature_
 from .sku_grouping import identity, refresh
 
 RULE_VERSION = "sku-physical-object-v1"
-LIMITATIONS = ["多候选比较、选择性重试与 SKU 跨机共享尚未开放"]
+LIMITATIONS = ["选择性重试与 SKU 跨机共享尚未开放"]
 
 
 def evidence_version(member):
@@ -173,4 +173,6 @@ def apply(snapshot, config, *, stop=None, reload_manual=None):
                       matching_note="图文依据：" + "; ".join(e["reason"] for edge, e in positive.items() if key in edge and any(other in edge for other in target_ids)))
         target["image_grouping"] = True
         moved.add(key)
+    from .sku_recommendations import apply as apply_recommendations
+    apply_recommendations(snapshot, config, stop=stop, reload_manual=reload_manual)
     _finish(snapshot)
