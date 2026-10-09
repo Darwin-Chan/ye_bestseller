@@ -1126,14 +1126,30 @@ class LegacyCoexistenceTests(SkuSharingCase):
         """旧版本实测用的就是真实旧代码：旧通道文件与 main（已部署）逐字节一致。"""
         import bestseller_monitor
         root = Path(bestseller_monitor.__file__).resolve().parents[1]
+        # 这一步有意读到沙箱外、对本检出（真实仓库）跑 git：沙箱屏蔽的本机 git 配置
+        # 里正有它成立靠的两样——系统层的 core.autocrlf（CRLF 工作树按它归一到 LF）
+        # 与全局层的 safe.directory（属主校验，主仓 .git 属沙箱账号）；命令级只放行
+        # 这两项，另把宿主可能泄漏的 GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE 滤掉（否则
+        # 比较会被引到别的仓库/索引），其余仍走沙箱口径。
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
         for ref in ("main", "origin/main"):     # 功能树里有本地 main；隔离副本克隆里是 origin/main
-            done = subprocess.run(["git", "-C", str(root), "diff", "--quiet", ref, "--",
-                                   "bestseller_monitor/judgment_set.py"], capture_output=True)
+            done = subprocess.run(["git", "-C", str(root), "-c", "safe.directory=*",
+                                   "-c", "core.autocrlf=true",
+                                   "diff", "--quiet", ref, "--",
+                                   "bestseller_monitor/judgment_set.py"],
+                                  capture_output=True, env=env)
             if done.returncode in (0, 1):
                 break
-        self.assertIn(done.returncode, (0, 1), "找不到 main/origin/main 作比较基准")
+        # 两条失败消息都带上实际比过的 ref、rc 与 git 的输出：rc=1（真差异，--quiet
+        # 无输出）与访问错误（stderr 有话说）由此分辨得出。
+        git_output = done.stderr.decode("utf-8", "replace").strip() or "无"
+        self.assertIn(done.returncode, (0, 1),
+                      f"找不到 main/origin/main 作比较基准（最后试 {ref}：rc={done.returncode}，"
+                      f"git 输出：{git_output}）")
         self.assertEqual(0, done.returncode,
-                         "judgment_set.py 与已部署（main）有差异，先确认部署版本再谈旧版本实测")
+                         f"judgment_set.py 与已部署（{ref}）有差异，先确认部署版本再谈旧版本实测"
+                         f"（rc={done.returncode}，git 输出：{git_output}）")
 
     def test_legacy_publish_and_collect_leave_the_new_file_untouched(self):
         from bestseller_monitor import judgment_set
