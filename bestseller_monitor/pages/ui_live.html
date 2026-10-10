@@ -364,7 +364,9 @@
     if (d.browser) {
       const facts = "配置：" + d.browser.source + "；专用目录：" + d.browser.profile + "；" + d.browser.message;
       $("browserFacts").textContent = facts + (d.login_refusal ? "（" + d.login_refusal + "）" : " " + d.browser.retry);
-      $("loginBrowserBtn").disabled = !d.browser.can_open || d.browser.state === "opening";
+      // 票 02：检测/配置类不再预置灰——登录按钮唯一灰源是服务端拒绝（login_refusal）；
+      // 「正在打开」的瞬时态也不置灰，防双开靠服务端 reserve_open 去重与 reused 返回。
+      $("loginBrowserBtn").disabled = !!d.login_refusal;
     }
     $("stProducts").textContent = d.ov.products.toLocaleString();
     $("stSkus").textContent = d.ov.skus.toLocaleString();
@@ -447,6 +449,7 @@
     // 准备还在跑：接着问，落定后这一页自动更新；停了就不再排。锁人的是
     // plan_locked（30 秒预算之内），轮询看的是 plan_waiting（准备真跑完才算完）。
     if (d.plan_waiting) schedulePrepPoll(); else clearPrepPoll();
+    return d;   // 取数结果交给调用方（点开始的自动核对要读最新事实，票 02）
   }
 
   function clearPrepPoll() {
@@ -477,19 +480,46 @@
 
   async function startRun() {
     const boxes = [...document.querySelectorAll("#rows input:checked")];
-    if (boxes.length === 0) { alert("请至少勾选一个店铺再开始抓取"); return; }
+    if (boxes.length === 0) {
+      showInfo({title: "未勾选店铺", sub: "请至少勾选一个店铺再开始抓取"});
+      return;
+    }
     const keys = boxes.map(b => api.__shops[+b.dataset.i].key);
+    // 点开始先自动核对一次最新事实（票 02，沿用取数链）：清单重绘后按店还原勾选，
+    // 不丢失用户当前的选择。
+    const was = snapshotSelection();
+    const d = await refreshStart();
+    if (!d) return;
+    restoreSelection(was);
+    // 浏览器/配置门禁原因优先于开始提示；两类都只报因，不替用户猜测。
+    if (d.browser_error) { showInfo({title: "暂不能开始抓取", sub: d.browser_error}); return; }
+    if (d.start_hint) { showInfo({title: "暂不能开始抓取", sub: d.start_hint}); return; }
     const r = await callApi("start_run", keys);
     if (!r) return;
     if (!r.ok) {
       // 闸门没开（本地没有本周计划）或角色不许：把理由原样说给人看；
       // 命令行逃生口（run.py --ignore-plan）不在这里（ADR-0035）。
-      alert(r.error || "启动失败");
+      showInfo({title: "启动失败", sub: r.error || "启动失败"});
       return;
     }
     hasStartedRun = true;
     switchTab("run");
     startPolling();
+  }
+
+  // 勾选快照/还原（票 02）：点开始的自动核对会重绘清单（勾选默认值来自最新取数），
+  // 按店 key 把用户的当前选择原样贴回去；新出现的店没在快照里，照常用它自己的默认值。
+  function snapshotSelection() {
+    const boxes = [...document.querySelectorAll("#rows input")];
+    return new Map(api.__shops.map((s, i) => [s.key, !!(boxes[i] && boxes[i].checked)]));
+  }
+  function restoreSelection(was) {
+    if (!api.__shops) return;
+    document.querySelectorAll("#rows input").forEach(c => {
+      const s = api.__shops[+c.dataset.i];
+      if (s && was.has(s.key)) c.checked = was.get(s.key);
+    });
+    updateSel();
   }
 
   // ---------- 过程页 ----------
@@ -636,10 +666,22 @@
     $("confirmTitle").textContent = opts.title || "确认终止本轮抓取？";
     $("confirmSub").textContent = opts.sub || "本轮将结束且不能继续；已抓取数据保留。收尾完成后，需明确点击开始才能新建。";
     $("confirmOk").textContent = opts.ok || "确定";
+    $("confirmCancel").style.display = "";
     confirmAction = action;
     $("confirmModal").classList.add("show");
   }
   function closeConfirm() { $("confirmModal").classList.remove("show"); }
+  // 信息框：确认弹窗壳的单按钮变体（票 02 交付，票 04 复用）。只讲一件事、只有
+  // 一个「知道了」；不进确认动作，按钮样式与确认弹窗同壳。
+  function showInfo(opts) {
+    opts = opts || {};
+    $("confirmTitle").textContent = opts.title || "";
+    $("confirmSub").textContent = opts.sub || "";
+    $("confirmOk").textContent = "知道了";
+    $("confirmCancel").style.display = "none";
+    confirmAction = null;
+    $("confirmModal").classList.add("show");
+  }
   async function doAbort(confirmation, changeRange = false, stayOnStart = false) {
     const r = await callApi("confirm_abort", confirmation);
     if (!r || !r.ok) { if (r) showNotice(r.error); return; }
@@ -734,7 +776,18 @@
     $("loginBrowserBtn").onclick = async () => {
       $("loginBrowserBtn").disabled = true;
       const r = await callApi("open_login_browser");
-      if (r && !r.ok) showNotice(r.error);
+      if (r && !r.ok) {
+        showInfo({title: "无法打开专用 Edge", sub: r.error});
+      } else if (r && r.reused) {
+        // 已在运行/正在打开（票 02）：指向原窗口，绝不显示假的「已关闭」。
+        const opening = !!(r.browser && r.browser.state === "opening");
+        showInfo({
+          title: opening ? "专用 Edge 正在打开" : "专用 Edge 已在运行",
+          sub: opening
+            ? "请用即将出现的窗口完成登录；登录后请关闭它，再开始采集（界面会自动核对）。"
+            : "请用原窗口完成登录；登录后请关闭它，再开始采集（界面会自动核对）。",
+        });
+      }
       await refreshStart();
     };
     $("residueBtn").onclick = retryCleanup;

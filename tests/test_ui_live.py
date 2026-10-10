@@ -30,7 +30,8 @@ window.pywebview = { platform: "edgechromium", api: {
     return {
       ov: {products: 180, skus: 1038},
       summary: {started: true, rounds: 1, text: "00:29 开始 · 跑约 20 分"},
-      shops: SHOPS, total_shops: 2, start_hint: window.__crawler ? "采集进程正在跑" : "",
+      shops: SHOPS, total_shops: 2, start_hint: window.__startHint || "",
+      browser_error: window.__gateReason || undefined,
       plan_note: window.__planNote || "",
       crawler: window.__crawler || null,
     };
@@ -175,6 +176,39 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
                 "start_run 应该被调用一次")
             self.assertIn("start_or_resume", page.inner_text(ERROR_BOX))
             self.assertEqual(self.active_tab(page), "开始", "失败时不该跳到过程页")
+        finally:
+            page.close()
+
+    def test_a_blocked_recheck_shows_the_info_box_instead_of_starting(self):
+        """点开始先自动核对最新事实（票 02）：门禁优先于开始提示，弹信息框、不调开始 API。"""
+        page = self.open_page()
+        try:
+            page.evaluate(
+                "window.__gateReason = '专用 Edge 已被打开，请手动关闭（包括后台窗口）后，再开始抓取'")
+            page.evaluate("window.__startHint = '上一次停止仍在收尾'")
+            page.click("#startBtn")
+            page.wait_for_selector("#confirmModal.show", timeout=5000)
+
+            sub = page.locator("#confirmSub").inner_text()
+            self.assertIn("请手动关闭", sub, "浏览器/配置门禁文案优先")
+            self.assertNotIn("收尾", sub)
+            self.assertEqual(page.locator("#confirmOk").inner_text().strip(), "知道了")
+            self.assertFalse(page.locator("#confirmCancel").is_visible())
+            self.assertEqual(
+                page.evaluate("() => window.__calls.filter(c => Array.isArray(c)).length"), 0,
+                "核对发现门禁：不该调用 start_run")
+            self.assertEqual(self.active_tab(page), "开始")
+
+            page.click("#confirmOk")
+            page.wait_for_function(
+                "!document.querySelector('#confirmModal').classList.contains('show')", timeout=5000)
+            # 没有门禁、只有开始提示时：改弹提示文案，同样不调开始 API。
+            page.evaluate("window.__gateReason = ''")
+            page.click("#startBtn")
+            page.wait_for_selector("#confirmModal.show", timeout=5000)
+            self.assertIn("收尾", page.locator("#confirmSub").inner_text())
+            self.assertEqual(
+                page.evaluate("() => window.__calls.filter(c => Array.isArray(c)).length"), 0)
         finally:
             page.close()
 
@@ -532,18 +566,19 @@ class UiLivePollingTests(unittest.TestCase):
         try:
             page.evaluate("window.__gate = true")
             self.start_a_run(page)
-            self.assertEqual(self.calls_of(page, "get_start"), 1, "开页面时已经取过一次")
+            self.assertEqual(self.calls_of(page, "get_start"), 2,
+                             "开页面取过一次；点开始又自动核对过一次（票 02）")
 
             # 取数要排队时 switchTab() 返回的 promise 会挂到在途那条之后，这里不等它，
             # 只要求「页签切过去了、取数没开第二条」。
             page.evaluate("() => { switchTab('start'); }")
             page.wait_for_timeout(200)
 
-            self.assertEqual(self.calls_of(page, "get_start"), 1,
+            self.assertEqual(self.calls_of(page, "get_start"), 2,
                              "在途刷新还没回来，切页签不该再开一条取数")
             page.evaluate("window.__release()")
             page.wait_for_function(
-                "window.__calls.filter(c => c === 'get_start').length === 2", timeout=5000)
+                "window.__calls.filter(c => c === 'get_start').length === 3", timeout=5000)
         finally:
             page.close()
 
@@ -562,7 +597,7 @@ window.pywebview = { platform: "edgechromium", api: {
       summary: {started: false, rounds: 0, text: ""},
       shops: [{key: "A01", name: "店铺A", products: 0, skus: 0, pages: 1,
                default_checked: true}],
-      total_shops: 1, start_hint: "采集进程正在跑", crawler: {round_id: 7, pid: 4321},
+      total_shops: 1, start_hint: "", crawler: null,
       stopping: window.__stopping,
     };
   },

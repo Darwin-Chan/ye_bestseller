@@ -432,10 +432,10 @@ class Api:
                     # 开始页按钮禁用时给出原因（与过程页同一处 login_refusal）。
                     view["login_refusal"] = refusal
                 if gate:
-                    view["start_allowed"] = False
+                    # 浏览器/配置门禁原因只留在 browser_error（票 02）：开始页不再据此
+                    # 预置灰，点按钮时取这份原因弹页面内信息框；start_allowed/start_hint
+                    # 只表达计划/忙/遗留/欠账那半边，服务端 start_run 的拒绝面不在这里。
                     view["browser_error"] = gate
-                    if not view.get("start_hint"):
-                        view["start_hint"] = gate
                 return view
             finally:
                 conn.close()
