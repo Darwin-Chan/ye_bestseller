@@ -25,7 +25,6 @@ import contextlib
 import dataclasses
 import functools
 import ctypes
-import datetime as dt
 import logging
 import logging.handlers
 import os
@@ -43,14 +42,14 @@ from bestseller_monitor.crawler_close import CloseSnapshot, install_close_guard
 
 from bestseller_monitor.collection_context import for_collection, prepare_trial_storage
 from bestseller_monitor.config import Config, Shop, is_merge_only, load_shops
-from bestseller_monitor.db import CST, Database, connect, cst_date, utcnow
+from bestseller_monitor.db import Database, connect, cst_date, utcnow
 from bestseller_monitor.rounds import (
     RoundRequest,
     ScopeMismatch,
     ShopScope,
     TerminalReason,
 )
-from bestseller_monitor import plan_step, rounds, weekly_plan
+from bestseller_monitor import plan_step, preparation, rounds, weekly_plan
 from bestseller_monitor import crawler_identity
 from bestseller_monitor import single_instance
 from bestseller_monitor import shop_progress
@@ -89,10 +88,6 @@ _SW_RESTORE = 9
 
 # 「已经有采集在跑」的拒绝文案：三个入口共用一句，免得改了半处。
 _BUSY_ERROR = "已有抓取任务在运行，请先暂停或中止。"
-
-# 窗口等「开轮前准备」落定的上限（秒，ADR-0035）：等不到就照开，页面按本地有没有
-# 本周计划分岔（有则照常可用并标「未能确认最新」，没有则停在闸门）。
-PREPARE_WAIT_SEC = 30.0
 
 
 def _local_shops(cfg) -> list[Shop]:
@@ -176,7 +171,7 @@ class Api:
     """
 
     def __init__(self, cfg=None, *, now=utcnow, open_conn=None, shops=None,
-                 stop_clock=None, config_file=None, browser_runtime=None):
+                 stop_clock=None, config_file=None, browser_runtime=None, prep_runtime=None):
         """构造 interface：配置、时刻、连接与店铺表都可以注入。
 
         `main()` 仍写 `Api()`——那时配置按项目默认位置读，「现在」取本机时间，
@@ -184,6 +179,8 @@ class Api:
         测试与基准注入固定时刻与自己的库，于是「今天」可判定、也不用手工塞私有属性。
         `stop_clock` 是停止窗口用的时钟（默认挂钟）：用例给它一个能推进的时钟，
         就能把 8 秒 / 10 秒那两段窗口走到点，而不必去改私有状态。
+        `prep_runtime` 是准备专用运行 adapter（单调读时 / 安排后台执行 / 等待通知，
+        默认走生产线程与真实时钟）：用例用它控制预算推进与派发/唤醒，不去改私有字段。
         """
         source = Path(config_file) if config_file is not None else PROJECT_ROOT / "config/config.toml"
         self.cfg = cfg if cfg is not None else Config.from_file(source)
@@ -196,14 +193,6 @@ class Api:
             lambda: connect(self.cfg.db_file))
         self._shops_injected = shops is not None
         self.shops = (list(shops) if shops is not None else _local_shops(self.cfg))
-        # 开轮前准备（spec §6）的结局：`prepare()` 落在这里，闸门判定（`_plan_block_reason`）
-        # 与开始页（`_ui_state`）都读它；没跑过就是 None。`_prep_confirming` 与
-        # `_prep_started_at` 配对：准备在跑时页面接着轮询，30 秒预算之内还锁住勾选与
-        # 开始（`confirming_now`）；`_prep_settled` 是窗口那根等落定的线（ADR-0035）。
-        self._prep: plan_step.PrepResult | None = None
-        self._prep_confirming = False
-        self._prep_started_at: float | None = None
-        self._prep_settled = threading.Event()
         self._lock = threading.RLock()
         self.proc: subprocess.Popen | None = None
         self.round_id: int | None = None
@@ -220,6 +209,20 @@ class Api:
         self._stop_watch = stop_request.StopWatch(
             runtime, now=stop_clock or time.time,
         )
+        # 开轮前准备（spec §6 / ADR-0035）的接纳、预算、等待、落定与扫描编排都在
+        # 持有者里（preparation.Preparation）；这里只负责选owner与接线。正式上下文
+        # 一个实例；进入试采换成绑定试采配置的 bypass 实例；回到原正式配置时恢复
+        # 同一个正式实例（原事实还在）。连接能力按构造时的配置冻结——持有者不回读
+        # 可变的 self.cfg / self._open_conn（切换试采也换不掉发起时那次运行的连接）。
+        formal_cfg = self.cfg
+        formal_conn = open_conn if open_conn is not None else (
+            lambda: connect(formal_cfg.db_file))
+        self._prep_runtime = prep_runtime if prep_runtime is not None else (
+            preparation.ProductionPrepRuntime())
+        self._formal_prep_owner = preparation.Preparation(
+            cfg=formal_cfg, open_conn=formal_conn, now=self._now,
+            runtime=self._prep_runtime)
+        self._prep_owner = self._formal_prep_owner
 
     def set_local_trial(self, enabled: bool) -> dict:
         """Explicit storage selection; never change machine identity or formal tools."""
@@ -252,6 +255,11 @@ class Api:
                 return {"ok": False, "error": f"不能进入本机试采，不会回退正式采集：{exc}"}
             self.cfg = target
             self._open_conn = (lambda: connect(self.cfg.db_file)) if enabled or self._formal_open_conn is None else self._formal_open_conn
+            # 选owner：进试采换成绑定试采配置的 bypass 实例（不启动也不消费正式准备），
+            # 回正式恢复**同一个**正式实例——原先的事实还在，不自动重新准备。
+            self._prep_owner = (preparation.Preparation(
+                cfg=target, open_conn=(lambda: connect(target.db_file)), now=self._now,
+                runtime=self._prep_runtime) if enabled else self._formal_prep_owner)
             self.shops = shops
             self.proc = None
             self.round_id = None
@@ -298,11 +306,10 @@ class Api:
             stopping=self._stop_watch.state,
             stop_grace_sec=self._stop_watch.grace_sec,
             start_error=self._refused_start_message(),
-            # 这次准备原样交给取数：跨周的那次不算本周的确认，但也正是「窗口跨周了」
-            # 的判据（plan_step.start_plan 自己按周折）。
-            prep=self._prep,
-            plan_confirming=self.confirming_now(),
-            plan_waiting=self.prepare_running(),
+            # 这一次准备的一份不可变快照原样交给取数：闸门、「未能确认最新」与确认期
+            # 锁定都从它读（跨周的那次不算本周的确认，但也正是「窗口跨周了」的判据，
+            # plan_step.start_plan 自己按周折）。
+            prep=self._prep_owner.snapshot(),
         )
 
     # ---------- 开始页 ----------
@@ -313,114 +320,83 @@ class Api:
     def prepare(self) -> plan_step.PrepResult | None:
         """开轮前的一次准备（spec §6）：与命令行开跑前同一步（ADR-0035）。
 
-        `main()` 先起这个线程、等**落定**（`_prep_settled`，上限 30 秒）再建窗口——
-        开始页画出来时默认勾选就是本机份额那份（份额里今天已采够的默认不勾，票据 17）。
-        「重试准备」（闸门与「未能确认最新」
-        两态）走同一条路。落定之后的缺口检查是只告警的慢活，不占开窗的等待。
-
-        失败只记日志：界面照常可用，闸门判定在 `_plan_block_reason`。返回结局供测试
-        与日志用；意外异常返回 None。
+        经持有者接纳，等它**连同缺口扫描**结束（保持同步 prepare 语义）：落定先发布，
+        扫描是只告警的慢活、不占开窗的等待（开窗走 `prepare_for_window`）。未落定时
+        重复请求被拒绝——记录理由并返回 None，不隐式等待、不重跑（一次只接纳一个）。
+        试采绕过正式准备（返回 None）；失败只记日志，界面照常可用，闸门判定在
+        `_plan_lock_reason`。返回结局供测试与日志用；异常或派发失败返回 None。
         """
-        if self.cfg.local_trial:
-            self._prep_settled.set()
-            return None
         with self._lock:
-            self._prep_confirming = True
-            self._prep_started_at = time.time()
-        try:
-            result = self._prepare_once()
-        except Exception as exc:                       # noqa: BLE001
-            log.warning("开轮前准备没做成（界面照常可用，子进程开轮前还会再准备一次）：%s", exc)
-            result = None
-        self._settle(result)
-        if result is None:
+            owner = self._prep_owner
+            decision = owner.request()
+        if decision.outcome is preparation.RequestOutcome.IN_FLIGHT:
+            log.info("重复的开轮前准备被拒绝（已有未落定的运行）：返回 None，不等待、不重跑。")
             return None
-        log.info("开轮前准备：%s（本周 %s，本机 %s 家店）",
-                 result.status.value, result.week, len(result.my_shops))
-        for warning in result.warnings:
-            log.warning("开轮前准备：%s", warning)
-        if result.status is not plan_step.PrepStatus.SKIPPED_MERGE_ONLY:
-            # 缺口检查是只告警的慢活：落定之后才扫，不占窗口那根线。它属于采集机
-            # 开轮前的准备（提醒本机落后了、去跑交换台）；纯汇总机没有开轮这一步，跳过。
-            self._scan_gaps(result.week)
-        return result
+        if decision.outcome is preparation.RequestOutcome.TRIAL_BYPASS:
+            return None
+        return owner.wait_for_finish(decision.run)
 
-    def _settle(self, result: plan_step.PrepResult | None) -> None:
-        """准备落定：状态写回 + 唤醒等窗口的那根线（缺口检查还在后面跑）。"""
-        with self._lock:                # 只锁这几步：准备本身（含 git）不占锁
-            self._prep_confirming = False
-            self._prep_started_at = None
-            if result is not None:
-                self._prep = result
-        self._prep_settled.set()
+    def prepare_for_window(self) -> preparation.PreparationSnapshot:
+        """开窗准备（`main()` 用）：请求一次准备，或**明确等待已在跑的那一次**。
+
+        只等指定运行落定或它的剩余预算——不含缺口扫描，也不接受另给一份预算；
+        返回该次运行的快照供日志与测试看事实。试采直接返回绕过快照。
+        """
+        with self._lock:
+            owner = self._prep_owner
+            decision = owner.request()
+        if decision.outcome is preparation.RequestOutcome.TRIAL_BYPASS:
+            return owner.snapshot()
+        return owner.wait_for_open(decision.run)
 
     def confirming_now(self) -> bool:
         """「正在确认」：准备在跑、且还在 30 秒预算里——页面据此锁住勾选与开始。
 
         预算之外不再拦着人（超时兜底：本地有那份就照常用、没有就停在闸门），但准备
-        还在跑（`prepare_running()`）时页面继续轮询，落定即自动更新。
+        还在跑（`prepare_running()`）时页面继续轮询，落定即自动更新。判断都在持有者
+        的快照里（单调截止点），这里是纯委托。
         """
         with self._lock:
-            return (self._prep_confirming and self._prep_started_at is not None
-                    and time.time() - self._prep_started_at < PREPARE_WAIT_SEC)
+            return self._prep_owner.snapshot().confirming
 
     def prepare_running(self) -> bool:
         """准备还在跑吗（不限预算）：页面据此决定要不要接着轮询。"""
         with self._lock:
-            return self._prep_confirming
-
-    def _prepare_once(self) -> plan_step.PrepResult:
-        """跑一次准备串的阻塞段（拉计划库 → 同步清单 → 确认/发布 → 落库）。"""
-        conn = self._open_conn()
-        try:
-            # prepare_week 按北京日期算周：注入的时刻先折算到 CST，免得跨夜差一周
-            moment = dt.datetime.fromisoformat(self._now()).astimezone(CST)
-            return plan_step.prepare_week(self.cfg, Database(conn), now=moment, gap_scan=False)
-        finally:
-            conn.close()
-
-    def _scan_gaps(self, week: str) -> None:
-        """缺口检查（只告警不拦）：落定之后再单独扫一遍，坏了也只记日志。"""
-        try:
-            conn = self._open_conn()
-            try:
-                gaps = plan_step.scan_exchange_gaps(self.cfg.exchange_root, conn, week)
-            finally:
-                conn.close()
-        except Exception as exc:                        # noqa: BLE001
-            log.warning("缺口检查没做成（不影响开轮）：%s", exc)
-            return
-        for warning in plan_step.gap_warnings(gaps):
-            log.warning("开轮前准备：%s", warning)
+            return self._prep_owner.snapshot().running
 
     def retry_prepare(self) -> dict:
         """「重试准备」入口：后台重跑一次开轮前准备（闸门与「未能确认最新」两态）。
 
-        先立起 confirming 与预算起点再起线程：紧接着的那次取数要立刻看到「正在确认」，
-        页面才会接着轮询、落定后自动更新。
+        接纳成功立即放行——紧接着的那次取数就能从快照看到「正在确认」，页面据此
+        接着轮询、落定后自动更新。未落定时重复请求返回 error；派发失败返回 error。
         """
         with self._lock:
-            if self.cfg.local_trial:
-                return {"ok": True}
-            if self._prep_confirming:
-                return {"ok": False, "error": "正在确认中：等这一次跑完。"}
-            self._prep_confirming = True
-            self._prep_started_at = time.time()
-        threading.Thread(target=self.prepare, name="plan-prepare-retry", daemon=True).start()
+            decision = self._prep_owner.request()
+        if decision.outcome is preparation.RequestOutcome.TRIAL_BYPASS:
+            return {"ok": True}
+        if decision.outcome is preparation.RequestOutcome.IN_FLIGHT:
+            return {"ok": False, "error": "正在确认中：等这一次跑完。"}
+        if decision.outcome is preparation.RequestOutcome.DISPATCH_FAILED:
+            return {"ok": False, "error": "准备任务派发失败，请稍后重试。"}
         return {"ok": True}
 
-    def _plan_block_reason(self, db: Database) -> str | None:
-        """闸门判定（ADR-0035）：本地没有本周计划就不开轮——与开始页同一处判定。
+    def _plan_lock_reason(self, db: Database) -> str | None:
+        """开轮的计划与确认判定（ADR-0035）：确认期内、闸门、降级分流都在这**一处**。
 
-        纯汇总机先判角色。开始页只表达新建，不借数据库旧轮跳过计划门禁；
-        子进程 run.py 开跑前还会准备并核验一次。普通 CLI 的续跑能力保持独立。
+        确认期内与开始页一致拒绝；本地没有本周计划守闸门；本地有那份而这次没确认
+        到最新，按原规则降级放行（返回 None）。纯汇总机先判角色。开始页只表达新建，
+        不借数据库旧轮跳过计划门禁；子进程 run.py 开跑前还会准备并核验一次。普通
+        CLI 的续跑能力保持独立。
         """
         if self.cfg.local_trial:
             return None
         if is_merge_only(self.cfg):
             return plan_step.MERGE_ONLY_REFUSAL
-        plan = plan_step.start_plan(db, self.cfg, self._current_week(), self._prep)
-        return plan.reason if plan.blocked else None
+        snapshot = self._prep_owner.snapshot()
+        plan = plan_step.start_plan(db, self.cfg, self._current_week(),
+                                    snapshot.result, history=snapshot.history,
+                                    confirming=snapshot.confirming)
+        return plan.lock_reason
 
     def _refresh_shops(self, conn) -> None:
         """店铺全量的最新读法：本机启用的店 + 本周计划说到的店。
@@ -618,7 +594,7 @@ class Api:
 
     @_collection_action
     def start_run(self, keys: list[str]) -> dict:
-        """开始一轮（按勾选的店铺）；闸门没开或角色不许时不发子进程（ADR-0035）。"""
+        """开始一轮（按勾选的店铺）；确认期未过、闸门没开或角色不许时不发子进程（ADR-0035）。"""
         with self._lock:
             if self._closing_requested:
                 return {"ok": False, "error": CLOSING_REFUSAL}
@@ -626,7 +602,7 @@ class Api:
             try:
                 self._stop_watch.tick(conn)
                 db = Database(conn)
-                reason = self._plan_block_reason(db)
+                reason = self._plan_lock_reason(db)
                 if reason is not None:
                     return {"ok": False, "error": reason}
                 if self.cfg.local_trial:
@@ -1400,13 +1376,11 @@ def main() -> int:
             _notify(f"配置错误，不能打开采集界面：{exc}\n请修正本机配置后重新打开。")
             return 2
         _configure_gui_logging(api.cfg)
-        # 窗口等「开轮前准备」落定再建（ADR-0035）：开始页画出来时默认勾选就已经是
-        # 本机份额那份（份额里今天已采够的默认不勾，票据 17）。等待上限 30 秒；等不到
-        # 也照开，页面按「本地有没有本周计划」
-        # 分岔（有则照常可用并标「未能确认最新」，没有则停在闸门等「重试准备」）。
-        # 等的只是**落定**：缺口检查这类慢活还在准备线程里继续跑，不占开窗。
-        threading.Thread(target=api.prepare, name="plan-prepare", daemon=True).start()
-        api._prep_settled.wait(PREPARE_WAIT_SEC)
+        # 窗口等「开轮前准备」的公开入口返回再建（ADR-0035）：入口只等落定或它的
+        # 30 秒剩余预算，准备与预算的编排都在持有者里，main 不另起线程、不自己计时。
+        # 落定后的缺口检查这类慢活在后台继续跑，不占开窗；开始页画出来时默认勾选
+        # 就已经是本机份额那份（份额里今天已采够的默认不勾，票据 17）。
+        api.prepare_for_window()
         html = (PROJECT_ROOT / "bestseller_monitor" / "pages" / "ui_live.html").read_text(encoding="utf-8")
         window = webview.create_window(
             WINDOW_TITLE,

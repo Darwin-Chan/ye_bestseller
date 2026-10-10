@@ -1,6 +1,6 @@
 # 0047. 2026-09-23 审查的其余候选挂起（待定暂不处理）
 
-- 状态：已接受（其余候选挂起，不是否决；#elapsed 已于2026-10-08实施验收）
+- 状态：已接受（其余候选挂起，不是否决；#elapsed 已于2026-10-08实施验收；#prep-owner 已于2026-10-10实施验收）
 - 日期：2026-10-05
 
 ## 背景
@@ -19,7 +19,8 @@
 
 - ① 交换台包线：包发布原语、找包读包唯一入口、七动作结局形状
   （报告 `#package-publish` / `#package-read` / `#action-outcome`）；
-- ② 界面状态：开轮前准备运行态（`#prep-owner`）仍挂起；已抓时长段计时（`#elapsed`）于2026-10-08实施验收，见下文；
+- ② 界面状态：开轮前准备运行态（`#prep-owner`）于2026-10-10实施验收（整项完成）；
+  已抓时长段计时（`#elapsed`）于2026-10-08实施验收，见下文；
 - ⑤ 工具边界：工具列表页装配收归 `listing`、诊断对账工具走生产读口
   （`#tool-page` / `#tool-reads`）；
 - 8 条 Worth exploring 的其余各条（`#tx-seam`、`#image-evidence`、
@@ -90,4 +91,59 @@ Q1–Q8 及最终运行态/interface、新测试 seam 均已确认；grill、to-
 基线公开 interface 诊断 12 项：6 个通过对照、6 个行为断言失败，0 error；这是旧实现的复现证据，
 不是交付验收或生产事故记录。记录见 [prep-owner 访谈与取证](../design/prep-owner-interview-2026-10-09.md)。
 `#page-contract` 及其余候选状态不变；不重开已完成的 `#elapsed`、handled-predicate 或店铺阶段。
+归档 HTML 未修改。
+
+## 2026-10-10：prep-owner 01 实施并验收（02/03 未授权）
+
+用户授权仅实施 01（「接手 prep-owner 票01 实施，范围仅票01」）。统一准备接纳、30 秒单调预算、
+按运行等待与「先落定后扫描」编排已收进新 module `bestseller_monitor/preparation.py`；
+Api/main/views 改为消费同一份不可变快照，main 的私有线程、Event 与预算编排删除。
+start_run 的确认期收紧、当前结果/历史/闸门页语义及跨入口矩阵属 02/03，未实施。
+
+验收：独立只读双轴审查（Standards 0 硬违规、Spec 0 缺主项/0 scope creep；整改后增量复审
+双轴通过）；deletion test 通过（调用方零残留、深模块成立）；隔离副本分段全量 1972/1972 项、
+7/7 段 OK、计数对账一致（1103.2s、退出码 0、不带 -f）。受测快照 `563dfaf`（分支
+`claude/prep-owner-01`，尚未并入 main）。交付记录见
+[01 交付记录](../design/prep-owner-01-delivery-2026-10-10.md)，逐项证据在
+`.scratch/logs/tickets/prep-owner/01/20261010-implement/`。
+
+`#prep-owner` 整项不关闭（02/03 未授权、未实施）；`#page-contract` 及其余挂起候选状态不变；
+归档 HTML 未修改。
+
+## 2026-10-10：prep-owner 02 实施并验收（03 未授权）
+
+用户授权仅实施 02（「接手 prep-owner 票02 实施，范围仅票02」）。「确认期不许开轮」与
+「当前结局、历史结果、开轮闸门」的解释统一收进 `plan_step.start_plan` / `StartPlan`
+（`history` 只喂原有跨周提示；`locked` / `lock_reason` 供开始页与 `start_run` 共用同一判定）；
+`start_run` 确认期内与开始页一致拒绝、预算后按本地计划降级、无则守闸门；`views.start_view`
+只转交事实，JSON 键形状不变。旧成功回填与调用方重复解释结局/预算的知识删除（deletion test
+通过）。模式切换/迟到扫描跨入口矩阵与 elapsed/关窗整项回归（03）未实施。
+
+验收：独立只读双轴审查（Standards 0 硬违规、2 条判断题保留；Spec 0 scope creep，1 实缺 +
+1 次要全部整改，增量复审双轴通过）；deletion test 通过；隔离副本分段全量 **1986/1986** 项、
+7/7 段 OK、计数对账一致（1014.4s、退出码 0、不带 -f）。受测快照 `eacf17f`（分支
+`claude/prep-owner-01`，尚未并入 main）。交付记录见
+[02 交付记录](../design/prep-owner-02-delivery-2026-10-10.md)，逐项证据在
+`.scratch/logs/tickets/prep-owner/02/20261010-implement/`。
+
+`#prep-owner` 整项不关闭（03 未授权、未实施）；`#page-contract` 及其余挂起候选状态不变；
+归档 HTML 未修改。
+
+## 2026-10-10：prep-owner 03 实施并验收，整项完成
+
+用户授权仅实施 03（「接手 prep-owner 票03 实施，范围仅票03」，本线最后一票含整项验收）。
+03 以验证为主：跨入口矩阵测试钉住迟到工作归属（A 落定扫描未完可接纳 B，A 的等待/扫描/
+完成只对 A）、缺口扫描阻塞/异常、落定后切试采（旧扫描不改写当前取数）、试采三个准备入口
+零正式副作用与回正式的跨周解释、main 在预算耗尽与异常路径上的建窗与页面/start_run 一致；
+elapsed（准备后起算、同轮/新轮边界）与确认关窗、停止监督回归通过。矩阵即绿，03 无新增
+生产故障，保留 01/02 已正确实现；生产代码零改动。
+
+验收：独立只读双轴审查（Standards 首轮 0 硬违规、判断题整改后增量复审全部闭合；
+Spec 首轮 0 缺失整项/0 scope creep、整改后增量复审闭合）；deletion test 通过；
+隔离副本分段全量 1991/1991 项、7/7 段 OK、计数对账一致（1000.9s、退出码 0、不带 -f）。
+受测快照 `13ce197`（分支 `claude/prep-owner-01`，尚未并入 main）。交付记录见
+[03 交付记录](../design/prep-owner-03-delivery-2026-10-10.md)，逐项证据在
+`.scratch/logs/tickets/prep-owner/03/20261010-implement/`。
+
+`#prep-owner` 整项完成（三票验收均成立）；`#page-contract` 及其余挂起候选状态不变；
 归档 HTML 未修改。

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from bestseller_monitor import elapsed, plan_step, rounds, views, weekly_plan
+from bestseller_monitor import elapsed, plan_step, preparation, rounds, views, weekly_plan
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import Database, connect
 from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
@@ -37,10 +37,12 @@ class ViewsTestCase(unittest.TestCase):
         store_weekly_plan(self.db, WEEK,
                           *[(key, machine, pages.get(key, 3)) for key, machine in assignments])
 
-    def preparation(self, status, *, week: str = WEEK) -> plan_step.PrepResult:
-        """本界面那一次准备的结局（页面据此定闸门与「未能确认最新」）。"""
-        return plan_step.PrepResult(status=status, week=week, machine="m-test",
-                                    reason="拉不到计划库，先修通道。")
+    def preparation(self, status, *, week: str = WEEK) -> preparation.PreparationSnapshot:
+        """本界面那一次准备的落定快照（页面据此定闸门与「未能确认最新」）。"""
+        return preparation.PreparationSnapshot(
+            phase=preparation.PrepPhase.SETTLED,
+            result=plan_step.PrepResult(status=status, week=week, machine="m-test",
+                                        reason="拉不到计划库，先修通道。"))
 
     def submit(self, round_id, offer_id, *skus, shop_key="A01", collected_at=NOW):
         """按库存快照提交的口径写一条成功观测（每项是 (sku_name, stock)）。
@@ -253,12 +255,33 @@ class StartViewTests(ViewsTestCase):
 
         view = views.start_view(
             self.conn, cfg=self.cfg, shops=self.shops,
-            state=views.UiState(plan_confirming=True, plan_waiting=True),
+            state=views.UiState(prep=preparation.PreparationSnapshot(
+                phase=preparation.PrepPhase.CONFIRMING)),
             crawler=None, now=NOW)
 
         self.assertTrue(view["plan_confirming"])
         self.assertTrue(view["plan_locked"])
         self.assertIn("正在确认", view["plan_note"])
+
+    def test_the_cross_week_hint_survives_when_the_latest_attempt_failed(self):
+        """新一次尝试失败后（当前结局已清空）：最近一份历史仍说明窗口跨周，不冒充当前成功。"""
+        self.store_plan(("A01", "m-test"))
+
+        view = views.start_view(
+            self.conn, cfg=self.cfg, shops=self.shops,
+            state=views.UiState(prep=preparation.PreparationSnapshot(
+                phase=preparation.PrepPhase.SETTLED,
+                failure=preparation.PrepFailure.EXCEPTION,
+                history=plan_step.PrepResult(status=plan_step.PrepStatus.READY,
+                                             week="2026-W36", machine="m-test"))),
+            crawler=None, now=NOW)
+
+        self.assertIn("本周已变", view["plan_note"])
+        self.assertIn("2026-W36", view["plan_note"])
+        self.assertIn("未能确认最新", view["plan_note"])
+        self.assertFalse(view["plan_locked"])
+        self.assertFalse(view["plan_gate"])
+        self.assertTrue(view["plan_retry"])
 
     def test_a_preparation_past_its_budget_keeps_asking_without_locking(self):
         """30 秒预算用完（超时兜底）：不再拦着人，但页面接着等它落定（ADR-0035）。"""
@@ -266,7 +289,9 @@ class StartViewTests(ViewsTestCase):
 
         view = views.start_view(
             self.conn, cfg=self.cfg, shops=self.shops,
-            state=views.UiState(plan_waiting=True), crawler=None, now=NOW)
+            state=views.UiState(prep=preparation.PreparationSnapshot(
+                phase=preparation.PrepPhase.EXPIRED)),
+            crawler=None, now=NOW)
 
         self.assertTrue(view["plan_waiting"], "准备还在跑：页面接着轮询")
         self.assertFalse(view["plan_locked"], "预算之外不锁人")

@@ -458,6 +458,66 @@ class StartPlanTests(unittest.TestCase):
 
         self.assertFalse(plan.blocked, "纯汇总机不做采集：闸门与它无关，角色那句话由页面另说")
 
+    def test_confirming_locks_the_start_with_the_confirmation_reason(self):
+        """确认期内（还在 30 秒预算里）：开始页锁勾选与开始、后端拒绝开轮，同一处判定。"""
+        self.store(("A01", "m1", 23))
+
+        plan = plan_step.start_plan(self.db, self.cfg, WEEK, None, confirming=True)
+
+        self.assertFalse(plan.blocked, "闸门没关：本地有那份")
+        self.assertTrue(plan.confirming)
+        self.assertTrue(plan.locked, "确认期内：不许开轮")
+        self.assertEqual(plan.lock_reason, plan_step.CONFIRMING_GATE_REASON)
+        self.assertTrue(plan.stale, "这次还没落定：本地那份照常可用，但要标未确认")
+
+    def test_a_shut_gate_speaks_the_confirmation_first_while_it_lasts(self):
+        """确认期内闸门理由让位给「正在确认」：此时点「重试准备」也会被拒，指去重试是条死路。"""
+        plan = plan_step.start_plan(self.db, self.cfg, WEEK, None, confirming=True)
+
+        self.assertTrue(plan.locked)
+        self.assertEqual(plan.lock_reason, plan_step.CONFIRMING_GATE_REASON)
+        self.assertTrue(plan.blocked, "闸门事实不变：本地确实没有本周计划")
+
+    def test_an_open_plan_has_no_lock_and_the_gate_reason_passes_through(self):
+        blocked = plan_step.start_plan(self.db, self.cfg, WEEK, None)
+        self.assertTrue(blocked.locked)
+        self.assertEqual(blocked.lock_reason, blocked.reason, "闸门理由原样转交")
+
+        self.store(("A01", "m1", 23))
+        open_plan = plan_step.start_plan(self.db, self.cfg, WEEK,
+                                         self.preparation(plan_step.PrepStatus.READY))
+        self.assertFalse(open_plan.locked)
+        self.assertIsNone(open_plan.lock_reason)
+
+    def test_history_only_keeps_the_original_cross_week_hint(self):
+        """历史输入只保留原有跨周提示：旧结局不证明当前成功、不假造 PrepResult。"""
+        self.store(("A01", "m1", 23))
+        old = self.preparation(plan_step.PrepStatus.READY, week="2026-W01")
+
+        plan = plan_step.start_plan(self.db, self.cfg, WEEK, None, history=old)
+
+        self.assertEqual(plan.week_changed, "2026-W01",
+                         "这次没落定：最近一份历史仍说明窗口跨周")
+        self.assertTrue(plan.stale, "旧 READY 不冒充当前成功：这次仍是未确认")
+        self.assertFalse(plan.blocked)
+
+    def test_the_current_attempt_beats_the_history_for_the_week_hint(self):
+        self.store(("A01", "m1", 23))
+
+        plan = plan_step.start_plan(
+            self.db, self.cfg, WEEK, self.preparation(plan_step.PrepStatus.READY),
+            history=self.preparation(plan_step.PrepStatus.READY, week="2026-W01"))
+
+        self.assertIsNone(plan.week_changed, "这次确认的就是本周：不再说「本周已变」")
+
+    def test_a_merge_only_machine_still_carries_the_confirmation_fact(self):
+        plan = plan_step.start_plan(
+            self.db, crawler_cfg(machine_id="m1", role=ROLE_MERGE_ONLY), WEEK, None,
+            confirming=True)
+
+        self.assertTrue(plan.confirming, "锁定事实照旧转交：页面锁定与角色拒绝各说各的")
+        self.assertTrue(plan.locked)
+
 
 class PlanDeviationTests(unittest.TestCase):
     """这次要采的店里哪些在计划之外（spec §6）：越权只剩「店在计划内、本周归别人」一种。"""

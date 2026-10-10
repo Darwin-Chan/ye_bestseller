@@ -13,10 +13,10 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from . import click_events, elapsed, pacing, plan_step, rounds, shop_progress, weekly_plan
+from . import click_events, elapsed, pacing, plan_step, preparation, rounds, shop_progress, weekly_plan
 from .config import effective_pages_limit, is_merge_only
 from .crawler_identity import CrawlerProcess, browser_cleanup_complete
 from .db import CST, Database, RoundTally, cst_date
@@ -36,14 +36,10 @@ class UiState:
     stopping: str | None = None
     stop_grace_sec: float = 0.0
     start_error: str | None = None
-    # 本界面这一次、属于本周的开轮前准备（ADR-0035）：闸门与「未能确认最新」的事实源
-    # 是它，不是库里的计划表——库里的表回答「本地有没有」，它回答「这次确认到没有」。
-    prep: plan_step.PrepResult | None = None
-    # 准备正在跑、且还在 30 秒预算里（超时兜底开了窗，或刚点了「重试准备」）：
-    # 页面锁住勾选与开始。预算用完（`plan_waiting` 还在）就不再拦着人。
-    plan_confirming: bool = False
-    # 准备还在跑（不限预算）：页面接着轮询，落定后自动更新。
-    plan_waiting: bool = False
+    # 本界面这一次开轮前准备的一份不可变快照（ADR-0035）：闸门、「未能确认最新」、
+    # 「正在确认」（锁住勾选与开始）与「接着轮询」都从它读，不再拼零散字段。
+    prep: preparation.PreparationSnapshot = field(
+        default_factory=preparation.PreparationSnapshot)
 
 
 def stop_failure_text(code: str) -> str:
@@ -369,19 +365,21 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
     计划情况（闸门、默认勾选、标注、页数）读 **plan_step.start_plan** 那一份
     （ADR-0035，与拦开轮是同一处判定）：本地没有本周计划就停在闸门——不勾不开，
     给理由与「重试准备」；本地有那份而这次没确认到最新，就标「未能确认最新」、
-    照常可采。本机本周没店（空手）是合法正常态：照常给出店铺表，另附一句说明。
+    照常可采。确认期内（还在 30 秒预算里）与后端共用同一处判定，锁住勾选与开始；
+    本机本周没店（空手）是合法正常态：照常给出店铺表，另附一句说明。
     纯汇总机照常给这一页，但第一句就说清它不做采集（票据 11）。
     """
     today = cst_date(now)
     db = Database(conn)
     trial = getattr(cfg, "local_trial", False)
     plan = (plan_step.StartPlan(weekly_plan.week_label(today), cfg.machine_id) if trial
-            else plan_step.start_plan(db, cfg, weekly_plan.week_label(today), state.prep))
+            else plan_step.start_plan(db, cfg, weekly_plan.week_label(today),
+                                      state.prep.result, history=state.prep.history,
+                                      confirming=state.prep.confirming))
     idle = plan.local is not None and not plan.my_shops
     notes = []
-    if state.plan_confirming:
-        notes.append("正在确认本周计划…（拉计划库 → 同步清单 → 确认计划）："
-                     "确认完这一页会自动更新。")
+    if plan.confirming:
+        notes.append(plan_step.CONFIRMING_GATE_REASON)
     if is_merge_only(cfg) and not trial:
         # 采集入口在这台机器上是被拒的（判定与命令行同源，见 plan_step.MERGE_ONLY_REFUSAL）：
         # 把话说在点「开始抓取」之前，而不是等人点了才知道。
@@ -408,7 +406,7 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
         residue = {"round_id": identity["round_id"],
                    "state": identity["browser_state"] or "UNKNOWN"}
     # 开始页仅表达新建；无终态旧轮不是「可暂停续跑」的证明。
-    locked = state.plan_confirming or plan.blocked
+    locked = plan.locked
     start_allowed = not locked and not (is_merge_only(cfg) and not trial)
     if state.stopping:
         hint = "上一次停止仍在核验或收尾，请等待收尾完成再明确开始新轮。"
@@ -441,8 +439,8 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
         "plan_note": "\n".join(notes),
         "plan_gate": plan.blocked,
         "plan_locked": locked,
-        "plan_confirming": state.plan_confirming,
-        "plan_waiting": state.plan_waiting,
+        "plan_confirming": plan.confirming,
+        "plan_waiting": state.prep.running,
         "plan_retry": plan.blocked or plan.stale,
         # 页面按 `d.crawler.round_id` 说话，跨 pywebview 那一步走 JSON：给回普通 dict。
         "crawler": crawler.to_payload() if crawler is not None else None,
