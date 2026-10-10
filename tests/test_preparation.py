@@ -56,6 +56,11 @@ class GatedConnection:
     def release_call(self, call=1) -> None:
         self._events(call)[1].set()
 
+    def hold_next(self) -> None:
+        """把下一次调用临时挂进闸门（调用次数与页面取数交错的用例用它）。"""
+        with self.lock:
+            self.hold.add(self.calls + 1)
+
 
 class ControlledRuntime:
     """可控准备运行 adapter：单调时钟可推进；派发只入队；等待由用例选择落法。
@@ -65,11 +70,14 @@ class ControlledRuntime:
       `real_wait=True` 档——真等信号（有 5 秒硬上限，仅供「等工作完成」的用例）。
     """
 
-    def __init__(self, *, real_wait=False, fail_dispatch=False):
+    def __init__(self, *, real_wait=False, fail_dispatch=False, auto_start=False):
         self.clock = 1000.0
         self.queued = []
+        self.started = 0
+        self.launched = []
         self.real_wait = real_wait
         self.fail_dispatch = fail_dispatch
+        self.auto_start = auto_start
         self.parked = threading.Event()
 
     def monotonic(self) -> float:
@@ -81,6 +89,12 @@ class ControlledRuntime:
     def start(self, work) -> None:
         if self.fail_dispatch:
             raise RuntimeError("dispatch failed (test)")
+        self.started += 1
+        if self.auto_start:
+            thread = threading.Thread(target=work, name="prep-work", daemon=True)
+            thread.start()
+            self.launched.append(thread)
+            return
         self.queued.append(work)
 
     def wait(self, signal, timeout):
@@ -97,8 +111,13 @@ class ControlledRuntime:
         work = self.queued.pop(0)
         thread = threading.Thread(target=work, name="prep-work", daemon=True)
         thread.start()
+        self.launched.append(thread)
         test.addCleanup(lambda: thread.join(5))
         return thread
+
+    def join_all(self, timeout=5) -> None:
+        for thread in list(self.launched):
+            thread.join(timeout)
 
 
 class PreparationTestBase(unittest.TestCase):
