@@ -247,11 +247,10 @@ class Preparation:
                 gaps = plan_step.scan_exchange_gaps(self._cfg.exchange_root, conn, result.week)
             finally:
                 conn.close()
+            for warning in plan_step.gap_warnings(gaps):
+                log.warning("开轮前准备：%s", warning)
         except Exception as exc:                        # noqa: BLE001
             log.warning("缺口检查没做成（不影响开轮）：%s", exc)
-            return
-        for warning in plan_step.gap_warnings(gaps):
-            log.warning("开轮前准备：%s", warning)
 
     # ---------- 状态发布 ----------
 
