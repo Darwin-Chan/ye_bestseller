@@ -161,6 +161,21 @@ class PausedManualLoginTests(unittest.TestCase):
             "document.querySelector('#runLoginBrowserBtn').title"
             ".includes('不能另开手动浏览器')", timeout=5000)
 
+    def test_run_entry_stays_grey_on_a_leftover_round_without_pause_qualification(self):
+        # 遗留轮（进程退出、无明确暂停、无欠账）：入口须维持禁用——「未具备暂停资格」
+        # 属忙/资格类，不复用检测类的亮起报因路径（票 04 验收②；票 03 审查偏差整改）。
+        from playwright.sync_api import expect
+        self.start_round()
+        self.proc.poll.return_value = 0
+        view = self.api.get_run()
+        self.assertFalse(view['can_resume'])
+        self.assertIsNone(view.get('login_refusal'))
+        page = self.page()
+        expect(page.locator('#runLoginBrowserBtn')).to_be_visible()
+        self.assertTrue(page.locator('#runLoginBrowserBtn').is_disabled())
+        title = page.locator('#runLoginBrowserBtn').get_attribute('title')
+        self.assertIn('先暂停', title, '灰态理由指向先完成暂停/收尾')
+
     # ---------- 轮询成本：采集中不查浏览器 OS 事实 ----------
     def test_collecting_refresh_does_not_query_browser_os_facts(self):
         # 过程页每 2 秒轮询一次，而真实进程枚举是秒级的：暂停前不得每轮都查。

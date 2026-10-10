@@ -610,7 +610,8 @@
         $("runLoginBrowserBtn").title = d.login_refusal
           || "先暂停本轮并等停止收尾完成，才能打开专用 Edge 处理登录。";
       }
-      $("runLoginBrowserBtn").disabled = !!d.login_refusal;
+      // 灰源＝拒绝（忙态/服务端）或未具备暂停资格（can_resume 假，含遗留/跨天轮）。
+      $("runLoginBrowserBtn").disabled = !!d.login_refusal || !d.can_resume;
       // 暂停态显示“继续”，运行态显示“暂停”；停止途中与无进程的遗留态都不给点。
       // 票 04：「继续」can_resume 即显示、不再因 continue_gate 置灰——点击直调
       // resume_run（服务端为权威检查），失败弹信息框给原样原因。
