@@ -587,6 +587,74 @@ class GuiPlanWiringTests(unittest.TestCase):
         self.assertTrue(result["ok"], "后端与页面一致")
         spawn.assert_called_once()
 
+    def test_a_failed_attempt_can_be_retried_and_the_new_outcome_is_consumed(self):
+        """异常落定之后明确重试：确认期内一致拒绝，重试拿回的真实 READY 被两端消费（票02 验收 5）。"""
+        _, exchange = self.plan_world()
+        gate = GatedConnection(self.db_path)
+        runtime = ControlledRuntime(auto_start=True)
+        api = self.api(prep_runtime=runtime, open_conn=gate, exchange_root=exchange)
+
+        gate.fail_on = 1                                 # 首次准备：连接失败 → 异常落定
+        self.assertIsNone(api.prepare())
+        gate.fail_on = None
+
+        after_failure = api.get_start()
+        self.assertTrue(after_failure["plan_retry"], "异常之后：页面给出「重试准备」")
+        self.assertTrue(after_failure["plan_locked"], "本地没有计划：闸门关着")
+
+        runtime.auto_start = False                       # 重试这趟改延后派发
+        self.assertTrue(api.retry_prepare()["ok"], "明确重试：接纳")
+        gate.hold_next()                                 # 重试那趟卡在开库：确认期内
+        runtime.launch(self)
+        self.assertTrue(gate.wait_entered(3), "重试的工作者在跑")
+        during = api.get_start()
+        self.assertTrue(during["plan_confirming"], "重试在确认期内：页面锁定")
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            refused = api.start_run(["A01"])
+        self.assertFalse(refused["ok"], "确认期内后端一致拒绝")
+        spawn.assert_not_called()
+
+        gate.release_call(3)
+        runtime.join_all()
+
+        final = api.get_start()
+        self.assertFalse(final["plan_locked"], "重试拿回真实 READY：页面放行")
+        self.assertFalse(final["plan_gate"])
+        self.assertFalse(final["plan_retry"])
+        self.assertNotIn("未能确认最新", final["plan_note"])
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            started = api.start_run(["A01"])
+        self.assertTrue(started["ok"], "后端与页面一致：消费重试的新结局")
+        spawn.assert_called_once()
+
+    def test_the_cross_week_hint_survives_a_failed_retry(self):
+        """重试也失败后：最近一份历史仍说明窗口跨周（原有提示不因新尝试失败而丢）。"""
+        self.store_plan(("A01", "m-test", 23))
+        moment = {"now": "2025-12-29T04:00:00+00:00"}    # 北京时间 2025-12-29：2026-W01
+        failing = {"on": False}
+
+        def open_conn():
+            if failing["on"]:
+                raise RuntimeError("injected: retry connection failure")
+            return connect(self.db_path)
+
+        api = self.api(now=lambda: moment["now"], open_conn=open_conn)
+        self.assertEqual(api.prepare().week, "2026-W01")  # 这次确认的是 W01
+        moment["now"] = self.NOW                          # 回到 W39：窗口跨了周
+
+        failing["on"] = True
+        self.assertIsNone(api.prepare())                  # 新一次尝试异常落定
+        failing["on"] = False
+
+        start = api.get_start()
+        self.assertIn("本周已变", start["plan_note"], "最近一份历史仍说明窗口跨周")
+        self.assertIn("未能确认最新", start["plan_note"])
+        self.assertFalse(start["plan_locked"])
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            result = api.start_run(["A01"])
+        self.assertTrue(result["ok"], "本地那份仍在：按原规则降级放行（页面与后端一致）")
+        spawn.assert_called_once()
+
     def test_start_run_does_not_adopt_todays_round_without_a_plan(self):
         api = self.api()
         self.assertEqual(api.prepare().status, plan_step.PrepStatus.REFUSED)
