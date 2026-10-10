@@ -216,7 +216,8 @@ class StartPlan:
 
     一处判定、两处消费：`gui.Api` 用它定「开不开轮」，`views.start_view` 用它渲染
     默认勾选、标注与横幅。闸门只看**本地有没有本周计划**——这次准备确认到没有，
-    只决定标不标「未能确认最新」（降级落定与还没落定都标，本地那份都照常可用）。
+    只决定标不标「未能确认最新」（降级落定与还没落定都标，本地那份都照常可用）；
+    确认期内（`confirming`）与闸门一样不许开轮，两端共用 `locked` / `lock_reason`。
     """
 
     week: str
@@ -226,6 +227,7 @@ class StartPlan:
     reason: str | None = None           # 闸门理由（给人看的那段话）
     stale: bool = False                 # 这次没能确认到最新（本地那份照常可用）
     week_changed: str | None = None     # 这次准备属于另一个周：窗口跨周了
+    confirming: bool = False            # 这次准备还在 30 秒预算内：与闸门一样不许开轮
 
     @property
     def my_shops(self) -> frozenset[str]:
@@ -233,6 +235,25 @@ class StartPlan:
         return (frozenset(self.local.machine_keys(self.machine))
                 if self.local is not None else frozenset())
 
+    @property
+    def locked(self) -> bool:
+        """现在不许开轮吗（确认期内，或闸门没开）：开始页锁勾选与开始、后端拒绝共用这一条。"""
+        return self.confirming or self.blocked
+
+    @property
+    def lock_reason(self) -> str | None:
+        """不许开轮时给人看的那句话；可以开轮时为 None。
+
+        确认期优先说「正在确认」——此时「重试准备」也会被拒，指去重试是条死路；
+        闸门则原样转交判定理由。
+        """
+        if self.confirming:
+            return CONFIRMING_GATE_REASON
+        return self.reason if self.blocked else None
+
+
+CONFIRMING_GATE_REASON = (
+    "正在确认本周计划…（拉计划库 → 同步清单 → 确认计划）：确认完这一页会自动更新。")
 
 UNSETTLED_GATE_REASON = (
     "开轮前准备还没落定（还在确认，或等了 30 秒没回来）：本机也没有本周（{week}）"
@@ -244,25 +265,30 @@ EMPTY_WEEK_GATE_REASON = (
     "开轮也无事可做。")
 
 
-def start_plan(db: Database, cfg, week: str, prep: PrepResult | None) -> StartPlan:
+def start_plan(db: Database, cfg, week: str, prep: PrepResult | None, *,
+               history: PrepResult | None = None, confirming: bool = False) -> StartPlan:
     """把「本地有没有本周计划」「这次准备确认到没有」折成开始页要的一份事实。
 
-    `prep` 给本界面这一次准备的结局（哪一周的都收：跨了周的那次不算本周的确认，
-    但它正好说明窗口跨周了）。闸门（ADR-0035）：本地没有本周计划就不开轮——理由取
-    那次准备的拒绝说明、整周空计划，或一句「还没落定」。纯汇总机不做采集，闸门与
-    它无关。
+    `prep` 给本界面**这一次**准备的结局（哪一周的都收：跨了周的那次不算本周的确认，
+    但它正好说明窗口跨周了）。`history` 给最近一份历史结局——只用于原有跨周提示
+    （这次还没落定时，最近一份历史的周同样说明窗口跨周），不证明当前成功、不假造
+    结果：`stale` 只看 `prep`。`confirming` 给「还在 30 秒预算内确认」这一预算事实，
+    与闸门一起折进 `locked`（开始页锁定与后端拒绝同一处判定）。闸门（ADR-0035）：
+    本地没有本周计划就不开轮——理由取那次准备的拒绝说明、整周空计划，或一句
+    「还没落定」。纯汇总机不做采集，闸门与它无关。
     """
     local = stored_plan(db, week)
     machine = str(cfg.machine_id)
     if is_merge_only(cfg):
-        return StartPlan(week=week, machine=machine, local=local)
+        return StartPlan(week=week, machine=machine, local=local, confirming=confirming)
     settled = prep if prep is not None and prep.week == week else None
     stale = local is not None and not (settled is not None
                                        and settled.status is PrepStatus.READY)
-    week_changed = prep.week if prep is not None and prep.week != week else None
+    latest = prep if prep is not None else history
+    week_changed = latest.week if latest is not None and latest.week != week else None
     if local is not None:
         return StartPlan(week=week, machine=machine, local=local, stale=stale,
-                         week_changed=week_changed)
+                         week_changed=week_changed, confirming=confirming)
     if settled is None:
         reason = UNSETTLED_GATE_REASON.format(week=week)
     elif settled.status is PrepStatus.REFUSED:
@@ -270,7 +296,7 @@ def start_plan(db: Database, cfg, week: str, prep: PrepResult | None) -> StartPl
     else:
         reason = EMPTY_WEEK_GATE_REASON.format(week=week)
     return StartPlan(week=week, machine=machine, blocked=True, reason=reason,
-                     week_changed=week_changed)
+                     week_changed=week_changed, confirming=confirming)
 
 
 class DeviationKind(str, enum.Enum):

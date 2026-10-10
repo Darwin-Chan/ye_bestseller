@@ -324,7 +324,7 @@ class Api:
         扫描是只告警的慢活、不占开窗的等待（开窗走 `prepare_for_window`）。未落定时
         重复请求被拒绝——记录理由并返回 None，不隐式等待、不重跑（一次只接纳一个）。
         试采绕过正式准备（返回 None）；失败只记日志，界面照常可用，闸门判定在
-        `_plan_block_reason`。返回结局供测试与日志用；异常或派发失败返回 None。
+        `_plan_lock_reason`。返回结局供测试与日志用；异常或派发失败返回 None。
         """
         with self._lock:
             owner = self._prep_owner
@@ -380,19 +380,23 @@ class Api:
             return {"ok": False, "error": "准备任务派发失败，请稍后重试。"}
         return {"ok": True}
 
-    def _plan_block_reason(self, db: Database) -> str | None:
-        """闸门判定（ADR-0035）：本地没有本周计划就不开轮——与开始页同一处判定。
+    def _plan_lock_reason(self, db: Database) -> str | None:
+        """开轮的计划与确认判定（ADR-0035）：确认期内、闸门、降级分流都在这**一处**。
 
-        纯汇总机先判角色。开始页只表达新建，不借数据库旧轮跳过计划门禁；
-        子进程 run.py 开跑前还会准备并核验一次。普通 CLI 的续跑能力保持独立。
+        确认期内与开始页一致拒绝；本地没有本周计划守闸门；本地有那份而这次没确认
+        到最新，按原规则降级放行（返回 None）。纯汇总机先判角色。开始页只表达新建，
+        不借数据库旧轮跳过计划门禁；子进程 run.py 开跑前还会准备并核验一次。普通
+        CLI 的续跑能力保持独立。
         """
         if self.cfg.local_trial:
             return None
         if is_merge_only(self.cfg):
             return plan_step.MERGE_ONLY_REFUSAL
+        snapshot = self._prep_owner.snapshot()
         plan = plan_step.start_plan(db, self.cfg, self._current_week(),
-                                    self._prep_owner.snapshot().result)
-        return plan.reason if plan.blocked else None
+                                    snapshot.result, history=snapshot.history,
+                                    confirming=snapshot.confirming)
+        return plan.lock_reason
 
     def _refresh_shops(self, conn) -> None:
         """店铺全量的最新读法：本机启用的店 + 本周计划说到的店。
@@ -590,7 +594,7 @@ class Api:
 
     @_collection_action
     def start_run(self, keys: list[str]) -> dict:
-        """开始一轮（按勾选的店铺）；闸门没开或角色不许时不发子进程（ADR-0035）。"""
+        """开始一轮（按勾选的店铺）；确认期未过、闸门没开或角色不许时不发子进程（ADR-0035）。"""
         with self._lock:
             if self._closing_requested:
                 return {"ok": False, "error": CLOSING_REFUSAL}
@@ -598,7 +602,7 @@ class Api:
             try:
                 self._stop_watch.tick(conn)
                 db = Database(conn)
-                reason = self._plan_block_reason(db)
+                reason = self._plan_lock_reason(db)
                 if reason is not None:
                     return {"ok": False, "error": reason}
                 if self.cfg.local_trial:
