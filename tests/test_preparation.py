@@ -361,6 +361,32 @@ class AttemptLifecycleTests(PreparationTestBase):
         self.assertIs(owner.snapshot().result, second_result)
         self.assertIs(owner.snapshot().history, first_result)
 
+    def test_consecutive_failures_do_not_drop_the_history(self):
+        """中途一次失败不算「有结果」：历史仍是最近一份可用结果，不误删。"""
+        gate = GatedConnection(self.db_path)
+        runtime = ControlledRuntime()
+        owner = self.owner(runtime=runtime, open_conn=gate)
+        first = owner.request()
+        runtime.launch(self)
+        first_result = owner.wait_for_finish(first.run)
+        self.assertIsNotNone(first_result)
+
+        gate.fail_on = gate.calls + 1                    # 下一趟准备：连接失败
+        second = owner.request()
+        runtime.launch(self)
+        self.assertIsNone(owner.wait_for_finish(second.run), "失败运行没有结果")
+
+        gate.fail_on = None
+        third = owner.request()
+        self.assertIsNone(owner.snapshot().result, "新尝试照旧清空当前结果")
+        self.assertIs(owner.snapshot().history, first_result,
+                      "失败的上一趟不占历史：仍是最近一份可用结果")
+
+        runtime.launch(self)
+        self.assertIsNotNone(owner.wait_for_finish(third.run))
+        self.assertIs(owner.snapshot().history, first_result,
+                      "第三趟还没被顶替：历史等下一次接纳才更新")
+
     def test_dispatch_failure_settles_wakes_and_allows_retry(self):
         runtime = ControlledRuntime(dispatch_exc=RuntimeError("dispatch failed (test)"))
         owner = self.owner(runtime=runtime, open_conn=GatedConnection(self.db_path))

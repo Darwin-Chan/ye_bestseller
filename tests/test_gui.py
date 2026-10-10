@@ -1,4 +1,5 @@
 from browser_facts import FreeBrowserOS
+import hashlib
 import logging
 import sqlite3
 import tempfile
@@ -21,6 +22,7 @@ from helpers import crawler_cfg, insert_inventory_rows, isolated_locks, new_roun
     store_weekly_plan
 from test_preparation import ControlledRuntime, GatedConnection, start_waiting
 from test_run_cli import MINIMAL_CONFIG
+from tests.git_repos import GitSandbox, WorldTemplate
 from tools import bench_refresh
 
 
@@ -115,6 +117,22 @@ class GuiPlanWiringTests(unittest.TestCase):
                               *assignments)
         finally:
             conn.close()
+
+    def plan_world(self) -> tuple[GitSandbox, Path]:
+        """一件「计划库在本地裸远端」的小世界：真实 READY（确认/生成发布）要用它。
+
+        走模板原语（模板名前缀 `gui-prep-`，与别的文件不撞）：本进程第一次取这份
+        清单内容才真跑 git，之后每次 take 都是纯复制。返回（样例台, exchange_root）。
+        """
+        box = GitSandbox(self)
+        tag = hashlib.sha256(self.SHOPS_CSV.encode("utf-8")).hexdigest()[:10]
+        WorldTemplate.obtain(
+            f"gui-prep-{tag}",
+            lambda site: site.world("plan.git", "exchange/plan",
+                                    files={"shops.csv": self.SHOPS_CSV.encode("utf-8"),
+                                           "machines.json": b'["m-test"]\n'}),
+        ).take(box)
+        return box, box.tmp / "exchange"
 
     def test_start_page_defaults_and_pages_come_from_the_stored_plan(self):
         self.store_plan(("A01", "m-test", 23), ("A02", "m2", 8))
@@ -458,6 +476,116 @@ class GuiPlanWiringTests(unittest.TestCase):
         self.assertIn("未能确认最新", start["plan_note"])
         self.assertIn("本周已变", start["plan_note"])
         self.assertFalse(start["plan_locked"], "本地有那份：照常可采")
+
+    def test_start_run_is_refused_while_the_preparation_is_confirming(self):
+        """确认期内与开始页一致拒绝（D06 回归）：后端不许绕过页面锁定拉起采集。"""
+        self.store_plan(("A01", "m-test", 23))
+        gate = GatedConnection(self.db_path)
+        runtime = ControlledRuntime()
+        api = self.api(prep_runtime=runtime, open_conn=gate)
+        self.assertTrue(api.retry_prepare()["ok"])
+        gate.hold_next()
+        runtime.launch(self)
+        self.assertTrue(gate.wait_entered(1), "这次确认卡在开库：确认期内")
+
+        start = api.get_start()
+        self.assertTrue(start["plan_locked"], "页面锁定")
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            refused = api.start_run(["A01"])
+        self.assertFalse(refused["ok"], "后端与页面一致：确认期内不开轮")
+        spawn.assert_not_called()
+
+        runtime.advance(30.0)                            # 预算后：本地有那份，按原规则降级放行
+        self.assertFalse(api.get_start()["plan_locked"])
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            allowed = api.start_run(["A01"])
+        self.assertTrue(allowed["ok"], "后端与页面一致：降级照常可采")
+        spawn.assert_called_once_with(["A01"], new_intent=ANY)
+        gate.release_call(1)
+        runtime.join_all()
+
+    def test_start_run_keeps_the_gate_after_the_budget_without_a_local_plan(self):
+        """预算用完后本地没有那份：守闸门——页面与后端都不开轮（C03 回归）。"""
+        gate = GatedConnection(self.db_path)
+        runtime = ControlledRuntime()
+        api = self.api(prep_runtime=runtime, open_conn=gate)
+        api.retry_prepare()
+        gate.hold_next()
+        runtime.launch(self)
+        self.assertTrue(gate.wait_entered(1))
+
+        runtime.advance(30.0)
+
+        start = api.get_start()
+        self.assertTrue(start["plan_locked"], "本地没有本周计划：闸门仍然关着")
+        self.assertTrue(start["plan_waiting"], "后台还在跑：页面接着轮询")
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            refused = api.start_run(["A01"])
+        self.assertFalse(refused["ok"])
+        self.assertIn("还没落定", refused["error"])
+        spawn.assert_not_called()
+        gate.release_call(1)
+        runtime.join_all()
+
+    def test_an_old_confirmation_does_not_survive_a_failed_retry(self):
+        """真实旧 READY 后新尝试异常：页面与后端都不再把旧结局当最新确认（D04 回归）。"""
+        _, exchange = self.plan_world()
+        failing = {"on": False}
+
+        def open_conn():
+            if failing["on"]:
+                raise RuntimeError("injected: new-attempt connection failure")
+            return connect(self.db_path)
+
+        api = self.api(open_conn=open_conn, exchange_root=exchange)
+
+        first = api.prepare()
+        self.assertIs(first.status, plan_step.PrepStatus.READY)
+        self.assertFalse(api.get_start()["plan_retry"], "刚确认到最新：不用重试")
+
+        failing["on"] = True
+        self.assertIsNone(api.prepare())                 # 新尝试：异常落定，当前结局清空
+        failing["on"] = False
+
+        start = api.get_start()
+        self.assertFalse(start["plan_waiting"])
+        self.assertTrue(start["plan_retry"], "旧 READY 不再冒充最新确认")
+        self.assertIn("未能确认最新", start["plan_note"])
+        self.assertFalse(start["plan_locked"])
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            result = api.start_run(["A01"])
+        self.assertTrue(result["ok"], "本地那份仍在：按原规则降级放行（页面与后端一致）")
+        spawn.assert_called_once()
+
+    def test_a_timed_out_preparation_is_consumed_when_it_late_settles(self):
+        """超时后台最终落定后消费真实新结果：迟到的 READY 一到，闸门与标注都按它更新。"""
+        _, exchange = self.plan_world()
+        gate = GatedConnection(self.db_path)
+        runtime = ControlledRuntime()
+        api = self.api(prep_runtime=runtime, open_conn=gate, exchange_root=exchange)
+        api.retry_prepare()
+        gate.hold_next()                                 # 计划拉取卡在开库：模拟超时
+        runtime.launch(self)
+        self.assertTrue(gate.wait_entered(1))
+
+        runtime.advance(30.0)
+        during = api.get_start()
+        self.assertTrue(during["plan_waiting"], "预算之外：页面接着等它落定")
+        self.assertTrue(during["plan_locked"], "还没有本地那份：闸门关着")
+
+        gate.release_call(1)
+        runtime.join_all()
+
+        start = api.get_start()
+        self.assertFalse(start["plan_waiting"])
+        self.assertFalse(start["plan_gate"], "迟到落定的真实结果已经落库")
+        self.assertFalse(start["plan_locked"], "页面按真实新结果放行")
+        self.assertNotIn("未能确认最新", start["plan_note"])
+        self.assertFalse(start["plan_retry"])
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            result = api.start_run(["A01"])
+        self.assertTrue(result["ok"], "后端与页面一致")
+        spawn.assert_called_once()
 
     def test_start_run_does_not_adopt_todays_round_without_a_plan(self):
         api = self.api()

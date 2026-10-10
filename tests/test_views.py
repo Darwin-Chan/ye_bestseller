@@ -263,6 +263,26 @@ class StartViewTests(ViewsTestCase):
         self.assertTrue(view["plan_locked"])
         self.assertIn("正在确认", view["plan_note"])
 
+    def test_the_cross_week_hint_survives_when_the_latest_attempt_failed(self):
+        """新一次尝试失败后（当前结局已清空）：最近一份历史仍说明窗口跨周，不冒充当前成功。"""
+        self.store_plan(("A01", "m-test"))
+
+        view = views.start_view(
+            self.conn, cfg=self.cfg, shops=self.shops,
+            state=views.UiState(prep=preparation.PreparationSnapshot(
+                phase=preparation.PrepPhase.SETTLED,
+                failure=preparation.PrepFailure.EXCEPTION,
+                history=plan_step.PrepResult(status=plan_step.PrepStatus.READY,
+                                             week="2026-W36", machine="m-test"))),
+            crawler=None, now=NOW)
+
+        self.assertIn("本周已变", view["plan_note"])
+        self.assertIn("2026-W36", view["plan_note"])
+        self.assertIn("未能确认最新", view["plan_note"])
+        self.assertFalse(view["plan_locked"])
+        self.assertFalse(view["plan_gate"])
+        self.assertTrue(view["plan_retry"])
+
     def test_a_preparation_past_its_budget_keeps_asking_without_locking(self):
         """30 秒预算用完（超时兜底）：不再拦着人，但页面接着等它落定（ADR-0035）。"""
         self.store_plan(("A01", "m-test"))
