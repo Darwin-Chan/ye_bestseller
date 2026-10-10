@@ -157,10 +157,14 @@ class Preparation:
             self._current = run
             try:
                 self._runtime.start(functools.partial(self._work, run))
-            except Exception as exc:                    # noqa: BLE001
-                log.warning("开轮前准备派发失败（界面照常可用，可再试）：%s", exc)
+            except BaseException as exc:                # noqa: BLE001
+                # 派发失败也发布终态并唤醒——包括 BaseException 落在派发点的情形，
+                # 否则这条运行永远不落定、后续请求全被拒；清理后仍保留传播语义。
                 self._publish_settle(run, failure=PrepFailure.DISPATCH_FAILED)
                 self._publish_finish(run)
+                if not isinstance(exc, Exception):
+                    raise
+                log.warning("开轮前准备派发失败（界面照常可用，可再试）：%s", exc)
                 return RequestDecision(RequestOutcome.DISPATCH_FAILED, run=run)
             return RequestDecision(RequestOutcome.ACCEPTED, run=run)
 
@@ -238,7 +242,11 @@ class Preparation:
             conn.close()
 
     def _scan_gaps(self, result: plan_step.PrepResult) -> None:
-        """缺口检查（只告警不拦）：落定之后再单独扫一遍，坏了也只记日志、不撤销结果。"""
+        """缺口检查（只告警不拦）：落定之后再单独扫一遍，坏了也只记日志、不撤销结果。
+
+        它属于采集机开轮前的准备（提醒本机落后了、去跑交换台）；纯汇总机没有开轮
+        这一步，跳过——这条判据跟着落定后的扫描走，与 prepare_week 内那条一致。
+        """
         if result.status is plan_step.PrepStatus.SKIPPED_MERGE_ONLY:
             return
         try:

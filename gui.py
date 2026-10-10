@@ -332,7 +332,7 @@ class Api:
         if decision.outcome is preparation.RequestOutcome.IN_FLIGHT:
             log.info("重复的开轮前准备被拒绝（已有未落定的运行）：返回 None，不等待、不重跑。")
             return None
-        if decision.run is None:                        # 试采绕过
+        if decision.outcome is preparation.RequestOutcome.TRIAL_BYPASS:
             return None
         return owner.wait_for_finish(decision.run)
 
@@ -345,7 +345,7 @@ class Api:
         with self._lock:
             owner = self._prep_owner
             decision = owner.request()
-        if decision.run is None:                        # 试采绕过
+        if decision.outcome is preparation.RequestOutcome.TRIAL_BYPASS:
             return owner.snapshot()
         return owner.wait_for_open(decision.run)
 

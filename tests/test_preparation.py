@@ -62,21 +62,37 @@ class GatedConnection:
             self.hold.add(self.calls + 1)
 
 
-class ControlledRuntime:
-    """可控准备运行 adapter：单调时钟可推进；派发只入队；等待由用例选择落法。
+def start_waiting(call):
+    """在真实线程里发起一次阻塞调用；返回（线程, 结果槽）。test_gui 也共用这一件。"""
+    out = {}
 
-    - `start` 只把后台工作记下来（用例显式 launch 到真实线程），或按开关抛派发失败；
+    def run():
+        try:
+            out["value"] = call()
+        except BaseException as exc:                    # noqa: BLE001
+            out["error"] = exc
+
+    thread = threading.Thread(target=run, name="prep-waiter", daemon=True)
+    thread.start()
+    return thread, out
+
+
+class ControlledRuntime:
+    """可控准备运行 adapter：单调时钟可推进；派发只入队或按开关抛异常；等待由用例选择落法。
+
+    - `start` 只把后台工作记下来（用例显式 launch 到真实线程），或按 `dispatch_exc`
+      抛一个指定的异常（含 BaseException 情形）；
     - `wait` 两档：默认虚拟档——信号未置位时把同一时钟走到超时点再返回；
       `real_wait=True` 档——真等信号（有 5 秒硬上限，仅供「等工作完成」的用例）。
     """
 
-    def __init__(self, *, real_wait=False, fail_dispatch=False, auto_start=False):
+    def __init__(self, *, real_wait=False, dispatch_exc=None, auto_start=False):
         self.clock = 1000.0
         self.queued = []
         self.started = 0
         self.launched = []
         self.real_wait = real_wait
-        self.fail_dispatch = fail_dispatch
+        self.dispatch_exc = dispatch_exc
         self.auto_start = auto_start
         self.parked = threading.Event()
 
@@ -87,8 +103,8 @@ class ControlledRuntime:
         self.clock += seconds
 
     def start(self, work) -> None:
-        if self.fail_dispatch:
-            raise RuntimeError("dispatch failed (test)")
+        if self.dispatch_exc is not None:
+            raise self.dispatch_exc
         self.started += 1
         if self.auto_start:
             thread = threading.Thread(target=work, name="prep-work", daemon=True)
@@ -144,17 +160,21 @@ class PreparationTestBase(unittest.TestCase):
 
     def wait_async(self, call):
         """在真实线程里发起一次等待；返回（线程, 结果槽）。"""
-        out = {}
+        return start_waiting(call)
 
-        def run():
-            try:
-                out["value"] = call()
-            except BaseException as exc:                # noqa: BLE001
-                out["error"] = exc
 
-        thread = threading.Thread(target=run, name="prep-waiter", daemon=True)
-        thread.start()
-        return thread, out
+class SnapshotTests(PreparationTestBase):
+    def test_a_fresh_owner_reads_not_started(self):
+        owner = self.owner()
+
+        snapshot = owner.snapshot()
+
+        self.assertIs(snapshot.phase, preparation.PrepPhase.NOT_STARTED)
+        self.assertFalse(snapshot.running)
+        self.assertFalse(snapshot.confirming)
+        self.assertIsNone(snapshot.result)
+        self.assertIsNone(snapshot.history)
+        self.assertIsNone(snapshot.failure)
 
 
 class AdmissionTests(PreparationTestBase):
@@ -196,6 +216,12 @@ class BudgetTests(PreparationTestBase):
         self.assertTrue(owner.snapshot().running, "超时不等于结束")
         runtime.advance(10.0)
         self.assertIs(owner.snapshot().phase, preparation.PrepPhase.EXPIRED)
+
+        duplicate = owner.request()
+        self.assertFalse(duplicate.accepted, "超时≠落定：仍拒绝，不排队、不重跑")
+        self.assertIs(duplicate.outcome, preparation.RequestOutcome.IN_FLIGHT)
+        self.assertIs(owner.snapshot().phase, preparation.PrepPhase.EXPIRED,
+                      "截止点没有被重置（重置会把它带回预算内）")
 
     def test_the_deadline_is_set_at_admission_not_at_dispatch(self):
         gate = GatedConnection(self.db_path, hold={1})
@@ -336,7 +362,7 @@ class AttemptLifecycleTests(PreparationTestBase):
         self.assertIs(owner.snapshot().history, first_result)
 
     def test_dispatch_failure_settles_wakes_and_allows_retry(self):
-        runtime = ControlledRuntime(fail_dispatch=True)
+        runtime = ControlledRuntime(dispatch_exc=RuntimeError("dispatch failed (test)"))
         owner = self.owner(runtime=runtime, open_conn=GatedConnection(self.db_path))
         decision = owner.request()
 
@@ -352,11 +378,25 @@ class AttemptLifecycleTests(PreparationTestBase):
                       preparation.PrepPhase.SETTLED, "等待者被唤醒，不卡死")
         self.assertIsNone(owner.wait_for_finish(decision.run))
 
-        runtime.fail_dispatch = False
+        runtime.dispatch_exc = None
         retry = owner.request()
         self.assertTrue(retry.accepted, "派发失败之后可以明确再试")
         runtime.launch(self)
         self.assertIs(owner.wait_for_finish(retry.run).status, plan_step.PrepStatus.REFUSED)
+
+    def test_a_base_exception_at_dispatch_still_settles_without_self_lock(self):
+        """BaseException 落在派发点：同样先落定/唤醒再传播，不把持有者锁死在「在跑」。"""
+        runtime = ControlledRuntime(dispatch_exc=KeyboardInterrupt())
+        owner = self.owner(runtime=runtime)
+
+        with self.assertRaises(KeyboardInterrupt):
+            owner.request()
+
+        snapshot = owner.snapshot()
+        self.assertIs(snapshot.phase, preparation.PrepPhase.SETTLED)
+        self.assertIs(snapshot.failure, preparation.PrepFailure.DISPATCH_FAILED)
+        runtime.dispatch_exc = None
+        self.assertTrue(owner.request().accepted, "清理之后还能明确再试，不永久拒绝")
 
 
 class FailureTests(PreparationTestBase):

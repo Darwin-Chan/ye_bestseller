@@ -1,4 +1,3 @@
-import dataclasses
 from browser_facts import FreeBrowserOS
 import logging
 import sqlite3
@@ -21,7 +20,7 @@ from bestseller_monitor.rounds import RoundRequest, ShopScope, TerminalReason
 from gui import Api
 from helpers import crawler_cfg, insert_inventory_rows, isolated_locks, new_round, \
     store_weekly_plan
-from test_preparation import ControlledRuntime, GatedConnection
+from test_preparation import ControlledRuntime, GatedConnection, start_waiting
 from test_run_cli import MINIMAL_CONFIG
 from tools import bench_refresh
 
@@ -64,21 +63,6 @@ def store_today_plan(db_path, *assignments):
         store_weekly_plan(Database(conn), weekly_plan.week_label(cst_date()), *assignments)
     finally:
         conn.close()
-
-
-def start_waiting(call):
-    """在真实线程里发起一次可能阻塞的调用；返回（线程, 结果槽）。"""
-    out = {}
-
-    def run():
-        try:
-            out["value"] = call()
-        except BaseException as exc:                    # noqa: BLE001
-            out["error"] = exc
-
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    return thread, out
 
 
 def pause_for_resume(api, path, rid):
