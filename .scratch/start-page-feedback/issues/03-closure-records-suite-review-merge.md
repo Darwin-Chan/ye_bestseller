@@ -1,6 +1,6 @@
 # 03：收口：验收语言与记录、收尾全量、双轴审查、按授权并入 main
 
-Status: ready-for-agent（2026-10-11 更新：①②③ 完成；④ 完成、1 条边缘态投影偏差挂账待用户定夺；⑤ 待用户明确授权）
+Status: resolved（2026-10-11；①–⑤ 全部完成并记录——审查整改 96be8c7＋复审通过，并入 main c7f5a9c＋适配 06bd22a，合并后全量 2016/2016；未 push）
 Type: implementation
 Feature: start-page-feedback
 Date: 2026-10-10（Asia/Shanghai）
@@ -14,8 +14,8 @@ Spec: [../spec.md](../spec.md)（版本 3）
 - [x] 验收语言更新落盘：08-A12/A14 及母 spec 相关脚注与新行为一致、无互相矛盾；母 spec 与台账各含「改范围按钮已删（快捷方式；路径语义不变）」一句；「开始页可见原因／配置可查看」处的改写落盘（含 `docs/design/` 走查记录；`docs/reviews/` 归档报告未改、其建议作废一句已点）。（2026-10-11 完成，7 份文档，见实施记录①；边界注明：issue 08/11 的 01–07 历史票与 grill 其余段落未动——历史工单档不改写，旧按钮名仅在因三类引用而改写的句内随之更新。）
 - [x] 交付/台账记录更新（日期、提交、验证结果、证据路径）。（台账 2026-10-11 状态行＋08/11 两处补句；本文件实施记录；证据路径见下。）
 - [x] 隔离副本分段全量：合计/对账/结论三行齐全、7/7 段 OK、退出码 0；证据落 `.scratch/logs/tickets/start-page-feedback/03/<run>/`。（合计 **2011 项（预期 2011，计数对账一致）、总耗时 1201.3s、7/7 段 OK、结论 OK**、退出码 0；`03/20261011-t03-01/`。）
-- [ ] 两轴审查报告归档，0 未解决硬性项/阻断项（或整改后复审通过、记录整改提交）。（**报告已归档**（`review-r1/` 任务与原文＋`docs/reviews/` 整理版）；Standards 0 硬违例；Spec 1 条边缘态投影偏差经复核确认，处置＝**挂账待用户定夺**——未整改（产品代码改动须经用户确认），见实施记录④。本框待用户裁决定夺后闭环。）
-- [ ] 并入 main 仅在用户明确授权后执行；合并后按惯例留 main 侧验证证据。（本轮会话未含授权句；未合并、未 push。）
+- [x] 两轴审查报告归档，0 未解决硬性项/阻断项（或整改后复审通过、记录整改提交）。（报告归档（`review-r1/` 任务与原文＋`docs/reviews/start-page-feedback-batch-review-2026-10-11.md`）；Standards 0 硬违例；Spec 1 条边缘态投影偏差已整改——`96be8c7`（灰源补 `!d.can_resume`＋新用例先红后绿）并经复审通过（复审报告 `.scratch/logs/tickets/merge-start-page-feedback-into-main/01/rework-review-report.md`：「偏差已关闭、无新引入问题」），无未解决项。）
+- [x] 并入 main 仅在用户明确授权后执行；合并后按惯例留 main 侧验证证据。（用户 2026-10-11 指令「整改偏差，然后授权合并进 main」（经 /resolving-merge-conflicts 流程）；合并 `c7f5a9c`＋适配 `06bd22a`；合并树分段全量 **2016/2016、对账一致、7/7 段 OK、退出 0**；证据 `.scratch/logs/tickets/merge-start-page-feedback-into-main/01/`。未 push。）
 
 ## 接缝
 
@@ -48,12 +48,23 @@ Spec: [../spec.md](../spec.md)（版本 3）
 - 主仓：F:\AI\projects\bestseller
 - 隔离副本：F:\AI\projects\bestseller\.scratch\sandboxes\start-page-feedback\03\20261011-t03-01\bestseller（独立 clone；被测树＝分支顶点 `4fd2200`；未复制主仓真实配置/库/登录态）
 - 来源：分支 `claude/start-page-feedback` 顶点 `4fd2200`（`4d58cf3` + 01/02/04 全部提交）＋本记录提交；主仓分支 ref 经 fetch 回写，主仓工作树未动
-- 验收证据：F:\AI\projects\bestseller\.scratch\logs\tickets\start-page-feedback\03\20261011-t03-01（来源清单、三件配置、分段全量与 summary/退出码、`lang-sync/`（before/after/diffs/sha256.txt）、`review-r1/`（任务与报告原文））
-- 永久保留：上述全部；主仓 7 份同步文档的改后版本（未跟踪 2 份在主仓磁盘 `.scratch/issues-08-11/`；受跟踪 5 份待并入 main 的收尾提交落定）；`docs/reviews/` 整理版报告随该批收尾提交落定
+- 验收证据：F:\AI\projects\bestseller\.scratch\logs\tickets\start-page-feedback\03\20261011-t03-01（来源清单、三件配置、分段全量与 summary/退出码、`lang-sync/`（before/after/diffs/sha256.txt）、`review-r1/`（任务与报告原文））；合并验证证据 `.scratch\logs\tickets\merge-start-page-feedback-into-main\01`（合并净改动 diff、定向与全量日志、复审任务与报告、来源记录）
+- 永久保留：上述全部；主仓 7 份同步文档的改后版本（未跟踪 2 份在主仓磁盘 `.scratch/issues-08-11/`；受跟踪 5 份与 `docs/reviews/` 整理版报告已随 2026-10-11 收尾提交落定）
 - 可删除候选：本副本 `.scratch\sandboxes\start-page-feedback\03\20261011-t03-01`（删除需另行授权）
-- 暂留待确认：同上副本；本线四副本（01/02/04/03）保留待本线收口或用户决定
+- 暂留待确认：同上副本；本线四副本（01/02/04/03）保留——本线已收口，删除待用户授权
 - 实际清理：未执行（未获授权）
+
+## 集成记录（2026-10-11）
+
+经用户明确授权（原句：「整改偏差，然后授权合并进 main」——经 /resolving-merge-conflicts 流程指令），本线并入 main；本节为落地后所记。审查整改先于合并落定：`96be8c7`（过程页入口灰源补 `!d.can_resume`＋新用例先红后绿；复审通过——报告见 `.scratch/logs/tickets/merge-start-page-feedback-into-main/01/rework-review-report.md`）。上方正文保留为合流前的事实。
+
+- 合并链：`c7f5a9c`（本线顶点 `96be8c7` × main@`340f036`——local-trial-merge-only 线并入后的顶点；**唯一内容冲突** `bestseller_monitor/pages/ui_live.html` 页头区：对线「试采入口收窄为纯汇总机功能（`trialModeBtn` 默认 hidden、由 `d.trial_available` 投影）」× 本线「页头横向容器＋两枚『打开专用 Edge』入口」——解法：容器结构用本线、hidden 与注释用对线，双方意图都保留；`gui.py` 与 `tests/test_ui_live.py` 自动合并，逐块核过——对线 `trial_available` 投影 × 本线 `get_start` 折入、两侧用例并存）→ `06bd22a`（合并适配：`test_fact_rechecks_stay_automatic_on_tab_return_and_trial_switch` 按收窄后语义改 merge_only 夹具、试采态起步、末尾切回正式；三个核对时点断言不变）。
+- 合并树验证：定向九文件全绿（ui_live 23、manual_edge 35、local_trial_gui 21、paused 17、gui 87、joint 4、explicit 16、local_trial_cli 25、leftover 26）；分段全量 **2016 项（预期 2016，计数对账一致）、总耗时 1209.7s、7/7 段 OK、结论 OK、退出码 0**。主仓 fast-forward 落地（`340f036 → 06bd22a`，工作区未提交改动保留不涉）。证据：`.scratch/logs/tickets/merge-start-page-feedback-into-main/01/`。
+- 语言同步的受跟踪 5 份（台账、`docs/design/` ×4）与本批两轴报告随本线收尾提交一并落定（`docs: record the start-page-feedback main integration and its verification`；见台账 2026-10-11 集成行）。
+- 本线「未合并」旧边界自此解除；08/11 剩余未完成仅部署机人工验收（08-H01/11-H01）待用户现场反馈，两 issue 保持未处理。未 push。
 
 ## Comments
 
 2026-10-11：票 03 收口执行（本轮会话，主 agent）。①②③④ 完成：语言同步 7 份落盘（快照与逐份 diff 留证）、台账更新、分段全量 2011/2011 对账一致 7/7 段 OK 退出 0、两轴审查完成（Standards 0 硬违例；Spec 1 条边缘态投影偏差经复核确认、**挂账待用户定夺**——见实施记录④，未整改）。⑤ 并入 main 待用户明确授权；本票未 push。待人项：用户对偏差项定夺（整改／另开票／接受挂账）＋ ⑤ 授权。
+
+2026-10-11（后记）：用户经 /resolving-merge-conflicts 指令「整改偏差，然后授权合并进 main」。整改 `96be8c7`（红→绿＋复审通过）；合并 `c7f5a9c`＋适配 `06bd22a` 已落地 main（fast-forward `340f036 → 06bd22a`）；合并树定向九文件全绿、分段全量 2016/2016、7/7 段 OK、退出 0。本票五步全部完成，置 resolved。未 push。
