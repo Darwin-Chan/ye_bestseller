@@ -4,6 +4,7 @@
 只有模型与图片网络被替换，页面、HTTP、服务、临时库都是真的）。
 """
 import os
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +15,18 @@ import test_analysis as fixture
 import test_group_editing as editing
 from bestseller_monitor.matching import MatchingConfig, MatchingService
 from test_analysis_progress import StagedTransport
+
+
+def _drain_run(service, transport):
+    """放行闸门，并等这次运行走到终态（终态以后不再有任何写入）。
+
+    正常路径用例自己会等到遮罩关闭；失败在半路时也得给后台判断线程松手的机会——
+    否则它还攥着 match.sqlite，临时目录清理会撞 WinError 32（重负载下真撞过）。
+    """
+    transport.release.set()
+    reading = service.in_flight_job()
+    if reading:
+        service.wait_terminal(reading['id'], timeout=30)
 
 
 class MatchingMaskTests(unittest.TestCase):
@@ -32,8 +45,24 @@ class MatchingMaskTests(unittest.TestCase):
         self.addCleanup(patch.stopall)
         patch.dict(os.environ, {'DEEPSEEK_API_KEY': 'test'}).start()
         patch('bestseller_monitor.matching.urlopen', side_effect=transport).start()
-        self.addCleanup(transport.release.set)
+        # 最后登记、最先跑：失败在半路也要放行闸门并等运行到终态（见 _drain_run）。
+        self.addCleanup(_drain_run, self.service, transport)
         return transport
+
+    def wait_judged(self, count, timeout=15):
+        """等这次运行的服务读数真的判完 count 对（假传输的闸门保证读数停得住）。
+
+        遮罩文本最多慢一个轮询周期；先等读数、再断言文本，5 秒的 DOM 窗口就不和
+        后台判断在重负载下赛跑。读数等不到时照常红，失败信息带着当时的读数。
+        """
+        deadline = time.monotonic() + timeout
+        reading = None
+        while time.monotonic() < deadline:
+            reading = self.service.in_flight_job()
+            if reading and reading['judged'] >= count:
+                return reading
+            time.sleep(0.01)
+        self.fail(f'等不到判断数走到 {count}：{reading}')
 
     def enter(self, start='2026-09-07', end='2026-09-14'):
         """在日期页点「下一步」，返回遮罩。"""
@@ -56,6 +85,7 @@ class MatchingMaskTests(unittest.TestCase):
         expect(mask.locator('#maskPhase')).to_contain_text('第 4 步 / 共 5 步')
         expect(mask.locator('#maskPhase')).to_contain_text('逐对判断同款')
         expect(mask.locator('.mask-steps li.cur')).to_have_text('逐对判断同款')
+        self.wait_judged(2)                    # 先等服务读数判完两对，再看遮罩文本（慢一个轮询周期）
         expect(mask.locator('#maskMain')).to_have_text('已完成 2 / 6 对')
         expect(mask.locator('#maskSub')).to_contain_text('可判 4 个商品')
         expect(mask.locator('#maskSub')).to_contain_text('命中缓存不花钱')
@@ -112,6 +142,7 @@ class MatchingMaskTests(unittest.TestCase):
         transport = self.model(pass_first=2)
         self.seed(4)
         mask = self.enter()
+        self.wait_judged(2)                    # 先等服务读数判完两对，再看遮罩文本（慢一个轮询周期）
         expect(mask.locator('#maskMain')).to_have_text('已完成 2 / 6 对')
 
         self.page.reload()
@@ -134,6 +165,7 @@ class MatchingMaskTests(unittest.TestCase):
 
         self.page.get_by_role('button', name='继续').click()
         expect(mask).to_be_visible()
+        self.wait_judged(2)                    # 先等服务读数判完两对，再看遮罩文本（慢一个轮询周期）
         expect(mask.locator('#maskMain')).to_have_text('已完成 2 / 6 对')
         transport.release.set()
         expect(mask).to_be_hidden()
