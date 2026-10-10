@@ -693,6 +693,23 @@ class GuiPlanWiringTests(unittest.TestCase):
 
         self.assertIn("准备没通过", run["start_error"])
 
+    def test_a_failed_gap_scan_does_not_revoke_the_page_confirmation(self):
+        """票03 跨入口矩阵：缺口扫描异常只作日志，不撤销已落定的结局——页面照常确认。"""
+        _, exchange = self.plan_world()
+        gate = GatedConnection(self.db_path, fail_on=2)   # 第 2 次连接＝缺口扫描
+        api = self.api(open_conn=gate, exchange_root=exchange)
+
+        result = api.prepare()
+
+        self.assertIs(result.status, plan_step.PrepStatus.READY)
+        start = api.get_start()
+        self.assertFalse(start["plan_locked"], "结局没有被扫描异常撤销")
+        self.assertFalse(start["plan_retry"], "不把页面打回未确认")
+        self.assertNotIn("未能确认最新", start["plan_note"])
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            self.assertTrue(api.start_run(["A01"])["ok"], "开始页与 start_run 一致：照常开轮")
+            spawn.assert_called_once()
+
     def test_the_interface_never_sends_a_page_budget_override(self):
         """界面不提供改预算的入口：只有命令行能发 --pages-per-shop（spec §6）。"""
         api = self.api()
@@ -709,7 +726,8 @@ class GuiPlanWiringTests(unittest.TestCase):
 
 
 class PrepContextIsolationTests(unittest.TestCase):
-    """准备与扫描固定发起时的上下文：落定后切试采，迟到的扫描不借用新连接（D05 回归）。"""
+    """准备与扫描固定发起时的上下文（D05 回归）；票03 起同放跨入口矩阵：
+    迟到工作归属（A/B）、模式切换与旧扫描、试采隔离与恢复、main 超时建窗。"""
 
     NOW = GuiPlanWiringTests.NOW
 
@@ -723,10 +741,19 @@ class PrepContextIsolationTests(unittest.TestCase):
             "A01,店一,https://a.example/,3,1,\n", encoding="utf-8")
         self.cfg = Config.from_file(self.config, root=self.root)
 
-    def api(self, *, prep_runtime=None, open_conn=None):
+    def api(self, *, prep_runtime=None, open_conn=None, now=None):
         return gui.Api(browser_runtime=FreeBrowserOS(), cfg=self.cfg,
-                       config_file=self.config, now=lambda: self.NOW,
+                       config_file=self.config, now=now or (lambda: self.NOW),
                        open_conn=open_conn, prep_runtime=prep_runtime)
+
+    def store_plan(self, *assignments):
+        """把本类固定 NOW 那一周（W39）的计划落进本机计划表。"""
+        conn = connect(self.cfg.db_file)
+        try:
+            store_weekly_plan(Database(conn), weekly_plan.week_label("2026-09-21"),
+                              *assignments)
+        finally:
+            conn.close()
 
     def test_a_late_scan_keeps_the_original_connection_capability(self):
         gate = GatedConnection(self.cfg.db_file, hold={1, 2})
@@ -822,6 +849,143 @@ class PrepContextIsolationTests(unittest.TestCase):
         start = api.get_start()
         self.assertEqual(start["plan_note"], before, "回正式恢复原事实，不自动准备")
         self.assertEqual(runtime.started, 1, "切模式不触发新的正式准备")
+
+    def test_a_settled_runs_late_work_never_answers_for_the_next_run(self):
+        """票03 跨入口矩阵：A 落定（扫描未完）接纳 B——A 的完成等待只认 A；
+        开窗等待者加入 B、只等 B 的剩余预算；A 的迟到扫描/完成不改写 B 的运行状态。"""
+        gate = GatedConnection(self.cfg.db_file, hold={1, 2, 3})
+        runtime = ControlledRuntime()
+        api = self.api(prep_runtime=runtime, open_conn=gate)
+        a_thread, a_out = start_waiting(api.prepare)
+        self.assertTrue(runtime.parked.wait(5), "A 的 prepare 在等它那次运行完成")
+        runtime.launch(self)
+        self.assertTrue(gate.wait_entered(1), "A 卡在开库")
+        gate.release_call(1)                             # A 落定；扫描卡在第 2 次连接
+        self.assertTrue(gate.wait_entered(2))
+        self.assertFalse(api.prepare_running(), "A 落定即释放接纳：扫描没完也能接 B")
+
+        self.assertTrue(api.retry_prepare()["ok"], "落定后接纳 B")
+        runtime.launch(self)                             # B 的工作者卡在第 3 次连接
+        self.assertTrue(gate.wait_entered(3))
+        self.assertTrue(api.prepare_running(), "B 在跑")
+        self.assertEqual(a_out, {}, "A 的完成等待还没返回（A 的扫描仍挂着）")
+
+        window = api.prepare_for_window()                # 开窗等待者：加入 B
+        self.assertIs(window.phase, preparation.PrepPhase.EXPIRED,
+                      "只等 B 的剩余预算，不重置预算、不等 A 的扫描")
+        self.assertIsNone(window.result, "拿的是 B 的快照（未落定），不是 A 的结果")
+        self.assertEqual(runtime.started, 2, "已有运行：不重复接纳")
+
+        gate.release_call(2)                             # A 的迟到扫描收尾
+        a_thread.join(5)
+        self.assertFalse(a_thread.is_alive())
+        self.assertIs(a_out["value"].status, plan_step.PrepStatus.REFUSED,
+                      "A 的完成等待返回 A 的结果")
+        self.assertTrue(api.prepare_running(), "A 的扫描/完成不清 B 的运行状态")
+        self.assertTrue(api.get_start()["plan_waiting"], "页面看到的仍是 B 在跑")
+
+        gate.release_call(3)                             # B 落定
+        runtime.join_all()
+        self.assertFalse(api.prepare_running())
+        self.assertFalse(api.get_start()["plan_waiting"])
+
+    def test_a_late_scan_after_a_mode_switch_never_writes_the_current_facts(self):
+        """票03 跨入口矩阵：落定后切试采，旧扫描收尾不改写当前（试采）页事实；
+        切回正式恢复原事实（旧扫描仍用原正式连接由 D05 回归继续钉住）。"""
+        gate = GatedConnection(self.cfg.db_file, hold={1, 2})
+        runtime = ControlledRuntime(auto_start=True)
+        api = self.api(prep_runtime=runtime, open_conn=gate)
+        thread, out = start_waiting(api.prepare)
+        self.assertTrue(gate.wait_entered(1), "准备卡在开库")
+        gate.release_call(1)                             # 落定；扫描卡在第 2 次连接
+        self.assertTrue(gate.wait_entered(2))
+        formal_before = api.get_start()
+        self.assertTrue(formal_before["plan_locked"], "这次没确认到计划：闸门关着")
+
+        self.assertTrue(api.set_local_trial(True)["ok"], "落定后可以切模式")
+        trial_before = api.get_start()
+        self.assertFalse(trial_before["plan_gate"], "试采页不看正式闸门")
+
+        gate.release_call(2)                             # 旧扫描收尾（原正式上下文）
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+
+        self.assertEqual(api.get_start(), trial_before, "旧扫描不改写当前（试采）页事实")
+        self.assertTrue(api.set_local_trial(False)["ok"])
+        self.assertEqual(api.get_start(), formal_before, "回正式恢复原事实")
+        self.assertIs(out["value"].status, plan_step.PrepStatus.REFUSED)
+
+    def test_the_trial_entries_leave_no_formal_side_effects_and_the_return_reads_cross_week(self):
+        """票03 跨入口矩阵：试采下 prepare/retry/开窗三个入口零正式连接、零派发、
+        零计划副作用；回正式恢复原事实并按跨周规则解释，不自动准备、不复用。"""
+        self.store_plan(("A01", "m1", 3))
+        moment = {"now": "2025-12-29T04:00:00+00:00"}    # 北京时间 2025-12-29：2026-W01
+        gate = GatedConnection(self.cfg.db_file)
+        runtime = ControlledRuntime(auto_start=True)
+        api = self.api(now=lambda: moment["now"], open_conn=gate, prep_runtime=runtime)
+        self.assertEqual(api.prepare().week, "2026-W01")  # 这次确认的是 W01
+        moment["now"] = self.NOW                          # 回到 W39：窗口跨周
+        formal_before = api.get_start()
+        self.assertIn("本周已变", formal_before["plan_note"])
+        calls, started = gate.calls, runtime.started
+
+        with patch("bestseller_monitor.plan_step.prepare_week") as prepare:
+            self.assertTrue(api.set_local_trial(True)["ok"])
+            self.assertIsNone(api.prepare(), "试采绕过正式准备")
+            self.assertEqual(api.retry_prepare(), {"ok": True}, "试采重试也不安排正式任务")
+            self.assertIs(api.prepare_for_window().phase, preparation.PrepPhase.TRIAL_BYPASS)
+            prepare.assert_not_called()                   # 零计划（与 Git）副作用
+            self.assertEqual((gate.calls, runtime.started), (calls, started),
+                             "三个入口都不开正式连接、不安排正式任务")
+            trial = api.get_start()
+            self.assertFalse(trial["plan_gate"], "试采页不看正式闸门")
+            self.assertFalse(trial["plan_waiting"], "正式的在跑/等待事实不泄进试采页")
+            self.assertEqual(trial["plan_note"], "", "正式结局也不泄进试采页")
+
+        self.assertTrue(api.set_local_trial(False)["ok"])
+        self.assertEqual(runtime.started, started, "回正式不自动准备")
+        self.assertEqual(api.get_start(), formal_before, "回正式恢复原事实（含跨周提示）")
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            self.assertTrue(api.start_run(["A01"])["ok"], "恢复后按降级规则照常开轮")
+            spawn.assert_called_once()
+
+    def test_the_window_opens_when_the_budget_runs_out_and_the_page_follows_the_settlement(self):
+        """票03 跨入口矩阵：预算耗尽不拦建窗（后台继续）；本地有本周计划，
+        main、开始页与 start_run 一致按降级规则走，迟到落定后页面跟着更新。"""
+        self.store_plan(("A01", "m1", 3))
+        gate = GatedConnection(self.cfg.db_file, hold={1})
+        runtime = ControlledRuntime(auto_start=True)
+        api = self.api(prep_runtime=runtime, open_conn=gate)
+        window_facts = []
+
+        def create_window(*args, **kwargs):
+            window_facts.append(api.prepare_running())
+            return _FakeWindow()
+
+        with patch.object(single_instance, "acquire", return_value=MagicMock()), \
+                patch.object(gui, "Api", return_value=api), \
+                patch.object(gui, "_configure_gui_logging"), \
+                patch.object(gui.webview, "create_window", side_effect=create_window), \
+                patch.object(gui.webview, "start"):
+            self.assertEqual(gui.main(), 0)
+
+        self.assertTrue(gate.wait_entered(1), "工作者真的在跑（卡在开库）")
+        self.assertEqual(window_facts, [True], "预算耗尽不拦建窗：后台还在跑")
+
+        start = api.get_start()
+        self.assertTrue(start["plan_waiting"], "页面接着等它落定")
+        self.assertFalse(start["plan_confirming"], "预算之外不叫「正在确认」")
+        self.assertFalse(start["plan_locked"], "本地有那份：按降级规则不锁")
+        self.assertIn("未能确认最新", start["plan_note"])
+        with patch.object(Api, "_spawn_crawler") as spawn:
+            self.assertTrue(api.start_run(["A01"])["ok"], "开始页与 start_run 一致：降级放行")
+            spawn.assert_called_once()
+
+        gate.release_call(1)
+        runtime.join_all()
+        start = api.get_start()
+        self.assertFalse(start["plan_waiting"], "落定后不再轮询")
+        self.assertFalse(start["plan_locked"])
 
 
 class GuiWindowHeightTests(unittest.TestCase):
