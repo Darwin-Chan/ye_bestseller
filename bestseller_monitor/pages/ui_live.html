@@ -357,7 +357,8 @@
     const d = await callApi("get_start");
     if (!d) return;
     if (d.browser) {
-      $("browserFacts").textContent = "配置：" + d.browser.source + "；专用目录：" + d.browser.profile + "；" + d.browser.message + " " + d.browser.retry;
+      const facts = "配置：" + d.browser.source + "；专用目录：" + d.browser.profile + "；" + d.browser.message;
+      $("browserFacts").textContent = facts + (d.login_refusal ? "（" + d.login_refusal + "）" : " " + d.browser.retry);
       $("loginBrowserBtn").disabled = !d.browser.can_open || d.browser.state === "opening";
     }
     $("stProducts").textContent = d.ov.products.toLocaleString();

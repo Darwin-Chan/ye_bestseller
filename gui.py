@@ -450,8 +450,11 @@ class Api:
                 view = self._collection_payload(views.start_view(
                     conn, cfg=self.cfg, shops=self.shops, state=self._ui_state(),
                     crawler=self.current_crawler(conn), now=self._now()))
-                browser, _, gate = self._browser_entry(conn)
+                browser, refusal, gate = self._browser_entry(conn)
                 view["browser"] = browser
+                if refusal is not None:
+                    # 开始页按钮禁用时给出原因（与过程页同一处 login_refusal）。
+                    view["login_refusal"] = refusal
                 if gate:
                     view["start_allowed"] = False
                     view["browser_error"] = gate
@@ -481,11 +484,13 @@ class Api:
 
         停止/收尾未完成、采集或身份验证等待进行中一律拒绝。本界面明确暂停且停止
         收尾已完成（停止窗口回到 idle、没有采集进程）时，过程页入口照常放行——
-        这是票 05 接入的那一格。前端禁用只是引导，真正的授权在这里。
+        这是票 05 接入的那一格。纯汇总机正式模式拒绝，但**本机试采照常放行**
+        （票 08）：试采用同一份专用 profile，登录准备与正式采集同样需要。
+        前端禁用只是引导，真正的授权在这里。
         """
         if self._closing_requested:
             return CLOSING_REFUSAL
-        if is_merge_only(self.cfg):
+        if is_merge_only(self.cfg) and not self.cfg.local_trial:
             return "纯汇总机不允许打开采集专用 Edge。"
         if self._stop_watch.status.phase is not stop_request.StopPhase.IDLE:
             return "停止或收尾仍在进行，请稍后刷新重试。"

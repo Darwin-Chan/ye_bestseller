@@ -200,6 +200,31 @@ class ManualEdgeTests(unittest.TestCase):
         self.assertTrue(page.locator('#startBtn').is_disabled())
         self.assertIn('纯汇总机', self.api.open_login_browser()['error'])
         self.assertFalse(self.api.start_run(['A'])['ok'])
+    def test_merge_only_trial_allows_the_login_entry_and_returns_to_refusal(self):
+        # 纯汇总机的本机试采同样要登录专用 profile（票 08）：试采下入口放行，
+        # 打开的是同一解析目录；切回正式模式恢复拒绝。正式拒绝文案不变。
+        self.config.write_text(self.config.read_text('utf-8').replace('role = "collector"','role = "merge_only"'),'utf-8')
+        self.api = gui.Api(config_file=self.config, browser_runtime=self.os)
+        self.assertIn('纯汇总机', self.api.open_login_browser()['error'])
+        self.assertTrue(self.api.set_local_trial(True)['ok'])
+        page = self.page()
+        page.evaluate('refreshStart()')
+        self.assertFalse(page.locator('#loginBrowserBtn').is_disabled())
+        result = self.api.open_login_browser()
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(self.os.starts[-1].profile, str(self.tmp/'profiles/account1_edge'))
+        self.assertTrue(self.api.set_local_trial(False)['ok'])
+        page.evaluate('refreshStart()')
+        self.assertTrue(page.locator('#loginBrowserBtn').is_disabled())
+        self.assertIn('纯汇总机', self.api.open_login_browser()['error'])
+    def test_start_page_shows_why_the_login_entry_is_disabled(self):
+        # 开始页按钮禁用时要给出原因（与过程页同一处 login_refusal），不再「灰着不说为什么」。
+        self.config.write_text(self.config.read_text('utf-8').replace('role = "collector"','role = "merge_only"'),'utf-8')
+        self.api = gui.Api(config_file=self.config, browser_runtime=self.os)
+        page = self.page()
+        page.evaluate('refreshStart()')
+        self.assertIn('纯汇总机', page.locator('#browserFacts').inner_text())
+        self.assertTrue(page.locator('#loginBrowserBtn').is_disabled())
     def test_collecting_and_stop_cleanup_reject_api_and_page(self):
         from contextlib import closing
         from bestseller_monitor.db import Database
