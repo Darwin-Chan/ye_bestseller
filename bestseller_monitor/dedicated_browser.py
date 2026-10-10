@@ -12,7 +12,7 @@ import threading
 from .config import Config
 
 HOME = 'https://www.1688.com/'
-RETRY = '请自行关闭专用 Edge（包括后台窗口），确认退出后点刷新重试；不要关闭日常 Edge。'
+RETRY = '请自行关闭专用 Edge（包括后台窗口），确认退出后即可继续（界面会自动核对）；不要关闭日常 Edge。'
 
 
 @dataclasses.dataclass(frozen=True)

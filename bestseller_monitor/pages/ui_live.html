@@ -66,7 +66,10 @@
 <div class="wrap">
   <header>
     <h1>1688 畅销品监控 · 库存数据抓取</h1>
-    <button class="btn ghost sm" id="trialModeBtn">进入本机试采</button>
+    <div style="display:flex;gap:10px">
+      <button class="btn ghost sm" id="loginBrowserBtn">打开专用 Edge</button>
+      <button class="btn ghost sm" id="trialModeBtn">进入本机试采</button>
+    </div>
   </header>
   <div class="banner warn" id="collectionMode" role="status">正式采集</div>
 
@@ -80,7 +83,7 @@
 
   <!-- 开始 -->
   <div class="panel active" id="panel-start">
-    <div class="card"><button class="btn ghost" id="loginBrowserBtn">打开专用 Edge / 登录 1688</button> <button class="btn ghost" id="refreshBrowserBtn">刷新浏览器状态</button><p id="browserFacts"></p><p class="muted">专用数据目录独立于日常 Edge，不复制 Cookie。浏览器打开不代表账号已登录。登录后请自行关闭手动窗口，再刷新并明确开始采集。</p></div>
+    <div class="card"><p id="browserFacts"></p><p class="muted">专用数据目录独立于日常 Edge，不复制 Cookie。浏览器打开不代表账号已登录。登录后请自行关闭手动窗口，确认退出后再开始采集（界面会自动核对）。</p></div>
     <div class="card">
       <div class="grid" style="grid-template-columns:repeat(3,1fr)">
         <div class="stat"><div class="l">今日已抓取商品</div><div class="n" id="stProducts">0</div></div>
@@ -163,7 +166,7 @@
     <div class="card" id="runLoginCard">
       <b>暂停后处理登录</b>
       <p class="muted" style="margin:8px 0 0">需要手动登录或处理验证时，可在这里打开程序专用 Edge。请先自行关闭该窗口，确认专用目录已释放，再点「继续」——关闭窗口不会自动继续本轮。</p>
-      <div style="margin-top:12px"><button class="btn ghost" id="runLoginBrowserBtn">打开专用 Edge / 登录 1688</button></div>
+      <div style="margin-top:12px"><button class="btn ghost" id="runLoginBrowserBtn">打开专用 Edge</button></div>
       <p class="muted" id="runBrowserFacts" style="margin:10px 0 0"></p>
     </div>
   </div>
@@ -318,6 +321,8 @@
   function showTab(name) {
     updateSteps(name);
     document.querySelectorAll(".panel").forEach(p => p.classList.toggle("active", p.id === "panel-" + name));
+    // 页头的登录入口只属于开始页签（票 01）：过程页签/结果页签不显示，过程页用它自己的卡片。
+    $("loginBrowserBtn").style.display = name === "start" ? "" : "none";
   }
 
   // 取数排队：轮询、手动刷新、切回开始页、中止后的结果页都排进同一条链，
@@ -732,7 +737,6 @@
       if (r && !r.ok) showNotice(r.error);
       await refreshStart();
     };
-    $("refreshBrowserBtn").onclick = () => refreshStart();
     $("residueBtn").onclick = retryCleanup;
     $("startBtn").onclick = () => startRun();
     $("retryPrepBtn").onclick = retryPrepare;

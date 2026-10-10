@@ -67,8 +67,66 @@ class ManualEdgeTests(unittest.TestCase):
         self.assertEqual(view['summary']['rounds'], 0)
         self.assertEqual(view['browser']['profile'], str(self.tmp/'profiles/account1_edge'))
         self.assertNotIn('账号已登录', page.locator('#browserFacts').inner_text())
-        page.click('#refreshBrowserBtn')
+        # 「刷新浏览器状态」按钮已删（票 01）：等价的读一次数直接走 refreshStart()。
+        page.evaluate('refreshStart()')
         self.assertEqual(len(self.os.starts), 1)
+
+    # ---------- 票 01：入口收拢（删刷新按钮、两页改名、上移页头） ----------
+    def test_start_tab_header_carries_the_renamed_entry_left_of_the_trial_switch(self):
+        page = self.page()
+        self.assertEqual(page.eval_on_selector_all('header button', 'els => els.map(e => e.id)'),
+                         ['loginBrowserBtn', 'trialModeBtn'],
+                         '开始页页头右侧依序为「打开专用 Edge」「进入本机试采」')
+        self.assertEqual(page.locator('#loginBrowserBtn').inner_text().strip(), '打开专用 Edge')
+        self.assertTrue(page.locator('#loginBrowserBtn').is_visible())
+
+    def test_start_card_keeps_only_facts_and_copy_without_any_refresh_control(self):
+        page = self.page()
+        self.assertTrue(page.evaluate("document.getElementById('refreshBrowserBtn') === null"),
+                        '「刷新浏览器状态」按钮的 HTML 已随票 01 删除')
+        self.assertTrue(page.evaluate(
+            "document.querySelector('#panel-start #loginBrowserBtn') === null"),
+            '登录入口已上移页头：开始卡内不再有登录入口按钮')
+
+    def test_header_login_entry_is_hidden_on_non_start_tabs_and_run_card_keeps_its_own(self):
+        page = self.page()
+        self.assertTrue(page.evaluate("document.querySelector('header #loginBrowserBtn') !== null"),
+                        '入口应挂在页头（只随页签显隐，不再随开始卡一起消失）')
+        self.assertTrue(page.locator('#loginBrowserBtn').is_visible())
+        page.evaluate("showTab('run')")
+        self.assertFalse(page.locator('#loginBrowserBtn').is_visible(), '过程页签不显示页头入口')
+        self.assertEqual(page.locator('#runLoginBrowserBtn').text_content().strip(),
+                         '打开专用 Edge', '过程页自己的登录入口照旧显示，仅改名')
+        page.evaluate("showTab('result')")
+        self.assertFalse(page.locator('#loginBrowserBtn').is_visible(), '结果页签不显示页头入口')
+        page.evaluate("showTab('start')")
+        self.assertTrue(page.locator('#loginBrowserBtn').is_visible(), '回到开始页签恢复显示')
+
+    def test_facts_and_copy_switch_to_automatic_recheck_wording(self):
+        from bestseller_monitor.dedicated_browser import RETRY
+        self.assertNotIn('刷新', RETRY, 'retry 文案不再指向已删除的刷新按钮')
+        self.assertIn('自动核对', RETRY, 'retry 文案改为自动核对口径（开始页与过程页同源显示）')
+        page = self.page()
+        facts = page.locator('#browserFacts').inner_text()
+        self.assertIn('自动核对', facts, '开始页事实行带着新的 retry 文案')
+        self.assertNotIn('刷新', facts)
+        self.assertNotIn('刷新', page.locator('#panel-start').inner_text(),
+                         '开始卡说明句不再写「再刷新并明确开始采集」')
+
+    def test_fact_rechecks_stay_automatic_on_tab_return_and_trial_switch(self):
+        # 删按钮不减少核对：进页取一次事实之外，切回开始页签、切换试采仍是自动取数时点（票 01）。
+        page = self.page()
+        self.assertIn('专用目录未占用', page.locator('#browserFacts').inner_text())
+        page.evaluate("showTab('run')")
+        self.os.state = 'occupied'
+        page.evaluate("switchTab('start')")
+        self.assertIn('专用目录仍被浏览器占用', page.locator('#browserFacts').inner_text())
+        self.os.state = 'free'
+        page.click('#trialModeBtn')
+        page.wait_for_function(
+            "document.querySelector('#browserFacts').textContent.includes('专用目录未占用')")
+        self.assertIn('本机试采', page.locator('#collectionMode').inner_text())
+
     def store_plan(self):
         from contextlib import closing
         from bestseller_monitor.db import Database
