@@ -91,3 +91,20 @@ Q1–Q8 及最终运行态/interface、新测试 seam 均已确认；grill、to-
 不是交付验收或生产事故记录。记录见 [prep-owner 访谈与取证](../design/prep-owner-interview-2026-10-09.md)。
 `#page-contract` 及其余候选状态不变；不重开已完成的 `#elapsed`、handled-predicate 或店铺阶段。
 归档 HTML 未修改。
+
+## 2026-10-10：prep-owner 01 实施并验收（02/03 未授权）
+
+用户授权仅实施 01（「接手 prep-owner 票01 实施，范围仅票01」）。统一准备接纳、30 秒单调预算、
+按运行等待与「先落定后扫描」编排已收进新 module `bestseller_monitor/preparation.py`；
+Api/main/views 改为消费同一份不可变快照，main 的私有线程、Event 与预算编排删除。
+start_run 的确认期收紧、当前结果/历史/闸门页语义及跨入口矩阵属 02/03，未实施。
+
+验收：独立只读双轴审查（Standards 0 硬违规、Spec 0 缺主项/0 scope creep；整改后增量复审
+双轴通过）；deletion test 通过（调用方零残留、深模块成立）；隔离副本分段全量 1972/1972 项、
+7/7 段 OK、计数对账一致（1103.2s、退出码 0、不带 -f）。受测快照 `563dfaf`（分支
+`claude/prep-owner-01`，尚未并入 main）。交付记录见
+[01 交付记录](../design/prep-owner-01-delivery-2026-10-10.md)，逐项证据在
+`.scratch/logs/tickets/prep-owner/01/20261010-implement/`。
+
+`#prep-owner` 整项不关闭（02/03 未授权、未实施）；`#page-contract` 及其余挂起候选状态不变；
+归档 HTML 未修改。
