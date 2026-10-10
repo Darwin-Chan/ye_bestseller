@@ -108,3 +108,22 @@ start_run 的确认期收紧、当前结果/历史/闸门页语义及跨入口�
 
 `#prep-owner` 整项不关闭（02/03 未授权、未实施）；`#page-contract` 及其余挂起候选状态不变；
 归档 HTML 未修改。
+
+## 2026-10-10：prep-owner 02 实施并验收（03 未授权）
+
+用户授权仅实施 02（「接手 prep-owner 票02 实施，范围仅票02」）。「确认期不许开轮」与
+「当前结局、历史结果、开轮闸门」的解释统一收进 `plan_step.start_plan` / `StartPlan`
+（`history` 只喂原有跨周提示；`locked` / `lock_reason` 供开始页与 `start_run` 共用同一判定）；
+`start_run` 确认期内与开始页一致拒绝、预算后按本地计划降级、无则守闸门；`views.start_view`
+只转交事实，JSON 键形状不变。旧成功回填与调用方重复解释结局/预算的知识删除（deletion test
+通过）。模式切换/迟到扫描跨入口矩阵与 elapsed/关窗整项回归（03）未实施。
+
+验收：独立只读双轴审查（Standards 0 硬违规、2 条判断题保留；Spec 0 scope creep，1 实缺 +
+1 次要全部整改，增量复审双轴通过）；deletion test 通过；隔离副本分段全量 **1986/1986** 项、
+7/7 段 OK、计数对账一致（1014.4s、退出码 0、不带 -f）。受测快照 `eacf17f`（分支
+`claude/prep-owner-01`，尚未并入 main）。交付记录见
+[02 交付记录](../design/prep-owner-02-delivery-2026-10-10.md)，逐项证据在
+`.scratch/logs/tickets/prep-owner/02/20261010-implement/`。
+
+`#prep-owner` 整项不关闭（03 未授权、未实施）；`#page-contract` 及其余挂起候选状态不变；
+归档 HTML 未修改。
