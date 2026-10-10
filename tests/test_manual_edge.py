@@ -134,7 +134,14 @@ class ManualEdgeTests(unittest.TestCase):
 
     def test_fact_rechecks_stay_automatic_on_tab_return_and_trial_switch(self):
         # 删按钮/删卡不减少核对（票 01/04）：进页取一次事实之外，切回开始页签、
-        # 切换试采仍是自动取数时点。观测面从事实行换成取数计数＋按钮悬浮提示。
+        # 切换模式仍是自动取数时点。观测面从事实行换成取数计数＋按钮悬浮提示。
+        # 合并适配（2026-10-11，local-trial-merge-only）：试采入口已按 ADR-0049 修订段
+        # 收窄为纯汇总机功能（trialModeBtn 只在 merge_only 显示），且纯汇总机正式态
+        # 入口自带置灰（另一契约，见 test_role_disallows_entry_api_and_page）；本用例在
+        # 试采态起步观测「切回正式仍自动取数」，三个核对时点断言不变。
+        self.config.write_text(self.config.read_text('utf-8').replace('role = "collector"','role = "merge_only"'),'utf-8')
+        self.api = gui.Api(config_file=self.config, browser_runtime=self.os)
+        self.assertTrue(self.api.set_local_trial(True)['ok'])
         calls = []
         real = self.api.get_start
         self.api.get_start = lambda *a: (calls.append(1), real(*a))[1]
@@ -152,10 +159,9 @@ class ManualEdgeTests(unittest.TestCase):
         before = len(calls)
         page.click('#trialModeBtn')
         page.wait_for_function(
-            "document.querySelector('#loginBrowserBtn').title.includes('专用目录未占用')",
-            timeout=5000)
-        self.assertEqual(len(calls), before + 1, '切换试采自动取一次')
-        self.assertIn('本机试采', page.locator('#collectionMode').inner_text())
+            "document.querySelector('#loginBrowserBtn').title.includes('纯汇总机')", timeout=5000)
+        self.assertEqual(len(calls), before + 1, '切换模式自动取一次')
+        self.assertIn('正式采集', page.locator('#collectionMode').inner_text())
 
     # ---------- 票 02：检测/配置类不预置灰，点击报因（页面内单按钮信息框） ----------
     def test_occupied_buttons_stay_lit_and_the_open_click_reports_the_existing_window(self):
