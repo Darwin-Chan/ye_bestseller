@@ -33,6 +33,8 @@ window.pywebview = { platform: "edgechromium", api: {
       shops: SHOPS, total_shops: 2, start_hint: window.__crawler ? "采集进程正在跑" : "",
       plan_note: window.__planNote || "",
       crawler: window.__crawler || null,
+      ...(window.__collectionLabel ? {collection_label: window.__collectionLabel} : {}),
+      ...(window.__trialAvailable !== undefined ? {trial_available: window.__trialAvailable} : {}),
     };
   },
   get_run: async () => {
@@ -127,7 +129,8 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
 
     def open_page(self, fail_on: str | None = None, message: str | None = None,
                   start_error: str | None = None, crawler: dict | None = None,
-                  plan_note: str | None = None):
+                  plan_note: str | None = None, collection_label: str | None = None,
+                  trial_available: bool | None = None):
         """加载真实页面，注入一个会按需抛错、按需拒绝启动的 pywebview 桥。"""
         page = self.browser.new_page(viewport={"width": 1100, "height": 1000})
         if fail_on:
@@ -140,6 +143,12 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
             page.add_init_script(f"window.__crawler = {crawler!r};")
         if plan_note is not None:
             page.add_init_script(f"window.__planNote = {plan_note!r};")
+        if collection_label is not None:
+            page.add_init_script(f"window.__collectionLabel = {collection_label!r};")
+        if trial_available is not None:
+            # JS 的布尔字面量：Python 的 True/False 在页面里不是真值。
+            page.add_init_script(
+                f"window.__trialAvailable = {'true' if trial_available else 'false'};")
         page.add_init_script(MOCK_API)
         page.goto(HTML_URI)
         return page
@@ -255,6 +264,25 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
 
             self.assertIn("已有采集进程在运行", page.inner_text(ERROR_BOX))
             self.assertEqual(self.active_tab(page), "开始", "被拒绝时不该停在结果页")
+        finally:
+            page.close()
+
+    def test_the_trial_entry_appears_only_where_the_machine_offers_it(self):
+        """试采入口按机器角色投影：纯汇总机看得见，采集机上页面里没有它（不是灰着）。"""
+        page = self.open_page(trial_available=True, collection_label="正式采集")
+        try:
+            page.wait_for_selector("#trialModeBtn", state="visible", timeout=5000)
+            self.assertEqual(page.inner_text("#trialModeBtn"), "进入本机试采")
+        finally:
+            page.close()
+        page = self.open_page(trial_available=False, collection_label="正式采集·渲染标记")
+        try:
+            # 事实行按注入的标签渲染出来 = renderCollectionMode 真的跑过，
+            # 这样「不可见」不会只是「还没渲染」的假象。
+            page.wait_for_function(
+                "() => document.querySelector('#collectionMode').textContent.trim() === '正式采集·渲染标记'",
+                timeout=5000)
+            self.assertFalse(page.locator("#trialModeBtn").is_visible())
         finally:
             page.close()
 

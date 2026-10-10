@@ -743,7 +743,11 @@ class GuiPlanWiringTests(unittest.TestCase):
 
 class PrepContextIsolationTests(unittest.TestCase):
     """准备与扫描固定发起时的上下文（D05 回归）；票03 起同放跨入口矩阵：
-    迟到工作归属（A/B）、模式切换与旧扫描、试采隔离与恢复、main 预算耗尽建窗。"""
+    迟到工作归属（A/B）、模式切换与旧扫描、试采隔离与恢复、main 预算耗尽建窗。
+
+    2026-10-11 试采收窄为纯汇总机（ADR-0049 修订段）后：采集机根本进不了试采，
+    切试采的用例走 `merge_only()` 的纯汇总机夹具；原来那两条「采集机上切试采 +
+    迟到正式扫描」随场景一并消失，改写成同接缝的角色门禁护栏。"""
 
     NOW = GuiPlanWiringTests.NOW
 
@@ -766,7 +770,15 @@ class PrepContextIsolationTests(unittest.TestCase):
         """把本类固定 NOW 那一周（W39）的计划落进本机计划表。"""
         store_plan_week(self.cfg.db_file, "2026-09-21", *assignments)
 
-    def test_a_late_scan_keeps_the_original_connection_capability(self):
+    def merge_only(self):
+        """成立切试采用例的夹具：试采只对纯汇总机开放，而本类其余用例仍按采集机
+        跑它们的正式准备语义（纯汇总机没有那份准备，见 ADR-0049 修订段）。"""
+        self.config.write_text(MINIMAL_CONFIG + 'role = "merge_only"\n', encoding="utf-8")
+        self.cfg = Config.from_file(self.config, root=self.root)
+
+    def test_a_refused_trial_entry_leaves_the_formal_scan_on_its_own_connection(self):
+        """D05 回归 + 角色门禁：采集机上切试采被拒（不换库、不建试采空间），
+        发起时挂着的正式扫描仍用它那一份连接收尾。"""
         gate = GatedConnection(self.cfg.db_file, hold={1, 2})
         runtime = ControlledRuntime(auto_start=True)
         api = self.api(prep_runtime=runtime, open_conn=gate)
@@ -776,17 +788,19 @@ class PrepContextIsolationTests(unittest.TestCase):
         self.assertTrue(gate.wait_entered(2))
         self.assertFalse(api.prepare_running(), "落定即释放准备限制")
 
-        opened = []
-        with patch.object(gui, "connect",
-                          side_effect=lambda path: opened.append(path) or connect(path)):
-            self.assertTrue(api.set_local_trial(True)["ok"])
-            gate.release_call(2)                         # 放行迟到扫描
-            thread.join(5)
+        refused = api.set_local_trial(True)
+        self.assertFalse(refused["ok"], "采集机没有本机试采")
+        self.assertIn("只在纯汇总机提供", refused["error"])
+        self.assertEqual(api.cfg.db_file, self.cfg.db_file, "被拒的切换不换库")
+        self.assertFalse((self.root / "local-trial").exists(), "被拒的切换不建试采空间")
+
+        gate.release_call(2)                             # 放行迟到扫描
+        thread.join(5)
 
         self.assertFalse(thread.is_alive())
         self.assertIs(out["value"].status, plan_step.PrepStatus.REFUSED)
-        self.assertEqual(opened, [], "迟到扫描没借用切换后的试采连接")
         self.assertEqual(gate.calls, 2, "准备与扫描都走发起时注入的连接能力")
+        self.assertFalse((self.root / "local-trial").exists())
 
     def test_the_window_waits_for_the_preparation_to_settle(self):
         """真实 main + 真实 Api：准备卡住不建窗；落定后建窗，挂起的扫描不占开窗。"""
@@ -837,10 +851,12 @@ class PrepContextIsolationTests(unittest.TestCase):
 
     def test_returning_to_the_formal_context_restores_the_same_preparation_facts(self):
         """切试采走 bypass、不消费正式结果；切回来恢复**同一个**正式事实，不自动重跑。"""
+        self.merge_only()
         gate = GatedConnection(self.cfg.db_file)
         runtime = ControlledRuntime(auto_start=True)
         api = self.api(prep_runtime=runtime, open_conn=gate)
-        self.assertIs(api.prepare().status, plan_step.PrepStatus.REFUSED)
+        # 纯汇总机的正式准备是「跳过」而不是「被闸门拒绝」（采集机才是后者）。
+        self.assertIs(api.prepare().status, plan_step.PrepStatus.SKIPPED_MERGE_ONLY)
         before = api.get_start()["plan_note"]
 
         self.assertTrue(api.set_local_trial(True)["ok"])
@@ -893,45 +909,31 @@ class PrepContextIsolationTests(unittest.TestCase):
         self.assertFalse(api.prepare_running())
         self.assertFalse(api.get_start()["plan_waiting"])
 
-    def test_a_late_scan_after_a_mode_switch_never_writes_the_current_facts(self):
-        """票03 跨入口矩阵：落定后切试采，旧扫描收尾后试采开始页的取数与切回后的
-        正式事实都不被扰动（旧扫描仍用原正式连接由 D05 回归继续钉住）。"""
-        gate = GatedConnection(self.cfg.db_file, hold={1, 2})
+    def test_a_refused_trial_entry_leaves_the_formal_context_untouched(self):
+        """采集机上从页面或直接调 API 进试采都被拒：库、开始页取数、准备持有者
+        一律不动，也不落任何试采存储——被拒之后这台机器仍是正式采集上下文。"""
         runtime = ControlledRuntime(auto_start=True)
-        api = self.api(prep_runtime=runtime, open_conn=gate)
-        thread, out = start_waiting(api.prepare)
-        self.assertTrue(gate.wait_entered(1), "准备卡在开库")
-        gate.release_call(1)                             # 落定；扫描卡在第 2 次连接
-        self.assertTrue(gate.wait_entered(2))
+        api = self.api(prep_runtime=runtime)
         formal_before = api.get_start()
-        self.assertTrue(formal_before["plan_locked"], "这次没确认到计划：闸门关着")
 
-        self.assertTrue(api.set_local_trial(True)["ok"], "落定后可以切模式")
-        trial_before = api.get_start()
-        self.assertFalse(trial_before["plan_gate"], "试采页不看正式闸门")
-        self.assertFalse(trial_before["plan_waiting"], "正式的在跑事实不泄进试采页")
+        refused = api.set_local_trial(True)
+        self.assertFalse(refused["ok"])
+        self.assertIn("只在纯汇总机提供", refused["error"])
+        self.assertIs(api.cfg, self.cfg)
+        self.assertEqual(api.get_start(), formal_before, "被拒不改开始页取数")
+        self.assertIs(api.prepare().status, plan_step.PrepStatus.REFUSED,
+                      "被拒之后仍是正式准备（不是试采旁路）")
+        self.assertFalse((self.root / "local-trial").exists())
 
-        gate.release_call(2)                             # 旧扫描收尾（原正式上下文）
-        thread.join(5)
-        self.assertFalse(thread.is_alive())
-
-        self.assertEqual(api.get_start(), trial_before, "旧扫描收尾不改动试采开始页的取数")
-        self.assertTrue(api.set_local_trial(False)["ok"])
-        self.assertEqual(api.get_start(), formal_before, "回正式恢复原事实")
-        self.assertIs(out["value"].status, plan_step.PrepStatus.REFUSED)
-
-    def test_the_trial_entries_leave_no_formal_side_effects_and_the_return_reads_cross_week(self):
+    def test_the_trial_entries_leave_no_formal_side_effects(self):
         """票03 跨入口矩阵：试采下 prepare/retry/开窗三个入口零正式连接、零派发、
-        零计划副作用；回正式恢复原事实并按跨周规则解释，不自动准备、不复用。"""
-        self.store_plan(("A01", "m1", 3))
-        moment = {"now": "2025-12-29T04:00:00+00:00"}    # 北京时间 2025-12-29：2026-W01
+        零计划副作用；回正式恢复原事实，不自动准备、不复用。"""
+        self.merge_only()
         gate = GatedConnection(self.cfg.db_file)
         runtime = ControlledRuntime(auto_start=True)
-        api = self.api(now=lambda: moment["now"], open_conn=gate, prep_runtime=runtime)
-        self.assertEqual(api.prepare().week, "2026-W01")  # 这次确认的是 W01
-        moment["now"] = self.NOW                          # 回到 W39：窗口跨周
+        api = self.api(open_conn=gate, prep_runtime=runtime)
+        self.assertIs(api.prepare().status, plan_step.PrepStatus.SKIPPED_MERGE_ONLY)
         formal_before = api.get_start()
-        self.assertIn("本周已变", formal_before["plan_note"])
         calls, started = gate.calls, runtime.started
 
         with patch("bestseller_monitor.plan_step.prepare_week") as prepare:
@@ -949,10 +951,7 @@ class PrepContextIsolationTests(unittest.TestCase):
 
         self.assertTrue(api.set_local_trial(False)["ok"])
         self.assertEqual(runtime.started, started, "回正式不自动准备")
-        self.assertEqual(api.get_start(), formal_before, "回正式恢复原事实（含跨周提示）")
-        with patch.object(Api, "_spawn_crawler") as spawn:
-            self.assertTrue(api.start_run(["A01"])["ok"], "恢复后按降级规则照常开轮")
-            spawn.assert_called_once()
+        self.assertEqual(api.get_start(), formal_before, "回正式恢复原事实")
 
     def test_the_window_opens_when_the_budget_runs_out_and_the_page_follows_the_settlement(self):
         """票03 跨入口矩阵：预算耗尽不拦建窗（后台继续）；本地有本周计划，

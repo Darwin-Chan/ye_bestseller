@@ -20,9 +20,10 @@
 纯汇总机（`machine.role = merge_only`）默认不做正式采集：在碰采集清单与库之前就明确拒绝
 （退出码 2，文案 `plan_step.MERGE_ONLY_REFUSAL`）——这台机器上跑交换台。
 
-显式 `--local-trial` 不改角色：不准备共享计划，从本机启用清单选店，写入
+显式 `--local-trial` 只在纯汇总机上可用，且不改角色：不准备共享计划，从本机启用清单选店，写入
 <data_dir 的上一级>/local-trial/{data,logs}，不进入正式分析或共享。沿用自己的
-轮次与历史，同日已采商品可能跳过；正式判断集共享仍照常。GUI 入口由另一票交付。
+轮次与历史，同日已采商品可能跳过；正式判断集共享仍照常。采集机敲这个参数会被明确拒绝
+（退出码 2）：试采是纯汇总机的补偿手段，采集机要试采请走转角色（见 ADR-0049 的修订段）。
 
 `--shops` 是人工冒烟的清单覆盖：正式采集的开轮前准备把它当作「本机清单副本」与计划库比对
 （两边都变会停下不猜，单边变化可能被推送）——拿临时清单冒烟时留意这一点。
@@ -50,7 +51,7 @@ from bestseller_monitor.pipeline import (  # noqa: E402
     run_round,
 )
 from bestseller_monitor.collection_context import (  # noqa: E402
-    TrialUnavailable, for_collection, prepare_trial_storage, trial_shops,
+    TrialRoleRefused, TrialUnavailable, for_collection, prepare_trial_storage, trial_shops,
 )
 from bestseller_monitor.rounds import ScopeMismatch  # noqa: E402
 from bestseller_monitor import plan_step, rounds, single_instance, sound  # noqa: E402
@@ -209,6 +210,9 @@ def _run_local_trial(formal: Config, args: argparse.Namespace) -> int:
                   "沿用试采历史，同日已采商品可能跳过。\n")
             cfg.ensure_dirs()
             return _run_collection(cfg, shops, new_intent=args.new_round_intent, resume_intent=args.resume_round_intent)
+    except TrialRoleRefused as exc:
+        print(f"\n>>> {exc}\n>>> 正式采集照常可用；--local-trial 不改变机器角色。\n")
+        return EXIT_NOT_DONE
     except (TrialUnavailable, OSError, ValueError, sqlite3.Error) as exc:
         print(f"\n>>> 本机试采无法开始：{exc}；请检查本机清单与隔离空间，不会回退到正式数据。\n")
         return EXIT_NOT_DONE

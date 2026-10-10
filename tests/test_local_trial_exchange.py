@@ -1,15 +1,13 @@
 """Trial history cannot enter formal analysis or actual local Git/image outputs."""
-from browser_facts import FreeBrowserOS
 import contextlib
 import gzip
 import sqlite3
 import unittest
 from unittest.mock import patch
 
-import gui
 from bestseller_monitor import export
 from bestseller_monitor.analysis import AnalysisConfig, AnalysisService
-from bestseller_monitor.collection_context import for_collection
+from bestseller_monitor.collection_context import for_collection, prepare_trial_storage
 from bestseller_monitor.config import Config, ROLE_MERGE_ONLY
 from bestseller_monitor.db import connect, Database
 from bestseller_monitor.image_store import image_key
@@ -20,6 +18,12 @@ from test_exchange import ConsoleWorld, DAYS, WEEK
 
 class LocalTrialExchangeTests(unittest.TestCase):
     def seed_trial(self, world):
+        """在本机落一份试采数据，供下方两条「正式侧看不见试采」的断言使用。
+
+        试采收窄为纯汇总机之后（ADR-0049 修订段），采集机已经进不了试采入口，
+        所以这里的试采现场按库层口径直接构造：用例要的是「磁盘上存在试采库与试采
+        资产」这一个事实，好让导出与汇总继续证明它们不会把试采资产带出去。
+        """
         root = world.box.tmp
         config = root / "config/config.toml"
         config.parent.mkdir(exist_ok=True)
@@ -29,10 +33,11 @@ class LocalTrialExchangeTests(unittest.TestCase):
             analysis_config=world.analysis_path)
         cfg.shop_csv.write_text("shop_key,shop_name,shop_url,pages,active,offer_list_url\n"
                                 "TRIAL,测试店,https://trial.example/,3,1,\n", encoding="utf-8")
-        api = gui.Api(browser_runtime=FreeBrowserOS(), cfg=cfg, config_file=config)
-        self.assertTrue(api.set_local_trial(True)["ok"])
-        trial = api.cfg
-        self.assertEqual(trial.db_file, for_collection(cfg, local_trial=True, config_file=config).db_file)
+        # 试采路径由 for_collection 一处算出（纯汇总机口径），不在测试里另抄一份布局。
+        trial = for_collection(cfg.replace(role=ROLE_MERGE_ONLY), local_trial=True, config_file=config)
+        prepare_trial_storage(trial)
+        self.assertEqual(trial.db_file, for_collection(
+            cfg.replace(role=ROLE_MERGE_ONLY), local_trial=True, config_file=config).db_file)
         with contextlib.closing(connect(trial.db_file)) as conn:
             db = Database(conn)
             for day, stock in [("2026-09-14", 9), ("2026-09-15", 8)]:

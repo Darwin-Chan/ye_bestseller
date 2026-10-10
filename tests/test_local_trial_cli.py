@@ -14,7 +14,7 @@ import run
 from bestseller_monitor import browser_pw, guard, single_instance, click_listing, product_images, rounds, stop_request
 from bestseller_monitor.config import Config
 from bestseller_monitor.db import connect, Database, cst_date
-from bestseller_monitor.collection_context import for_collection, TrialUnavailable
+from bestseller_monitor.collection_context import for_collection, TrialRoleRefused, TrialUnavailable
 from helpers import isolated_locks, FakeCard, ScriptedListing, product_picture, submit_offer
 from test_run_cli import MINIMAL_CONFIG
 from frozen_clock import frozen_clock
@@ -68,6 +68,30 @@ class LocalTrialCliTests(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT count(*) FROM plan_deviations").fetchone()[0], 0)
         self.assertEqual(conn.execute("SELECT count(*) FROM weekly_plan").fetchone()[0], 0)
         self.assertTrue((self.root / "local-trial/logs/run.log").exists())
+
+    def test_trial_is_only_available_on_a_merge_only_machine(self):
+        """采集机没有本机试采：库层先拒绝，命令行说清原因，且不碰任何存储。"""
+        collector = self.root / "collector.toml"
+        collector.write_text(MINIMAL_CONFIG, encoding="utf-8")  # 省略 role 即采集机
+        formal = Config.from_file(collector, root=self.root)
+        self.assertEqual(formal.role, "collector")
+        with self.assertRaises(TrialRoleRefused):
+            for_collection(formal, local_trial=True)
+        self.assertIs(for_collection(formal, local_trial=False), formal)
+        out = io.StringIO()
+        with patch.object(run, "ROOT", self.root), \
+                patch.object(sys, "argv", ["run.py", "--config", str(collector), "--local-trial"]), \
+                isolated_locks(), \
+                contextlib.redirect_stdout(out):
+            code = run.main()
+        text = out.getvalue()
+        self.assertEqual(code, 2)
+        self.assertIn("只在纯汇总机提供", text)
+        self.assertIn("采集机", text)
+        self.assertNotIn("请检查本机清单与隔离空间", text)
+        self.assertEqual(self.sessions, [])
+        self.assertFalse((self.root / "local-trial").exists())
+        self.assertFalse((self.root / "bestseller.db").exists())
 
     def test_default_merge_only_and_ignore_plan_still_refuse_without_storage(self):
         for args in [(), ("--ignore-plan",)]:

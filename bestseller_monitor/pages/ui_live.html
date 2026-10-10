@@ -66,7 +66,8 @@
 <div class="wrap">
   <header>
     <h1>1688 畅销品监控 · 库存数据抓取</h1>
-    <button class="btn ghost sm" id="trialModeBtn">进入本机试采</button>
+    <!-- 试采是纯汇总机的功能（ADR-0049 修订段）：默认收起，由后端按角色投影显隐 -->
+    <button class="btn ghost sm" id="trialModeBtn" hidden>进入本机试采</button>
   </header>
   <div class="banner warn" id="collectionMode" role="status">正式采集</div>
 
@@ -274,6 +275,7 @@
     $("collectionMode").textContent = d.collection_label
       + (localTrial ? " · 历史保留；同日已采商品可能跳过。正式交换与判断集共享不受影响。" : "");
     $("trialModeBtn").textContent = localTrial ? "返回正式采集" : "进入本机试采";
+    $("trialModeBtn").hidden = !d.trial_available;
     $("trialModeBtn").disabled = !!d.mode_switch_locked;
   }
   async function changeCollectionMode() {
