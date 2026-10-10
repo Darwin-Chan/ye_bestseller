@@ -1,10 +1,12 @@
 """Trial history cannot enter formal analysis or actual local Git/image outputs."""
+from browser_facts import FreeBrowserOS
 import contextlib
 import gzip
 import sqlite3
 import unittest
 from unittest.mock import patch
 
+import gui
 from bestseller_monitor import export
 from bestseller_monitor.analysis import AnalysisConfig, AnalysisService
 from bestseller_monitor.collection_context import for_collection, prepare_trial_storage
@@ -17,13 +19,8 @@ from test_exchange import ConsoleWorld, DAYS, WEEK
 
 
 class LocalTrialExchangeTests(unittest.TestCase):
-    def seed_trial(self, world):
-        """在本机落一份试采数据，供下方两条「正式侧看不见试采」的断言使用。
-
-        试采收窄为纯汇总机之后（ADR-0049 修订段），采集机已经进不了试采入口，
-        所以这里的试采现场按库层口径直接构造：用例要的是「磁盘上存在试采库与试采
-        资产」这一个事实，好让导出与汇总继续证明它们不会把试采资产带出去。
-        """
+    def local_config(self, world):
+        """这台世界的本机配置与清单（config.toml ＋ shops.csv），读成 Config 返回。"""
         root = world.box.tmp
         config = root / "config/config.toml"
         config.parent.mkdir(exist_ok=True)
@@ -33,16 +30,36 @@ class LocalTrialExchangeTests(unittest.TestCase):
             analysis_config=world.analysis_path)
         cfg.shop_csv.write_text("shop_key,shop_name,shop_url,pages,active,offer_list_url\n"
                                 "TRIAL,测试店,https://trial.example/,3,1,\n", encoding="utf-8")
+        return config, cfg
+
+    def seed_trial(self, world):
+        """在本机落一份试采数据，供下方两条「正式侧看不见试采」的断言使用。
+
+        试采收窄为纯汇总机之后（ADR-0049 修订段），采集机已经进不了试采入口，
+        所以这里的试采现场按库层口径直接构造：用例要的是「磁盘上存在试采库与试采
+        资产」这一个事实，好让导出与汇总继续证明它们不会把试采资产带出去。
+        """
+        config, cfg = self.local_config(world)
         # 试采路径由 for_collection 一处算出（纯汇总机口径），不在测试里另抄一份布局。
         trial = for_collection(cfg.replace(role=ROLE_MERGE_ONLY), local_trial=True, config_file=config)
         prepare_trial_storage(trial)
-        self.assertEqual(trial.db_file, for_collection(
-            cfg.replace(role=ROLE_MERGE_ONLY), local_trial=True, config_file=config).db_file)
         with contextlib.closing(connect(trial.db_file)) as conn:
             db = Database(conn)
             for day, stock in [("2026-09-14", 9), ("2026-09-15", 8)]:
                 submit_offer(db, "99001", day, stock, name="trial-only", shop_key="TRIAL", color="green")
         return trial
+
+    def test_a_collector_machine_cannot_enter_the_trial_entry(self):
+        """采集机进不了试采入口——这正是上面 seed_trial 只能按库层口径构造现场的原因；
+        入口那半的回归由 CLI 与界面两处用例盯着，这里钉的是本文件自己的前提。"""
+        world = ConsoleWorld(self)
+        config, cfg = self.local_config(world)
+        api = gui.Api(browser_runtime=FreeBrowserOS(), cfg=cfg, config_file=config)
+        refused = api.set_local_trial(True)
+        self.assertFalse(refused["ok"])
+        self.assertIn("只在纯汇总机提供", refused["error"])
+        self.assertEqual(api.cfg.db_file, world.db_path)
+        self.assertFalse((world.box.tmp / "local-trial").exists())
 
     def test_merge_only_still_merges_and_shares_formal_judgments_with_trial_history(self):
         world = ConsoleWorld(self, machine_id="m4", role=ROLE_MERGE_ONLY)
