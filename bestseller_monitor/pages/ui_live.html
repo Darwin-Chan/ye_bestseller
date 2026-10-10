@@ -68,6 +68,7 @@
     <h1>1688 畅销品监控 · 库存数据抓取</h1>
     <div style="display:flex;gap:10px">
       <button class="btn ghost sm" id="loginBrowserBtn">打开专用 Edge</button>
+      <button class="btn ghost sm" id="runLoginBrowserBtn" style="display:none">打开专用 Edge</button>
       <button class="btn ghost sm" id="trialModeBtn">进入本机试采</button>
     </div>
   </header>
@@ -83,7 +84,6 @@
 
   <!-- 开始 -->
   <div class="panel active" id="panel-start">
-    <div class="card"><p id="browserFacts"></p><p class="muted">专用数据目录独立于日常 Edge，不复制 Cookie。浏览器打开不代表账号已登录。登录后请自行关闭手动窗口，确认退出后再开始采集（界面会自动核对）。</p></div>
     <div class="card">
       <div class="grid" style="grid-template-columns:repeat(3,1fr)">
         <div class="stat"><div class="l">今日已抓取商品</div><div class="n" id="stProducts">0</div></div>
@@ -159,15 +159,8 @@
       <div style="margin-top:16px;text-align:right;display:flex;gap:10px;justify-content:flex-end">
         <button class="btn ghost" id="resumeBtn" style="display:none">继续</button>
         <button class="btn ghost" id="pauseBtn">暂停本轮</button>
-        <button class="btn ghost" id="changeScopeBtn">改范围（中止后重选）</button>
         <button class="btn danger" id="abortBtn">中止本轮（放弃）</button>
       </div>
-    </div>
-    <div class="card" id="runLoginCard">
-      <b>暂停后处理登录</b>
-      <p class="muted" style="margin:8px 0 0">需要手动登录或处理验证时，可在这里打开程序专用 Edge。请先自行关闭该窗口，确认专用目录已释放，再点「继续」——关闭窗口不会自动继续本轮。</p>
-      <div style="margin-top:12px"><button class="btn ghost" id="runLoginBrowserBtn">打开专用 Edge</button></div>
-      <p class="muted" id="runBrowserFacts" style="margin:10px 0 0"></p>
     </div>
   </div>
 
@@ -236,6 +229,9 @@
   let resStopTimer = null;
   // 串起取数：同一时刻至多一条在途刷新（IS-38）。
   let tickChain = Promise.resolve();
+  // 当前页签与「过程页本轮次是否在场」：页头两枚登录入口同槽互斥显隐的口径（票 04）。
+  let currentTab = "start";
+  let runHasRound = false;
 
   const $ = id => document.getElementById(id);
 
@@ -320,9 +316,15 @@
   }
   function showTab(name) {
     updateSteps(name);
+    currentTab = name;
     document.querySelectorAll(".panel").forEach(p => p.classList.toggle("active", p.id === "panel-" + name));
-    // 页头的登录入口只属于开始页签（票 01）：过程页签/结果页签不显示，过程页用它自己的卡片。
-    $("loginBrowserBtn").style.display = name === "start" ? "" : "none";
+    syncLoginEntries();
+  }
+  // 页头的登录入口（票 04）：开始版与过程版占同一槽位，按页签互斥显隐——
+  // 开始页签显开始版；过程页签有轮次（has_round）才显过程版；结果页签两版都不显。
+  function syncLoginEntries() {
+    $("loginBrowserBtn").style.display = currentTab === "start" ? "" : "none";
+    $("runLoginBrowserBtn").style.display = (currentTab === "run" && runHasRound) ? "" : "none";
   }
 
   // 取数排队：轮询、手动刷新、切回开始页、中止后的结果页都排进同一条链，
@@ -362,11 +364,15 @@
     const d = await callApi("get_start");
     if (!d) return;
     if (d.browser) {
-      const facts = "配置：" + d.browser.source + "；专用目录：" + d.browser.profile + "；" + d.browser.message;
-      $("browserFacts").textContent = facts + (d.login_refusal ? "（" + d.login_refusal + "）" : " " + d.browser.retry);
+      // 票 04 改动三：浏览器事实不再常驻页面（卡片已删）——配置来源、专用目录与
+      // 状态句折叠进悬浮提示两形；retry 尾句只活在点击信息框里，不进提示。
       // 票 02：检测/配置类不再预置灰——登录按钮唯一灰源是服务端拒绝（login_refusal）；
       // 「正在打开」的瞬时态也不置灰，防双开靠服务端 reserve_open 去重与 reused 返回。
-      $("loginBrowserBtn").disabled = !!d.login_refusal;
+      const btn = $("loginBrowserBtn");
+      btn.disabled = !!d.login_refusal;
+      btn.title = d.login_refusal
+        ? d.login_refusal + "；配置：" + d.browser.source + "；专用目录：" + d.browser.profile
+        : "配置：" + d.browser.source + "；专用目录：" + d.browser.profile + "；" + d.browser.message;
     }
     $("stProducts").textContent = d.ov.products.toLocaleString();
     $("stSkus").textContent = d.ov.skus.toLocaleString();
@@ -591,33 +597,36 @@
         ? "继续启动未成功：" + d.resume_error + "。原轮暂停资格保留，请明确点击继续重试。"
         : d.continue_gate
           ? "已暂停（轮次保留为「进行中」），但还不能继续：" + d.continue_gate
-          : "已暂停（轮次保留为「进行中」，点「继续」接着抓取本轮剩余任务）。";
-      // 暂停后手动处理登录（票 05）：明确暂停且收尾完成后同一入口可用；采集、
-      // 验证等待、停止或收尾中禁用并说明。目录没释放时「继续」也不给点。
-      $("runLoginCard").style.display = "block";
+            + "；关闭专用 Edge 窗口不会自动继续本轮。"
+          : "已暂停（轮次保留为「进行中」，点「继续」接着抓取本轮剩余任务；关闭专用 Edge 窗口不会自动继续本轮）。";
+      // 过程页登录入口（票 04：已上移页头、有轮次才显）：沿用票 02 的点击报因口径——
+      // 非检测类（忙/资格/服务端拒绝）置灰、原因挂悬浮提示；检测/配置类亮起、点击弹
+      // 信息框。有浏览器事实（明确暂停且收尾完成）时提示带配置来源与专用目录。
       if (d.browser) {
-        let facts = "配置：" + d.browser.source + "；专用目录：" + d.browser.profile + "；" + d.browser.message;
-        facts += d.login_refusal ? "（" + d.login_refusal + "）" : " " + d.browser.retry;
-        $("runBrowserFacts").textContent = facts;
+        $("runLoginBrowserBtn").title = d.login_refusal
+          ? d.login_refusal + "；配置：" + d.browser.source + "；专用目录：" + d.browser.profile
+          : "配置：" + d.browser.source + "；专用目录：" + d.browser.profile + "；" + d.browser.message;
       } else {
-        $("runBrowserFacts").textContent = d.login_refusal
-          || "先暂停本轮并等停止收尾完成，才能在这里打开专用 Edge 处理登录。";
+        $("runLoginBrowserBtn").title = d.login_refusal
+          || "先暂停本轮并等停止收尾完成，才能打开专用 Edge 处理登录。";
       }
-      $("runLoginBrowserBtn").disabled = !(d.browser && d.browser.can_open);
+      $("runLoginBrowserBtn").disabled = !!d.login_refusal;
       // 暂停态显示“继续”，运行态显示“暂停”；停止途中与无进程的遗留态都不给点。
+      // 票 04：「继续」can_resume 即显示、不再因 continue_gate 置灰——点击直调
+      // resume_run（服务端为权威检查），失败弹信息框给原样原因。
       $("resumeBtn").style.display = (!stopping && d.can_resume) ? "" : "none";
-      $("resumeBtn").disabled = !!d.continue_gate;
       $("pauseBtn").style.display = (!stopping && d.running && !d.can_resume) ? "" : "none";
-      $("changeScopeBtn").disabled = !d.can_abort;
       $("abortBtn").disabled = !d.can_abort;
+      runHasRound = true;
+      syncLoginEntries();
     } else {
       $("resumeBtn").style.display = "none";
       $("pauseBtn").style.display = "none";
       $("rUnfinished").style.display = "none";
-      $("runLoginCard").style.display = "none";
-      $("changeScopeBtn").disabled = true;
       $("abortBtn").disabled = true;
       $("rProgressLine").textContent = d.running ? "抓取进程正在启动…" : "本轮已结束，正在加载结果…";
+      runHasRound = false;
+      syncLoginEntries();
     }
 
     // 结束判定：确实没有窗口内的轮次、子进程结束且非暂停 -> 看结果。
@@ -640,21 +649,14 @@
   async function resumeRun() {
     const r = await callApi("resume_run");
     if (!r) return;
-    if (!r.ok) { alert(r.error || "继续失败"); return; }
+    // 票 04：服务端为权威检查；被拒时把原样原因放进单按钮信息框（不再用系统 alert）。
+    if (!r.ok) { showInfo({title: "暂时无法继续", sub: r.error || "继续失败"}); return; }
     startPolling();
   }
   // ---------- 确认弹窗 ----------
   // 一次只问一件事：默认文案是中止本轮；带 opts 时换成那件事的文案与动作
   // （如逃生口确认，spec §6 降级表最后一行）。
   let confirmAction = null;
-  let rangeChangeRound = null;
-  async function changeScope() {
-    const prepared = await callApi("prepare_abort");
-    if (!prepared || !prepared.ok) { if (prepared) showNotice(prepared.error); return; }
-    await openConfirm({title: "中止原轮并改变范围？",
-      sub: "原轮将结束且不能继续；已抓取数据保留。等待停止及收尾完成后，回开始页重新选店并明确开始新轮。",
-      action: () => doAbort(prepared.confirmation, true)});
-  }
   async function openConfirm(opts) {
     opts = opts || {};
     let action = opts.action;
@@ -682,13 +684,12 @@
     confirmAction = null;
     $("confirmModal").classList.add("show");
   }
-  async function doAbort(confirmation, changeRange = false, stayOnStart = false) {
+  async function doAbort(confirmation, stayOnStart = false) {
     const r = await callApi("confirm_abort", confirmation);
     if (!r || !r.ok) { if (r) showNotice(r.error); return; }
     // 收尾欠账未核清等事实要当场说清：请求成功不等于收尾成功。
     if (r.note) showNotice(r.note);
     if (stayOnStart) { stopPolling(); await refreshStart(); return; }
-    if (changeRange) rangeChangeRound = r.round_id;
     stopPolling();
     const res = await queued(() => callApi("get_result"));
     if (res && res.has_round) { switchTab("result"); renderResult(res); }
@@ -707,7 +708,7 @@
     await openConfirm({
       title: "确认中止此轮？",
       sub: where + "将结束且不能继续；已抓取数据保留。等待收尾完成后，需明确点击开始才能新建。",
-      action: () => doAbort(prepared.confirmation, false, true),
+      action: () => doAbort(prepared.confirmation, true),
     });
   }
 
@@ -723,7 +724,7 @@
       title: "确认重试收尾核验？",
       sub: "将按原采集的精确绑定核验并处理仍属于本次采集的浏览器；"
         + "无法核验时会保留欠账，不会误关日常 Edge。",
-      action: () => doAbort(prepared.confirmation, false, true),
+      action: () => doAbort(prepared.confirmation, true),
     });
   }
 
@@ -748,12 +749,9 @@
     if (stopping) $("resStopping").textContent = stoppingText(d);
     if (stopping) {
       if (!resStopTimer) resStopTimer = setTimeout(refreshResultStopping, POLL_MS);
-    } else {
-      if (resStopTimer) { clearTimeout(resStopTimer); resStopTimer = null; }
-      if (rangeChangeRound === d.round_id && d.reason) {
-        rangeChangeRound = null;
-        switchTab("start"); // only navigation: never starts a collector
-      }
+    } else if (resStopTimer) {
+      clearTimeout(resStopTimer);
+      resStopTimer = null;
     }
   }
 
@@ -768,33 +766,38 @@
     if (res && res.has_round) renderResult(res);
   }
 
+  // 手动打开专用 Edge（票 02/04，两页共用）：失败弹原样原因；`reused`（已在运行/
+  // 正在打开）弹「已有窗口」信息框——指向原窗口，绝不显示假的「已关闭」。
+  async function openManualBrowser(button, after) {
+    button.disabled = true;
+    const r = await callApi("open_login_browser");
+    if (r && !r.ok) {
+      showInfo({title: "无法打开专用 Edge", sub: r.error});
+    } else if (r && r.reused) {
+      const opening = !!(r.browser && r.browser.state === "opening");
+      showInfo({
+        title: opening ? "专用 Edge 正在打开" : "专用 Edge 已在运行",
+        sub: (opening
+          ? "请用即将出现的窗口完成登录；登录后请关闭它，"
+          : "请用原窗口完成登录；登录后请关闭它，") + after,
+      });
+    }
+    return r;
+  }
+
   // ---------- 初始化 ----------
   function init() {
     api = window.pywebview.api;
     // 事件处理器包一层：onclick 会把事件对象当第一个参数传进来，不能让它冒充参数
     $("trialModeBtn").onclick = changeCollectionMode;
     $("loginBrowserBtn").onclick = async () => {
-      $("loginBrowserBtn").disabled = true;
-      const r = await callApi("open_login_browser");
-      if (r && !r.ok) {
-        showInfo({title: "无法打开专用 Edge", sub: r.error});
-      } else if (r && r.reused) {
-        // 已在运行/正在打开（票 02）：指向原窗口，绝不显示假的「已关闭」。
-        const opening = !!(r.browser && r.browser.state === "opening");
-        showInfo({
-          title: opening ? "专用 Edge 正在打开" : "专用 Edge 已在运行",
-          sub: opening
-            ? "请用即将出现的窗口完成登录；登录后请关闭它，再开始采集（界面会自动核对）。"
-            : "请用原窗口完成登录；登录后请关闭它，再开始采集（界面会自动核对）。",
-        });
-      }
+      await openManualBrowser($("loginBrowserBtn"), "再开始采集（界面会自动核对）。");
       await refreshStart();
     };
     $("residueBtn").onclick = retryCleanup;
     $("startBtn").onclick = () => startRun();
     $("retryPrepBtn").onclick = retryPrepare;
     $("pauseBtn").onclick = pauseRun;
-    $("changeScopeBtn").onclick = changeScope;
     $("abortBtn").onclick = () => openConfirm();
     $("abortForeignBtn").onclick = () => openConfirm();
     $("confirmCancel").onclick = closeConfirm;
@@ -806,15 +809,14 @@
     };
     $("resumeBtn").onclick = resumeRun;
     $("runLoginBrowserBtn").onclick = async () => {
-      // 与开始页同一服务、同一条 API：重复点击不另开，占了就引导用现有窗口。
-      $("runLoginBrowserBtn").disabled = true;
-      const r = await callApi("open_login_browser");
-      if (r && !r.ok) showNotice(r.error);
+      // 与开始页同一服务、同一条 API（票 04）：点击报因同样走信息框，重复点击不另开。
+      await openManualBrowser($("runLoginBrowserBtn"), "再点「继续」接着抓取本轮。");
       await tickRun();
     };
     $("backBtn").onclick = () => switchTab("start");
     $("selAllBtn").onclick = () => setAllShops(true);
     $("selNoneBtn").onclick = () => setAllShops(false);
+    syncLoginEntries();
     refreshStart();
   }
 

@@ -134,18 +134,21 @@ class PausedManualLoginTests(unittest.TestCase):
         self.assertTrue(page.locator('#runLoginBrowserBtn').is_disabled())
         self.assertFalse(self.api.open_login_browser()['ok'])
         self.assertEqual(self.os.starts, [])
-        # 收尾完成：过程页出现入口，点击只开手动窗口，不采集、不另建轮
+        # 收尾完成：过程页签（有轮次）页头出现入口，点击只开手动窗口，不采集、不另建轮
         self.proc.poll.return_value = 0
         self.assertTrue(self.api.get_run()['can_resume'])
         page.evaluate('tickRun()')
+        expect(page.locator('#runLoginBrowserBtn')).to_be_visible()
         expect(page.locator('#runLoginBrowserBtn')).to_be_enabled()
         self.assertTrue(self.login_available())
         page.click('#runLoginBrowserBtn')
         page.wait_for_function(
-            "document.querySelector('#runBrowserFacts').textContent.includes('占用')")
+            "document.querySelector('#runLoginBrowserBtn').title.includes('占用')", timeout=5000)
         self.assertEqual(len(self.os.starts), 1)
         self.assertEqual(self.os.starts[0].profile, str(self.tmp / 'profiles/account1_edge'))
-        self.assertNotIn('账号已登录', page.locator('#runBrowserFacts').inner_text())
+        title = page.locator('#runLoginBrowserBtn').get_attribute('title')
+        self.assertNotIn('账号已登录', title)
+        self.assertIn('配置：', title, '常态悬浮提示带配置来源')
 
     def test_login_entry_is_refused_without_an_explicit_pause_qualification(self):
         # 未暂停：过程页的入口不提供（票 05 只在明确暂停后接入同一服务）
@@ -155,7 +158,8 @@ class PausedManualLoginTests(unittest.TestCase):
         self.assertEqual(self.os.starts, [])
         self.assertTrue(page.locator('#runLoginBrowserBtn').is_disabled())
         page.wait_for_function(
-            "document.querySelector('#runBrowserFacts').textContent.includes('不能另开手动浏览器')")
+            "document.querySelector('#runLoginBrowserBtn').title"
+            ".includes('不能另开手动浏览器')", timeout=5000)
 
     # ---------- 轮询成本：采集中不查浏览器 OS 事实 ----------
     def test_collecting_refresh_does_not_query_browser_os_facts(self):
@@ -184,13 +188,69 @@ class PausedManualLoginTests(unittest.TestCase):
         self.assertTrue(view['can_resume'])
         self.assertIn('占用', view['continue_gate'])
         page.evaluate('tickRun()')
-        self.assertTrue(page.locator('#resumeBtn').is_disabled())
+        # 票 04：「继续」不再因门禁置灰——点击直调 resume_run（服务端为权威检查），
+        # 被拒时弹信息框给原样原因；不误开采集。
+        self.assertFalse(page.locator('#resumeBtn').is_disabled(), '不再因门禁置灰')
         with patch.object(gui.subprocess, 'Popen') as spawn:
-            self.assertFalse(self.api.resume_run()['ok'])
+            page.click('#resumeBtn')
+            page.wait_for_selector('#confirmModal.show', timeout=5000)
             spawn.assert_not_called()
+        self.assertEqual(page.locator('#confirmSub').inner_text(), view['continue_gate'], '原样报因')
+        self.assertEqual(page.locator('#confirmOk').inner_text().strip(), '知道了')
+        self.assertFalse(page.locator('#confirmCancel').is_visible())
+        page.click('#confirmOk')
         # 重复点击不另开、不接管
         self.assertTrue(self.api.open_login_browser()['reused'])
         self.assertEqual(len(self.os.starts), 1)
+
+    def test_run_entry_click_reports_the_existing_window_without_a_second_launch(self):
+        # 票 04：过程页入口与开始页同一条 API、同一信息框口径——占用态点击弹
+        # 「已有窗口」（指向原窗口），绝不重复开窗、不显示假的「已关闭」。
+        from playwright.sync_api import expect
+        self.start_round()
+        self.pause_and_settle()
+        self.assertTrue(self.api.open_login_browser()['ok'])
+        self.assertEqual(len(self.os.starts), 1)
+        page = self.page()
+        page.evaluate('tickRun()')
+        expect(page.locator('#runLoginBrowserBtn')).to_be_enabled()
+        page.click('#runLoginBrowserBtn')
+        page.wait_for_selector('#confirmModal.show', timeout=5000)
+        self.assertIn('已在运行', page.locator('#confirmTitle').inner_text())
+        sub = page.locator('#confirmSub').inner_text()
+        self.assertIn('原窗口', sub)
+        self.assertIn('继续', sub, '过程页语境：关闭后回来点「继续」')
+        self.assertNotIn('已关闭', sub, '绝不显示假的「已关闭」')
+        self.assertEqual(len(self.os.starts), 1, '不重复开窗')
+
+    def test_paused_run_entry_lit_on_detection_class_and_reports_reason_on_click(self):
+        # 票 04：检测类（无法确认）在暂停资格具备后亮起；点击弹同源原因的信息框，
+        # 不误开（启动计数为零）、不接管无关实例。
+        from playwright.sync_api import expect
+        self.start_round()
+        self.pause_and_settle()
+        self.os.state = 'unknown'
+        page = self.page()
+        page.evaluate('tickRun()')
+        expect(page.locator('#runLoginBrowserBtn')).to_be_enabled()
+        expected = self.api.open_login_browser()['error']
+        self.assertEqual(self.os.starts, [])
+        page.click('#runLoginBrowserBtn')
+        page.wait_for_selector('#confirmModal.show', timeout=5000)
+        self.assertEqual(page.locator('#confirmSub').inner_text(), expected, '原样报因')
+        self.assertEqual(page.locator('#confirmOk').inner_text().strip(), '知道了')
+        self.assertEqual(len(self.os.starts), 0, '不接管无关实例')
+
+    def test_pause_banner_says_closing_the_window_never_auto_resumes(self):
+        # 票 04：原卡里「关闭窗口不会自动继续本轮」句迁入暂停横幅（卡片已删）。
+        from playwright.sync_api import expect
+        self.start_round()
+        self.pause_and_settle()
+        page = self.page()
+        page.evaluate('tickRun()')
+        expect(page.locator('#rPaused')).to_be_visible()
+        self.assertIn('关闭专用 Edge 窗口不会自动继续本轮',
+                      page.locator('#rPaused').inner_text())
 
     def test_unverifiable_release_refuses_continue(self):
         self.start_round()

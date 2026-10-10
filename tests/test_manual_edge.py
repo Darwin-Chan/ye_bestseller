@@ -57,18 +57,21 @@ class ManualEdgeTests(unittest.TestCase):
         page.add_init_script("window.pywebview={api:new Proxy({}, {get: (t,n)=> (n in t) ? t[n] : (...a)=>window.ticketApi(n,a)})};window.alert=()=>{};")
         page.goto((Path(gui.PROJECT_ROOT)/'bestseller_monitor/pages/ui_live.html').as_uri())
         page.locator('#loginBrowserBtn').wait_for()
-        page.wait_for_function("document.querySelector('#browserFacts').textContent.length > 0")
+        # 就绪判据（票 04 改动三）：事实卡已删，进页取数完成的信号改成按钮悬浮提示有值。
+        page.wait_for_function("document.querySelector('#loginBrowserBtn').title.length > 0",
+                               timeout=10000)
         return page
     def test_page_login_does_not_collect_or_create_round(self):
         page = self.page()
         page.click('#loginBrowserBtn')
-        page.wait_for_function("document.querySelector('#browserFacts').textContent.includes('占用')")
+        page.wait_for_function(
+            "document.querySelector('#loginBrowserBtn').title.includes('占用')", timeout=5000)
         self.assertEqual(len(self.os.starts), 1)
         self.assertIsNone(self.api.proc)
         view = self.api.get_start()
         self.assertEqual(view['summary']['rounds'], 0)
         self.assertEqual(view['browser']['profile'], str(self.tmp/'profiles/account1_edge'))
-        self.assertNotIn('账号已登录', page.locator('#browserFacts').inner_text())
+        self.assertNotIn('账号已登录', page.locator('#loginBrowserBtn').get_attribute('title'))
         # 「刷新浏览器状态」按钮已删（票 01）：等价的读一次数直接走 refreshStart()。
         page.evaluate('refreshStart()')
         self.assertEqual(len(self.os.starts), 1)
@@ -77,10 +80,11 @@ class ManualEdgeTests(unittest.TestCase):
     def test_start_tab_header_carries_the_renamed_entry_left_of_the_trial_switch(self):
         page = self.page()
         self.assertEqual(page.eval_on_selector_all('header button', 'els => els.map(e => e.id)'),
-                         ['loginBrowserBtn', 'trialModeBtn'],
-                         '开始页页头右侧依序为「打开专用 Edge」「进入本机试采」')
+                         ['loginBrowserBtn', 'runLoginBrowserBtn', 'trialModeBtn'],
+                         '两枚「打开专用 Edge」（票 04）同槽并列，都在「进入本机试采」左侧')
         self.assertEqual(page.locator('#loginBrowserBtn').inner_text().strip(), '打开专用 Edge')
         self.assertTrue(page.locator('#loginBrowserBtn').is_visible())
+        self.assertFalse(page.locator('#runLoginBrowserBtn').is_visible(), '开始页签不显过程版')
 
     def test_start_card_keeps_only_facts_and_copy_without_any_refresh_control(self):
         page = self.page()
@@ -90,17 +94,20 @@ class ManualEdgeTests(unittest.TestCase):
             "document.querySelector('#panel-start #loginBrowserBtn') === null"),
             '登录入口已上移页头：开始卡内不再有登录入口按钮')
 
-    def test_header_login_entry_is_hidden_on_non_start_tabs_and_run_card_keeps_its_own(self):
+    def test_header_login_entries_share_one_slot_across_tabs(self):
+        # 票 04：两枚登录入口同槽互斥——开始页签显开始版；过程页签有轮次才显过程版
+        # （本夹具没有轮次，因此两个页签都看不到过程版）；结果页签两版都不显。
         page = self.page()
         self.assertTrue(page.evaluate("document.querySelector('header #loginBrowserBtn') !== null"),
                         '入口应挂在页头（只随页签显隐，不再随开始卡一起消失）')
         self.assertTrue(page.locator('#loginBrowserBtn').is_visible())
         page.evaluate("showTab('run')")
-        self.assertFalse(page.locator('#loginBrowserBtn').is_visible(), '过程页签不显示页头入口')
-        self.assertEqual(page.locator('#runLoginBrowserBtn').text_content().strip(),
-                         '打开专用 Edge', '过程页自己的登录入口照旧显示，仅改名')
+        self.assertFalse(page.locator('#loginBrowserBtn').is_visible(), '过程页签不显示页头开始版')
+        self.assertFalse(page.locator('#runLoginBrowserBtn').is_visible(),
+                         '过程页签无轮次时不显示过程版（has_round 才显）')
         page.evaluate("showTab('result')")
-        self.assertFalse(page.locator('#loginBrowserBtn').is_visible(), '结果页签不显示页头入口')
+        self.assertFalse(page.locator('#loginBrowserBtn').is_visible(), '结果页签不显示页头开始版')
+        self.assertFalse(page.locator('#runLoginBrowserBtn').is_visible(), '结果页签不显示过程版')
         page.evaluate("showTab('start')")
         self.assertTrue(page.locator('#loginBrowserBtn').is_visible(), '回到开始页签恢复显示')
 
@@ -108,25 +115,46 @@ class ManualEdgeTests(unittest.TestCase):
         from bestseller_monitor.dedicated_browser import RETRY
         self.assertNotIn('刷新', RETRY, 'retry 文案不再指向已删除的刷新按钮')
         self.assertIn('自动核对', RETRY, 'retry 文案改为自动核对口径（开始页与过程页同源显示）')
+        # 票 04 改动三：事实卡已删——retry 只活在点击信息框里，不进悬浮提示。
         page = self.page()
-        facts = page.locator('#browserFacts').inner_text()
-        self.assertIn('自动核对', facts, '开始页事实行带着新的 retry 文案')
-        self.assertNotIn('刷新', facts)
+        self.os.state = 'occupied'
+        page.evaluate('refreshStart()')
+        page.wait_for_function(
+            "document.querySelector('#loginBrowserBtn').title.includes('占用')", timeout=5000)
+        title = page.locator('#loginBrowserBtn').get_attribute('title')
+        self.assertNotIn('刷新', title)
+        self.assertNotIn('请自行关闭', title, 'retry 尾句不进悬浮提示')
+        page.click('#loginBrowserBtn')
+        page.wait_for_selector('#confirmModal.show', timeout=5000)
+        sub = page.locator('#confirmSub').inner_text()
+        self.assertIn('自动核对', sub, '「已有窗口」信息框带着新的自动核对文案')
+        self.assertNotIn('刷新', sub)
         self.assertNotIn('刷新', page.locator('#panel-start').inner_text(),
-                         '开始卡说明句不再写「再刷新并明确开始采集」')
+                         '开始卡说明句已随卡片删除（票 04 改动三）')
 
     def test_fact_rechecks_stay_automatic_on_tab_return_and_trial_switch(self):
-        # 删按钮不减少核对：进页取一次事实之外，切回开始页签、切换试采仍是自动取数时点（票 01）。
+        # 删按钮/删卡不减少核对（票 01/04）：进页取一次事实之外，切回开始页签、
+        # 切换试采仍是自动取数时点。观测面从事实行换成取数计数＋按钮悬浮提示。
+        calls = []
+        real = self.api.get_start
+        self.api.get_start = lambda *a: (calls.append(1), real(*a))[1]
         page = self.page()
-        self.assertIn('专用目录未占用', page.locator('#browserFacts').inner_text())
+        self.assertEqual(len(calls), 1, '进页自动取一次')
+        self.assertIn('专用目录未占用', page.locator('#loginBrowserBtn').get_attribute('title'))
         page.evaluate("showTab('run')")
         self.os.state = 'occupied'
+        before = len(calls)
         page.evaluate("switchTab('start')")
-        self.assertIn('专用目录仍被浏览器占用', page.locator('#browserFacts').inner_text())
+        page.wait_for_function(
+            "document.querySelector('#loginBrowserBtn').title.includes('占用')", timeout=5000)
+        self.assertEqual(len(calls), before + 1, '切回开始页签自动取一次')
         self.os.state = 'free'
+        before = len(calls)
         page.click('#trialModeBtn')
         page.wait_for_function(
-            "document.querySelector('#browserFacts').textContent.includes('专用目录未占用')")
+            "document.querySelector('#loginBrowserBtn').title.includes('专用目录未占用')",
+            timeout=5000)
+        self.assertEqual(len(calls), before + 1, '切换试采自动取一次')
         self.assertIn('本机试采', page.locator('#collectionMode').inner_text())
 
     # ---------- 票 02：检测/配置类不预置灰，点击报因（页面内单按钮信息框） ----------
@@ -424,13 +452,54 @@ class ManualEdgeTests(unittest.TestCase):
         self.assertTrue(page.locator('#loginBrowserBtn').is_disabled())
         self.assertIn('纯汇总机', self.api.open_login_browser()['error'])
     def test_start_page_shows_why_the_login_entry_is_disabled(self):
-        # 开始页按钮禁用时要给出原因（与过程页同一处 login_refusal），不再「灰着不说为什么」。
+        # 开始页按钮禁用时要给出原因（与过程页同一处 login_refusal）；票 04 改动三后
+        # 原因、配置来源与专用目录一起挂在按钮悬浮提示上（拒绝句；配置：…；专用目录：…），
+        # 且不再附带状态句（那半只在常态提示里）。
         self.config.write_text(self.config.read_text('utf-8').replace('role = "collector"','role = "merge_only"'),'utf-8')
         self.api = gui.Api(config_file=self.config, browser_runtime=self.os)
         page = self.page()
         page.evaluate('refreshStart()')
-        self.assertIn('纯汇总机', page.locator('#browserFacts').inner_text())
+        page.wait_for_function(
+            "document.querySelector('#loginBrowserBtn').title.includes('纯汇总机')", timeout=5000)
         self.assertTrue(page.locator('#loginBrowserBtn').is_disabled())
+        title = page.locator('#loginBrowserBtn').get_attribute('title')
+        self.assertIn('配置：', title)
+        self.assertIn('专用目录：', title)
+        self.assertNotIn('专用目录未占用', title, '置灰态提示不含状态句（两形之分）')
+
+    # ---------- 票 04：浏览器事实面收整（删卡、删「改范围」、入口上移） ----------
+    def test_start_page_has_no_live_browser_facts_surface(self):
+        # 票 04 改动三：开始页第一张卡整卡删除（事实行元素与其写入、说明文字均不在）；
+        # 浏览器事实退到「打开专用 Edge」悬浮提示：常态＝配置：…；专用目录：…；状态句；
+        # retry 尾句不进提示；开始按钮不另加提示（其置灰原因另有横幅/处置卡的面）。
+        page = self.page()
+        self.assertTrue(page.evaluate("document.getElementById('browserFacts') === null"),
+                        '事实行元素已随卡片删除')
+        start_text = page.locator('#panel-start').inner_text()
+        self.assertNotIn('专用数据目录独立于日常 Edge', start_text, '说明文字随卡删净')
+        self.assertNotIn('浏览器打开不代表账号已登录', start_text)
+        b = self.api.get_start()['browser']
+        self.assertEqual(page.locator('#loginBrowserBtn').get_attribute('title'),
+                         "配置：" + b['source'] + "；专用目录：" + b['profile'] + "；" + b['message'],
+                         '常态悬浮提示＝配置：…；专用目录：…；状态句')
+        self.assertNotIn('请自行关闭', page.locator('#loginBrowserBtn').get_attribute('title'),
+                         'retry 尾句只活在点击信息框')
+        self.assertFalse(page.locator('#startBtn').get_attribute('title'),
+                         '开始按钮不加悬浮提示')
+
+    def test_change_scope_chain_and_run_login_card_are_gone(self):
+        # 票 04：删「改范围（中止后重选）」前端整链与「暂停后处理登录」整卡；
+        # 唯一中止入口是「中止本轮」，替代动线＝中止 → 结果页「返回开始」→ 重选 → 明确开始。
+        page = self.page()
+        self.assertTrue(page.evaluate("document.getElementById('changeScopeBtn') === null"))
+        self.assertTrue(page.evaluate("typeof changeScope === 'undefined'"))
+        self.assertTrue(page.evaluate("typeof rangeChangeRound === 'undefined'"))
+        self.assertTrue(page.evaluate("document.getElementById('runLoginCard') === null"))
+        self.assertTrue(page.evaluate("document.getElementById('runBrowserFacts') === null"))
+        self.assertTrue(page.evaluate("document.getElementById('abortBtn') !== null"),
+                        '「中止本轮」保留')
+        self.assertTrue(page.evaluate("document.getElementById('backBtn') !== null"),
+                        '结果页「返回开始」是替代动线的回程')
     def test_collecting_and_stop_cleanup_reject_api_and_page(self):
         from contextlib import closing
         from bestseller_monitor.db import Database
@@ -564,7 +633,8 @@ class ManualEdgeTests(unittest.TestCase):
         self.api = gui.Api(config_file=root/'config/config.toml',browser_runtime=self.os)
         page = self.page()
         page.click('#loginBrowserBtn')
-        page.wait_for_function("document.querySelector('#browserFacts').textContent.includes('占用')")
+        page.wait_for_function(
+            "document.querySelector('#loginBrowserBtn').title.includes('占用')", timeout=5000)
         self.assertEqual(self.os.starts[0].root,str(root))
         self.assertEqual(self.api.get_start()['summary']['rounds'],0)
 

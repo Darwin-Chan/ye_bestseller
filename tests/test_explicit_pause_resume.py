@@ -221,25 +221,31 @@ class PauseResumeTests(unittest.TestCase):
         self.assertIsNone(shops[-1].home_url, 'new configuration must not redirect original shop')
         self.assertIsNone(shops[-1].offer_list_url)
 
-    def test_real_page_change_scope_cancel_is_inert_confirm_waits_then_explicit_new(self):
+    def test_real_page_abort_cancel_is_inert_confirm_waits_then_explicit_new(self):
+        # 票 04 删「改范围」后：唯一中止动线＝「中止本轮」→（等收尾）→ 结果页
+        # 「返回开始」→ 改勾选 → 明确开始；不再有自动跳回开始页的机制。
         from playwright.sync_api import expect
         page=self.page()
-        self.assertEqual(page.locator('#changeScopeBtn').count(),1)
+        self.assertEqual(page.locator('#changeScopeBtn').count(),0, '「改范围」按钮与整链已删（票 04）')
         with patch.object(gui.subprocess,'Popen') as spawn:
-            page.locator('#changeScopeBtn').click()
+            page.locator('#abortBtn').click()
             expect(page.locator('#confirmSub')).to_contain_text('不能继续')
             page.locator('#confirmCancel').click()
             with closing(connect(self.path)) as conn:
                 self.assertIsNone(rounds.load(Database(conn),self.rid).reason)
             self.assertIsNone(self.api.get_run()['stopping'])
             spawn.assert_not_called()
-            page.locator('#changeScopeBtn').click(); page.locator('#confirmOk').click()
+            page.locator('#abortBtn').click(); page.locator('#confirmOk').click()
             expect(page.locator('#panel-result')).to_have_class('panel active')
             self.assertFalse(self.api.start_run(['D'])['ok'])
             self.assertFalse(self.api.resume_run()['ok'])
             spawn.assert_not_called()
             self.proc.poll.return_value=0; self.lock.release()
             page.evaluate('refreshResultStopping()')
+            expect(page.locator('#resStopping')).to_be_hidden()
+            # 收尾结束后留在结果页，不再自动跳回开始页（票 04 替代动线）
+            expect(page.locator('#panel-result')).to_have_class('panel active')
+            page.locator('#backBtn').click()
             expect(page.locator('#panel-start')).to_have_class('panel active')
             spawn.assert_not_called()
             with closing(connect(self.path)) as conn:
