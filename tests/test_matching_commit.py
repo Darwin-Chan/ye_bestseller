@@ -9,6 +9,7 @@
   传输在第 N 次同款比较时抛出逃逸异常——与硬结束进程的事务结局等价：未提交的那批回滚。
 - 进程边界：子进程跑真的 `suggest`，`os._exit` 硬结束（不跑 finally、不回滚，未提交事务靠
   SQLite 的 journal 恢复丢掉），与 2026-09-22 实测的「整批跑完、未提交、整体回滚」同形。
+  硬杀死点跟着批量提交点走：第一批提交后的下一批里（2026-10-10 起），不再与批提交赛跑。
 """
 import base64
 import json
@@ -31,10 +32,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 COMPARE = 'Compare the same physical product style'
 
-# 子进程：吃父进程写好的商品清单，跑真的 suggest；第 kill_after 次同款比较之后再来的请求
-# 直接 os._exit——等价于关窗／任务管理器结束进程。
+# 第一批判断提交后，下一批再落这么多条未提交判断，子进程就硬结束。经 argv 传给 PROBE
+# 单源共用——下面夹具下限守卫的算术也用这个数，两处别再各写一份。
+DIE_WITH_PENDING = 5
+
+# 子进程：吃父进程写好的商品清单（argv[2]）与硬杀余量（argv[3]），跑真的 suggest；
+# 第一批判断提交之后，下一批又落 DIE_WITH_PENDING 条（未提交）时 os._exit——等价于
+# 关窗／任务管理器结束进程。
+#
+# 硬杀死点钉在判断落盘的主线程里（连接钩子），不跟 worker 线程的模型调用赛跑：旧写法
+# 「第 N 次同款比较之后再来的请求直接退」是「硬杀时刻」与「第一批提交完成」两个线程的
+# 赛跑，调度一漂移第一批提交就落在硬杀之后，库里 0 条——2026-10-10 实测整文件跑
+# ~5–10%/次偶发红（见 .scratch/tool-output/diag-matching-commit/）。
 PROBE = r'''
-import base64, io, json, os, sys, time
+import base64, io, json, os, sqlite3, sys, time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -45,12 +56,52 @@ from bestseller_monitor.matching import MatchingConfig, MatchingService
 products = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
 groups = [{"id": "G%d" % i, "confirmed": False, "sales": p["sales"],
            "members": [{"shop_key": p["shop_key"], "offer_id": p["offer_id"]}]} for i, p in enumerate(products)]
-kill_after, served = int(sys.argv[3]), [0]
+
+DIE_WITH_PENDING = int(sys.argv[3])     # 第一批提交后，下一批再落这么多条未提交判断就硬结束（父进程传单源值）
+
+
+class _DieAfterFirstBatch(sqlite3.Connection):
+    """第一批判断提交后，下一批攒到 DIE_WITH_PENDING 条时 os._exit（不跑 finally、不回滚）。
+
+    钩子在连接上而不是在模型传输里：判断行的落盘与批提交都发生在主线程（匹配模块的
+    判断循环），死点因此与批量提交点串行——机器再怎么抖，死时恒为「第一批已提交、
+    第二批未提交」，两边的线程赛跑不复存在。
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._committed = False     # 判断表里已经有提交过的批
+        self._pending = 0           # 上一批提交后又落了几条判断
+
+    def execute(self, sql, *args, **kwargs):
+        cursor = super().execute(sql, *args, **kwargs)
+        if 'INTO judgments' in sql:     # 匹配模块里判断行的落盘语句（store_judgment）
+            self._pending += 1
+            if self._committed and self._pending >= DIE_WITH_PENDING:
+                os._exit(1)             # 硬结束：本批整批丢，已提交的批留在库里
+        return cursor
+
+    def commit(self):
+        super().commit()
+        if self._pending:
+            self._committed = True
+        self._pending = 0
+
+
+_real_connect = sqlite3.connect
+
+
+def _connect(*args, **kwargs):
+    kwargs.setdefault('factory', _DieAfterFirstBatch)
+    return _real_connect(*args, **kwargs)
+
+
+sqlite3.connect = _connect
 
 
 def transport(request, timeout):
-    # 每次比较都睡一下：替身比真模型快三个数量级，不压一压，主线程的批提交会被甩在后面，
-    # 硬结束就可能正好落在一次提交中间（那一批按提交点语义整批丢，测不到「已提交的批在」）。
+    # 每次比较都睡一下：替身比真模型快三个数量级，压一压让硬结束落在判断仍在进行时
+    # （worker 手里还有在途的调用），与真跑中关窗同形。
     time.sleep(0.01)
     payload = json.loads(request.data)
     instruction = payload["messages"][0]["content"]
@@ -61,9 +112,6 @@ def transport(request, timeout):
         colors = {(255, 0, 0): "red", (0, 255, 0): "green", (0, 0, 255): "blue"}
         result = {"colors": [colors[images[0].getpixel((i * 50 + 25, 25))] for i in range(5)]}
     else:
-        served[0] += 1
-        if served[0] > kill_after:
-            os._exit(1)     # 硬结束：不跑 finally、不回滚，与关窗同形
         visual = [str(image.getpixel((0, 0))) for image in images]
         result = {"same": visual[0] == visual[1], "confidence": 0.99}
     for image in images:
@@ -191,19 +239,29 @@ class MatchingCommitTests(unittest.TestCase):
                          '判断与证据索引同批落盘：两边的版本集合必须一致')
 
     def test_killed_process_rerun_fills_only_the_unjudged(self):
-        """真关窗：冷跑量出全量调用数 → 子进程被硬结束 → 重开只补未判的（A10 演示路径）。"""
+        """真关窗：冷跑量出全量调用数 → 子进程被硬结束 → 重开只补未判的（A10 演示路径）。
+
+        硬杀死点跟着批量提交点走（PROBE 的连接钩子）：第一批提交后、下一批落几条未提交
+        判断时 os._exit；旧写法按「第 N 次模型调用之后杀」，杀点与第一批提交是两个线程
+        的赛跑，机器一抖第一批就落在硬杀之后（2026-10-10 诊断
+        .scratch/tool-output/diag-matching-commit/）。
+        """
         items = write_products(Path(self.tmp.name)/'products.json')
         cold = ModelTransport()
         reference = self.suggest(self.cache('cold'), items, cold)
         asked = asked_pairs(cold)
         names_by_version = {version(p): p['product_name'] for p in items}
+        self.assertGreaterEqual(len(asked), JUDGMENT_COMMIT_BATCH + DIE_WITH_PENDING,
+                                '夹具至少要能排出一批已提交＋下批几条未提交的硬杀点')
 
         child = subprocess.run(
             [sys.executable, '-c', PROBE, str(self.cache('killed')),
-             str(Path(self.tmp.name)/'products.json'), str(len(asked) - 5)],
+             str(Path(self.tmp.name)/'products.json'), str(DIE_WITH_PENDING)],
             cwd=ROOT, capture_output=True, env={**os.environ, 'DEEPSEEK_API_KEY': 'secret-value'})
 
-        self.assertNotEqual(child.returncode, 0, child.stderr.decode('utf-8', 'replace')[-400:])
+        self.assertNotEqual(child.returncode, 0,
+                            '子进程应被连接钩子硬杀（跑完即钩子未生效）——'
+                            + child.stderr.decode('utf-8', 'replace')[-400:])
         judgments, evidence = judged_rows(self.cache('killed'))
         self.assertTrue(0 < len(judgments) < len(asked),
                         f'中途结束应当留下部分判断：{len(judgments)}/{len(asked)}')
