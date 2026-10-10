@@ -145,6 +145,21 @@ class LocalTrialGuiTests(unittest.TestCase):
         self.assertIn('id="trialModeBtn"', html)
         self.assertIn('callApi("set_local_trial"', html)
 
+    def test_the_trial_entry_is_only_offered_on_a_merge_only_machine(self):
+        collector = self.root / "collector.toml"
+        collector.write_text(MINIMAL_CONFIG, encoding="utf-8")  # 省略 role 即采集机
+        cfg = Config.from_file(collector, root=self.root)
+        self.assertEqual(cfg.role, "collector")
+        api = gui.Api(browser_runtime=FreeBrowserOS(), cfg=cfg, config_file=collector, now=db.utcnow)
+        for page in [api.get_start(), api.get_run(), api.get_result()]:
+            self.assertFalse(page["trial_available"])
+        refused = api.set_local_trial(True)
+        self.assertFalse(refused["ok"])
+        self.assertIn("只在纯汇总机提供", refused["error"])
+        self.assertEqual(api.cfg.db_file, cfg.db_file)
+        self.assertFalse(api.cfg.local_trial)
+        self.assertTrue(self.api.get_start()["trial_available"], "纯汇总机照旧提供入口")
+
     def test_external_abort_finishes_trial_round_then_stops_exact_identity(self):
         from bestseller_monitor import single_instance, browser_proc
         from bestseller_monitor.db import Database

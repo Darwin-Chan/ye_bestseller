@@ -271,6 +271,7 @@ class Api:
     def _collection_payload(self, payload: dict) -> dict:
         return {**payload, "local_trial": self.cfg.local_trial,
                 "collection_label": "本机试采，不共享" if self.cfg.local_trial else "正式采集",
+                "trial_available": is_merge_only(self.cfg),
                 "database": str(self.cfg.db_file),
                 "mode_switch_locked": self._own_crawler_alive() or (self.cfg.local_trial and self.any_crawler_running())
                 or self._stop_watch.status.phase is not stop_request.StopPhase.IDLE}

@@ -7,13 +7,17 @@ import os
 from pathlib import Path
 import tempfile
 
-from .config import Config, Shop, load_shops
+from .config import Config, Shop, ROLE_GLOSS, is_merge_only, load_shops
 from .db import Database, connect, cst_date
 from . import rounds
 
 
 class TrialUnavailable(ValueError):
     """No safe local trial can be started; never fall back to formal storage."""
+
+
+class TrialRoleRefused(TrialUnavailable):
+    """This machine's role does not have local trial: only a pure aggregator does."""
 
 
 def _walk_error(exc: OSError) -> None:
@@ -47,6 +51,11 @@ def for_collection(cfg: Config, *, local_trial: bool = False,
                    config_file: Path | None = None) -> Config:
     if not local_trial:
         return cfg
+    # 试采是纯汇总机的补偿手段（ADR-0049 及其修订段）：角色判据在这里落下，
+    # 界面与命令行都从这一处过，别在入口各判一次。
+    if not is_merge_only(cfg):
+        raise TrialRoleRefused(
+            f"本机试采只在纯汇总机提供（本机角色：{ROLE_GLOSS.get(cfg.role, cfg.role)}）。")
     home = cfg.data_dir.parent / "local-trial"
     try:
         protected = _protected_paths(cfg, config_file)

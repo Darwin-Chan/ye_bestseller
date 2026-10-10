@@ -156,7 +156,8 @@ class ElapsedCrossEntryTests(unittest.TestCase):
                 self.assertEqual(self.fact(rid), elapsed.Fact(12, 'complete'))
     def test_real_cli_main_and_gui_takeover_share_saved_round_without_starting_another_segment(self):
         config = self.root / 'config.toml'
-        config.write_text(MINIMAL_CONFIG, encoding='utf-8')
+        # 试采只对纯汇总机开放（ADR-0049 修订段）：这条跨入口用例按真机口径跑。
+        config.write_text(MINIMAL_CONFIG + 'role = "merge_only"\n', encoding='utf-8')
         rid = None
         db_path = None
 
