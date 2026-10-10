@@ -24,6 +24,7 @@ import enum
 import functools
 import logging
 import threading
+import time
 
 from . import plan_step
 from .db import CST, Database
@@ -32,6 +33,19 @@ log = logging.getLogger(__name__)
 
 # 开窗等「准备落定」的预算（秒，ADR-0035）：接纳那一刻起算，30 秒整即耗尽。
 PREPARE_WAIT_SEC = 30.0
+
+
+class ProductionPrepRuntime:
+    """生产运行 adapter：真单调钟、daemon 线程、Event 等待（三件环境能力）。"""
+
+    def monotonic(self) -> float:
+        return time.monotonic()
+
+    def start(self, work) -> None:
+        threading.Thread(target=work, name="plan-prepare", daemon=True).start()
+
+    def wait(self, signal: threading.Event, timeout: float | None) -> bool:
+        return signal.wait(timeout)
 
 
 class PrepPhase(str, enum.Enum):
