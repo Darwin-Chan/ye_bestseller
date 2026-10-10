@@ -1,4 +1,5 @@
 from browser_facts import FreeBrowserOS
+import contextlib
 import hashlib
 import logging
 import sqlite3
@@ -57,13 +58,33 @@ def gui_api(*, shops=(), now=None, db_path=None, open_conn=None, stop_clock=None
                prep_runtime=prep_runtime)
 
 
-def store_today_plan(db_path, *assignments):
-    """给「今天」这一周落一份计划：闸门按本地计划表开合（ADR-0035）。"""
+def store_plan_week(db_path, anchor, *assignments):
+    """把 `anchor` 那一周的本地计划落进计划表：闸门按本地计划表开合（ADR-0035）。"""
     conn = connect(db_path)
     try:
-        store_weekly_plan(Database(conn), weekly_plan.week_label(cst_date()), *assignments)
+        store_weekly_plan(Database(conn), weekly_plan.week_label(anchor), *assignments)
     finally:
         conn.close()
+
+
+def store_today_plan(db_path, *assignments):
+    """给「今天」这一周落一份计划。"""
+    store_plan_week(db_path, cst_date(), *assignments)
+
+
+@contextlib.contextmanager
+def running_main(api, create_window):
+    """真实 main 的适配层：单例锁/日志入口/窗口都指向这份 api，建窗走回调。
+
+    既有 main 用例（等待落定、异常建窗、预算耗尽建窗）共用这一份；
+    `create_window(*args, **kwargs)` 在建窗那一刻被调用，返回窗口假件。
+    """
+    with patch.object(single_instance, "acquire", return_value=MagicMock()), \
+            patch.object(gui, "Api", return_value=api), \
+            patch.object(gui, "_configure_gui_logging"), \
+            patch.object(gui.webview, "create_window", side_effect=create_window), \
+            patch.object(gui.webview, "start"):
+        yield
 
 
 def pause_for_resume(api, path, rid):
@@ -111,12 +132,7 @@ class GuiPlanWiringTests(unittest.TestCase):
 
     def store_plan(self, *assignments):
         """把本周计划落进本机计划表；assignments 是 (shop_key, machine_id, pages)。"""
-        conn = connect(self.db_path)
-        try:
-            store_weekly_plan(Database(conn), weekly_plan.week_label("2026-09-21"),
-                              *assignments)
-        finally:
-            conn.close()
+        store_plan_week(self.db_path, "2026-09-21", *assignments)
 
     def plan_world(self) -> tuple[GitSandbox, Path]:
         """一件「计划库在本地裸远端」的小世界：真实 READY（确认/生成发布）要用它。
@@ -727,7 +743,7 @@ class GuiPlanWiringTests(unittest.TestCase):
 
 class PrepContextIsolationTests(unittest.TestCase):
     """准备与扫描固定发起时的上下文（D05 回归）；票03 起同放跨入口矩阵：
-    迟到工作归属（A/B）、模式切换与旧扫描、试采隔离与恢复、main 超时建窗。"""
+    迟到工作归属（A/B）、模式切换与旧扫描、试采隔离与恢复、main 预算耗尽建窗。"""
 
     NOW = GuiPlanWiringTests.NOW
 
@@ -748,12 +764,7 @@ class PrepContextIsolationTests(unittest.TestCase):
 
     def store_plan(self, *assignments):
         """把本类固定 NOW 那一周（W39）的计划落进本机计划表。"""
-        conn = connect(self.cfg.db_file)
-        try:
-            store_weekly_plan(Database(conn), weekly_plan.week_label("2026-09-21"),
-                              *assignments)
-        finally:
-            conn.close()
+        store_plan_week(self.cfg.db_file, "2026-09-21", *assignments)
 
     def test_a_late_scan_keeps_the_original_connection_capability(self):
         gate = GatedConnection(self.cfg.db_file, hold={1, 2})
@@ -788,11 +799,7 @@ class PrepContextIsolationTests(unittest.TestCase):
             window_facts.append(api.prepare_running())
             return _FakeWindow()
 
-        with patch.object(single_instance, "acquire", return_value=MagicMock()), \
-                patch.object(gui, "Api", return_value=api), \
-                patch.object(gui, "_configure_gui_logging"), \
-                patch.object(gui.webview, "create_window", side_effect=create_window), \
-                patch.object(gui.webview, "start"):
+        with running_main(api, create_window):
             thread, out = start_waiting(gui.main)
             self.assertTrue(gate.wait_entered(1), "准备卡在开库")
             self.assertEqual(window_facts, [], "建窗不许抢在准备落定之前")
@@ -817,11 +824,7 @@ class PrepContextIsolationTests(unittest.TestCase):
             window_facts.append(api.prepare_running())
             return _FakeWindow()
 
-        with patch.object(single_instance, "acquire", return_value=MagicMock()), \
-                patch.object(gui, "Api", return_value=api), \
-                patch.object(gui, "_configure_gui_logging"), \
-                patch.object(gui.webview, "create_window", side_effect=create_window), \
-                patch.object(gui.webview, "start"):
+        with running_main(api, create_window):
             thread, out = start_waiting(gui.main)
             self.assertTrue(gate.wait_entered(1))
             self.assertEqual(window_facts, [], "异常没落定之前也不建窗")
@@ -850,9 +853,10 @@ class PrepContextIsolationTests(unittest.TestCase):
         self.assertEqual(start["plan_note"], before, "回正式恢复原事实，不自动准备")
         self.assertEqual(runtime.started, 1, "切模式不触发新的正式准备")
 
-    def test_a_settled_runs_late_work_never_answers_for_the_next_run(self):
+    def test_late_work_never_answers_for_the_run_that_follows(self):
         """票03 跨入口矩阵：A 落定（扫描未完）接纳 B——A 的完成等待只认 A；
-        开窗等待者加入 B、只等 B 的剩余预算；A 的迟到扫描/完成不改写 B 的运行状态。"""
+        开窗等待者加入 B、在 B 的预算内返回（不误等 A 的扫描）；
+        A 的迟到扫描/完成不改写 B 的运行状态。"""
         gate = GatedConnection(self.cfg.db_file, hold={1, 2, 3})
         runtime = ControlledRuntime()
         api = self.api(prep_runtime=runtime, open_conn=gate)
@@ -872,7 +876,7 @@ class PrepContextIsolationTests(unittest.TestCase):
 
         window = api.prepare_for_window()                # 开窗等待者：加入 B
         self.assertIs(window.phase, preparation.PrepPhase.EXPIRED,
-                      "只等 B 的剩余预算，不重置预算、不等 A 的扫描")
+                      "加入的是 B：等它的预算返回 EXPIRED，不误等 A 的扫描")
         self.assertIsNone(window.result, "拿的是 B 的快照（未落定），不是 A 的结果")
         self.assertEqual(runtime.started, 2, "已有运行：不重复接纳")
 
@@ -890,8 +894,8 @@ class PrepContextIsolationTests(unittest.TestCase):
         self.assertFalse(api.get_start()["plan_waiting"])
 
     def test_a_late_scan_after_a_mode_switch_never_writes_the_current_facts(self):
-        """票03 跨入口矩阵：落定后切试采，旧扫描收尾不改写当前（试采）页事实；
-        切回正式恢复原事实（旧扫描仍用原正式连接由 D05 回归继续钉住）。"""
+        """票03 跨入口矩阵：落定后切试采，旧扫描收尾后试采开始页的取数与切回后的
+        正式事实都不被扰动（旧扫描仍用原正式连接由 D05 回归继续钉住）。"""
         gate = GatedConnection(self.cfg.db_file, hold={1, 2})
         runtime = ControlledRuntime(auto_start=True)
         api = self.api(prep_runtime=runtime, open_conn=gate)
@@ -905,12 +909,13 @@ class PrepContextIsolationTests(unittest.TestCase):
         self.assertTrue(api.set_local_trial(True)["ok"], "落定后可以切模式")
         trial_before = api.get_start()
         self.assertFalse(trial_before["plan_gate"], "试采页不看正式闸门")
+        self.assertFalse(trial_before["plan_waiting"], "正式的在跑事实不泄进试采页")
 
         gate.release_call(2)                             # 旧扫描收尾（原正式上下文）
         thread.join(5)
         self.assertFalse(thread.is_alive())
 
-        self.assertEqual(api.get_start(), trial_before, "旧扫描不改写当前（试采）页事实")
+        self.assertEqual(api.get_start(), trial_before, "旧扫描收尾不改动试采开始页的取数")
         self.assertTrue(api.set_local_trial(False)["ok"])
         self.assertEqual(api.get_start(), formal_before, "回正式恢复原事实")
         self.assertIs(out["value"].status, plan_step.PrepStatus.REFUSED)
@@ -962,11 +967,7 @@ class PrepContextIsolationTests(unittest.TestCase):
             window_facts.append(api.prepare_running())
             return _FakeWindow()
 
-        with patch.object(single_instance, "acquire", return_value=MagicMock()), \
-                patch.object(gui, "Api", return_value=api), \
-                patch.object(gui, "_configure_gui_logging"), \
-                patch.object(gui.webview, "create_window", side_effect=create_window), \
-                patch.object(gui.webview, "start"):
+        with running_main(api, create_window):
             self.assertEqual(gui.main(), 0)
 
         self.assertTrue(gate.wait_entered(1), "工作者真的在跑（卡在开库）")
