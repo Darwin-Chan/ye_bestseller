@@ -30,7 +30,8 @@ window.pywebview = { platform: "edgechromium", api: {
     return {
       ov: {products: 180, skus: 1038},
       summary: {started: true, rounds: 1, text: "00:29 开始 · 跑约 20 分"},
-      shops: SHOPS, total_shops: 2, start_hint: window.__crawler ? "采集进程正在跑" : "",
+      shops: SHOPS, total_shops: 2, start_hint: window.__startHint || "",
+      browser_error: window.__gateReason || undefined,
       plan_note: window.__planNote || "",
       crawler: window.__crawler || null,
       ...(window.__collectionLabel ? {collection_label: window.__collectionLabel} : {}),
@@ -184,6 +185,39 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
                 "start_run 应该被调用一次")
             self.assertIn("start_or_resume", page.inner_text(ERROR_BOX))
             self.assertEqual(self.active_tab(page), "开始", "失败时不该跳到过程页")
+        finally:
+            page.close()
+
+    def test_a_blocked_recheck_shows_the_info_box_instead_of_starting(self):
+        """点开始先自动核对最新事实（票 02）：门禁优先于开始提示，弹信息框、不调开始 API。"""
+        page = self.open_page()
+        try:
+            page.evaluate(
+                "window.__gateReason = '专用 Edge 已被打开，请手动关闭（包括后台窗口）后，再开始抓取'")
+            page.evaluate("window.__startHint = '上一次停止仍在收尾'")
+            page.click("#startBtn")
+            page.wait_for_selector("#confirmModal.show", timeout=5000)
+
+            sub = page.locator("#confirmSub").inner_text()
+            self.assertIn("请手动关闭", sub, "浏览器/配置门禁文案优先")
+            self.assertNotIn("收尾", sub)
+            self.assertEqual(page.locator("#confirmOk").inner_text().strip(), "知道了")
+            self.assertFalse(page.locator("#confirmCancel").is_visible())
+            self.assertEqual(
+                page.evaluate("() => window.__calls.filter(c => Array.isArray(c)).length"), 0,
+                "核对发现门禁：不该调用 start_run")
+            self.assertEqual(self.active_tab(page), "开始")
+
+            page.click("#confirmOk")
+            page.wait_for_function(
+                "!document.querySelector('#confirmModal').classList.contains('show')", timeout=5000)
+            # 没有门禁、只有开始提示时：改弹提示文案，同样不调开始 API。
+            page.evaluate("window.__gateReason = ''")
+            page.click("#startBtn")
+            page.wait_for_selector("#confirmModal.show", timeout=5000)
+            self.assertIn("收尾", page.locator("#confirmSub").inner_text())
+            self.assertEqual(
+                page.evaluate("() => window.__calls.filter(c => Array.isArray(c)).length"), 0)
         finally:
             page.close()
 
@@ -560,18 +594,19 @@ class UiLivePollingTests(unittest.TestCase):
         try:
             page.evaluate("window.__gate = true")
             self.start_a_run(page)
-            self.assertEqual(self.calls_of(page, "get_start"), 1, "开页面时已经取过一次")
+            self.assertEqual(self.calls_of(page, "get_start"), 2,
+                             "开页面取过一次；点开始又自动核对过一次（票 02）")
 
             # 取数要排队时 switchTab() 返回的 promise 会挂到在途那条之后，这里不等它，
             # 只要求「页签切过去了、取数没开第二条」。
             page.evaluate("() => { switchTab('start'); }")
             page.wait_for_timeout(200)
 
-            self.assertEqual(self.calls_of(page, "get_start"), 1,
+            self.assertEqual(self.calls_of(page, "get_start"), 2,
                              "在途刷新还没回来，切页签不该再开一条取数")
             page.evaluate("window.__release()")
             page.wait_for_function(
-                "window.__calls.filter(c => c === 'get_start').length === 2", timeout=5000)
+                "window.__calls.filter(c => c === 'get_start').length === 3", timeout=5000)
         finally:
             page.close()
 
@@ -590,7 +625,7 @@ window.pywebview = { platform: "edgechromium", api: {
       summary: {started: false, rounds: 0, text: ""},
       shops: [{key: "A01", name: "店铺A", products: 0, skus: 0, pages: 1,
                default_checked: true}],
-      total_shops: 1, start_hint: "采集进程正在跑", crawler: {round_id: 7, pid: 4321},
+      total_shops: 1, start_hint: "", crawler: null,
       stopping: window.__stopping,
     };
   },
@@ -696,6 +731,134 @@ class UiLiveStoppingTests(unittest.TestCase):
             self.assertGreater(page.evaluate(
                 "window.__calls.filter(c => c === 'get_result').length"), before,
                 "结果页要自己接着问，不能停在这一屏")
+        finally:
+            page.close()
+
+
+# 票 04：过程页入口与「继续」的点击报因都走页面内信息框（复用票 02 的壳）。
+RUN_PAGE_MOCK_API = r"""
+window.__calls = [];
+window.__resumeResult = null;   // null → {ok:true}
+window.__openResult = {ok: true};
+window.__loginRefusal = "";
+window.pywebview = { platform: "edgechromium", api: {
+  get_start: async () => {
+    window.__calls.push("get_start");
+    return {
+      ov: {products: 0, skus: 0},
+      summary: {started: false, rounds: 0, text: ""},
+      shops: [{key: "A01", name: "店铺A", products: 0, skus: 0, pages: 1,
+               default_checked: true}],
+      total_shops: 1, start_hint: "", crawler: null,
+      browser: {source: "config.toml", profile: "profiles/p", message: "专用目录未占用。",
+                retry: "R", state: "free"},
+      login_refusal: window.__loginRefusal || undefined,
+    };
+  },
+  get_run: async () => {
+    window.__calls.push("get_run");
+    return {
+      running: false, manually_paused: true, has_round: true, round_id: 7,
+      can_resume: true, can_abort: true,
+      started_hhmm: "10:00", elapsed_sec: 5, deny: 0, done_count: 0, total_count: 1,
+      progress: 0, current_shop: "A01", done: [], todo: [{key: "A01", name: "店铺A"}],
+      browser: {source: "config.toml", profile: "profiles/p", message: "专用目录未占用。",
+                retry: "R", state: "free", can_open: true},
+      login_refusal: window.__loginRefusal || undefined,
+    };
+  },
+  get_result: async () => ({has_round: false}),
+  start_run: async () => ({ok: true}),
+  pause_run: async () => ({ok: true}),
+  resume_run: async () => {
+    window.__calls.push("resume_run");
+    return window.__resumeResult || {ok: true};
+  },
+  open_login_browser: async () => {
+    window.__calls.push("open_login_browser");
+    return window.__openResult;
+  },
+  abort_run: async () => ({ok: true}),
+}};
+"""
+
+
+class UiLiveRunPageEntryTests(unittest.TestCase):
+    """票 04：过程页的入口与「继续」不再用系统 alert，被拒走单按钮信息框给原样原因。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._pw = sync_playwright().start()
+        try:
+            cls.browser = cls._pw.chromium.launch(channel="msedge", headless=True)
+        except Exception as exc:  # noqa: BLE001
+            cls._pw.stop()
+            cls._pw = None
+            raise unittest.SkipTest(f"没有可用的 Edge/Playwright 浏览器：{exc}")
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._pw is not None:
+            cls.browser.close()
+            cls._pw.stop()
+
+    def open_run_page(self):
+        page = self.browser.new_page(viewport={"width": 1100, "height": 1000})
+        page.add_init_script(RUN_PAGE_MOCK_API)
+        page.goto(HTML_URI)
+        page.evaluate("switchTab('run'); tickRun()")
+        page.wait_for_selector("#runLoginBrowserBtn", state="visible", timeout=5000)
+        return page
+
+    def test_continue_click_failure_reports_the_original_reason_in_the_info_box(self):
+        page = self.open_run_page()
+        try:
+            # 表达式以数字 0 收尾：完成值若是函数，Playwright 的求值工具会把它当谓词调用一次。
+            page.evaluate("window.__alertCalls = 0; window.alert = () => { window.__alertCalls++; }; 0")
+            page.evaluate("window.__resumeResult = {ok: false, "
+                          "error: '专用 Edge 已被打开，请手动关闭（包括后台窗口）后，再开始抓取'}")
+            page.wait_for_selector("#resumeBtn", state="visible", timeout=5000)
+            self.assertFalse(page.locator("#resumeBtn").is_disabled(), "不再因门禁置灰")
+            page.click("#resumeBtn")
+            page.wait_for_selector("#confirmModal.show", timeout=5000)
+
+            self.assertEqual(page.locator("#confirmSub").inner_text(),
+                             "专用 Edge 已被打开，请手动关闭（包括后台窗口）后，再开始抓取",
+                             "信息框给服务端原样原因")
+            self.assertEqual(page.locator("#confirmOk").inner_text().strip(), "知道了")
+            self.assertFalse(page.locator("#confirmCancel").is_visible(), "信息框是单按钮变体")
+            self.assertEqual(page.evaluate("window.__alertCalls"), 0, "不再用系统 alert")
+            self.assertEqual(
+                page.evaluate("window.__calls.filter(c => c === 'resume_run').length"), 1)
+        finally:
+            page.close()
+
+    def test_run_entry_click_reports_failure_and_the_existing_window_in_the_info_box(self):
+        page = self.open_run_page()
+        try:
+            # 命中竞态失败（核对后被拒）：弹信息框给原样原因
+            page.evaluate("window.__openResult = {ok: false, "
+                          "error: '调试端口被既有实例占用，拒绝接管或另开标签。'}")
+            page.click("#runLoginBrowserBtn")
+            page.wait_for_selector("#confirmModal.show", timeout=5000)
+            self.assertEqual(page.locator("#confirmTitle").inner_text(), "无法打开专用 Edge")
+            self.assertEqual(page.locator("#confirmSub").inner_text(),
+                             "调试端口被既有实例占用，拒绝接管或另开标签。")
+            page.click("#confirmOk")
+            page.wait_for_selector("#confirmModal", state="hidden", timeout=5000)
+
+            # reused（已在运行）：弹「已有窗口」，指向原窗口，过程页语境回到「继续」
+            page.evaluate("window.__openResult = "
+                          "{ok: true, reused: true, browser: {state: 'occupied'}}")
+            page.click("#runLoginBrowserBtn")
+            page.wait_for_selector("#confirmModal.show", timeout=5000)
+            self.assertIn("已在运行", page.locator("#confirmTitle").inner_text())
+            sub = page.locator("#confirmSub").inner_text()
+            self.assertIn("原窗口", sub)
+            self.assertIn("继续", sub)
+            self.assertNotIn("已关闭", sub, "绝不显示假的「已关闭」")
+            self.assertEqual(
+                page.evaluate("window.__calls.filter(c => c === 'open_login_browser').length"), 2)
         finally:
             page.close()
 

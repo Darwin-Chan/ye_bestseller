@@ -215,11 +215,13 @@ class JointAcceptanceTests(unittest.TestCase):
         profile = str(self.cfg.user_data_path)
 
         # 开始页手动入口：只打开同一配置解析出的专用 Edge，不建轮、不采集
+        # （票 04 改动三：事实行已删，占用态与配置落在按钮悬浮提示上）
         ui.click('#loginBrowserBtn')
-        ui.wait_for_function("document.querySelector('#browserFacts').textContent.includes('占用')")
+        ui.wait_for_function(
+            "document.querySelector('#loginBrowserBtn').title.includes('占用')", timeout=5000)
         self.assertEqual(len(self.os.starts), 1)
         self.assertEqual(self.os.starts[0].profile, profile)
-        self.assertNotIn('账号已登录', ui.locator('#browserFacts').inner_text())
+        self.assertNotIn('账号已登录', ui.locator('#loginBrowserBtn').get_attribute('title'))
         with closing(connect(self.cfg.db_file)) as conn:
             self.assertEqual(rounds.pending_rounds(Database(conn)), ())
             self.assertIsNone(Database(conn).crawler_process())
@@ -263,18 +265,27 @@ class JointAcceptanceTests(unittest.TestCase):
         self.child.poll.return_value = 0
         self.assertTrue(self.api.get_run()['can_resume'])
 
-        # 过程页手动入口：只开窗口；开着时继续被拒且没有任何自动采集
+        # 过程页手动入口（票 04：已上移页头、占用态信息落悬浮提示）：只开窗口；
+        # 开着时「继续」不再置灰，点击弹信息框原样报因，且没有任何自动采集
         ui.evaluate('tickRun()')
+        expect(ui.locator('#runLoginBrowserBtn')).to_be_visible()
         expect(ui.locator('#runLoginBrowserBtn')).to_be_enabled()
         frozen_visits = list(visits)
         ui.click('#runLoginBrowserBtn')
-        ui.wait_for_function("document.querySelector('#runBrowserFacts').textContent.includes('占用')")
+        ui.wait_for_function(
+            "document.querySelector('#runLoginBrowserBtn').title.includes('占用')", timeout=5000)
         self.assertEqual(len(self.os.starts), 2)
         self.assertEqual(self.os.starts[1].profile, profile)
-        self.assertNotIn('账号已登录', ui.locator('#runBrowserFacts').inner_text())
+        self.assertNotIn('账号已登录', ui.locator('#runLoginBrowserBtn').get_attribute('title'))
         self.assertIn('占用', self.api.get_run()['continue_gate'])
         ui.evaluate('tickRun()')
-        self.assertTrue(ui.locator('#resumeBtn').is_disabled())
+        self.assertFalse(ui.locator('#resumeBtn').is_disabled(), '继续不再因门禁置灰')
+        with patch.object(gui.subprocess, 'Popen') as spawn:
+            ui.locator('#resumeBtn').click()
+            ui.wait_for_selector('#confirmModal.show', timeout=5000)
+            spawn.assert_not_called()
+        self.assertIn('占用', ui.locator('#confirmSub').inner_text(), '信息框给原样原因')
+        ui.locator('#confirmOk').click()
         self.assertEqual(list(visits), frozen_visits, '手动操作不自动采集')
         # 用户关闭手动窗口：也不会自动继续
         self.os.state = 'free'
