@@ -32,8 +32,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 COMPARE = 'Compare the same physical product style'
 
-# 子进程：吃父进程写好的商品清单，跑真的 suggest；第一批判断提交之后，下一批又落
-# DIE_WITH_PENDING 条（未提交）时 os._exit——等价于关窗／任务管理器结束进程。
+# 第一批判断提交后，下一批再落这么多条未提交判断，子进程就硬结束。经 argv 传给 PROBE
+# 单源共用——下面夹具下限守卫的算术也用这个数，两处别再各写一份。
+DIE_WITH_PENDING = 5
+
+# 子进程：吃父进程写好的商品清单（argv[2]）与硬杀余量（argv[3]），跑真的 suggest；
+# 第一批判断提交之后，下一批又落 DIE_WITH_PENDING 条（未提交）时 os._exit——等价于
+# 关窗／任务管理器结束进程。
 #
 # 硬杀死点钉在判断落盘的主线程里（连接钩子），不跟 worker 线程的模型调用赛跑：旧写法
 # 「第 N 次同款比较之后再来的请求直接退」是「硬杀时刻」与「第一批提交完成」两个线程的
@@ -52,7 +57,7 @@ products = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
 groups = [{"id": "G%d" % i, "confirmed": False, "sales": p["sales"],
            "members": [{"shop_key": p["shop_key"], "offer_id": p["offer_id"]}]} for i, p in enumerate(products)]
 
-DIE_WITH_PENDING = 5        # 第一批提交后，下一批再落这么多条未提交判断就硬结束
+DIE_WITH_PENDING = int(sys.argv[3])     # 第一批提交后，下一批再落这么多条未提交判断就硬结束（父进程传单源值）
 
 
 class _DieAfterFirstBatch(sqlite3.Connection):
@@ -246,15 +251,17 @@ class MatchingCommitTests(unittest.TestCase):
         reference = self.suggest(self.cache('cold'), items, cold)
         asked = asked_pairs(cold)
         names_by_version = {version(p): p['product_name'] for p in items}
-        self.assertGreater(len(asked), JUDGMENT_COMMIT_BATCH + 5,
-                           '夹具太小：排不出「一批已提交＋下批几条未提交」的硬杀点')
+        self.assertGreaterEqual(len(asked), JUDGMENT_COMMIT_BATCH + DIE_WITH_PENDING,
+                                '夹具至少要能排出一批已提交＋下批几条未提交的硬杀点')
 
         child = subprocess.run(
             [sys.executable, '-c', PROBE, str(self.cache('killed')),
-             str(Path(self.tmp.name)/'products.json')],
+             str(Path(self.tmp.name)/'products.json'), str(DIE_WITH_PENDING)],
             cwd=ROOT, capture_output=True, env={**os.environ, 'DEEPSEEK_API_KEY': 'secret-value'})
 
-        self.assertNotEqual(child.returncode, 0, child.stderr.decode('utf-8', 'replace')[-400:])
+        self.assertNotEqual(child.returncode, 0,
+                            '子进程应被连接钩子硬杀（跑完即钩子未生效）——'
+                            + child.stderr.decode('utf-8', 'replace')[-400:])
         judgments, evidence = judged_rows(self.cache('killed'))
         self.assertTrue(0 < len(judgments) < len(asked),
                         f'中途结束应当留下部分判断：{len(judgments)}/{len(asked)}')
