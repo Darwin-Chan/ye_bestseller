@@ -64,6 +64,16 @@ class ViewsTestCase(unittest.TestCase):
             attempt=1,
         )
 
+    def collect_half(self, round_id, shop_key, *, first_id="21", second_id="22"):
+        """把该店做成「采到一半」：榜单完整（两个商品），只提交了第一个详情。"""
+        self.db.save_shop_offers(
+            round_id, shop_key, f"https://{shop_key}.example/", f"店铺{shop_key}",
+            [(1, first_id, f"https://detail.1688.com/offer/{first_id}.html",
+              f"商品{first_id}", ""),
+             (2, second_id, f"https://detail.1688.com/offer/{second_id}.html",
+              f"商品{second_id}", "")], 1)
+        self.submit(round_id, first_id, ("蓝", 3), shop_key=shop_key)
+
 
 class StartViewTests(ViewsTestCase):
     def test_start_page_counts_today_inventory_and_offers_shops_to_crawl(self):
@@ -420,11 +430,7 @@ class RunViewTests(ViewsTestCase):
         """过程页不动：部分采集店仍在「未完成店铺」药丸里（旧形状、无计数），不进完成表。"""
         round_id = new_round(self.db, ("A01", "https://A01.example/", "店铺A"),
                              ("A02", "https://A02.example/", "店铺B"), run_date=TODAY)
-        self.db.save_shop_offers(
-            round_id, "A01", "https://A01.example/", "店铺A",
-            [(1, "11", "https://detail.1688.com/offer/11.html", "商品11", ""),
-             (2, "12", "https://detail.1688.com/offer/12.html", "商品12", "")], 1)
-        self.submit(round_id, "11", ("红", 5))
+        self.collect_half(round_id, "A01", first_id="11", second_id="12")
 
         view = views.run_view(self.conn, state=self.state, now=NOW)
 
@@ -489,12 +495,8 @@ class ResultViewTests(ViewsTestCase):
             round_id, "A01", "https://A01.example/", "店铺A",
             [(1, "11", "https://detail.1688.com/offer/11.html", "商品11", "")], 1)
         self.submit(round_id, "11", ("红", 5), ("蓝", 7))
-        # A02：榜单完整（两个商品），只提交了一个详情——采到一半、仍有剩余工作
-        self.db.save_shop_offers(
-            round_id, "A02", "https://A02.example/", "店铺B",
-            [(1, "21", "https://detail.1688.com/offer/21.html", "商品21", ""),
-             (2, "22", "https://detail.1688.com/offer/22.html", "商品22", "")], 1)
-        self.submit(round_id, "21", ("蓝", 3), shop_key="A02")
+        # A02：采到一半（榜单完整、只提交了一个详情、仍有剩余工作）
+        self.collect_half(round_id, "A02")
         rounds.finish(self.db, rounds.load(self.db, round_id), TerminalReason.ABANDONED,
                       now="2026-09-13T04:10:00+00:00")
 
@@ -521,11 +523,7 @@ class ResultViewTests(ViewsTestCase):
         self.db.save_shop_offers(round_id, "A01", "https://A01.example/", "店铺A", [],
                                  pages_read=1, confirmed_empty=True)
         # A02：采到一半
-        self.db.save_shop_offers(
-            round_id, "A02", "https://A02.example/", "店铺B",
-            [(1, "21", "https://detail.1688.com/offer/21.html", "商品21", ""),
-             (2, "22", "https://detail.1688.com/offer/22.html", "商品22", "")], 1)
-        self.submit(round_id, "21", ("蓝", 3), shop_key="A02")
+        self.collect_half(round_id, "A02")
         rounds.finish(self.db, rounds.load(self.db, round_id), TerminalReason.ABANDONED,
                       now="2026-09-13T04:10:00+00:00")
 
@@ -577,11 +575,7 @@ class SharedMetricsTests(ViewsTestCase):
         self.submit(round_id, "11", ("红", 5), ("蓝", 7))
         self.db.append_event(round_id, "click_deny", shop_key="A01")
         # A02 采到一半：榜单完整、提交了一个详情、还有一个剩余
-        self.db.save_shop_offers(
-            round_id, "A02", "https://A02.example/", "店铺B",
-            [(1, "21", "https://detail.1688.com/offer/21.html", "商品21", ""),
-             (2, "22", "https://detail.1688.com/offer/22.html", "商品22", "")], 1)
-        self.submit(round_id, "21", ("蓝", 3), shop_key="A02")
+        self.collect_half(round_id, "A02")
 
         run = views.run_view(self.conn, state=self.state, now=NOW)
         result = views.result_view(

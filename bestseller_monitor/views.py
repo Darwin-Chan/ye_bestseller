@@ -488,33 +488,23 @@ def _shop_breakdown(conn: sqlite3.Connection, round_id: int,
         shop_key = progress.shop_key
         one = tally.shop(shop_key)
         deny, duration = _shop_span(conn, round_id, shop_key)
-        if not progress.needs_work:
-            done.append({
-                "key": shop_key,
-                "name": progress.shop_name,
-                "products": one.success_offers,
-                "skus": one.success_skus,
-                "duration": _fmt_minutes(duration),
-                "deny": deny,
-                **shop_progress.display(progress),
-            })
-            continue
-        todo.append({
+        base = {
             "key": shop_key,
             "name": progress.shop_name,
             **shop_progress.display(progress),
-        })
+        }
+        counts = {
+            "products": one.success_offers,
+            "skus": one.success_skus,
+            "duration": _fmt_minutes(duration),
+            "deny": deny,
+        }
+        if not progress.needs_work:
+            done.append({**base, **counts})
+            continue
+        todo.append(base)
         if one.success_offers > 0:
-            partial.append({
-                "key": shop_key,
-                "name": progress.shop_name,
-                "products": one.success_offers,
-                "skus": one.success_skus,
-                "duration": _fmt_minutes(duration),
-                "deny": deny,
-                "partial": True,
-                **shop_progress.display(progress),
-            })
+            partial.append({**base, **counts, "partial": True})
     return done, partial, todo
 
 
@@ -652,7 +642,11 @@ def _refused_start(message: str) -> dict:
 
 def result_view(conn: sqlite3.Connection, *, state: UiState, now: str,
                 max_attempts: int = shop_progress.DEFAULT_MAX_ATTEMPTS) -> dict:
-    """结果页取数：最近一轮（或本界面认领的那一轮）的终态、总量与未完成店铺。"""
+    """结果页取数：最近一轮（或本界面认领的那一轮）的终态、总量与已抓取/未抓取店铺。
+
+    「已抓取店铺」（done 键）＝抓到过商品的店——完成与部分采集按编号混排，部分行带
+    partial 事实；「未抓取店铺」（todo 键）＝一件商品都没抓到的店（含完成但空手的）。
+    """
     db = Database(conn)
     run = (rounds.load(db, state.round_id) if state.round_id is not None
            else rounds.latest(db, finished=True))

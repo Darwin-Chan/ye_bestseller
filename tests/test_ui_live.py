@@ -741,7 +741,7 @@ class UiLiveStoppingTests(unittest.TestCase):
             page.evaluate("""() => {
               window.__result = {has_round: true, round_id: 7, reason: "ABANDONED",
                 started_hhmm: "10:00", finished_hhmm: "10:05", duration_text: "5 分",
-                deny: 0, done_count: 2, total_count: 4, products_total: 40, skus_total: 52,
+                deny: 0, done_count: 1, total_count: 4, products_total: 40, skus_total: 52,
                 done: [
                   {key: "A01", name: "店铺A", products: 30, skus: 40,
                    duration: "10 分", deny: 0},
@@ -761,8 +761,8 @@ class UiLiveStoppingTests(unittest.TestCase):
             self.assertIn("A02 店铺B", rows[1])
             self.assertIn("未完成", rows[1], "没走完的店带未完成标")
             self.assertIn("已抓取店铺（2）", page.inner_text("#resDoneTitle"))
-            self.assertEqual(page.inner_text("#resDoneBig"), "2 / 4",
-                             "顶部大数字仍是「完成店铺」口径")
+            self.assertEqual(page.inner_text("#resDoneBig"), "1 / 4",
+                             "顶部大数字仍是「完成店铺」口径，与表行数（2）刻意不同")
             self.assertIn("未抓取店铺（1）", page.inner_text("#resTodoTitle"))
             self.assertEqual(page.inner_text("#resTodoPills"), "A03 店铺C",
                              "药丸带店名，不再只有编号")
