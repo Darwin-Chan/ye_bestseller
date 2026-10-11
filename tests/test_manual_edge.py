@@ -399,7 +399,8 @@ class ManualEdgeTests(unittest.TestCase):
     def test_false_mode_and_invalid_config_have_accurate_errors(self):
         self.store_plan()
         self.config.write_text(self.config.read_text('utf-8').replace('start_browser = true','start_browser = false'),'utf-8')
-        api = gui.Api(config_file=self.config, browser_runtime=self.os)
+        api = gui.Api(config_file=self.config, browser_runtime=self.os,
+                      now=lambda: '2026-10-09T04:00:00+00:00')  # 同 setUp：闸门按注入的钟找本周计划
         self.assertIn('start_browser=true', api.open_login_browser()['error'])
         self.assertIn('start_browser=true', api.start_run(['A'])['error'])
         self.config.write_text('invalid = [', 'utf-8')
