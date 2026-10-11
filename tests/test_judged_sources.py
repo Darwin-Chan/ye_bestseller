@@ -47,6 +47,24 @@ def _gitee(name, *, private=True, owner=OWNER, remote="") -> judged_sources.Gite
     return judged_sources.GiteeRepo(name=name, owner=owner, private=private, remote=remote)
 
 
+def _gitee_fetch(pages: dict[int, list[dict]], *, error_on: int | None = None,
+                 login: str = OWNER):
+    """替身传输的规范形状：`/user` 回 token 账号（`login`）；仓库页按 URL 里的 page 参数回
+    `pages` 对应的一页；`error_on` 点名哪一页报网络错。返回 (fetch, seen)。"""
+    seen: list[tuple[str, dict]] = []
+
+    def fetch(url: str, headers: dict):
+        seen.append((url, dict(headers)))
+        if url.endswith("/user"):
+            return {"login": login}
+        page = int(url.rsplit("page=", 1)[-1].split("&")[0])
+        if error_on is not None and page == error_on:
+            raise OSError("HTTP 500")
+        return pages.get(page, [])
+
+    return fetch, seen
+
+
 class FakeProvider:
     """替身 provider：给一页仓库清单，或在查询时抛错（模拟 API 失败 / 分页不完整）。"""
 
@@ -209,8 +227,7 @@ class RefreshTests(RefreshCase):
         """防呆出口在刷新这一层：账号对不上 = 查询失败 = 保留上一版，绝不发布空清单。"""
         self.refresh(FakeProvider([_gitee("judged-m1")]))
 
-        def fetch(url: str, headers: dict):
-            return {"login": "someoneelse"} if url.endswith("/user") else []
+        fetch, _ = _gitee_fetch({}, login="someoneelse")
 
         result = self.refresh(judged_sources.GiteeApi(OWNER, "secret-gitee-token", fetch=fetch))
 
@@ -276,25 +293,8 @@ class GiteeApiTests(unittest.TestCase):
     def client(self, fetch, **kwargs):
         return judged_sources.GiteeApi(OWNER, self.TOKEN, per_page=2, fetch=fetch, **kwargs)
 
-    def recording_fetch(self, pages: dict[int, list[dict]], *, error_on: int | None = None,
-                        login: str = OWNER):
-        """替身传输：`/user` 回 token 账号（`login`）；仓库页按 URL 里的 page 参数回对应的一页；
-        要哪一页报错就报错。"""
-        seen: list[tuple[str, dict]] = []
-
-        def fetch(url: str, headers: dict):
-            seen.append((url, dict(headers)))
-            if url.endswith("/user"):
-                return {"login": login}
-            page = int(url.rsplit("page=", 1)[-1].split("&")[0])
-            if error_on is not None and page == error_on:
-                raise OSError("HTTP 500")
-            return pages.get(page, [])
-
-        return fetch, seen
-
     def test_the_client_pages_through_every_page(self):
-        fetch, seen = self.recording_fetch({
+        fetch, seen = _gitee_fetch({
             1: [{"name": "judged-m1", "private": True, "namespace": {"path": OWNER}},
                 {"name": "judged-m2", "private": True, "namespace": {"path": OWNER}}],
             2: [{"name": "judged-m4", "private": True, "namespace": {"path": OWNER}}],
@@ -312,7 +312,7 @@ class GiteeApiTests(unittest.TestCase):
     def test_the_listing_uses_the_authorized_user_endpoint(self):
         """票 05 现场坐实：`/users/{owner}/repos` 对私有库回空列表（本人 token 也一样），
         授权用户接口才看得到——列表查询只走后者。"""
-        fetch, seen = self.recording_fetch({1: []})
+        fetch, seen = _gitee_fetch({1: []})
 
         self.client(fetch).list_repos()
 
@@ -327,7 +327,7 @@ class GiteeApiTests(unittest.TestCase):
     def test_a_token_from_another_account_is_refused_before_listing(self):
         """防呆：token 账号 ≠ machine.gitee_owner = 看错了地方——按查询失败处理、
         不再往下翻仓库页（查了也不是本家的仓库）。"""
-        fetch, seen = self.recording_fetch({1: []}, login="someoneelse")
+        fetch, seen = _gitee_fetch({1: []}, login="someoneelse")
 
         with self.assertRaises(judged_sources.SourceQueryError) as caught:
             self.client(fetch).list_repos()
@@ -338,17 +338,18 @@ class GiteeApiTests(unittest.TestCase):
         self.assertNotIn(self.TOKEN, message)
         self.assertEqual(len(seen), 1, "账号对不上就不再查仓库页")
 
-    def test_the_account_check_reads_user_and_ignores_login_case(self):
-        """列仓库前先经 `GET /user` 核对账号；登录名大小写不敏感（Gitee 上指同一个账号）。"""
-        fetch, seen = self.recording_fetch({
-            1: [{"name": "judged-m1", "private": True, "namespace": {"path": OWNER}}]},
+    def test_a_case_variant_account_is_refused_too(self):
+        """登录名逐字比对（与下游 `_select` 过滤、上一版 owner 比对同口径）：大小写不同 =
+        不一致、按查询失败处理——在这里放宽会留下「核对过、却全被过滤」的静默发空清单缝。"""
+        fetch, _ = _gitee_fetch({1: [
+            {"name": "judged-m1", "private": True, "namespace": {"path": OWNER}}]},
             login=OWNER.upper())
 
-        repos = self.client(fetch).list_repos()
+        with self.assertRaises(judged_sources.SourceQueryError) as caught:
+            self.client(fetch).list_repos()
 
-        self.assertEqual([repo.name for repo in repos], ["judged-m1"])
-        self.assertTrue(any(url.endswith("/user") for url, _ in seen),
-                        "列仓库前先核对 token 账号")
+        self.assertIn(OWNER.upper(), str(caught.exception))
+        self.assertIn(OWNER, str(caught.exception))
 
     def test_an_unreadable_account_identity_is_a_query_failure(self):
         """`/user` 返回读不出 login 的东西 = 账核对不了，按查询失败处理（保留上一版）。"""
@@ -360,8 +361,19 @@ class GiteeApiTests(unittest.TestCase):
 
         self.assertIn("/user", str(caught.exception))
 
+    def test_a_network_failure_on_the_account_check_is_a_query_failure(self):
+        """`/user` 侧的网络错也折成查询失败（保留上一版），绝不冒充「没来源」。"""
+        def fetch(url: str, headers: dict):
+            raise OSError("HTTP 502")
+
+        with self.assertRaises(judged_sources.SourceQueryError) as caught:
+            self.client(fetch).list_repos()
+
+        self.assertIn("token 账号核对", str(caught.exception))
+        self.assertNotIn(self.TOKEN, str(caught.exception))
+
     def test_the_client_stops_on_an_empty_last_page(self):
-        fetch, seen = self.recording_fetch({
+        fetch, seen = _gitee_fetch({
             1: [{"name": "judged-m1", "private": True, "namespace": {"path": OWNER}},
                 {"name": "judged-m2", "private": True, "namespace": {"path": OWNER}}],
             2: [],
@@ -373,7 +385,7 @@ class GiteeApiTests(unittest.TestCase):
         self.assertEqual(len([url for url, _ in seen if not url.endswith("/user")]), 2)
 
     def test_the_token_rides_in_the_header_never_in_the_url(self):
-        fetch, seen = self.recording_fetch({1: []})
+        fetch, seen = _gitee_fetch({1: []})
 
         self.client(fetch).list_repos()
 
@@ -382,7 +394,7 @@ class GiteeApiTests(unittest.TestCase):
             self.assertEqual(headers.get("Authorization"), f"token {self.TOKEN}")
 
     def test_a_failure_on_a_later_page_raises_without_leaking_the_token(self):
-        fetch, _ = self.recording_fetch(
+        fetch, _ = _gitee_fetch(
             {1: [{"name": "judged-m1", "private": True, "namespace": {"path": OWNER}},
                  {"name": "judged-m2", "private": True, "namespace": {"path": OWNER}}]},
             error_on=2)
@@ -394,8 +406,6 @@ class GiteeApiTests(unittest.TestCase):
         self.assertIn("2", str(caught.exception), "点名翻到哪一页没成")
 
     def test_an_endless_full_pages_run_is_treated_as_incomplete(self):
-        fetch, _ = self.recording_fetch({})   # 每页都满（默认回全满的一页）：翻不到底
-
         def endless(url: str, headers: dict):
             if url.endswith("/user"):
                 return {"login": OWNER}
@@ -406,7 +416,7 @@ class GiteeApiTests(unittest.TestCase):
             self.client(endless).list_repos()
 
     def test_the_client_reads_the_documented_repo_fields(self):
-        fetch, _ = self.recording_fetch({1: [
+        fetch, _ = _gitee_fetch({1: [
             {"name": "judged-m1", "private": True, "namespace": {"path": OWNER},
              "ssh_url": "git@gitee.com:somebody/judged-m1.git"}]})
 

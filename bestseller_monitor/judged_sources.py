@@ -63,9 +63,9 @@ MACHINE_ID_RE = re.compile(r"m[1-9][0-9]*\Z")
 
 
 class SourceQueryError(RuntimeError):
-    """来源查询失败（API 不通、某一页没成、翻页翻不到底、返回不是仓库列表）。
+    """来源查询失败（API 不通、token 账号核对不过、某一页没成、翻页翻不到底、返回不是仓库列表）。
 
-    调用方据此「不覆盖上一版快照」。消息里只带页号与错误种类，**绝不含 token**。
+    调用方据此「不覆盖上一版快照」。消息里只带页号、账号名与错误种类，**绝不含 token**。
     """
 
 
@@ -365,32 +365,33 @@ class GiteeApi:
         """`GET /user`：token 是谁的账号。与可信 owner 不一致 = 看错了地方，按查询失败处理。
 
         token 换过账号而 owner 配置没跟上时，`/user/repos` 照样 200——只会安静地列出**别人**的
-        仓库或空表；这里先拦住，让「空列表」永远代表「真没有」。登录名按不区分大小写比对
-        （Gitee 上大小写指同一个账号）。
+        仓库或空表；这里先拦住，让「空列表」永远代表「真没有」。比对按逐字（含大小写）：下游
+        `_select` 的 owner 过滤与上一版 owner 比对都是逐字口径，这里放宽会在两层之间留下
+        「核对过、却全被过滤」的缝——那正是静默发空清单。
         """
-        payload = self._get_json(f"{self._base}/user", what="token 账号核对")
+        payload = self._get_json(f"{self._base}/user", operation="token 账号核对")
         login = str(payload.get("login") or "") if isinstance(payload, dict) else ""
         if not login:
             raise SourceQueryError(
                 f"token 账号核对没成：/user 返回的不是带 login 的对象（{type(payload).__name__}）")
-        if login.casefold() != self.owner.casefold():
+        if login != self.owner:
             raise SourceQueryError(
                 f"token 账号是 {login}，与配置的可信 owner {self.owner} 不一致——查错了账号；"
-                "核对 machine.gitee_owner 与 GITEE_TOKEN（token 是不是换过账号？）")
+                "核对 machine.gitee_owner 与 GITEE_TOKEN（token 是不是换过账号？注意大小写）")
 
-    def _get_json(self, url: str, *, what: str) -> object:
+    def _get_json(self, url: str, *, operation: str) -> object:
         try:
             return self._fetch(url, {"Authorization": f"token {self._token}",
                                      "Accept": "application/json"})
         except SourceQueryError:
             raise
         except Exception as exc:                       # 网络/解析都折成同一档
-            raise SourceQueryError(f"{what}没成（{type(exc).__name__}）：{exc}") from None
+            raise SourceQueryError(f"{operation}没成（{type(exc).__name__}）：{exc}") from None
 
     def _page(self, number: int) -> list[GiteeRepo]:
         url = (f"{self._base}/user/repos"
                f"?visibility=all&per_page={self._per_page}&page={number}")
-        payload = self._get_json(url, what=f"第 {number} 页查询")
+        payload = self._get_json(url, operation=f"第 {number} 页查询")
         if not isinstance(payload, list):
             raise SourceQueryError(f"第 {number} 页返回的不是仓库列表（{type(payload).__name__}）")
         return [_repo_of(item) for item in payload]
