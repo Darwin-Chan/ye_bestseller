@@ -2,7 +2,8 @@
 
 三条验收路径就是三个类：pull / push / push 被 non-fast-forward 拒绝后重试。
 其余失败（认证、网络、钩子拒绝）不重试的边界单独钉住；两路皆空的静默失败（issue 05）
-另有一类，钉住失败消息里的退出码与分档。
+另有一类，钉住失败消息里的退出码与分档；每次 git 调用的共享上限与超时归一同另有一类
+（issue 05 后续票 01，`CallTimeoutTests`）。
 
 世界（长尾地基税票 05）：各用例的铺场（裸库远端 ＋ seed 链 ＋ 夹具克隆）每测试进程只真搭
 一次模板、用例复制取独立副本；`GitChannel.clone` / `pull` / `push` 本体与被测真操作照旧
@@ -377,6 +378,107 @@ class SilentFailureTests(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn("does not appear to be a git repository", message)
         self.assertRegex(message, r"退出码 \d+")
+
+
+class CallTimeoutTests(unittest.TestCase):
+    """票 01（issue 05 后续）：通道里每次 git 调用共用一处上限，超时归一成通道错误。
+
+    真等满上限的用例不写（也不许写）：这一件在进程边界（`subprocess.run`）用假进程
+    捕获参数、注入 `TimeoutExpired`，不真跑 git——与 `SilentFailureTests` 同款路子。
+    """
+
+    def setUp(self):
+        self.box = GitSandbox(self)
+        self.repo = self.box.tmp / "raw-m1"
+
+    def _fake_git(self, calls):
+        """假 git 进程：记下每次调用的参数，按子命令回一个「像成了」的返回。"""
+        outputs = {"rev-list": "0\t0\n", "rev-parse": "abc1234\n",
+                   "remote": "https://example.invalid/x.git\n"}
+
+        def fake(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            sub = cmd[1] if cmd[1] != "-C" else cmd[3]
+            out = outputs.get(sub, "")
+            if kwargs.get("text"):
+                return subprocess.CompletedProcess(cmd, 0, out, "")
+            return subprocess.CompletedProcess(cmd, 0, out.encode("utf-8"), b"")
+
+        return fake
+
+    def _hang(self):
+        """假 git 进程：真给 `subprocess.run` 那一档超时——立刻抛 `TimeoutExpired`。"""
+        def fake(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+        return fake
+
+    def test_every_git_call_takes_the_limit_from_the_one_constant(self):
+        """逐条钉住：所有路（含读字节的 `show`）的上限都取自同一处常量。
+
+        把常量临时换成一个哨兵值再跑：哪条路要是另抄了一个数（比如硬编码 300），
+        捕获到的就不是哨兵——「集中在一处」当场破。
+        """
+        calls = []
+        channel = GitChannel(self.repo)
+        with mock.patch.object(git_channel.subprocess, "run",
+                               side_effect=self._fake_git(calls)), \
+                mock.patch.object(git_channel, "_TIMEOUT_SEC", 4242):
+            GitChannel.clone("https://example.invalid/plan.git", self.box.tmp / "clone")
+            channel.pull()
+            channel.pull_ff_only()
+            channel.remote_url()
+            channel.head_matches_upstream()
+            channel.local_changes()
+            channel.commit("m", [self.box.tmp / "f.txt"])
+            channel.push()
+            channel.head()
+            channel.read_path("data/x.db.gz")
+            channel.reset_to_upstream(clean=True)
+
+        self.assertTrue(any(kw.get("text") for _, kw in calls), "文本这几路得真跑过")
+        self.assertTrue(any(not kw.get("text") for _, kw in calls),
+                        "读字节那条路（`_run_bytes`）也得跑过")
+        for cmd, kwargs in calls:
+            self.assertEqual(kwargs.get("timeout"), 4242,
+                             f"{' '.join(cmd)} 没带（或没带对）上限")
+
+    def test_the_limit_is_one_shared_300_second_constant(self):
+        """300 秒一档、与 coscli 子进程同档：取值依据写在常量旁，值本身钉在这里。"""
+        self.assertEqual(git_channel._TIMEOUT_SEC, 300)
+
+    def test_a_timed_out_call_becomes_a_channel_error_naming_it_all(self):
+        """超时归一：消息里有动作、完整命令、上限与实际耗时，说清「超过上限、已放弃」。"""
+        clock = mock.Mock()
+        clock.monotonic.side_effect = [100.0, 431.5]    # 起表 100.0，放弃那一刻 431.5
+        with mock.patch.object(git_channel.subprocess, "run", side_effect=self._hang()), \
+                mock.patch.object(git_channel, "time", clock):
+            with self.assertRaises(ChannelError) as ctx:
+                GitChannel(self.repo).pull()
+
+        message = str(ctx.exception)
+        self.assertIn("拉取超时（git -C", message)        # 动作＋完整命令开头
+        self.assertIn(str(self.repo), message)           # 命令带路径
+        self.assertIn("300 秒上限", message)              # 上限秒数
+        self.assertIn("实际耗时 331.5 秒", message)        # 实测耗时（431.5 − 100.0）
+        self.assertIn("已放弃", message)                  # 「超过上限、已放弃」那一档
+
+    def test_a_push_timeout_is_not_a_rejection_and_gets_no_retry(self):
+        """超时不是 non-fast-forward 拒绝：push 那一步超时只试一次，原样报出。"""
+        calls = []
+
+        def fake(cmd, **kwargs):
+            calls.append(cmd)
+            if "push" in cmd:
+                raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with mock.patch.object(git_channel.subprocess, "run", side_effect=fake):
+            with self.assertRaises(ChannelError) as ctx:
+                GitChannel(self.repo).push()
+
+        self.assertEqual(sum("push" in cmd for cmd in calls), 1,
+                         "超时不许触发重试（重试只认 non-fast-forward 拒绝）")
+        self.assertIn("推送超时", str(ctx.exception))
 
 
 if __name__ == "__main__":

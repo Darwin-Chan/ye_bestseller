@@ -10,6 +10,8 @@
 - 诊断输出固定英文（`LC_ALL=C`）：判定「被拒」用 `push --porcelain` 的稳定标记，
   不依赖人话文案。
 - 空库（远端还没有分支）上的 `pull` 不算失败：没有可拉的而已。
+- 每次 git 子进程调用都带同一处上限（`_TIMEOUT_SEC`）：等满上限就放弃这次调用、归一成
+  通道错误原样报出（issue 05 后续：挂住比失败更糟——没有结论、没有退出码、没有日志）。
 - 失败消息一律带上 git 退出码；两路皆空时按「进程被外部结束」那一档说人话（issue 05：
   丢掉返回码的那版只剩一句「（git 没有输出）」，分不清 git 自己失败与进程被外部杀掉）
 """
@@ -19,8 +21,15 @@ import os
 import pathlib
 import re
 import subprocess
+import time
 
 DEFAULT_PUSH_ATTEMPTS = 5
+
+# 通道里每次 git 子进程调用的共享上限，300 秒一档（与 cos_store 的 coscli 子进程同档）：
+# 交换包体量在百 KB~MB 量级，正常一次 clone/pull/push 是秒级到十几秒；等满 300 秒只可能
+# 来自通道连上了却不回应（网络黑洞、对端假死）或 git 进程卡死——而不是「包大」。没有它，
+# 交换台会无限挂住：没有结论、没有退出码、没有日志（issue 05）。
+_TIMEOUT_SEC = 300
 
 # 远端还没有这个分支时的两种 git 说法（LC_ALL=C 下稳定）
 _UNBORN_REMOTE = re.compile(r"no such ref was fetched|couldn't find remote ref", re.IGNORECASE)
@@ -47,17 +56,27 @@ def _git_env() -> dict[str, str]:
     return dict(os.environ, GIT_TERMINAL_PROMPT="0", LC_ALL="C")
 
 
-def _run(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        env=_git_env(),
-    )
+def _run_git(what: str, args: tuple[str, ...], **kwargs) -> subprocess.CompletedProcess:
+    """起一个 git 子进程；每次调用共用同一处上限（`_TIMEOUT_SEC`），超时归一成通道错误。
+
+    耗时现测（起表放在这一层，文本／字节两条都覆盖）：`TimeoutExpired` 只带上限、
+    不带实际耗时，而这一档的现场事实正是「等满多久才放弃」。
+    """
+    started = time.monotonic()
+    try:
+        return subprocess.run(["git", *args], timeout=_TIMEOUT_SEC, **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        raise _timeout_failure(what, args, exc, time.monotonic() - started) from exc
 
 
-def _run_bytes(*args: str) -> subprocess.CompletedProcess[bytes]:
+def _run(what: str, *args: str) -> subprocess.CompletedProcess[str]:
+    return _run_git(what, args, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", env=_git_env())
+
+
+def _run_bytes(what: str, *args: str) -> subprocess.CompletedProcess[bytes]:
     """同一个 git 通道，但拿字节（`git show HEAD:<路径>` 读包这类二进制内容）。"""
-    return subprocess.run(["git", *args], capture_output=True, env=_git_env())
+    return _run_git(what, args, capture_output=True, env=_git_env())
 
 
 def _failure(what: str, args: tuple[str, ...], done: subprocess.CompletedProcess[str]) -> ChannelError:
@@ -89,6 +108,21 @@ def _silent_failure_note(returncode: int) -> str:
             f"（那类失败都会留话），更像进程被外部结束或通道瞬断。重跑一次通常就好。")
 
 
+def _timeout_failure(what: str, args: tuple[str, ...], exc: subprocess.TimeoutExpired,
+                     elapsed: float) -> ChannelError:
+    """超时那一档（issue 05 后续票 01）：等满上限就放弃这次调用，不再无限等。
+
+    形态与 `_failure` 同款：第一行是动作＋完整命令，下面给结论——那里在末尾放 git
+    退出码，这里放「超过上限、已放弃」与实测耗时（诊断要的现场事实），上游原样引用。
+    """
+    return ChannelError(
+        f"{what}超时（git {' '.join(args)}）：\n"
+        f"超过 {exc.timeout} 秒上限，已放弃这次调用（实际耗时 {elapsed:.1f} 秒）："
+        f"通道多半连上了却不回应（网络黑洞、对端假死）——不是 git 自己报的错；"
+        f"重跑一次通常就好，再现就把这一行和当时的时刻留着。"
+    )
+
+
 class GitChannel:
     """一个交换库的本地克隆；所有操作都在它里面发生。"""
 
@@ -101,7 +135,7 @@ class GitChannel:
         target = pathlib.Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         args = ("clone", url, str(target))
-        done = _run(*args)
+        done = _run("克隆", *args)
         if done.returncode != 0:
             raise _failure("克隆", args, done)
         return cls(target)
@@ -122,14 +156,14 @@ class GitChannel:
 
     def _pull(self, what: str, *flags: str) -> None:
         args = ("-C", str(self.path), "pull", *flags)
-        done = _run(*args)
+        done = _run(what, *args)
         if done.returncode != 0 and not _UNBORN_REMOTE.search(done.stderr or ""):
             raise _failure(what, args, done)
 
     def remote_url(self, name: str = "origin") -> str | None:
         """远端 `name` 的地址；没有这条 remote 时回 None（别的失败原样抛）。"""
         args = ("-C", str(self.path), "remote", "get-url", name)
-        done = _run(*args)
+        done = _run("读取远端地址", *args)
         if done.returncode == 0:
             return done.stdout.strip()
         if _NO_SUCH_REMOTE.search(done.stderr or ""):
@@ -143,7 +177,7 @@ class GitChannel:
         ——读它的包等于读一份未经来源发布的判断集。
         """
         args = ("-C", str(self.path), "rev-list", "--left-right", "--count", "@{u}...HEAD")
-        done = _run(*args)
+        done = _run("对比上游", *args)
         if done.returncode != 0:
             return self.head_or_none() is None      # 还没有上游：空库的克隆，两端一致
         behind, ahead = (int(count) for count in done.stdout.split())
@@ -164,7 +198,7 @@ class GitChannel:
         「拉不动」（见 `plan_step._heal_dirty_clone`）。
         """
         args = ("-C", str(self.path), "status", "--porcelain")
-        done = _run(*args)
+        done = _run("查看状态", *args)
         if done.returncode != 0:
             raise _failure("查看状态", args, done)
         return [line for line in done.stdout.splitlines() if line.strip()]
@@ -173,11 +207,11 @@ class GitChannel:
         """提交这些路径的当前内容；没有可提交的变化时返回 False（不是错误）。"""
         names = [str(p) for p in paths]
         add_args = ("-C", str(self.path), "add", "--", *names)
-        done = _run(*add_args)
+        done = _run("暂存", *add_args)
         if done.returncode != 0:
             raise _failure("暂存", add_args, done)
         commit_args = ("-C", str(self.path), "commit", "-m", message, "--", *names)
-        done = _run(*commit_args)
+        done = _run("提交", *commit_args)
         if done.returncode == 0:
             return True
         if "nothing to commit" in (done.stdout + done.stderr):
@@ -189,7 +223,7 @@ class GitChannel:
         for _ in range(max(attempts, 1)):
             self.pull()
             args = ("-C", str(self.path), "push", "--porcelain")
-            done = _run(*args)
+            done = _run("推送", *args)
             if done.returncode == 0:
                 return
             if not _rejected(done):
@@ -203,7 +237,7 @@ class GitChannel:
     def head(self) -> str:
         """当前提交的短哈希（导出报告里引用「发到了哪个提交」）。"""
         args = ("-C", str(self.path), "rev-parse", "--short", "HEAD")
-        done = _run(*args)
+        done = _run("读取提交", *args)
         if done.returncode != 0:
             raise _failure("读取提交", args, done)
         return done.stdout.strip()
@@ -215,7 +249,7 @@ class GitChannel:
         工作区可能留着崩溃残迹，不能当事实。
         """
         args = ("-C", str(self.path), "show", f"HEAD:{pathlib.PurePosixPath(path)}")
-        done = _run_bytes(*args)
+        done = _run_bytes("读取 HEAD 内容", *args)
         return done.stdout if done.returncode == 0 else None
 
     def reset_to_upstream(self, *, clean: bool = False) -> None:
@@ -231,16 +265,16 @@ class GitChannel:
         """
         if any((self.path / ".git" / d).exists() for d in ("rebase-merge", "rebase-apply")):
             abort_args = ("-C", str(self.path), "rebase", "--abort")
-            done = _run(*abort_args)
+            done = _run("终止变基", *abort_args)
             if done.returncode != 0:
                 raise _failure("终止变基", abort_args, done)
         args = ("-C", str(self.path), "reset", "--hard", "@{u}")
-        done = _run(*args)
+        done = _run("回退", *args)
         if done.returncode != 0:
             raise _failure("回退", args, done)
         if clean:
             clean_args = ("-C", str(self.path), "clean", "-fd")
-            done = _run(*clean_args)
+            done = _run("清未跟踪文件", *clean_args)
             if done.returncode != 0:
                 raise _failure("清未跟踪文件", clean_args, done)
 
