@@ -105,6 +105,43 @@ class DetailVisitTests(unittest.TestCase):
         self.assertIsInstance(result, detail_visit.DeniedVisit)
         self.assertEqual(clock.now, 0.0)
 
+    def test_a_pending_stop_does_not_preempt_the_first_judgement(self):
+        """票 01：第一判读先于就绪窗口——页面已就绪时，待处理的停止请求不抢在判读之前。
+
+        窗口先行的写法会先跑等待原语的入口检查点、把 StopRequested 抛在判读之前
+        （deny 记账与弹窗归属跟着被跳过）；第一判读先行时，就绪页根本不该碰检查点。
+        """
+        stop_request.install(lambda: (_ for _ in ()).throw(stop_request.StopRequested("停")))
+        self.addCleanup(stop_request.uninstall)
+
+        visit = self.begin(FakePage(PRODUCT_URL))
+
+        self.assertIsInstance(visit, detail_visit.ReadyDetailVisit)
+
+    def test_the_readiness_window_judges_with_the_visit_intent_intact(self):
+        """票 01：窗口里的每次判读都把访问意图（target_url）原样转发。
+
+        身份页重定向恢复靠它认回原目标；丢了这个转发，恢复后的页面会在身份等待里
+        空等到响铃超时（`resolved` 拿对不上目标的页面一直判不「已解除」）。
+        """
+        page = FakePage(PRODUCT_URL)
+        calls = []
+
+        def guard_stub(page_, cfg, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise guard.PageEvidenceUnavailable("还没渲染出来")
+            return False
+
+        with patch.object(detail_visit, "ready_detail_page", side_effect=guard_stub), \
+             patch.object(waiting.time, "sleep"):
+            visit = detail_visit.begin_detail_visit(
+                lambda: detail_visit.OpenedDetail(page, target_url=PRODUCT_URL), self.cfg)
+
+        self.assertIsInstance(visit, detail_visit.ReadyDetailVisit)
+        self.assertEqual([call.get("target_url") for call in calls],
+                         [PRODUCT_URL, PRODUCT_URL])
+
     def test_acquisition_failure_becomes_a_read_failed_visit(self):
         error = PlaywrightError("导航失败")
 
@@ -260,14 +297,14 @@ class DetailVisitTests(unittest.TestCase):
     def test_late_intervention_resets_the_full_readiness_window(self):
         """介入解决后重开的是**完整**新窗：原窗烧掉一半照旧，完整的那个窗才等得到（A08）。
 
-        钟按剧本走（每次读单调钟 = 一个时刻，`sleep` 不真等）：**第 0 拍先给初次判读的
-        就绪窗口**（票 01 新增，一轮就过、不推进时钟），窗口一 t=0 开（到 10 为止）、
-        t=1.5 睡过一片，第二轮探针撞上「滑块」；介入在 t=5 被 guard 解决，
+        钟按剧本走（每次读单调钟 = 一个时刻，`sleep` 不真等）：初次判读那次走的是打桩
+        后的 `ready_detail_page`（直接交 False），不读钟；窗口一 t=0 开（到 10
+        为止）、t=1.5 睡过一片，第二轮探针撞上「滑块」；介入在 t=5 被 guard 解决，
         原窗只剩一半——重开的新窗必须是**完整**的（到 15），t≥12.5 的那两轮才轮得到，
         第四次读取（t=12.9 之后）才拿到可读的正文。重置若只续剩余额度（新窗到 10），
         那次读取会走超时出口、拿到不可读的正文，本用例判红。
         """
-        clock = ScriptedClock([0.0, 0.0, 1.0, 1.5, 5.0, 12.0, 12.5, 12.8, 12.9])
+        clock = ScriptedClock([0.0, 1.0, 1.5, 5.0, 12.0, 12.5, 12.8, 12.9])
         page = readable_mock_page()
         page.url = PRODUCT_URL
         read_moments = []
