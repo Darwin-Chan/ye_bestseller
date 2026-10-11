@@ -181,13 +181,17 @@ class LocalTrialCliTests(unittest.TestCase):
         def browser(cfg, **kwargs):
             self.sessions.append(cfg)
             return None, None, object(), None
+        # 进程边界两道门都关上：run 挡 coscli（cos_store 走 run），Popen 挡 git 通道
+        # （票 01 起 git 走 Popen——只堵 run 会让 git 悄悄漏过去）。
         with patch.object(browser_pw, "close_session"), \
                 patch.object(click_listing, "PlaywrightListing", side_effect=listing), \
                 patch.object(product_images, "urlopen", side_effect=lambda *a, **k: io.BytesIO(product_picture("green")["content"])), \
                 patch("bestseller_monitor.git_channel.subprocess.run", side_effect=AssertionError("试采不得运行Git/COS")) as external_process, \
+                patch("bestseller_monitor.git_channel.subprocess.Popen", side_effect=AssertionError("试采不得运行Git/COS")) as external_spawn, \
                 patch("bestseller_monitor.matching.urlopen", side_effect=AssertionError("试采不得调用模型")) as model_request:
             result = self.cli("--local-trial", *args, browser=browser)
             external_process.assert_not_called()
+            external_spawn.assert_not_called()
             model_request.assert_not_called()
             return result
 

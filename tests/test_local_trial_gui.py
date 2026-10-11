@@ -323,6 +323,10 @@ class LocalTrialGuiTests(unittest.TestCase):
         cards = []
 
         def launch(command, **kwargs):
+            # 这个假件同时是 git 的进程边界门（票 01 起 git 走 Popen）：试采流程里真发起
+            # git 调用要当场炸，不能被假件接住、当成又一次正常的应用拉起。
+            if str(command[0]).lower().endswith(("git", "git.exe")):
+                raise AssertionError("禁止共享动作（试采不得运行 git）")
             card = FakeCard("trial-only", offer_id="11", content_values=[
                 '<meta property="og:image" content="https://img.example/trial.png">'
                 '<script>{"skuInfoMap":{"A":{"skuId":"A","name":"默认",'

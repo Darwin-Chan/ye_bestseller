@@ -10,8 +10,9 @@
 - 诊断输出固定英文（`LC_ALL=C`）：判定「被拒」用 `push --porcelain` 的稳定标记，
   不依赖人话文案。
 - 空库（远端还没有分支）上的 `pull` 不算失败：没有可拉的而已。
-- 每次 git 子进程调用都带同一处上限（`_TIMEOUT_SEC`）：等满上限就放弃这次调用、归一成
-  通道错误原样报出（issue 05 后续：挂住比失败更糟——没有结论、没有退出码、没有日志）。
+- 每次 git 子进程调用都带同一处上限（`_TIMEOUT_SEC`）：等满上限就放弃这次调用（杀进程
+  树、不等它收尾，见 `_abandon`），归一成通道错误原样报出（issue 05 后续：挂住比失败
+  更糟——没有结论、没有退出码、没有日志）。
 - 失败消息一律带上 git 退出码；两路皆空时按「进程被外部结束」那一档说人话（issue 05：
   丢掉返回码的那版只剩一句「（git 没有输出）」，分不清 git 自己失败与进程被外部杀掉）
 """
@@ -30,6 +31,10 @@ DEFAULT_PUSH_ATTEMPTS = 5
 # 来自通道连上了却不回应（网络黑洞、对端假死）或 git 进程卡死——而不是「包大」。没有它，
 # 交换台会无限挂住：没有结论、没有退出码、没有日志（issue 05）。
 _TIMEOUT_SEC = 300
+
+# 放弃一次超时调用时留给「杀进程＋收尸」的宽限：taskkill 与 wait 都是本机小动作，
+# 正常一瞬间；超过就不再等——调用方要立刻拿到结论，这才是超时这一档的意义。
+_ABANDON_GRACE_SEC = 10
 
 # 远端还没有这个分支时的两种 git 说法（LC_ALL=C 下稳定）
 _UNBORN_REMOTE = re.compile(r"no such ref was fetched|couldn't find remote ref", re.IGNORECASE)
@@ -59,24 +64,34 @@ def _git_env() -> dict[str, str]:
 def _run_git(what: str, args: tuple[str, ...], **kwargs) -> subprocess.CompletedProcess:
     """起一个 git 子进程；每次调用共用同一处上限（`_TIMEOUT_SEC`），超时归一成通道错误。
 
+    不用 `subprocess.run(timeout=…)`：超时后它还会阻塞地把被杀死进程的两个流收干，
+    而 git 的网络助手（git-remote-http）攥着那份管道句柄不放时，这一步本身就无限等
+    ——实测「对端收下连接却不回应」那一档，run 的 timeout 兜不住（票 01 证据
+    `real-timeout-stall-smoke-run-based.txt`）。这里自己拿 Popen：超时即杀进程树、
+    不再等它交管子，「放弃这次调用」就真的放弃。
+
     耗时现测（起表放在这一层，文本／字节两条都覆盖）：`TimeoutExpired` 只带上限、
     不带实际耗时，而这一档的现场事实正是「等满多久才放弃」。
     """
     started = time.monotonic()
+    proc = subprocess.Popen(["git", *args], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, **kwargs)
     try:
-        return subprocess.run(["git", *args], timeout=_TIMEOUT_SEC, **kwargs)
+        out, err = proc.communicate(timeout=_TIMEOUT_SEC)
     except subprocess.TimeoutExpired as exc:
+        _abandon(proc)
         raise _timeout_failure(what, args, exc, time.monotonic() - started) from exc
+    return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
 
 
 def _run(what: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return _run_git(what, args, capture_output=True, text=True,
-                    encoding="utf-8", errors="replace", env=_git_env())
+    return _run_git(what, args, text=True, encoding="utf-8", errors="replace",
+                    env=_git_env())
 
 
 def _run_bytes(what: str, *args: str) -> subprocess.CompletedProcess[bytes]:
     """同一个 git 通道，但拿字节（`git show HEAD:<路径>` 读包这类二进制内容）。"""
-    return _run_git(what, args, capture_output=True, env=_git_env())
+    return _run_git(what, args, env=_git_env())
 
 
 def _failure(what: str, args: tuple[str, ...], done: subprocess.CompletedProcess[str]) -> ChannelError:
@@ -121,6 +136,26 @@ def _timeout_failure(what: str, args: tuple[str, ...], exc: subprocess.TimeoutEx
         f"通道多半连上了却不回应（网络黑洞、对端假死）——不是 git 自己报的错；"
         f"重跑一次通常就好，再现就把这一行和当时的时刻留着。"
     )
+
+
+def _abandon(proc: subprocess.Popen) -> None:
+    """超时放弃这次调用：杀掉 git 连同它的子进程，收尸，但**不**等它把管道交干。
+
+    Windows 上 git 把 stdout／stderr 的管道句柄传给了网络助手（git-remote-http）：
+    只杀 git.exe，助手还攥着管子，谁再去读干那两个流就会一直等下去。taskkill /T
+    整棵树一起杀，不成再退回只杀直接子进程——反正都不再读了。
+    """
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=_ABANDON_GRACE_SEC)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    proc.kill()
+    try:
+        proc.wait(timeout=_ABANDON_GRACE_SEC)   # 收尸；免僵尸与「仍在运行」告警
+    except subprocess.TimeoutExpired:
+        pass
 
 
 class GitChannel:
