@@ -13,6 +13,9 @@
 - 每次 git 子进程调用都带同一处上限（`_TIMEOUT_SEC`）：等满上限就放弃这次调用（杀进程
   树、不等它收尾，见 `_abandon`），归一成通道错误原样报出（issue 05 后续：挂住比失败
   更糟——没有结论、没有退出码、没有日志）。
+- 读路径只在拿得准「本来就没有」时回空值（HEAD 里没有这个路径、HEAD 还没出生、还没有
+  上游）：其余失败一律抛出——「没问成」不是「没有」，安全方向的判据拿不准时不判「安全」
+  （issue 05 后续：静默被杀不许把一次没验证过的来源放行）。
 - 失败消息一律带上 git 退出码；两路皆空时按「进程被外部结束」那一档说人话（issue 05：
   丢掉返回码的那版只剩一句「（git 没有输出）」，分不清 git 自己失败与进程被外部杀掉）
 """
@@ -45,6 +48,26 @@ _NO_SUCH_REMOTE = re.compile(r"no such remote", re.IGNORECASE)
 _RETRY_HINT = re.compile(
     r"non-fast-forward|fetch first|Updates were rejected"
     r"|cannot lock ref .*but expected",
+    re.IGNORECASE,
+)
+
+# 「HEAD 里没有这个路径」的两种 git 说法（LC_ALL=C 下稳定）：路径完全不在（新库/新文件），
+# 与工作区有同名残迹但没进过 HEAD（崩溃留下的未跟踪文件）——调用方语义都是「本来就没有」。
+_PATH_ABSENT_IN_HEAD = re.compile(
+    r"does not exist in 'HEAD'|exists on disk, but not in 'HEAD'",
+    re.IGNORECASE,
+)
+# 「这个库还没有任何提交（HEAD 未出生）」按命令各有一种说法：
+# `show HEAD:<路径>` 说 invalid object name 'HEAD'；`rev-parse --short HEAD` 说
+# Needed a single revision。只认这两种措辞，其余失败原样抛。
+_UNBORN_HEAD_SHOW = re.compile(r"invalid object name 'HEAD'", re.IGNORECASE)
+_UNBORN_HEAD_REV_PARSE = re.compile(r"needed a single revision", re.IGNORECASE)
+# `rev-list @{u}...HEAD` 认「还没有上游」的几种说法：分支还没配置上游、分支引用本身
+# 未出生、上游引用取不到（空库的克隆——这台 git 说 unknown revision，老 git 还有
+# not stored as a remote-tracking branch 一档）。其余失败原样抛，不吞。
+_NO_UPSTREAM = re.compile(
+    r"no upstream configured|no such branch|unknown revision"
+    r"|not stored as a remote-tracking branch",
     re.IGNORECASE,
 )
 
@@ -94,6 +117,13 @@ def _run_bytes(what: str, *args: str) -> subprocess.CompletedProcess[bytes]:
     return _run_git(what, args, env=_git_env())
 
 
+def _as_text(part: str | bytes | None) -> str:
+    """失败现场的流统一成文本：读字节那条路（`_run_bytes`）带回来的是 bytes。"""
+    if isinstance(part, bytes):
+        return part.decode("utf-8", "replace")
+    return part or ""
+
+
 def _failure(what: str, args: tuple[str, ...], done: subprocess.CompletedProcess[str]) -> ChannelError:
     """把 git 两个流里有的话都带上：`push --porcelain` 的拒绝理由在 **stdout**（stderr
     只有一句「failed to push some refs」）——只挑一个流会把最要紧的那句丢掉。
@@ -102,7 +132,8 @@ def _failure(what: str, args: tuple[str, ...], done: subprocess.CompletedProcess
     一句「（git 没有输出）」，等于什么都没说——返回码 1（git 自己失败）与
     0xC000013A（进程被外部结束）本该是两种结论。
     """
-    detail = "\n".join(part.strip() for part in (done.stderr, done.stdout) if part.strip())
+    streams = (_as_text(done.stderr).strip(), _as_text(done.stdout).strip())
+    detail = "\n".join(part for part in streams if part)
     head = f"{what}失败（git {' '.join(args)}）："
     if detail:
         return ChannelError(f"{head}\n{detail}（git 退出码 {done.returncode}）")
@@ -210,20 +241,34 @@ class GitChannel:
 
         接收侧判据用：收来的库是来源的只读镜像，本地有上游没有的提交就说明有人动过它
         ——读它的包等于读一份未经来源发布的判断集。
+
+        只有认出「还没有上游」这一种失败才往下走（空库的克隆：两侧都还没提交，算一致，
+        本地有提交则不一致）；静默被杀、超时这类「没问成」原样抛出——拿不准时不许在
+        这道门禁上判「安全」（issue 05 后续票 02）。
         """
         args = ("-C", str(self.path), "rev-list", "--left-right", "--count", "@{u}...HEAD")
         done = _run("对比上游", *args)
         if done.returncode != 0:
+            if not _NO_UPSTREAM.search(done.stderr or ""):
+                raise _failure("对比上游", args, done)
             return self.head_or_none() is None      # 还没有上游：空库的克隆，两端一致
         behind, ahead = (int(count) for count in done.stdout.split())
         return behind == 0 and ahead == 0
 
     def head_or_none(self) -> str | None:
-        """当前提交；还没有任何提交（空库的克隆）回 None。"""
-        try:
-            return self.head()
-        except ChannelError:
+        """当前提交；还没有任何提交（空库的克隆）回 None；其它失败原样抛。
+
+        调用方原有的「`head_or_none() or ""`」写法继续成立：只有拿得准「还没有提交」
+        才回 None；拿不到（被杀、超时、仓库坏）就该报错，而不是在账上记一个空值
+        冒充事实（issue 05 后续票 02）。
+        """
+        args = ("-C", str(self.path), "rev-parse", "--short", "HEAD")
+        done = _run("读取提交", *args)
+        if done.returncode == 0:
+            return done.stdout.strip()
+        if _UNBORN_HEAD_REV_PARSE.search(done.stderr or ""):
             return None
+        raise _failure("读取提交", args, done)
 
     def local_changes(self) -> list[str]:
         """工作区里未提交的改动与未跟踪文件的 porcelain 清单；干净时为空。
@@ -282,10 +327,19 @@ class GitChannel:
 
         问「远端那份是什么」用这一条（比如导出判「已发布的那份同不同内容」）——
         工作区可能留着崩溃残迹，不能当事实。
+
+        只有拿得准的「本来就没有」才回 None（路径不在 HEAD 里、HEAD 还没出生，措辞
+        见上）；静默被杀、超时、带输出的普通失败都抛通道错误——失败不许被读成
+        「远端还没有这份」（issue 05 后续票 02）。
         """
         args = ("-C", str(self.path), "show", f"HEAD:{pathlib.PurePosixPath(path)}")
         done = _run_bytes("读取 HEAD 内容", *args)
-        return done.stdout if done.returncode == 0 else None
+        if done.returncode == 0:
+            return done.stdout
+        stderr = _as_text(done.stderr)
+        if _PATH_ABSENT_IN_HEAD.search(stderr) or _UNBORN_HEAD_SHOW.search(stderr):
+            return None
+        raise _failure("读取 HEAD 内容", args, done)
 
     def reset_to_upstream(self, *, clean: bool = False) -> None:
         """把分支与工作区退回远端状态：未推送出去的提交与改动都会被撤掉。

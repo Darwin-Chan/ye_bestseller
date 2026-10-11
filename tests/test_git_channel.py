@@ -3,7 +3,8 @@
 三条验收路径就是三个类：pull / push / push 被 non-fast-forward 拒绝后重试。
 其余失败（认证、网络、钩子拒绝）不重试的边界单独钉住；两路皆空的静默失败（issue 05）
 另有一类，钉住失败消息里的退出码与分档；每次 git 调用的共享上限与超时归一同另有一类
-（issue 05 后续票 01，`CallTimeoutTests`）。
+（issue 05 后续票 01，`CallTimeoutTests`）；读路径区分「本来就没有」与「没问成」再有两类
+（issue 05 后续票 02，`ReadPathAbsenceTests` / `ReadPathFailureTests`）。
 
 世界（长尾地基税票 05）：各用例的铺场（裸库远端 ＋ seed 链 ＋ 夹具克隆）每测试进程只真搭
 一次模板、用例复制取独立副本；`GitChannel.clone` / `pull` / `push` 本体与被测真操作照旧
@@ -315,6 +316,155 @@ class HeadAndPathTests(unittest.TestCase):
         self.box.write_files(self.mine, {"data/2026/W38-m1.db.gz": b"leftover"})
 
         self.assertIsNone(GitChannel(self.mine).read_path("data/2026/W38-m1.db.gz"))
+
+
+class ReadPathAbsenceTests(unittest.TestCase):
+    """票 02：读路径只在拿得准的「本来就没有」时回空值——用真 git 世界钉住这几种情形。
+
+    远端还没有分支（空库的克隆）是新克隆最常见的形状：两侧都还没提交，接入判据要认它；
+    HEAD 未出生时问「那份东西是什么」也该回「没有」。加固不许把这些正常路径变成报错。
+    （「新克隆里 HEAD 没有该路径」由 `HeadAndPathTests` 既有的那条继续钉住。）
+    """
+
+    def setUp(self):
+        self.box = GitSandbox(self)
+
+    def _unborn_clone(self):
+        blank_world_template().take(self.box)       # 空件：远端还没人推过
+        return self.box.clone(self.box.tmp / REMOTE, MINE)
+
+    def test_read_path_is_none_in_a_clone_that_has_no_commits_yet(self):
+        mine = self._unborn_clone()
+
+        self.assertIsNone(GitChannel(mine).read_path("data/2026/W38-m1.db.gz"),
+                          "HEAD 未出生 = 这份东西还没有过，不是「没问成」")
+
+    def test_head_or_none_is_none_for_an_unborn_head(self):
+        mine = self._unborn_clone()
+
+        self.assertIsNone(GitChannel(mine).head_or_none())
+
+    def test_head_matches_upstream_is_true_for_a_clone_of_an_empty_remote(self):
+        mine = self._unborn_clone()
+
+        self.assertTrue(GitChannel(mine).head_matches_upstream(),
+                        "两侧都还没有提交：空库的克隆算一致（未发布来源第 2 次接入的真实形态）")
+
+
+class ReadPathFailureTests(unittest.TestCase):
+    """票 02：读路径把「没问成」与「没有」分开——静默非零、超时、带输出的普通失败都抛出。
+
+    这些失败真 git 造不出来（git 自己失败几乎总会留话、真等满上限的用例不许写），在进程
+    边界打桩，与 `SilentFailureTests` / `CallTimeoutTests` 同款路子；断言的是「不再回空值」
+    ——静默被杀不许读成 None，更不许在「来源有没有被动过」这道门禁上读成「安全」。
+    """
+
+    def setUp(self):
+        self.box = GitSandbox(self)
+        self.repo = self.box.tmp / "raw-m1"
+
+    def _silent_bytes(self, returncode: int):
+        done = subprocess.CompletedProcess(["git"], returncode, b"", b"")
+        return mock.patch.object(git_channel, "_run_bytes", return_value=done)
+
+    def _silent_text(self, returncode: int):
+        done = subprocess.CompletedProcess(["git"], returncode, "", "")
+        return mock.patch.object(git_channel, "_run", return_value=done)
+
+    def test_a_silent_read_failure_is_not_read_as_none(self):
+        with self._silent_bytes(128):
+            with self.assertRaises(ChannelError) as ctx:
+                GitChannel(self.repo).read_path("data/2026/W38-m1.db.gz")
+
+        message = str(ctx.exception)
+        self.assertIn("读取 HEAD 内容失败（git", message)   # 动作＋完整命令在第一行
+        self.assertIn("退出码 128", message)
+
+    def test_a_read_failure_with_output_keeps_gits_words_and_raises(self):
+        done = subprocess.CompletedProcess(["git"], 1, b"", b"fatal: not a git repository\n")
+        with mock.patch.object(git_channel, "_run_bytes", return_value=done):
+            with self.assertRaises(ChannelError) as ctx:
+                GitChannel(self.repo).read_path("data/2026/W38-m1.db.gz")
+
+        message = str(ctx.exception)
+        self.assertIn("not a git repository", message)
+        self.assertIn("退出码 1", message)
+
+    def test_a_silent_head_read_is_not_turned_into_none(self):
+        with self._silent_text(0xC000013A):
+            with self.assertRaises(ChannelError) as ctx:
+                GitChannel(self.repo).head_or_none()
+
+        message = str(ctx.exception)
+        self.assertIn("读取提交失败（git", message)
+        self.assertIn("外部结束", message)                 # 被外部结束那一档的人话
+
+    def test_a_timed_out_head_read_is_not_turned_into_none(self):
+        class FakeGitProcess:
+            """假 git 进程：communicate 时抛超时（与 `CallTimeoutTests` 同款桩法）。"""
+            pid = 99999999                      # 被 `_abandon` 点名去 taskkill 的假 pid
+
+            def __init__(self, cmd, **kwargs):
+                self.args = cmd
+                self.returncode = None
+
+            def communicate(self, timeout=None):
+                raise subprocess.TimeoutExpired(self.args, timeout)
+
+            def kill(self):
+                self.returncode = -9
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        with mock.patch.object(git_channel.subprocess, "Popen",
+                               side_effect=FakeGitProcess), \
+                mock.patch.object(git_channel.subprocess, "run") as _taskkill:
+            with self.assertRaises(ChannelError) as ctx:
+                GitChannel(self.repo).head_or_none()
+
+        message = str(ctx.exception)
+        self.assertIn("读取提交超时（git", message)
+        self.assertIn("已放弃", message)
+
+    def test_a_silent_compare_is_not_turned_into_consistency(self):
+        """原缺陷的形状：对比被杀、HEAD 也读不出——旧行为会判「两端一致」放行。"""
+        with self._silent_text(0xC000013A):
+            with self.assertRaises(ChannelError) as ctx:
+                GitChannel(self.repo).head_matches_upstream()
+
+        message = str(ctx.exception)
+        self.assertIn("对比上游失败（git", message)
+
+    def test_a_compare_failure_with_output_is_not_judged_silently(self):
+        """带输出的普通失败：哪怕 HEAD 读得到，也不许悄悄判一个真假值。"""
+        def fake(what, *args):
+            if "rev-list" in args:
+                return subprocess.CompletedProcess(["git"], 128, "", "fatal: bad object HEAD\n")
+            return subprocess.CompletedProcess(["git"], 0, "abc1234\n", "")
+
+        with mock.patch.object(git_channel, "_run", side_effect=fake):
+            with self.assertRaises(ChannelError) as ctx:
+                GitChannel(self.repo).head_matches_upstream()
+
+        message = str(ctx.exception)
+        self.assertIn("对比上游失败（git", message)
+        self.assertIn("bad object HEAD", message)
+
+    def test_consistency_is_not_granted_when_head_itself_cannot_be_read(self):
+        """对比失败认出了「还没有上游」，但 HEAD 读不出来（也被杀）：照样不许放行。"""
+        def fake(what, *args):
+            if "rev-list" in args:
+                return subprocess.CompletedProcess(
+                    ["git"], 128, "", "fatal: no upstream configured for branch 'main'\n")
+            return subprocess.CompletedProcess(["git"], 0xC000013A, "", "")
+
+        with mock.patch.object(git_channel, "_run", side_effect=fake):
+            with self.assertRaises(ChannelError) as ctx:
+                GitChannel(self.repo).head_matches_upstream()
+
+        message = str(ctx.exception)
+        self.assertIn("读取提交失败（git", message)
 
 
 class SilentFailureTests(unittest.TestCase):
