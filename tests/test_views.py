@@ -64,6 +64,16 @@ class ViewsTestCase(unittest.TestCase):
             attempt=1,
         )
 
+    def collect_half(self, round_id, shop_key, *, first_id="21", second_id="22"):
+        """把该店做成「采到一半」：榜单完整（两个商品），只提交了第一个详情。"""
+        self.db.save_shop_offers(
+            round_id, shop_key, f"https://{shop_key}.example/", f"店铺{shop_key}",
+            [(1, first_id, f"https://detail.1688.com/offer/{first_id}.html",
+              f"商品{first_id}", ""),
+             (2, second_id, f"https://detail.1688.com/offer/{second_id}.html",
+              f"商品{second_id}", "")], 1)
+        self.submit(round_id, first_id, ("蓝", 3), shop_key=shop_key)
+
 
 class StartViewTests(ViewsTestCase):
     def test_start_page_counts_today_inventory_and_offers_shops_to_crawl(self):
@@ -416,6 +426,25 @@ class RunViewTests(ViewsTestCase):
             "next_action": "detail", "note": "详情预算耗尽",
         }])
 
+    def test_progress_page_keeps_partial_shops_in_pills_without_counts(self):
+        """过程页不动：部分采集店仍在「未完成店铺」药丸里（旧形状、无计数），不进完成表。"""
+        round_id = new_round(self.db, ("A01", "https://A01.example/", "店铺A"),
+                             ("A02", "https://A02.example/", "店铺B"), run_date=TODAY)
+        self.collect_half(round_id, "A01", first_id="11", second_id="12")
+
+        view = views.run_view(self.conn, state=self.state, now=NOW)
+
+        self.assertEqual(view["done"], [], "没走完的店不进完成表，哪怕已抓到商品")
+        self.assertEqual(view["todo"], [{
+            "key": "A01", "name": "店铺A", "listing_complete": True,
+            "detail_status": "未开始", "remaining_work": 1,
+            "next_action": "detail", "note": None,
+        }, {
+            "key": "A02", "name": "店铺B", "listing_complete": False,
+            "detail_status": "未开始", "remaining_work": 0,
+            "next_action": "listing", "note": None,
+        }])
+
     def test_progress_page_carries_the_ui_session_facts(self):
         state = views.UiState(crawler_running=True, manually_paused=True,
                               stopping="stopping", stop_grace_sec=8.0)
@@ -457,6 +486,54 @@ class ResultViewTests(ViewsTestCase):
         }])
         self.assertEqual(view["done"][0]["key"], "A01")
 
+    def test_result_page_lists_partially_collected_shops_in_the_same_table(self):
+        """采到商品但没走完的店也进「已抓取店铺」表：按编号混排、带计数，部分行带未完成事实。"""
+        round_id = new_round(self.db, ("A01", "https://A01.example/", "店铺A"),
+                             ("A02", "https://A02.example/", "店铺B"),
+                             ("A03", "https://A03.example/", "店铺C"), run_date=TODAY)
+        self.db.save_shop_offers(
+            round_id, "A01", "https://A01.example/", "店铺A",
+            [(1, "11", "https://detail.1688.com/offer/11.html", "商品11", "")], 1)
+        self.submit(round_id, "11", ("红", 5), ("蓝", 7))
+        # A02：采到一半（榜单完整、只提交了一个详情、仍有剩余工作）
+        self.collect_half(round_id, "A02")
+        rounds.finish(self.db, rounds.load(self.db, round_id), TerminalReason.ABANDONED,
+                      now="2026-09-13T04:10:00+00:00")
+
+        view = views.result_view(self.conn, state=views.UiState(round_id=round_id), now=NOW)
+
+        rows = {row["key"]: row for row in view["done"]}
+        self.assertEqual(sorted(rows), ["A01", "A02"], "完成与部分采集按编号混排在同一张表里")
+        self.assertFalse(rows["A01"].get("partial"), "完成的店不带未完成事实")
+        self.assertEqual((rows["A01"]["products"], rows["A01"]["skus"]), (1, 2))
+        self.assertTrue(rows["A02"]["partial"], "没走完的店带未完成事实")
+        self.assertEqual((rows["A02"]["products"], rows["A02"]["skus"]), (1, 1))
+        self.assertEqual(view["done_count"], 1, "「完成店铺」只数无剩余工作的店")
+        self.assertEqual(view["todo"], [{
+            "key": "A03", "name": "店铺C", "listing_complete": False,
+            "detail_status": "未开始", "remaining_work": 0,
+            "next_action": "listing", "note": None,
+        }])
+
+    def test_result_page_pills_hold_only_shops_with_zero_collected_products(self):
+        """0 商品的店留在「未抓取店铺」药丸里——完成与否都算；完成由顶部「完成店铺」数说话。"""
+        round_id = new_round(self.db, ("A01", "https://A01.example/", "店铺A"),
+                             ("A02", "https://A02.example/", "店铺B"), run_date=TODAY)
+        # A01：确认过的空榜单——这家完成了，但一件商品都没抓到
+        self.db.save_shop_offers(round_id, "A01", "https://A01.example/", "店铺A", [],
+                                 pages_read=1, confirmed_empty=True)
+        # A02：采到一半
+        self.collect_half(round_id, "A02")
+        rounds.finish(self.db, rounds.load(self.db, round_id), TerminalReason.ABANDONED,
+                      now="2026-09-13T04:10:00+00:00")
+
+        view = views.result_view(self.conn, state=views.UiState(round_id=round_id), now=NOW)
+
+        self.assertEqual([row["key"] for row in view["done"]], ["A02"], "表里只收抓到过商品的店")
+        self.assertEqual([row["key"] for row in view["todo"]], ["A01"], "空手的店落在药丸里")
+        self.assertEqual(view["done_count"], 1, "空手但完成的店仍计入「完成店铺」")
+        self.assertEqual((view["todo"][0]["key"], view["todo"][0]["name"]), ("A01", "店铺A"))
+
     def test_result_page_reads_saved_collection_time_while_the_round_is_still_open(self):
         round_id = new_round(self.db, run_date=TODAY)
 
@@ -482,25 +559,48 @@ class ResultViewTests(ViewsTestCase):
 
 
 class SharedMetricsTests(ViewsTestCase):
-    def test_progress_and_result_pages_report_the_same_shop_metrics(self):
-        """同一轮里两个页面对各店给出同一份指标——这正是从前两份实现要保证的事。"""
+    def test_progress_and_result_pages_share_one_metric_source_per_shop(self):
+        """同一家店的指标两页只有一份来源；分桶各自成篇（2026-10-11 起）。
+
+        旧契约是 run 与 result 的 done/todo 逐字相等——「已抓取 ≠ 完成」分家后不再成立
+        （结果页表收完成 ∪ 部分采集，过程页仍是完成表 + 号牌药丸）。保留的契约是：
+        两页都展示同一家店时，字段逐字一致；整轮读数（完成数/店铺数/deny）也一致。
+        """
         round_id = new_round(self.db, ("A01", "https://A01.example/", "店铺A"),
-                             ("A02", "https://A02.example/", "店铺B"), run_date=TODAY)
+                             ("A02", "https://A02.example/", "店铺B"),
+                             ("A03", "https://A03.example/", "店铺C"), run_date=TODAY)
         self.db.save_shop_offers(
             round_id, "A01", "https://A01.example/", "店铺A",
             [(1, "11", "https://detail.1688.com/offer/11.html", "商品11", "")], 1)
         self.submit(round_id, "11", ("红", 5), ("蓝", 7))
         self.db.append_event(round_id, "click_deny", shop_key="A01")
+        # A02 采到一半：榜单完整、提交了一个详情、还有一个剩余
+        self.collect_half(round_id, "A02")
 
         run = views.run_view(self.conn, state=self.state, now=NOW)
         result = views.result_view(
             self.conn, state=views.UiState(round_id=round_id), now=NOW)
 
-        self.assertEqual(run["done"], result["done"])
-        self.assertEqual(run["todo"], result["todo"])
+        # 完成的店：结果页表里原样复刻过程页的完成行
+        run_done = {row["key"]: row for row in run["done"]}
+        result_table = {row["key"]: row for row in result["done"]}
+        self.assertEqual(sorted(run_done), ["A01"])
+        self.assertEqual(result_table.get("A01"), run_done["A01"], "完成行两页逐字同一份")
+        # 部分采集店：结果页表里有它（带未完成事实），过程页药丸里有它（旧形状、不出现计数）
+        partial_rows = {row["key"]: row for row in result["done"] if row.get("partial")}
+        self.assertEqual(sorted(partial_rows), ["A02"])
+        self.assertEqual(partial_rows["A02"]["products"], 1)
+        run_pills = {row["key"]: row for row in run["todo"]}
+        self.assertEqual(run_pills["A02"]["remaining_work"],
+                         partial_rows["A02"]["remaining_work"], "同一份阶段事实")
+        self.assertNotIn("products", run_pills["A02"], "过程页药丸不出现计数")
+        # 未抓到的店：结果页药丸与过程页药丸是同一份
+        self.assertEqual([row["key"] for row in result["todo"]], ["A03"])
+        self.assertEqual(result["todo"][0], run_pills["A03"])
+        # 整轮读数两页一致
         self.assertEqual((run["done_count"], run["total_count"], run["deny"]),
                          (result["done_count"], result["total_count"], result["deny"]))
-        self.assertEqual((result["products_total"], result["skus_total"]), (1, 2))
+        self.assertEqual((result["products_total"], result["skus_total"]), (2, 3))
 
 
 class RefusedStartTests(ViewsTestCase):

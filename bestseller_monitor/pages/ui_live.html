@@ -741,11 +741,13 @@
     $("resTag").textContent = d.tag;
     $("resNote").textContent = d.note;
     $("resDoneTitle").textContent = "已抓取店铺（" + d.done.length + "）";
+    // 部分采集的行（s.partial）：店名后加「未完成」标，不带数字；完成的店一字不动。
     $("resDoneRows").innerHTML = d.done.map(s =>
-      `<tr><td><b>${s.key}</b> ${s.name}</td><td>${s.products}</td><td>${s.skus}</td><td>${s.duration}</td><td>${s.deny}</td></tr>`
+      `<tr><td><b>${s.key}</b> ${s.name}${s.partial ? ` <span class="pill a" style="margin-left:6px">未完成</span>` : ""}</td><td>${s.products}</td><td>${s.skus}</td><td>${s.duration}</td><td>${s.deny}</td></tr>`
     ).join("") || `<tr><td colspan="5" class="muted">没有已抓取的店铺</td></tr>`;
     $("resTodoTitle").textContent = "未抓取店铺（" + d.todo.length + "）";
-    $("resTodoPills").innerHTML = d.todo.map(s => `<span class="pill a">${s.key}</span>`).join("");
+    // 药丸带店名：一个商品都没抓到的店也要能一眼认出是谁。
+    $("resTodoPills").innerHTML = d.todo.map(s => `<span class="pill a"><b>${s.key}</b> ${s.name}</span>`).join("");
     // 中止写完终态就回结果页，采集进程可能还在收尾：接着问，直到它真的走了。
     const stopping = d.stopping || null;
     $("resStopping").style.display = stopping ? "block" : "none";
