@@ -471,11 +471,18 @@ def _shop_span(conn: sqlite3.Connection, round_id: int,
 
 
 def _shop_breakdown(conn: sqlite3.Connection, round_id: int,
-                    tally: RoundTally,
-                    max_attempts: int = shop_progress.DEFAULT_MAX_ATTEMPTS) -> tuple[list[dict], list[dict]]:
-    """本轮各店的（已完成明细、待处理清单），共享店铺阶段投影。"""
+                    tally: RoundTally, max_attempts: int = shop_progress.DEFAULT_MAX_ATTEMPTS
+                    ) -> tuple[list[dict], list[dict], list[dict]]:
+    """本轮各店的（完成明细、部分采集明细、待处理清单），共享店铺阶段投影。
+
+    完成＝无剩余工作；部分采集＝已抓到商品（成功商品数 > 0）但仍有剩余工作——明细同
+    完成行、另带 `partial` 事实，结果页据此加「未完成」标；待处理＝所有仍有剩余工作的店
+    （含部分采集店），形状与从前一致，过程页药丸照旧消费它。「完成」与「已抓取」在这里
+    分家：完成看剩余工作，已抓取看成功商品数（见 CONTEXT.md「部分采集店铺」）。
+    """
     db = Database(conn)
     done = []
+    partial = []
     todo = []
     for progress in shop_progress.all_shops(db, round_id, max_attempts):
         shop_key = progress.shop_key
@@ -491,13 +498,30 @@ def _shop_breakdown(conn: sqlite3.Connection, round_id: int,
                 "deny": deny,
                 **shop_progress.display(progress),
             })
-        else:
-            todo.append({
+            continue
+        todo.append({
+            "key": shop_key,
+            "name": progress.shop_name,
+            **shop_progress.display(progress),
+        })
+        if one.success_offers > 0:
+            partial.append({
                 "key": shop_key,
                 "name": progress.shop_name,
+                "products": one.success_offers,
+                "skus": one.success_skus,
+                "duration": _fmt_minutes(duration),
+                "deny": deny,
+                "partial": True,
                 **shop_progress.display(progress),
             })
-    return done, todo
+    return done, partial, todo
+
+
+def _pill_row(row: dict) -> dict:
+    """药丸/次要清单沿旧形状：店铺标识与阶段字段，不出现计数与未完成标。"""
+    return {k: v for k, v in row.items()
+            if k not in ("products", "skus", "duration", "deny", "partial")}
 
 
 def _current_shop(conn: sqlite3.Connection, round_id: int, todo_keys: list[str]) -> str | None:
@@ -578,7 +602,8 @@ def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str,
         }
     round_id = active.id
     tally = db.round_tally(round_id)
-    done, todo = _shop_breakdown(conn, round_id, tally, max_attempts)
+    # 过程页不展示部分采集桶：完成表 + 药丸（待处理清单里含部分采集店）即旧观感，一字不动。
+    done, _partial, todo = _shop_breakdown(conn, round_id, tally, max_attempts)
     total, deny = _round_counts(conn, round_id)
     timing = elapsed.read(conn, round_id)
     pacing_remaining, pacing_paused = _pacing_state(
@@ -642,8 +667,17 @@ def result_view(conn: sqlite3.Connection, *, state: UiState, now: str,
     round_id = run.id
     timing = elapsed.read(conn, round_id)
     tally = db.round_tally(round_id)
-    done, todo = _shop_breakdown(conn, round_id, tally, max_attempts)
+    done, partial, todo = _shop_breakdown(conn, round_id, tally, max_attempts)
     total, deny = _round_counts(conn, round_id)
+    # 「已抓取店铺」表＝抓到过商品的店（完成与部分采集按编号混排，部分行带 partial 事实）；
+    # 药丸＝一件商品都没抓到的店（含完成但空手的）。done_count 仍是「完成店铺」——
+    # 只数无剩余工作的店；空手的完成店计入它、但不进表。
+    partial_keys = {row["key"] for row in partial}
+    table = sorted(partial + [row for row in done if row["products"]],
+                   key=lambda row: row["key"])
+    pills = sorted([_pill_row(row) for row in done if not row["products"]]
+                   + [row for row in todo if row["key"] not in partial_keys],
+                   key=lambda row: row["key"])
     products_total, skus_total = tally.success_offers, tally.success_skus
     tag, note = _terminal_text(run.reason)
     return {
@@ -663,8 +697,8 @@ def result_view(conn: sqlite3.Connection, *, state: UiState, now: str,
         "total_count": total,
         "products_total": products_total,
         "skus_total": skus_total,
-        "done": done,
-        "todo": todo,
+        "done": table,
+        "todo": pills,
         "note": note,
         "tag": tag,
     }

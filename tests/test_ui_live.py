@@ -734,6 +734,41 @@ class UiLiveStoppingTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_result_page_marks_partial_shops_and_names_the_pill_shops(self):
+        """结果页新口径：已抓取表收部分采集店并带「未完成」标；未抓取药丸带店名；完成行无标。"""
+        page = self.open_page()
+        try:
+            page.evaluate("""() => {
+              window.__result = {has_round: true, round_id: 7, reason: "ABANDONED",
+                started_hhmm: "10:00", finished_hhmm: "10:05", duration_text: "5 分",
+                deny: 0, done_count: 2, total_count: 4, products_total: 40, skus_total: 52,
+                done: [
+                  {key: "A01", name: "店铺A", products: 30, skus: 40,
+                   duration: "10 分", deny: 0},
+                  {key: "A02", name: "店铺B", products: 10, skus: 12,
+                   duration: "3 分", deny: 1, partial: true},
+                ],
+                todo: [{key: "A03", name: "店铺C"}],
+                tag: "人工中止", note: "本轮由人工中止（放弃），已抓取数据已保留。",
+                stopping: null};
+              renderResult(window.__result); switchTab("result");
+            }""")
+
+            rows = page.eval_on_selector_all(
+                "#resDoneRows tr", "els => els.map(e => e.textContent)")
+            self.assertEqual(len(rows), 2)
+            self.assertNotIn("未完成", rows[0], "完成的店不带未完成标")
+            self.assertIn("A02 店铺B", rows[1])
+            self.assertIn("未完成", rows[1], "没走完的店带未完成标")
+            self.assertIn("已抓取店铺（2）", page.inner_text("#resDoneTitle"))
+            self.assertEqual(page.inner_text("#resDoneBig"), "2 / 4",
+                             "顶部大数字仍是「完成店铺」口径")
+            self.assertIn("未抓取店铺（1）", page.inner_text("#resTodoTitle"))
+            self.assertEqual(page.inner_text("#resTodoPills"), "A03 店铺C",
+                             "药丸带店名，不再只有编号")
+        finally:
+            page.close()
+
 
 # 票 04：过程页入口与「继续」的点击报因都走页面内信息框（复用票 02 的壳）。
 RUN_PAGE_MOCK_API = r"""
