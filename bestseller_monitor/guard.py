@@ -165,6 +165,11 @@ def _page_evidence(page) -> _PageEvidence:
 
     判据与它的解除判定都从这一份读起（ADR-0030）。各读各的就会给出互相矛盾的答案，
     而「要人工介入」与「介入已经解除」本来就是同一件事的两种读法。
+
+    业务页标记表前段是老前端的类名（兼容老页面与归档夹具），后段是 2026-10-11 真机取样
+    验明的当前前端模块标记——旧表在真机详情页 0 命中（`.sku-selection` 在 air.1688.com
+    的 iframe 里、顶层看不见），正常详情页曾被判「页面上下文未知」停轮；回归见
+    `tests/fixtures/offer-detail-gallery.html`。
     """
     try:
         context = page.evaluate(r"""() => {
@@ -176,7 +181,8 @@ def _page_evidence(page) -> _PageEvidence:
                     anyVisible('form[name="validateParams"]'),
                 business: anyVisible('#offer-detail, .offer-detail, #mod-detail-title, '
                     + '.mod-detail-title, .detail-gallery, .sku-selection, img.main-picture, '
-                    + '.sm-offer-list, .offer-list, .no-result, .empty-result')
+                    + '.sm-offer-list, .offer-list, .no-result, .empty-result, '
+                    + '#gallery, [data-module="od_picture_gallery"], .module-od-picture-gallery')
             };
         }""")
         # 先看文档在不在：不在就是还没到，不必再读正文与验证容器——无 body 时
