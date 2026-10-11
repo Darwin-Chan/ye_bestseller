@@ -3,7 +3,7 @@
 - 日期：**2026-10-08，Asia/Shanghai**。编号沿用处理台账的 05–11。
 - 本次请求：使用 diagnosing-bugs 分析全部未完成问题；**仅诊断，没有实施修复**。
 - 已完成包保持 01–04；07 从“待确认”转为“未处理：测试缺陷已定位”。当前 **4 已处理 / 7 未处理 / 0 待确认**；诊断不是结案。
-- [状态台账](F:/AI/projects/bestseller/docs/ops/issues处理状态台账-2026-10-08.md)。各包的 REPORT 及附带分析来自现场，不等于本次验证结论。
+- [状态台账](F:/AI/projects/bestseller/docs/ops/issues处理状态台账-2026-10-08.md)（2026-10-11 该台账移至 `F:/AI/projects/bestseller/.scratch/tool-output/issues/issues处理状态台账-2026-10-08.md`，本机、不进版本库）。各包的 REPORT 及附带分析来自现场，不等于本次验证结论。
 
 ## 1. 隔离、基线与证据口径
 

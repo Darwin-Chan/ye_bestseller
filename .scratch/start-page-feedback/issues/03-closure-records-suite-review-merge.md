@@ -19,7 +19,7 @@ Spec: [../spec.md](../spec.md)（版本 3）
 
 ## 接缝
 
-- 验收语言：`.scratch/issues-08-11/spec.md`（含描述改范围路径的行区）与 `.scratch/issues-08-11/issues/08-trial-login-entry-and-start-page-reason.md` 的验收表/措辞；台账 `docs/ops/issues处理状态台账-2026-10-08.md`；v3 扩：`docs/design/issues-08-11-grill-decisions-2026-10-08.md`（「本机配置路径及专用数据目录可查看」句）与 `docs/design/issues-08-11-ticket07-delivery-2026-10-09.md`（人工走查「开始页核对配置来源与专用目录」步）。
+- 验收语言：`.scratch/issues-08-11/spec.md`（含描述改范围路径的行区）与 `.scratch/issues-08-11/issues/08-trial-login-entry-and-start-page-reason.md` 的验收表/措辞；台账 `docs/ops/issues处理状态台账-2026-10-08.md`（2026-10-11 该台账移至 `.scratch/tool-output/issues/issues处理状态台账-2026-10-08.md`，本机、不进版本库）；v3 扩：`docs/design/issues-08-11-grill-decisions-2026-10-08.md`（「本机配置路径及专用数据目录可查看」句）与 `docs/design/issues-08-11-ticket07-delivery-2026-10-09.md`（人工走查「开始页核对配置来源与专用目录」步）。
 - 审查报告落 `docs/reviews/`（受跟踪）；全量证据落主仓 `.scratch/logs/tickets/`。
 - 合流按本仓惯例：分支在隔离副本验证后并入，主仓侧验证与记录提交。
 
@@ -33,7 +33,7 @@ Spec: [../spec.md](../spec.md)（版本 3）
 - 隔离副本：`F:\AI\projects\bestseller\.scratch\sandboxes\start-page-feedback\03\20261011-t03-01\bestseller`（独立 clone，`-c safe.directory='*'` 在 clone 之前、`--no-hardlinks`；clone 后 `git checkout -B main 4fd2200` 使副本本地 `main` 指向被测树——满足 `test_sku_sharing` 的 legacy-vs-main 布局要求；`config/config.toml` = example 仅改 `start_browser=false`（逐字节、CRLF 保留）、`analysis.toml`、`shops.csv` 各一；三件配置归档于证据目录，config.toml 哈希与 01/02/04 副本逐字节一致）。
 - ① 验收语言同步（7 份文档；改前/改后快照与逐份 diff 在证据 `lang-sync/`，`sha256.txt` 同目录）：
   - 未跟踪 2 份（主仓磁盘直改）：`.scratch/issues-08-11/spec.md`——08-A12/A14 改「点击报因／悬停＋服务端拒绝」两分口径；可用性表后新增「2026-10-11 按 start-page-feedback 批（票 03）同步界面呈现」段（禁用两形、两页入口同口径、事实面退场、服务端语义不变、纯汇总机·正式与试采格以票 08 为准）；Solution 行 37 旧按钮名与「及说明」随注同步；决策 7 改范围处补「（补：……一键快捷方式已删……路径语义不变。）」。`.scratch/issues-08-11/issues/08-trial-login-entry-and-start-page-reason.md`——标题、What to build②、Q4、验收①、接缝 5 处加同步注（保留原词、注明新形态与出处）。
-  - 受跟踪 5 份（已落主仓磁盘；提交落点照集成先例＝并入 main 时的 main 侧收尾提交，本记录提交不携其内容）：`docs/ops/issues处理状态台账-2026-10-08.md`——§4 08 节补记加同步注、§4 11 节补「改范围按钮已删（快捷方式；路径语义不变）」句、§6 追加 2026-10-11 语言同步行、08 历史行加指向新行的短注；`docs/design/issues-08-11-grill-decisions-2026-10-08.md`——行 185「可查看」加「为悬浮提示里的悬停查看」注；`docs/design/issues-08-11-ticket04/ticket05/ticket07-delivery-2026-10-09.md`——三份「部署机人工步骤」按新界面同步（悬停核对配置/状态句、点击报因、无事实行、无刷新钮、入口上移页头、按钮名随句更新），ticket07 集成记录追加 2026-10-11 补条。
+  - 受跟踪 5 份（已落主仓磁盘；提交落点照集成先例＝并入 main 时的 main 侧收尾提交，本记录提交不携其内容）：`docs/ops/issues处理状态台账-2026-10-08.md`（2026-10-11 该台账移至 `.scratch/tool-output/issues/issues处理状态台账-2026-10-08.md`，本机、不进版本库）——§4 08 节补记加同步注、§4 11 节补「改范围按钮已删（快捷方式；路径语义不变）」句、§6 追加 2026-10-11 语言同步行、08 历史行加指向新行的短注；`docs/design/issues-08-11-grill-decisions-2026-10-08.md`——行 185「可查看」加「为悬浮提示里的悬停查看」注；`docs/design/issues-08-11-ticket04/ticket05/ticket07-delivery-2026-10-09.md`——三份「部署机人工步骤」按新界面同步（悬停核对配置/状态句、点击报因、无事实行、无刷新钮、入口上移页头、按钮名随句更新），ticket07 集成记录追加 2026-10-11 补条。
   - 边界与口径：`docs/reviews/` 归档报告一律未改；`browserFactsText(d)` 抽取建议作废一句已点进台账（§6 2026-10-11 行）；issue 08/11 的 01–07 历史票与 grill 其余段落未动（改范围句按 grill Q4 口径只补母 spec 与台账两处）。
   - 行尾说明：Edit 工具将三份混合行尾文件归一（spec.md 1 处 CRLF→LF、grill-decisions 26 处 LF→CRLF、ticket07 1 处 LF→CRLF）；autocrlf=true 下 git diff 无行尾噪音（`tracked-docs.diff` 仅内容变更）。
 - ② 交付/台账记录：台账更新见上（§6 行含证据路径）；本文件即交付记录。

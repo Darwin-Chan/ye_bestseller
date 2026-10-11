@@ -7,7 +7,7 @@
 ## 输入与事实边界
 
 - 诊断报告：`F:/AI/projects/bestseller/docs/reviews/issues-unfinished-diagnosis-2026-10-08.md`，第 5 节。
-- 台账：`F:/AI/projects/bestseller/docs/ops/issues处理状态台账-2026-10-08.md`，07 条目。
+- 台账：`F:/AI/projects/bestseller/docs/ops/issues处理状态台账-2026-10-08.md`，07 条目。（2026-10-11 该台账移至 `F:/AI/projects/bestseller/.scratch/tool-output/issues/issues处理状态台账-2026-10-08.md`，本机、不进版本库。）
 - 原测试：`F:/AI/projects/bestseller/tests/test_e2e_acceptance.py`，`test_new_range_reuses_confirmation_in_the_browser_and_recomputes_sales`。
 - 服务层复用测试：`F:/AI/projects/bestseller/tests/test_analysis_reuse.py`。
 - 既有诊断证据：`F:/AI/projects/bestseller/.scratch/logs/tickets/issues-diagnosis/00/20261008-124951/`。

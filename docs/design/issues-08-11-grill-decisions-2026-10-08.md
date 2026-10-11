@@ -29,7 +29,7 @@
 
 ## 初轮历史诊断与代码快照（不是新验收结果；后续代码变化见补充核对）
 
-来源：../reviews/issues-unfinished-diagnosis-2026-10-08.md 第 6、9 节；../ops/issues处理状态台账-2026-10-08.md；固定诊断指针位于主仓 .scratch/tool-output/issues-diagnosis/active-run.json。
+来源：../reviews/issues-unfinished-diagnosis-2026-10-08.md 第 6、9 节；../ops/issues处理状态台账-2026-10-08.md；固定诊断指针位于主仓 .scratch/tool-output/issues-diagnosis/active-run.json。（2026-10-11 该台账移至 `.scratch/tool-output/issues/issues处理状态台账-2026-10-08.md`，本机、不进版本库。）
 
 - 固定诊断基线为 75b13294b20332c24cdb22634146301813d1a712；当前核对 HEAD 为 131ecee。先前已比较用户列出的 08 相关实现，未发现相对基线的提交差异；历史副本和清单未修改。
 - 08 的普通商品 URL、身份验证提示、captcha_visible=False 的漏判已有真实页面守卫离线回放证据。本轮不重新从零诊断，不据此解释全部动态容器问题。

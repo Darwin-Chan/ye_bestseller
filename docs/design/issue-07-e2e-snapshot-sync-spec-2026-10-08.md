@@ -156,7 +156,7 @@ AC03/AC08 的时序或故障控制只能存在于测试边界，不能为制造�
 
 - 访谈：`F:/AI/projects/bestseller/docs/design/issue-07-e2e-snapshot-sync-interview-2026-10-08.md`。D1 后台代办；D2 保存后主动刷新；D3 三层核对；D4 有限测试辅助函数。用户于本次对话确认收口并调用 to-spec，不再重复采访。
 - 诊断报告：`F:/AI/projects/bestseller/docs/reviews/issues-unfinished-diagnosis-2026-10-08.md`，第 5 节；证据目录：`F:/AI/projects/bestseller/.scratch/logs/tickets/issues-diagnosis/00/20261008-124951/`。
-- 状态台账：`F:/AI/projects/bestseller/docs/ops/issues处理状态台账-2026-10-08.md`，07 条目；本规格不改变其状态。
+- 状态台账：`F:/AI/projects/bestseller/docs/ops/issues处理状态台账-2026-10-08.md`，07 条目；本规格不改变其状态。（2026-10-11 该台账移至 `F:/AI/projects/bestseller/.scratch/tool-output/issues/issues处理状态台账-2026-10-08.md`，本机、不进版本库。）
 - 现有测试：`F:/AI/projects/bestseller/tests/test_e2e_acceptance.py` 与 `F:/AI/projects/bestseller/tests/test_analysis_reuse.py`。
 - 现有接口：`F:/AI/projects/bestseller/bestseller_monitor/analysis_http.py`、`F:/AI/projects/bestseller/bestseller_monitor/analysis.py`、`F:/AI/projects/bestseller/bestseller_monitor/pages/bestseller-analysis.html`。
 - 领域和约束沿用根 CONTEXT 与 ADR-0044 的异步受理/进度完成契约；不把分析号或运行终态改称页面呈现完成。
