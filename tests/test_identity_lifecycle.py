@@ -63,6 +63,25 @@ class IdentityLifecycleTests(unittest.TestCase):
         self.assertFalse(guard.resolved(self.page))
         with self.assertRaises(guard.RoundPauseRequired):
             guard.intervention_kind(self.page)
+    def test_a_rendering_detail_popup_settles_instead_of_pausing_the_round(self):
+        """票 01（回归）：刚打开的详情页还是空壳（complete、正文空）时，访问就绪窗口把它
+        等出来，而不是把整轮停掉——改前红：PageEvidenceUnavailable 当场穿透 begin_detail_visit。"""
+        from bestseller_monitor import detail_visit
+        from helpers import crawler_cfg
+        self.page.set_content('<html><head><title>加载中</title></head><body></body></html>')
+
+        def render():
+            if self.clock.now >= 1:
+                self.page.set_content(BUSINESS)
+                self.clock.on_sleep = lambda: None
+        self.clock.on_sleep = render
+
+        visit = detail_visit.begin_detail_visit(
+            lambda: detail_visit.OpenedDetail(self.page), crawler_cfg())
+
+        self.assertIsInstance(visit, detail_visit.ReadyDetailVisit)
+        self.assertGreaterEqual(self.clock.now, 1.0, '空壳期间在等，渲染后才判读')
+        self.alarm.assert_not_called()
     def test_confirmed_identity_waits_without_reload_then_emits_solution(self):
         def change_page():
             if self.clock.now >= 5:

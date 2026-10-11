@@ -69,6 +69,42 @@ class DetailVisitTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             detail_visit.OpenedDetail(MagicMock(), punished=True)
 
+    def test_a_popup_that_is_still_rendering_settles_within_the_readiness_window(self):
+        """票 01：刚打开的弹窗头几轮判读读不到可靠文档——就绪窗口内等待重判，不算「无法验证」。"""
+        page = FakePage(PRODUCT_URL, not_ready_reads=2)
+
+        with patch.object(waiting.time, "sleep"):
+            visit = self.begin(page)
+
+        self.assertIsInstance(visit, detail_visit.ReadyDetailVisit)
+
+    def test_a_popup_that_never_renders_still_pauses_when_the_window_is_exhausted(self):
+        """票 01：持续不可判读照旧升级——整窗等满后才再判一次，原样抛出「页面尚未可靠加载」。
+
+        钟按轮询步长走：窗口若被改小（如 10 秒缩成 1 秒），下面的 `clock.now` 断言即红，
+        「整窗等满」不是不可否证的场面话。
+        """
+        page = FakePage(PRODUCT_URL, not_ready_reads=10 ** 9)
+        clock = GuardClock(step=detail_visit.DETAIL_READY_POLL_SEC)
+
+        with patch.object(waiting, "time", clock):
+            with self.assertRaises(guard.PageEvidenceUnavailable):
+                self.begin(page)
+
+        self.assertGreaterEqual(clock.now, detail_visit.DETAIL_READY_TIMEOUT_SEC,
+                                "整窗等满才升级为暂停")
+
+    def test_a_deny_popup_is_decided_without_entering_the_readiness_wait(self):
+        """票 01：deny 页即刻定论——第一判读先于就绪窗口，连等待原语都不进（零次读钟）。"""
+        page = FakePage("https://s.1688.com/bsop-punish?x=1")
+        clock = GuardClock(step=10.0)
+
+        with patch.object(waiting, "time", clock):
+            result = self.begin(page)
+
+        self.assertIsInstance(result, detail_visit.DeniedVisit)
+        self.assertEqual(clock.now, 0.0)
+
     def test_acquisition_failure_becomes_a_read_failed_visit(self):
         error = PlaywrightError("导航失败")
 
@@ -224,13 +260,14 @@ class DetailVisitTests(unittest.TestCase):
     def test_late_intervention_resets_the_full_readiness_window(self):
         """介入解决后重开的是**完整**新窗：原窗烧掉一半照旧，完整的那个窗才等得到（A08）。
 
-        钟按剧本走（每次读单调钟 = 一个时刻，`sleep` 不真等）：窗口一 t=0 开（到 10
-        为止）、t=1.5 睡过一片，第二轮探针撞上「滑块」；介入在 t=5 被 guard 解决，
+        钟按剧本走（每次读单调钟 = 一个时刻，`sleep` 不真等）：**第 0 拍先给初次判读的
+        就绪窗口**（票 01 新增，一轮就过、不推进时钟），窗口一 t=0 开（到 10 为止）、
+        t=1.5 睡过一片，第二轮探针撞上「滑块」；介入在 t=5 被 guard 解决，
         原窗只剩一半——重开的新窗必须是**完整**的（到 15），t≥12.5 的那两轮才轮得到，
         第四次读取（t=12.9 之后）才拿到可读的正文。重置若只续剩余额度（新窗到 10），
         那次读取会走超时出口、拿到不可读的正文，本用例判红。
         """
-        clock = ScriptedClock([0.0, 1.0, 1.5, 5.0, 12.0, 12.5, 12.8, 12.9])
+        clock = ScriptedClock([0.0, 0.0, 1.0, 1.5, 5.0, 12.0, 12.5, 12.8, 12.9])
         page = readable_mock_page()
         page.url = PRODUCT_URL
         read_moments = []

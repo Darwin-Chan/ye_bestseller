@@ -179,10 +179,14 @@ def _page_evidence(page) -> _PageEvidence:
                     + '.sm-offer-list, .offer-list, .no-result, .empty-result')
             };
         }""")
-        text = body_text(page, strict=True)
-        captcha = captcha_visible(page, strict=True)
-        if not context["loaded"] or not text.strip():
+        # 先看文档在不在：不在就是还没到，不必再读正文与验证容器——无 body 时
+        # `inner_text` 会挂起等挂载（至多 3 秒），就绪窗口里每个未就绪探针都会白付这笔等待。
+        if not context["loaded"]:
             raise PageEvidenceUnavailable("页面尚未可靠加载，不能确认业务状态")
+        text = body_text(page, strict=True)
+        if not text.strip():
+            raise PageEvidenceUnavailable("页面尚未可靠加载，不能确认业务状态")
+        captcha = captcha_visible(page, strict=True)
         return _PageEvidence(page.url or "", text, captcha,
                              context["identity"], context["business"])
     except PageEvidenceUnavailable:

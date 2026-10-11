@@ -132,6 +132,23 @@ class WalkTests(ClickListingTestCase):
             "popup_close"])
         self.assertEqual(card.closes, 1)
 
+    def test_a_popup_that_is_still_rendering_settles_instead_of_pausing_the_round(self):
+        """票 01（回归）：弹窗刚打开、头几轮判读还读不到可靠文档（本机试采第一张卡即整轮暂停
+        的形状）——就绪窗口把它等出来，整轮不被停止异常打断。
+
+        改前红：初次判读读到「尚未可靠加载」即抛 PageEvidenceUnavailable（轮级停止异常），
+        遍历在 product_open 之后当场中断。
+        """
+        card = FakeCard("商品1", offer_id="11", not_ready_reads=2)
+
+        with patch.object(waiting.time, "sleep"):
+            self.crawl([[card]])
+
+        self.assertEqual(self.event_names(), [
+            "list_page", "product_open", "popup_open", "detail_parse", "click_ok",
+            "popup_close"])
+        self.assertEqual(card.closes, 1)
+
     def test_the_event_sequence_of_a_parse_failure_is_unchanged(self):
         card = FakeCard("商品1", offer_id="11", observation=detail.Observation.parse_failed(
             RuntimeError("页面结构变了"), "<html></html>"))
