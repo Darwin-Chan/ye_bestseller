@@ -10,6 +10,7 @@ from bestseller_monitor import guard, waiting
 
 PRODUCT = 'https://detail.1688.com/offer/521844920352.html'
 FIXTURE = Path(__file__).with_name('fixtures') / 'identity-verification.html'
+GALLERY_FIXTURE = Path(__file__).with_name('fixtures') / 'offer-detail-gallery.html'
 BUSINESS = '<html><head><title>商品详情</title></head><body><div id="offer-detail"><h1>测试商品</h1></div></body></html>'
 
 class Clock:
@@ -82,6 +83,20 @@ class IdentityLifecycleTests(unittest.TestCase):
         self.assertIsInstance(visit, detail_visit.ReadyDetailVisit)
         self.assertGreaterEqual(self.clock.now, 1.0, '空壳期间在等，渲染后才判读')
         self.alarm.assert_not_called()
+    def test_the_current_real_offer_page_is_recognized_as_business(self):
+        """票 01（回归）：当前前端的真机详情页必须被认成业务页。
+
+        切片取自 2026-10-11 真机取样归档（见夹具头注释）：旧标记表在真机详情页 0 命中
+        （`.sku-selection` 在 air.1688.com 的 iframe 里、顶层看不见），正常详情页曾被判
+        「页面上下文未知」停轮（轮 #9）。改前红：intervention_kind 抛 PageEvidenceUnavailable。
+
+        `resolved` 走同一份证据（介入后复查），一并钉住——少了它，狭化 resolved 的
+        将来改动会在当前前端上把「已解决」判成没解决、空响到超时。
+        """
+        self.page.set_content(GALLERY_FIXTURE.read_text(encoding='utf-8'))
+
+        self.assertIsNone(guard.intervention_kind(self.page))
+        self.assertTrue(guard.resolved(self.page))
     def test_confirmed_identity_waits_without_reload_then_emits_solution(self):
         def change_page():
             if self.clock.now >= 5:
