@@ -35,7 +35,6 @@ import os
 import pathlib
 import re
 import urllib.error
-import urllib.parse
 import urllib.request
 from typing import Callable, Protocol
 
@@ -64,9 +63,9 @@ MACHINE_ID_RE = re.compile(r"m[1-9][0-9]*\Z")
 
 
 class SourceQueryError(RuntimeError):
-    """来源查询失败（API 不通、某一页没成、翻页翻不到底、返回不是仓库列表）。
+    """来源查询失败（API 不通、token 账号核对不过、某一页没成、翻页翻不到底、返回不是仓库列表）。
 
-    调用方据此「不覆盖上一版快照」。消息里只带页号与错误种类，**绝不含 token**。
+    调用方据此「不覆盖上一版快照」。消息里只带页号、账号名与错误种类，**绝不含 token**。
     """
 
 
@@ -309,7 +308,7 @@ def _read_snapshot(channel: GitChannel) -> _PreviousSnapshot:
 
 # ---------- Gitee API 客户端（唯一的网络口） ----------
 
-# 一页 GET 的形态：URL 与请求头进、解析后的 JSON 出；出错就抛（由 `_page` 折成 SourceQueryError）。
+# 一次 GET 的形态：URL 与请求头进、解析后的 JSON 出；出错就抛（由客户端折成 SourceQueryError）。
 Fetch = Callable[[str, dict], object]
 
 
@@ -324,23 +323,29 @@ def _http_json(url: str, headers: dict) -> object:
 
 
 class GiteeApi:
-    """Gitee API v5 的仓库列表口：可信 owner 下 `type=all`（含私有）逐页翻到底。
+    """Gitee API v5 的仓库列表口：授权用户（token 本人）的可见仓库逐页翻到底。
 
-    接口形状按 Gitee v5 文档（`GET /users/{owner}/repos?type=all&per_page=&page=`，
-    认证用 `Authorization: token <token>` 头）。**真机上能否按这套跑通，是票 05 的人工验收项**——
-    这里只把实现与失败语义写清，不宣称已在真实 Gitee 上验证过。
+    接口形状按 Gitee v5 文档与 m4 真机探针（2026-10-11）：`GET /user/repos?visibility=all&per_page=&page=`
+    ——公开库列表接口 `GET /users/{owner}/repos` 对本人的有效 token 也看不到私有库（票 05 现场
+    教训：空列表必须能区分「真没有」与「看错了地方」）。认证用 `Authorization: token <token>` 头；
+    列仓库前先经 `GET /user` 核对 token 账号与可信 owner 一致，不一致按查询失败处理。
+
+    现场证据（主仓）：`.scratch/logs/tickets/issue-06-m1-judgment-receive/05/2026-10-10/m4-证据/`
+    （`诊断-来源清单发布空-20261011.md`、`探针输出-20261011-221632.txt`）；修好后重跑 m4 向导、
+    清单落 4 个来源是票 05 后继的人工项。
     """
 
     def __init__(self, owner: str, token: str, *, base: str = GITEE_API_BASE,
                  per_page: int = PER_PAGE, fetch: Fetch | None = None):
-        self.owner = owner
+        self.owner = owner.strip()
         self._token = token
         self._base = base.rstrip("/")
         self._per_page = per_page
         self._fetch = fetch or _http_json
 
     def list_repos(self) -> tuple[GiteeRepo, ...]:
-        """翻页取全部仓库；短页或空页即到底，翻到 `MAX_PAGES` 还满页算查不全。"""
+        """先核对 token 账号，再翻页取全部仓库；短页或空页即到底，翻到 `MAX_PAGES` 还满页算查不全。"""
+        self._verify_account()
         out: list[GiteeRepo] = []
         page = 1
         while True:
@@ -356,16 +361,37 @@ class GiteeApi:
                     f"分页不完整：翻过 {MAX_PAGES} 页还是满页，翻不到底——不覆盖上一版快照")
         return tuple(out)
 
-    def _page(self, number: int) -> list[GiteeRepo]:
-        url = (f"{self._base}/users/{urllib.parse.quote(self.owner)}/repos"
-               f"?type=all&per_page={self._per_page}&page={number}")
+    def _verify_account(self) -> None:
+        """`GET /user`：token 是谁的账号。与可信 owner 不一致 = 看错了地方，按查询失败处理。
+
+        token 换过账号而 owner 配置没跟上时，`/user/repos` 照样 200——只会安静地列出**别人**的
+        仓库或空表；这里先拦住，让「空列表」永远代表「真没有」。比对按逐字（含大小写）：下游
+        `_select` 的 owner 过滤与上一版 owner 比对都是逐字口径，这里放宽会在两层之间留下
+        「核对过、却全被过滤」的缝——那正是静默发空清单。
+        """
+        payload = self._get_json(f"{self._base}/user", operation="token 账号核对")
+        login = str(payload.get("login") or "") if isinstance(payload, dict) else ""
+        if not login:
+            raise SourceQueryError(
+                f"token 账号核对没成：/user 返回的不是带 login 的对象（{type(payload).__name__}）")
+        if login != self.owner:
+            raise SourceQueryError(
+                f"token 账号是 {login}，与配置的可信 owner {self.owner} 不一致——查错了账号；"
+                "核对 machine.gitee_owner 与 GITEE_TOKEN（token 是不是换过账号？注意大小写）")
+
+    def _get_json(self, url: str, *, operation: str) -> object:
         try:
-            payload = self._fetch(url, {"Authorization": f"token {self._token}",
-                                        "Accept": "application/json"})
+            return self._fetch(url, {"Authorization": f"token {self._token}",
+                                     "Accept": "application/json"})
         except SourceQueryError:
             raise
         except Exception as exc:                       # 网络/解析都折成同一档
-            raise SourceQueryError(f"第 {number} 页查询没成（{type(exc).__name__}）：{exc}") from None
+            raise SourceQueryError(f"{operation}没成（{type(exc).__name__}）：{exc}") from None
+
+    def _page(self, number: int) -> list[GiteeRepo]:
+        url = (f"{self._base}/user/repos"
+               f"?visibility=all&per_page={self._per_page}&page={number}")
+        payload = self._get_json(url, operation=f"第 {number} 页查询")
         if not isinstance(payload, list):
             raise SourceQueryError(f"第 {number} 页返回的不是仓库列表（{type(payload).__name__}）")
         return [_repo_of(item) for item in payload]
