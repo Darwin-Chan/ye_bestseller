@@ -10,6 +10,8 @@
 - 诊断输出固定英文（`LC_ALL=C`）：判定「被拒」用 `push --porcelain` 的稳定标记，
   不依赖人话文案。
 - 空库（远端还没有分支）上的 `pull` 不算失败：没有可拉的而已。
+- 失败消息一律带上 git 退出码；两路皆空时按「进程被外部结束」那一档说人话（issue 05：
+  丢掉返回码的那版只剩一句「（git 没有输出）」，分不清 git 自己失败与进程被外部杀掉）
 """
 from __future__ import annotations
 
@@ -31,6 +33,10 @@ _RETRY_HINT = re.compile(
     r"|cannot lock ref .*but expected",
     re.IGNORECASE,
 )
+
+# 两路皆空时用来分档的下界：Windows 上进程被外部结束（TerminateProcess／安全软件拦）
+# 留下的是 NTSTATUS 那一档的码（如 0xC000013A 被结束），POSIX 下被信号杀死则是负数。
+_ABNORMAL_EXIT_FLOOR = 0xC0000000
 
 
 class ChannelError(RuntimeError):
@@ -57,9 +63,30 @@ def _run_bytes(*args: str) -> subprocess.CompletedProcess[bytes]:
 def _failure(what: str, args: tuple[str, ...], done: subprocess.CompletedProcess[str]) -> ChannelError:
     """把 git 两个流里有的话都带上：`push --porcelain` 的拒绝理由在 **stdout**（stderr
     只有一句「failed to push some refs」）——只挑一个流会把最要紧的那句丢掉。
+
+    **退出码一律带上**（issue 05）：两路皆空时它是唯一的线索，原先被丢掉，现场只留下
+    一句「（git 没有输出）」，等于什么都没说——返回码 1（git 自己失败）与
+    0xC000013A（进程被外部结束）本该是两种结论。
     """
     detail = "\n".join(part.strip() for part in (done.stderr, done.stdout) if part.strip())
-    return ChannelError(f"{what}失败（git {' '.join(args)}）：\n{detail or '（git 没有输出）'}")
+    head = f"{what}失败（git {' '.join(args)}）："
+    if detail:
+        return ChannelError(f"{head}\n{detail}（git 退出码 {done.returncode}）")
+    return ChannelError(f"{head}\n{_silent_failure_note(done.returncode)}")
+
+
+def _silent_failure_note(returncode: int) -> str:
+    """两个流都空时那句人话：git 自己失败几乎不会什么都不说。
+
+    认证被拒、网络不可达、non-fast-forward、rebase 冲突、index.lock 占用都会留下字；
+    能同时满足「返回码非零 + 两路皆空」的，更像进程被外部结束或异常终止。
+    """
+    if returncode < 0 or returncode >= _ABNORMAL_EXIT_FLOOR:
+        return (f"git 一个字节都没输出，退出码 {returncode} 是「进程被外部结束」那一档："
+                f"多半被安全软件或系统拦掉了。重跑一次通常就好；"
+                f"再现就把这一行和当时的时刻留着。")
+    return (f"git 一个字节都没输出（退出码 {returncode}）：这不像 git 自己报的错"
+            f"（那类失败都会留话），更像进程被外部结束或通道瞬断。重跑一次通常就好。")
 
 
 class GitChannel:

@@ -1,7 +1,8 @@
 """票据 04：交换区 git 通道的验收测试——真跑 git，远端是本地裸库。
 
 三条验收路径就是三个类：pull / push / push 被 non-fast-forward 拒绝后重试。
-其余失败（认证、网络、钩子拒绝）不重试的边界单独钉住。
+其余失败（认证、网络、钩子拒绝）不重试的边界单独钉住；两路皆空的静默失败（issue 05）
+另有一类，钉住失败消息里的退出码与分档。
 
 世界（长尾地基税票 05）：各用例的铺场（裸库远端 ＋ seed 链 ＋ 夹具克隆）每测试进程只真搭
 一次模板、用例复制取独立副本；`GitChannel.clone` / `pull` / `push` 本体与被测真操作照旧
@@ -11,8 +12,11 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
 import unittest
+from unittest import mock
 
+from bestseller_monitor import git_channel
 from bestseller_monitor.git_channel import ChannelError, GitChannel
 from tests.git_repos import GitSandbox, WorldTemplate
 
@@ -309,6 +313,70 @@ class HeadAndPathTests(unittest.TestCase):
         self.box.write_files(self.mine, {"data/2026/W38-m1.db.gz": b"leftover"})
 
         self.assertIsNone(GitChannel(self.mine).read_path("data/2026/W38-m1.db.gz"))
+
+
+class SilentFailureTests(unittest.TestCase):
+    """两路皆空、返回码非零的静默失败（issue 05）：消息要带退出码，并说清是哪一档。
+
+    真 git 自己失败几乎总会留话（认证、网络、冲突、锁），「两路皆空」造不出来——这一件
+    在进程边界（`_run`）给一个空返回，其余照旧真跑；最后一条用真 git 的失败（远端地址
+    失效）钉住「有输出时照样带退出码」。
+    """
+
+    def setUp(self):
+        self.box = GitSandbox(self)
+        self.repo = self.box.tmp / "raw-m1"
+
+    def _silent(self, returncode: int):
+        done = subprocess.CompletedProcess(["git"], returncode, "", "")
+        return mock.patch.object(git_channel, "_run", return_value=done)
+
+    def test_a_silent_pull_failure_names_the_exit_code(self):
+        with self._silent(128):
+            with self.assertRaises(ChannelError) as ctx:
+                GitChannel(self.repo).pull()
+
+        message = str(ctx.exception)
+        self.assertIn("拉取失败", message)
+        self.assertIn("退出码 128", message)
+        self.assertNotIn("（git 没有输出）", message, "空括号那版等于什么都没说")
+
+    def test_a_silently_killed_git_is_named_as_killed(self):
+        """被外部结束的码（Windows 的 NTSTATUS 那一档、POSIX 的负数）要说成那一档。"""
+        for killed in (-1073741510, 0xC000013A, 0xC0000005):
+            with self.subTest(returncode=killed), self._silent(killed):
+                with self.assertRaises(ChannelError) as ctx:
+                    GitChannel(self.repo).pull()
+
+            message = str(ctx.exception)
+            self.assertIn("外部结束", message)
+            self.assertIn(str(killed), message)
+
+    def test_the_message_joins_both_streams_and_still_names_the_exit_code(self):
+        """push --porcelain 的理由在 stdout、stderr 只有一句：两个流都得带上。"""
+        done = subprocess.CompletedProcess(
+            ["git"], 1, "! [remote rejected] master\n", "failed to push some refs\n")
+        with mock.patch.object(git_channel, "_run", return_value=done):
+            with self.assertRaises(ChannelError) as ctx:
+                GitChannel(self.repo).pull()
+
+        message = str(ctx.exception)
+        self.assertIn("failed to push some refs", message)
+        self.assertIn("! [remote rejected] master", message)
+        self.assertIn("退出码 1", message)
+
+    def test_a_failure_with_output_keeps_gits_words_and_adds_the_code(self):
+        blank_world_template().take(self.box)
+        self.box.seed(self.box.tmp / REMOTE, {"x.txt": "x\n"})
+        mine = self.box.clone(self.box.tmp / REMOTE, MINE)
+        self.box.must("remote", "set-url", "origin", str(self.box.tmp / "gone.git"), cwd=mine)
+
+        with self.assertRaises(ChannelError) as ctx:
+            GitChannel(mine).pull()
+
+        message = str(ctx.exception)
+        self.assertIn("does not appear to be a git repository", message)
+        self.assertRegex(message, r"退出码 \d+")
 
 
 if __name__ == "__main__":
