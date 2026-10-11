@@ -69,6 +69,79 @@ class DetailVisitTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             detail_visit.OpenedDetail(MagicMock(), punished=True)
 
+    def test_a_popup_that_is_still_rendering_settles_within_the_readiness_window(self):
+        """票 01：刚打开的弹窗头几轮判读读不到可靠文档——就绪窗口内等待重判，不算「无法验证」。"""
+        page = FakePage(PRODUCT_URL, not_ready_reads=2)
+
+        with patch.object(waiting.time, "sleep"):
+            visit = self.begin(page)
+
+        self.assertIsInstance(visit, detail_visit.ReadyDetailVisit)
+
+    def test_a_popup_that_never_renders_still_pauses_when_the_window_is_exhausted(self):
+        """票 01：持续不可判读照旧升级——整窗等满后才再判一次，原样抛出「页面尚未可靠加载」。
+
+        钟按轮询步长走：窗口若被改小（如 10 秒缩成 1 秒），下面的 `clock.now` 断言即红，
+        「整窗等满」不是不可否证的场面话。
+        """
+        page = FakePage(PRODUCT_URL, not_ready_reads=10 ** 9)
+        clock = GuardClock(step=detail_visit.DETAIL_READY_POLL_SEC)
+
+        with patch.object(waiting, "time", clock):
+            with self.assertRaises(guard.PageEvidenceUnavailable):
+                self.begin(page)
+
+        self.assertGreaterEqual(clock.now, detail_visit.DETAIL_READY_TIMEOUT_SEC,
+                                "整窗等满才升级为暂停")
+
+    def test_a_deny_popup_is_decided_without_entering_the_readiness_wait(self):
+        """票 01：deny 页即刻定论——第一判读先于就绪窗口，连等待原语都不进（零次读钟）。"""
+        page = FakePage("https://s.1688.com/bsop-punish?x=1")
+        clock = GuardClock(step=10.0)
+
+        with patch.object(waiting, "time", clock):
+            result = self.begin(page)
+
+        self.assertIsInstance(result, detail_visit.DeniedVisit)
+        self.assertEqual(clock.now, 0.0)
+
+    def test_a_pending_stop_does_not_preempt_the_first_judgement(self):
+        """票 01：第一判读先于就绪窗口——页面已就绪时，待处理的停止请求不抢在判读之前。
+
+        窗口先行的写法会先跑等待原语的入口检查点、把 StopRequested 抛在判读之前
+        （deny 记账与弹窗归属跟着被跳过）；第一判读先行时，就绪页根本不该碰检查点。
+        """
+        stop_request.install(lambda: (_ for _ in ()).throw(stop_request.StopRequested("停")))
+        self.addCleanup(stop_request.uninstall)
+
+        visit = self.begin(FakePage(PRODUCT_URL))
+
+        self.assertIsInstance(visit, detail_visit.ReadyDetailVisit)
+
+    def test_the_readiness_window_judges_with_the_visit_intent_intact(self):
+        """票 01：窗口里的每次判读都把访问意图（target_url）原样转发。
+
+        身份页重定向恢复靠它认回原目标；丢了这个转发，恢复后的页面会在身份等待里
+        空等到响铃超时（`resolved` 拿对不上目标的页面一直判不「已解除」）。
+        """
+        page = FakePage(PRODUCT_URL)
+        calls = []
+
+        def guard_stub(page_, cfg, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise guard.PageEvidenceUnavailable("还没渲染出来")
+            return False
+
+        with patch.object(detail_visit, "ready_detail_page", side_effect=guard_stub), \
+             patch.object(waiting.time, "sleep"):
+            visit = detail_visit.begin_detail_visit(
+                lambda: detail_visit.OpenedDetail(page, target_url=PRODUCT_URL), self.cfg)
+
+        self.assertIsInstance(visit, detail_visit.ReadyDetailVisit)
+        self.assertEqual([call.get("target_url") for call in calls],
+                         [PRODUCT_URL, PRODUCT_URL])
+
     def test_acquisition_failure_becomes_a_read_failed_visit(self):
         error = PlaywrightError("导航失败")
 
@@ -224,7 +297,8 @@ class DetailVisitTests(unittest.TestCase):
     def test_late_intervention_resets_the_full_readiness_window(self):
         """介入解决后重开的是**完整**新窗：原窗烧掉一半照旧，完整的那个窗才等得到（A08）。
 
-        钟按剧本走（每次读单调钟 = 一个时刻，`sleep` 不真等）：窗口一 t=0 开（到 10
+        钟按剧本走（每次读单调钟 = 一个时刻，`sleep` 不真等）：初次判读那次走的是打桩
+        后的 `ready_detail_page`（直接交 False），不读钟；窗口一 t=0 开（到 10
         为止）、t=1.5 睡过一片，第二轮探针撞上「滑块」；介入在 t=5 被 guard 解决，
         原窗只剩一半——重开的新窗必须是**完整**的（到 15），t≥12.5 的那两轮才轮得到，
         第四次读取（t=12.9 之后）才拿到可读的正文。重置若只续剩余额度（新窗到 10），

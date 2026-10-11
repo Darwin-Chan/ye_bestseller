@@ -1,14 +1,17 @@
 """详情访问的共享 seam：取得、安顿并读取一次当前详情观测。"""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from playwright.sync_api import Error as PlaywrightError
 
 from . import detail, waiting
 from .config import Config
-from .guard import (DenyTracker, intervention_kind, is_deny_url,
-                    ready_detail_page)
+from .guard import (DenyTracker, PageEvidenceUnavailable, intervention_kind,
+                    is_deny_url, ready_detail_page)
+
+log = logging.getLogger(__name__)
 
 DETAIL_READY_TIMEOUT_SEC = 10.0
 DETAIL_READY_POLL_SEC = 0.25
@@ -136,6 +139,46 @@ class ReadyDetailVisit:
             return detail.Observation.read_failed(exc)
 
 
+def _settle_detail_page(opened: OpenedDetail, cfg: Config, *, emit=None,
+                        deny_tracker: DenyTracker | None = None,
+                        shop_key: str | None = None) -> bool:
+    """刚打开的详情页先判读一次；「还没渲染出来」时给一段就绪窗口等待重判。
+
+    「还没渲染出来」不是「无法验证」：弹窗可能先落在空白页或空壳文档上，交接的同一瞬间
+    判据读到「页面尚未可靠加载 / 页面上下文未知」——那是页面还没到，不是判据的意见
+    （2026-10-11 本机试采第一张卡即整轮暂停，回路确证）。**第一判读照旧先发生**（deny
+    记账、阈值阶梯与弹窗归属的既有次序都不变），只有「尚未可靠加载」才进窗口继续轮询；
+    窗口用尽再按原样判一次，把真正的无法验证原样上抛——整轮暂停的安全语义不变
+    （issues-08-11 票 02/07）。deny 与人工介入各自即刻走自己的路径，不进本窗口；
+    等待期间收到停止请求照旧穿透。窗口与详情页可读等待同一量级（`DETAIL_READY_TIMEOUT_SEC`）：
+    先「可判读」后「可读」。
+    """
+    def judge() -> bool:
+        return ready_detail_page(
+            opened.page, cfg, emit=emit, deny_tracker=deny_tracker,
+            shop_key=shop_key, target_url=opened.target_url)
+
+    try:
+        return judge()
+    except PageEvidenceUnavailable:
+        pass  # 还没渲染出来：进就绪窗口等它，不是判据的意见
+
+    def probe():
+        try:
+            # 包一层真值：False=页面可用 也是定论，不许被原语当成「还没等到」。
+            return (True, judge())
+        except PageEvidenceUnavailable:
+            return None
+
+    settled = waiting.until(probe, timeout_sec=DETAIL_READY_TIMEOUT_SEC,
+                            poll_sec=DETAIL_READY_POLL_SEC)
+    if settled is None:
+        log.warning("详情页等待就绪超时（%.0f 秒），仍未就绪，交原样判读定论",
+                    DETAIL_READY_TIMEOUT_SEC)
+        return judge()
+    return settled[1]
+
+
 def begin_detail_visit(
     acquire,
     cfg: Config,
@@ -146,6 +189,10 @@ def begin_detail_visit(
     pacing=None,
 ) -> NotOpenedVisit | ReadFailedVisit | DeniedVisit | ReadyDetailVisit:
     """取得详情页并完成初次 guard，交回一次性的后续读取 capability。
+
+    初次判读走 `_settle_detail_page`：刚打开的弹窗上「还没渲染出来」不算无法验证，
+    第一判读照旧先发生，读不到可靠文档才进就绪窗口等待——这是本 seam 的责任，
+    两条取得路径（点击弹窗、逐店补采导航）都从这里过。
 
     主动停顿（ADR-0038）的两步也在这条共享 seam 上，只此一处持有：**取得之前**问一次
     （配额到点就停在这里，请求还没发出）、**adapter 真的交回页面之后**记一次。记账点放在
@@ -168,11 +215,8 @@ def begin_detail_visit(
         pacing.detail_visit_opened()
 
     try:
-        denied = ready_detail_page(
-            opened.page, cfg, emit=emit,
-            deny_tracker=deny_tracker, shop_key=shop_key,
-            target_url=opened.target_url,
-        )
+        denied = _settle_detail_page(
+            opened, cfg, emit=emit, deny_tracker=deny_tracker, shop_key=shop_key)
     except BROWSER_IO_ERRORS as exc:
         return ReadFailedVisit(exc, detail.Observation.read_failed(exc))
     if denied:

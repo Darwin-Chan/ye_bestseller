@@ -273,15 +273,21 @@ class FakePage:
 
     `become_wall()` / `solve()` 是给「晚到的介入」与「人工解决」两步用的——页面本来就是
     会变的，用例不必拿「第几次读」去模拟时间。
+
+    `not_ready_reads` 是「刚打开、还没渲染出可靠文档」的判读次数（本机试采第一张卡即暂停的
+    回归形状，票 01）：每被读一次 `evaluate` 证据就数一次（判读窗口的探针、observe、
+    解除确认等所有判读消费者共用这一个计数），数完即就绪。
     """
 
     def __init__(self, url: str, *, body: str = "", captcha: bool = False,
-                 html: str = "<html></html>", body_after_reload: str | None = None):
+                 html: str = "<html></html>", body_after_reload: str | None = None,
+                 not_ready_reads: int = 0):
         self.url = url
         self.body = body or "正常商品详情"
         self.captcha = captcha
         self.html = html
         self._body_after_reload = body_after_reload
+        self.not_ready_reads = not_ready_reads
         self.reloads = 0
 
     def become_wall(self, body: str) -> None:
@@ -304,6 +310,9 @@ class FakePage:
     def evaluate(self, expression):
         # Explicit readable/business DOM seam for legacy unit tests. Unknown and
         # identity contexts are covered by real offline DOM in ticket 02 tests.
+        if self.not_ready_reads > 0:
+            self.not_ready_reads -= 1
+            return {"loaded": False, "identity": False, "business": False}
         return {"loaded": True, "identity": False, "business": True}
 
     def locator(self, selector: str):
@@ -344,7 +353,8 @@ class FakeCard:
     def __init__(self, title: str = "", *, offer_id: str | None = "11",
                  observation=None, denied: bool = False, opened: bool = True,
                  read_error: Exception | None = None,
-                 content_values: list[str] | None = None):
+                 content_values: list[str] | None = None,
+                 not_ready_reads: int = 0):
         from bestseller_monitor import detail
 
         self._title = title
@@ -358,6 +368,7 @@ class FakeCard:
         self._opened = opened
         self._read_error = read_error
         self._content_values = iter(content_values) if content_values is not None else None
+        self._not_ready_reads = not_ready_reads
         self.card_ref = CardRef(page=0, index=0)   # 由 adapter 按当前页号填
         self.opens = 0
         self.closes = 0
@@ -395,7 +406,7 @@ class FakeCard:
                     '"name":"默认","price":1,"canBookCount":3}}}</script>')
 
         page = FakePage(self.DENY_URL if self._denied else self.url,
-                        body="正常商品详情")
+                        body="正常商品详情", not_ready_reads=self._not_ready_reads)
         page.content = content
         return detail_visit.OpenedDetail(page)
 
