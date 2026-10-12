@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from . import click_events, elapsed, pacing, plan_step, preparation, rounds, shop_progress, weekly_plan
-from .config import effective_pages_limit, is_merge_only
+from .config import CARDS_PER_PAGE, effective_pages_limit, is_merge_only
 from .crawler_identity import CrawlerProcess, browser_cleanup_complete
 from .db import CST, Database, RoundTally, cst_date
 
@@ -250,11 +250,6 @@ def _plan_mark(shop_key: str, plan: plan_step.StartPlan,
     return _ShopMark("计划外", "out")
 
 
-# 一页榜单约 30 张卡（同族事实的其它副本：`config.py` 的旧配额换算、`pacing.py` 与
-# `listing.py` 的实测注释）：「今日采够」判据 = 今日已采商品数 ≥ 页数 × 每页张数。
-_CARDS_PER_PAGE = 30
-
-
 def _round_can_resume(state: UiState, round_: rounds.Round, now: str) -> bool:
     """这一轮在该界面此刻算不算「明确暂停、可继续」——开始页与过程页共用一条。
 
@@ -338,7 +333,7 @@ def _start_shops(conn: sqlite3.Connection, shops, cfg, today: str, *,
             # 商品数 ≥ 页数×每页张数判「采够」，默认不勾、可手工勾上重采——同日去重
             # 只挡详情页，采够的店再来一遍只是白走列表页。越权店默认不勾、可显式勾上。
             "default_checked": (getattr(cfg, "local_trial", False) or shop.key in plan.my_shops)
-            and products < pages * _CARDS_PER_PAGE,
+            and products < pages * CARDS_PER_PAGE,
             "plan_label": mark.label,
             "plan_mark": mark.text,
             "plan_mark_kind": mark.kind,

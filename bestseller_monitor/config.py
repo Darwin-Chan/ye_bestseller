@@ -321,6 +321,12 @@ class Shop:
     active: bool = True
 
 
+# 一页榜单约 30 张卡（同族事实的其它副本：本模块的旧配额换算、`pacing.py` 与
+# `listing.py` 的实测注释）。两个消费方共用这一个值：界面侧的「今日采够」判据
+# （今日已采商品数 ≥ 页数 × 每页张数）与采集侧的短页判据（一页读到不足一页时留 WARNING）。
+CARDS_PER_PAGE = 30
+
+
 def effective_pages_limit(shop: Shop | None, cfg: Config, *,
                           plan_pages: Mapping[str, int] | None = None) -> int:
     """该店本轮实际翻页上限，四个来源按优先级取第一个有值的。

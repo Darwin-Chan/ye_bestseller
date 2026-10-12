@@ -452,6 +452,47 @@ class ScriptedListing:
         raise ListingLoadFailed(reason)
 
 
+class FillingCardsPage:
+    """与 Playwright 同形的假榜单页：卡片数按脚本随滚动变化（issue 14 的短页形状）。
+
+    `counts` = 「打开时多少张、每滚一次之后多少张」，滚过最后一档后停在那儿：`[20, 20, 30]`
+    表示打开时挂着 20 张、滚一次仍是 20（页面还在挂），第二次滚动才补到 30。`wheels` 记
+    每次滚动的距离，用来断言「还在挂卡时有没有再试一次」。
+    """
+
+    def __init__(self, counts: list[int]):
+        assert counts, "至少要有一档卡片数"
+        self._counts = list(counts)
+        self._step = 0
+        self.wheels: list[int] = []
+
+    def _cards(self) -> int:
+        return self._counts[min(self._step, len(self._counts) - 1)]
+
+    def locator(self, selector):
+        page = self
+
+        class _Locator:
+            def count(self) -> int:  # 与 Playwright 的 locator().count() 同形
+                return page._cards()
+
+        return _Locator()
+
+    @property
+    def mouse(self):
+        page = self
+
+        class _Mouse:
+            def wheel(self, x: int, y: int) -> None:
+                page.wheels.append(y)
+                page._step += 1
+
+        return _Mouse()
+
+    def wait_for_load_state(self, *args, **kwargs) -> None:
+        return None
+
+
 def readable_mock_page():
     """A scripted normal business page with explicit successful DOM reads."""
     page = MagicMock()

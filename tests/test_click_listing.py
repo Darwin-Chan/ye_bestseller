@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from playwright.sync_api import Error as PlaywrightError
 
@@ -23,7 +23,7 @@ from bestseller_monitor import guard
 from bestseller_monitor.guard import InterventionTimeout
 from bestseller_monitor.listing import ListingLoadFailed
 from frozen_clock import frozen_clock
-from helpers import crawler_cfg, FakeCard, ScriptedListing, new_round
+from helpers import FillingCardsPage, GuardClock, crawler_cfg, FakeCard, ScriptedListing, new_round
 
 
 class ClickListingTestCase(unittest.TestCase):
@@ -53,6 +53,10 @@ class ClickListingTestCase(unittest.TestCase):
 
     def event_names(self) -> list[str]:
         return [event for event, _ in self.events]
+
+    def notes(self, event: str) -> list[str]:
+        """某个事件的全部备注，按发出顺序。"""
+        return [kw.get("note") for name, kw in self.events if name == event]
 
     def crawl(self, pages, cfg=None, deny_tracker=None):
         page = ScriptedListing(pages)
@@ -108,12 +112,12 @@ class WalkTests(ClickListingTestCase):
         self.assertEqual([(row["offer_id"], row["list_title"]) for row in rows],
                          [("11", "商品1")])
 
-    def test_the_event_sequence_of_a_successful_card_is_unchanged(self):
+    def test_the_event_sequence_of_a_successful_card(self):
         self.crawl([[FakeCard("商品1", offer_id="11")]])
 
         self.assertEqual(self.event_names(), [
-            "list_page", "product_open", "popup_open", "detail_parse", "click_ok",
-            "popup_close"])
+            "list_page", "list_cards", "product_open", "popup_open", "detail_parse",
+            "click_ok", "popup_close"])
 
     def test_a_slow_detail_page_is_waited_for_before_the_existing_events_are_emitted(self):
         card = FakeCard(
@@ -128,8 +132,8 @@ class WalkTests(ClickListingTestCase):
             self.crawl([[card]])
 
         self.assertEqual(self.event_names(), [
-            "list_page", "product_open", "popup_open", "detail_parse", "click_ok",
-            "popup_close"])
+            "list_page", "list_cards", "product_open", "popup_open", "detail_parse",
+            "click_ok", "popup_close"])
         self.assertEqual(card.closes, 1)
 
     def test_a_popup_that_is_still_rendering_settles_instead_of_pausing_the_round(self):
@@ -145,22 +149,22 @@ class WalkTests(ClickListingTestCase):
             self.crawl([[card]])
 
         self.assertEqual(self.event_names(), [
-            "list_page", "product_open", "popup_open", "detail_parse", "click_ok",
-            "popup_close"])
+            "list_page", "list_cards", "product_open", "popup_open", "detail_parse",
+            "click_ok", "popup_close"])
         self.assertEqual(card.closes, 1)
 
-    def test_the_event_sequence_of_a_parse_failure_is_unchanged(self):
+    def test_the_event_sequence_of_a_parse_failure(self):
         card = FakeCard("商品1", offer_id="11", observation=detail.Observation.parse_failed(
             RuntimeError("页面结构变了"), "<html></html>"))
 
         self.crawl([[card]])
 
         self.assertEqual(self.event_names(), [
-            "list_page", "product_open", "popup_open", "click_parse_error", "detail_parse",
-            "popup_close"])
+            "list_page", "list_cards", "product_open", "popup_open", "click_parse_error",
+            "detail_parse", "popup_close"])
         self.assertEqual(len(self.snapshots("失败")), 1)
 
-    def test_the_event_sequence_of_a_read_failure_is_unchanged(self):
+    def test_the_event_sequence_of_a_read_failure(self):
         """读不到页面只发 click_parse_error（没有 sku_count=0 那条）。"""
         card = FakeCard("商品1", offer_id="11",
                         observation=detail.Observation.read_failed(RuntimeError("页面没了")))
@@ -168,7 +172,8 @@ class WalkTests(ClickListingTestCase):
         self.crawl([[card]])
 
         self.assertEqual(self.event_names(), [
-            "list_page", "product_open", "popup_open", "click_parse_error", "popup_close"])
+            "list_page", "list_cards", "product_open", "popup_open", "click_parse_error",
+            "popup_close"])
 
     def test_a_card_without_an_offer_id_is_recorded_as_no_popup(self):
         card = FakeCard("商品1", offer_id=None, opened=False)
@@ -190,6 +195,60 @@ class WalkTests(ClickListingTestCase):
         self.assertIs(raised.exception, error)
         self.assertEqual(card.closes, 1)
         self.assertEqual(self.snapshots("失败"), [])
+
+
+class ShortPageTests(ClickListingTestCase):
+    """issue 14 票 02：一页实际读到多少张卡要留下可判据的事实。
+
+    「短页」＝这一页读到的卡片数少于每页卡片数、**且这一页后面确实翻到了下一页**——
+    末页天然可以短，所以判据落在翻页成功之后，而不是「页号还没到本轮的页数预算」。
+    """
+
+    def test_every_page_records_how_many_cards_it_read(self):
+        self.crawl([[FakeCard("商品1", offer_id="11")], [FakeCard("商品2", offer_id="12")]])
+
+        self.assertEqual(self.notes("list_cards"), ["page=1;count=1", "page=2;count=1"])
+
+    def test_the_rescue_pass_records_its_own_card_counts(self):
+        """同名商品补抓那遍与主页同规：每页一条，页号键分开（它今天连数都不记）。"""
+        first, second = FakeCard("商品1", offer_id="11"), FakeCard("商品1", offer_id="12")
+
+        self.crawl([[first, second]])
+
+        self.assertEqual(self.notes("list_cards"), ["page=1;count=2", "rescue_page=1;count=2"])
+
+    def test_a_short_page_before_another_one_is_a_warning(self):
+        """第 1 页只读到 2 张、后面还有下一页——这一页少读了，必须是一条 WARNING。
+
+        文案**不带「图片总数」这个关键词**：那行 INFO 原样保留，按该关键词做正则聚合的
+        巡检脚本不会把同一页重复计一条。
+        """
+        cards = [FakeCard("商品1", offer_id="11"), FakeCard("商品2", offer_id="12")]
+
+        with self.assertLogs("bestseller_monitor.click_listing", level="WARNING") as logs:
+            self.crawl([cards, [FakeCard("商品3", offer_id="13")]])
+
+        short = [line for line in logs.output if "第 1 页只读到 2 张卡" in line]
+        self.assertEqual(len(short), 1, f"短页要有一条 WARNING：{logs.output}")
+        self.assertIn("后面还有下一页", short[0])
+        self.assertIn("少了 28 张", short[0])
+
+    def test_a_short_last_page_is_not_a_warning(self):
+        """末页天然可以短（店铺就这么多商品）：后面没有下一页就不是短页，不报。"""
+        cards = [FakeCard("商品1", offer_id="11"), FakeCard("商品2", offer_id="12")]
+
+        with self.assertNoLogs("bestseller_monitor.click_listing", level="WARNING"):
+            self.crawl([cards])
+
+    def test_the_rescue_pass_reports_its_own_short_page(self):
+        """补抓那遍同判据：第 1 页只读到 1 张、后面还有第 2 页 → 一条补抓的 WARNING。"""
+        first, second = FakeCard("商品1", offer_id="11"), FakeCard("商品1", offer_id="12")
+
+        with self.assertLogs("bestseller_monitor.click_listing", level="WARNING") as logs:
+            self.crawl([[first], [second]])
+
+        self.assertTrue([line for line in logs.output if "补抓第 1 页只读到 1 张卡" in line],
+                        f"补抓的短页也要报：{logs.output}")
 
 
 class SameNameTests(ClickListingTestCase):
@@ -470,15 +529,40 @@ class PlaywrightAdapterTests(ClickListingTestCase):
 
         page.on.assert_not_called()
 
-    def test_scrolling_stops_after_the_first_no_change_window(self):
+    def test_a_page_that_is_still_filling_gets_a_second_chance(self):
+        """issue 14 票 01：窗口里只挂了 20 张、第二次滚动才补到 30——这一页必须读到 30。
+
+        改前红：滚一次没等到新增就收工，这一页被记成 20，后面那 10 个商品整轮没进遍历
+        （2026-10-10 A06 少采 10 个就是这一个形状）。
+        """
+        page = FillingCardsPage([20, 20, 30])
+
+        with patch.object(waiting, "time", GuardClock(step=0.5)):
+            count = click_listing.scroll_cards_until_stable(page)
+
+        self.assertEqual(count, 30, "还在挂卡的一页不该被读成短页")
+        self.assertGreater(len(page.wheels), 1, "第一次没等到新增时要再滚一次")
+
+    def test_scrolling_stops_after_two_no_change_windows(self):
+        """一次不成先再试一次；连续两个窗口都没新增才收工（改前只给一个窗口就收工）。"""
         page = MagicMock()
         page.locator.return_value.count.return_value = 31
 
         with patch.object(listing, "wait_until", return_value=False) as wait:
             self.assertEqual(click_listing.scroll_cards_until_stable(page), 31)
 
-        wait.assert_called_once()
-        page.mouse.wheel.assert_called_once_with(0, 6000)
+        self.assertEqual(wait.call_count, 2)
+        self.assertEqual(page.mouse.wheel.call_args_list, [call(0, 6000), call(0, 6000)])
+
+    def test_a_page_that_keeps_loading_is_followed_to_the_roll_limit(self):
+        """页面一直在长就一直跟，跟到十二轮的滚动上限为止（上限不变、不越界）。"""
+        page = FillingCardsPage(list(range(1, 14)))
+
+        with patch.object(waiting, "time", GuardClock(step=0.5)):
+            count = click_listing.scroll_cards_until_stable(page)
+
+        self.assertEqual(len(page.wheels), 12, "滚动轮数仍是十二轮上限")
+        self.assertEqual(count, 13, "交回的是停下来那一刻的卡片数")
 
     def test_a_page_is_read_into_an_observation_with_its_main_image(self):
         owner = click_listing.PlaywrightListing(MagicMock(), self.shop, crawler_cfg(), self.human)

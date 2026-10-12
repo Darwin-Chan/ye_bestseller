@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 from playwright.sync_api import Error as PlaywrightError
 
 from . import click_events, dedupe, detail, detail_visit, listing, rounds
-from .config import Config, Shop, effective_pages_limit
+from .config import CARDS_PER_PAGE, Config, Shop, effective_pages_limit
 from .db import cst_date, utcnow
 from .delay import Humanizer
 from .guard import RoundDenyExceeded, ShopDenyExceeded
@@ -96,6 +96,7 @@ class ShopWalk:
             self.human.before_list_page()
             self.emit("list_page", note=f"page={self.pages_read}")
             count = self.listing_page.scroll_to_load("滚动加载新卡片")
+            self.emit("list_cards", note=f"page={self.pages_read};count={count}")
             log.info("店铺 %s 第 %s 页图片总数 %s（滚动后）", shop.key, self.pages_read, count)
             for index in range(count):
                 self._visit_card(index)
@@ -103,6 +104,7 @@ class ShopWalk:
                 break
             if not self.listing_page.advance(f"店铺 {shop.key} 第 {self.pages_read} 页"):
                 break
+            self._report_short_page(self.pages_read, count)
 
         self._rescue_same_named()
 
@@ -296,6 +298,19 @@ class ShopWalk:
         return observation
 
     # ---------- 同名商品第二遍 ----------
+    def _report_short_page(self, page_no: int, count: int, *, rescue: bool = False) -> None:
+        """这一页读到的卡片数不足一页、而后面确实还有下一页：留一条 WARNING。
+
+        判据落在**翻页成功之后**：末页天然可以短（店铺就这么多商品），拿「页号还没到本轮的
+        页数预算」当判据会在真实页数少于预算的店上误报。文案刻意不带「图片总数」这个关键词
+        ——那行 INFO 原样保留，按该关键词做正则聚合的巡检脚本才不会把同一页重复计一条。
+        """
+        if count >= CARDS_PER_PAGE:
+            return
+        log.warning("店铺 %s %s第 %s 页只读到 %s 张卡（滚动后），后面还有下一页——这一页少了 %s 张",
+                    self.shop.key, "补抓" if rescue else "", page_no, count,
+                    CARDS_PER_PAGE - count)
+
     def _rescue_same_named(self) -> None:
         """计数>1 的同名商品：回头按名补抓（offer_id 去重，避免重复/遗漏）。"""
         shop = self.shop
@@ -312,8 +327,10 @@ class ShopWalk:
         for rescue_page in range(1, rescue_last_page + 1):
             self.human.before_list_page()
             self.emit("list_page", note=f"rescue_page={rescue_page}")
+            count = None
             if rescue_page in ambiguous_pages:
                 count = self.listing_page.scroll_to_load("补抓滚动加载新卡片")
+                self.emit("list_cards", note=f"rescue_page={rescue_page};count={count}")
                 for index in range(count):
                     card = self.listing_page.card(index)
                     name = card.title()
@@ -325,6 +342,8 @@ class ShopWalk:
                 break
             if not self.listing_page.advance(f"店铺 {shop.key} 补抓第 {rescue_page} 页"):
                 break
+            if count is not None:
+                self._report_short_page(rescue_page, count, rescue=True)
 
 
 def remember_discovery(db, round_id: int, shop: Shop, offers: list,
@@ -433,11 +452,17 @@ class PlaywrightCard:
 
 
 def scroll_cards_until_stable(page, describe: str = "滚动加载新卡片") -> int:
-    """滚动加载卡片，首次无新增即停止，返回当前卡片数。
+    """滚动加载卡片，**连续两个窗口都没有新增**才停下，返回当前卡片数。
 
-    每次滚动已经有条件等待；再次对同一无新增状态等待没有信息增益，
-    只会给每页额外增加一个完整的超时窗口。
+    第一次滚动没等到新增时不立刻收工：页面可能只是还没挂完——第 1 页只挂 20 张、第二次
+    滚动才补到 30 就是现场那一次的形态（2026-10-10 A06 因此少采 10 个商品），而这一处
+    的返回值直接决定这一页收录多少张卡。所以再滚一次、再等同一个窗口；仍无新增才停。
+    代价是每页至多多一个 WAIT_SCROLL_SEC 窗口。
+
+    不按「每页应当有 30 张」触发：末页天然可以短、平台也可能改页长，那个期望在采集侧
+    不可核验（issue 14 的 ADR）。
     """
+    no_growth = 0
     for _ in range(12):
         baseline = page.locator(listing.PRODUCT_IMG_SEL).count()
         try:
@@ -452,7 +477,11 @@ def scroll_cards_until_stable(page, describe: str = "滚动加载新卡片") -> 
         )
         current = page.locator(listing.PRODUCT_IMG_SEL).count()
         if not loaded or current <= baseline:
-            break
+            no_growth += 1
+            if no_growth >= 2:
+                break
+            continue
+        no_growth = 0
     return page.locator(listing.PRODUCT_IMG_SEL).count()
 
 
