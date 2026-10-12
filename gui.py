@@ -55,7 +55,7 @@ from bestseller_monitor import single_instance
 from bestseller_monitor import shop_progress
 from bestseller_monitor import stop_request
 from bestseller_monitor import views
-from bestseller_monitor.dedicated_browser import DedicatedBrowser
+from bestseller_monitor.dedicated_browser import ENTRY_BLOCKED_STATES, DedicatedBrowser
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -158,9 +158,11 @@ def _collection_action(method):
 
 CLOSING_REFUSAL = "正在关闭程序，不能开始、续跑或暂停。"
 
-# 手动入口在这些浏览器状态下不提供：启动/观察失败、占用核不实、调试端口被无关实例占着、
-# 正在打开。「已打开/占用」放行——引导用户用已有窗口，不另开标签也不接管。
-_BROWSER_ENTRY_BLOCKED = ("failed", "port_busy", "opening", "unconfirmed")
+# 手动入口在这些浏览器状态下不提供：启动/观察失败、调试端口被无关实例占着、正在打开、
+# 以及「我们启动了却看不见它」。「已打开/占用」放行——引导用户用已有窗口，不另开标签也不
+# 接管；「读不成」与「读到但归属核不实」也放行（ADR-0056：读不成不得降级为否定事实）。
+# 档位表只有一处（`dedicated_browser`），这里从它派生，免得加一档要改两处。
+_BROWSER_ENTRY_BLOCKED = ENTRY_BLOCKED_STATES
 
 
 class Api:
@@ -529,8 +531,8 @@ class Api:
                     # 轮次由采集子进程创建，界面在这里随轮询认领它。
                     self.round_id = view["round_id"]
                 # 手动入口与继续门禁只在「本界面明确暂停且停止收尾完成」这一格才有意义
-                # （票 05）：其余状态一律禁用并给出原因。浏览器事实要跑一次进程枚举
-                # （秒级），而过程页每 2 秒轮询一次——不当暂停时不去查它。
+                # （票 05）：其余状态一律禁用并给出原因。浏览器事实走的是后台快照
+                # （探测不占请求线程），这里读一份算好的结果即可。
                 if view.get("can_resume"):
                     browser, refusal, gate = self._browser_entry(conn)
                     view["browser"] = browser

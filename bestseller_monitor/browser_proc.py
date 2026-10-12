@@ -154,7 +154,9 @@ def decode_console_output(data: bytes | None) -> str:
     这些程序的文本跟随控制台/OEM 码页（中文 Windows 是 GBK），而 `subprocess` 的
     `text=True` 用的是解释器默认编码——UTF-8 模式（PYTHONUTF8=1；Python 3.15 起是
     默认）下解 GBK 会在读取线程里抛 UnicodeDecodeError，stdout 静默变成 None。
-    读它们只认 ASCII 片段（TCP / LISTENING / PID / 进程名），替换字符不影响判断。
+    读它们只认 ASCII 片段（TCP / LISTENING / PID / 进程名），替换字符不影响判断；
+    要把中文原样读出来给人看的调用方（如浏览器事实核对的 stderr 摘要）也走这里——
+    按同一码页解，别各自发明。
     """
     return (data or b"").decode("oem" if os.name == "nt" else "utf-8",
                                 errors="replace")

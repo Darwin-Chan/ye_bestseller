@@ -541,7 +541,7 @@ class ManualEdgeTests(unittest.TestCase):
                        return_value=SimpleNamespace(returncode=0, stdout=evidence, stderr=b'')):
                 api.get_start()
         line = '\n'.join(logs.output)
-        self.assertIn('浏览器事实（界面）', line, '来源标记在场')
+        self.assertIn('浏览器事实（界面实例）', line, '来源标记在场')
         self.assertIn('档位=free', line)
         self.assertIn('耗时=', line)
         self.assertIn('返回码=0', line)
