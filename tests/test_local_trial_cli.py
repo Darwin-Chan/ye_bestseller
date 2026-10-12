@@ -2,6 +2,7 @@
 import contextlib
 import io
 import logging
+import ntpath
 import datetime as dt
 import os
 import sys
@@ -150,8 +151,9 @@ class LocalTrialCliTests(unittest.TestCase):
                 for_collection(formal, local_trial=True)
 
     def test_trial_refuses_entry_that_cannot_be_verified(self):
-        """同一课的另一半：连 lstat 都问不出来的条目（m2 上即此形态）按拒绝处理，
-        错误信息点名路径——不把「核实不了」当「安全」。"""
+        """原始层复刻 m2 形态：主机对链接的 lstat 与 readlink 都失败（WinError 1921 一档，
+        被 is_symlink/is_junction 吞成 False、被 resolve 兜底成空间内原路径——修复前必静默
+        放行），守卫仍须拒绝且信息点名路径——不把「核实不了」当「安全」。"""
         formal = Config.from_file(self.config, root=self.root)
         home = self.root / "local-trial"
         (home / "data").mkdir(parents=True)
@@ -161,13 +163,18 @@ class LocalTrialCliTests(unittest.TestCase):
         except OSError:
             return
         real_lstat = os.lstat
+        real_readlink = ntpath._nt_readlink
 
-        def blind_lstat(path, *args, **kwargs):
-            if os.fspath(path) == os.fspath(link):
-                raise OSError(22, "模拟 m2：ERROR_CANT_RESOLVE_FILENAME", os.fspath(path), 1921)
-            return real_lstat(path, *args, **kwargs)
+        def blind(source):
+            def probe(path, *args, **kwargs):
+                if os.fspath(path) == os.fspath(link):
+                    raise OSError(22, "模拟 m2：ERROR_CANT_RESOLVE_FILENAME",
+                                  os.fspath(path), 1921)
+                return source(path, *args, **kwargs)
+            return probe
 
-        with patch("os.lstat", new=blind_lstat):
+        with patch("os.lstat", new=blind(real_lstat)), \
+                patch("ntpath._nt_readlink", new=blind(real_readlink)):
             with self.assertRaises(TrialUnavailable) as caught:
                 for_collection(formal, local_trial=True)
         self.assertIn(os.fspath(link), str(caught.exception))
