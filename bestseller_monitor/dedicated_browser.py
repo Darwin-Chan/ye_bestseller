@@ -4,15 +4,33 @@ from __future__ import annotations
 import ctypes
 import dataclasses
 import json
+import logging
 import os
 from pathlib import Path
 import subprocess
 import threading
+import time
 
+from .browser_proc import decode_console_output
 from .config import Config
+
+log = logging.getLogger(__name__)
 
 HOME = 'https://www.1688.com/'
 RETRY = '请自行关闭专用 Edge（包括后台窗口），确认退出后即可继续（界面会自动核对）；不要关闭日常 Edge。'
+# 读事实那趟 PowerShell 的缰绳。热态实测 0.85–1.01 秒，本机冷态首遇 6.28 秒（2026-10-12 的
+# m2 记录包 2026-10-12-1713-m2）。它只是「别挂太久」的上限：**超时不等于读到占用**——超时
+# 折进「读不成」档，不拦开轮（见 ADR-0056）。
+_PROBE_TIMEOUT_SEC = 30
+
+# 独占打开探到的 WinError：别人持着 vs 我们没权限，是两回事。
+_SHARING_VIOLATION = 32
+_ACCESS_DENIED = 5
+
+# 「读到的东西」与「没读到」的分界，就是这份放行表：只有读到占用（occupied / port_busy）
+# 与配置错误（failed）落在表外——读不成（unreadable）不许冒充读到占用。
+_STARTABLE_STATES = ('free', 'closed', 'unknown', 'unreadable')
+
 
 
 @dataclasses.dataclass(frozen=True)
@@ -40,6 +58,16 @@ class Settings:
 class Facts:
     state: str
     message: str
+    detail: str = ''
+
+
+class _ProbeFact(Exception):
+    """一条**确定读到**的事实：读到的东西本身构成结论（占用、目录形状不对）。"""
+
+    def __init__(self, state, message):
+        super().__init__(message)
+        self.state = state
+        self.message = message
 
 
 class BrowserRuntime:
@@ -61,8 +89,13 @@ class BrowserRuntime:
         return None
 
     def observe(self, settings):
+        """读一次事实。输出分档按「这是不是一个读到的事实」：读不成不许冒充读到占用。"""
+        started = time.monotonic()
         if os.name != 'nt':
-            return Facts('unknown', '此浏览器事实适配器仅支持 Windows，无法安全核验。')
+            return Facts('unreadable', '此浏览器事实适配器仅支持 Windows，无法安全核验；'
+                                       '本次不拦开轮，界面会继续自动核对。',
+                         detail='非 Windows 主机')
+        result = None
         try:
             _check_directory(Path(settings.profile))
             # Enumerate all processes, not a guessed port owner. Null command lines
@@ -76,9 +109,10 @@ $t=@(Get-NetTCPConnection -State Listen -ErrorAction Stop | ForEach-Object {
 @{processes=$p;ports=$t}|ConvertTo-Json -Depth 4 -Compress"""
             result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive',
                 '-WindowStyle', 'Hidden', '-Command', script], capture_output=True,
-                timeout=12, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                timeout=_PROBE_TIMEOUT_SEC, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             if result.returncode != 0:
-                raise OSError('进程/端口查询失败或权限不足')
+                # 查询自己失败：这是「没问成」，不是「没有」。
+                raise OSError(f'进程/端口查询失败或权限不足（返回码 {result.returncode}）')
             data = json.loads(result.stdout.decode('utf-8-sig'))
             processes = data['processes']
             by_pid = {p['pid']: p for p in processes}
@@ -97,7 +131,8 @@ $t=@(Get-NetTCPConnection -State Listen -ErrorAction Stop | ForEach-Object {
                     if not Path(profile).is_absolute():
                         unknown = True
                     elif os.path.normcase(str(Path(profile).resolve())) == os.path.normcase(settings.profile):
-                        return Facts('occupied', '实际进程仍占用专用数据目录。')
+                        return Facts('occupied', '实际进程仍占用专用数据目录。',
+                                     detail=self._detail(started, result))
                 elif known_browser and any(a.startswith('--type=') for a in args):
                     # A surviving child without a readable browser ancestor may
                     # still hold profile files after the last window closed.
@@ -113,12 +148,41 @@ $t=@(Get-NetTCPConnection -State Listen -ErrorAction Stop | ForEach-Object {
                     else:
                         unknown = True
             if unknown:
-                return Facts('unknown', '存在无法读取或确认目录归属的浏览器进程。')
+                # 看到了浏览器但核不实归属：这是读到的事实，但归属判定靠的是命令行文本——
+                # 软判据不该有否决权，最终归属由开抓时的身份门（CDP PID ＋ OS 创建时刻）判。
+                return Facts('unknown', '存在无法读取或确认目录归属的浏览器进程；'
+                                        '本次不拦开轮，真正归属由开抓时判定。',
+                             detail=self._detail(started, result))
             if any(int(p['port']) == settings.port for p in data['ports']):
-                return Facts('port_busy', '调试端口被既有实例占用，拒绝接管或另开标签。')
-            return Facts('free', '实际进程与目录检查未发现占用。')
+                return Facts('port_busy', '调试端口被既有实例占用，拒绝接管或另开标签。',
+                             detail=self._detail(started, result))
+            return Facts('free', '实际进程与目录检查未发现占用。',
+                         detail=self._detail(started, result))
+        except _ProbeFact as fact:
+            return Facts(fact.state, fact.message, detail=self._detail(started, result))
+        except subprocess.TimeoutExpired:
+            return Facts('unreadable',
+                         f'读浏览器事实超时（上限 {_PROBE_TIMEOUT_SEC} 秒）；'
+                         '本次不拦开轮，界面会继续自动核对。',
+                         detail=self._detail(started, result))
         except Exception as exc:
-            return Facts('unknown', f'无法读取专用目录或进程事实：{exc}')
+            return Facts('unreadable', f'无法读取专用目录或进程事实：{exc}；'
+                                       '本次不拦开轮，界面会继续自动核对。',
+                         detail=self._detail(started, result))
+
+    @staticmethod
+    def _detail(started, result, note=''):
+        parts = [f'耗时={time.monotonic() - started:.2f}s']
+        if result is not None:
+            parts.append(f'返回码={result.returncode}')
+            # PowerShell 的 stderr 跟随控制台码页（中文 Windows 是 GBK），与 netstat 同一档。
+            stderr = decode_console_output(getattr(result, 'stderr', b'')).strip()
+            if stderr:
+                parts.append('stderr=' + stderr[:200].replace('\n', ' '))
+        if note:
+            parts.append(note)
+        return ' '.join(parts)
+
 
     def launch(self, settings):
         Path(settings.profile).mkdir(parents=True, exist_ok=True)
@@ -131,9 +195,10 @@ $t=@(Get-NetTCPConnection -State Listen -ErrorAction Stop | ForEach-Object {
 
 
 class DedicatedBrowser:
-    def __init__(self, cfg, source, *, runtime=None):
+    def __init__(self, cfg, source, *, runtime=None, role='界面'):
         self.settings = Settings.of(cfg, source)
         self.runtime = runtime or BrowserRuntime()
+        self.role = role
         self._read_config = isinstance(cfg, Config)
         self._lock = threading.RLock()
         self._opened = False
@@ -164,17 +229,17 @@ class DedicatedBrowser:
         with self._lock:
             error = self.configuration_error()
             if error:
-                return {**dataclasses.asdict(self.settings), 'state': 'failed',
-                        'message': error, 'retry': RETRY, 'can_start': False}
+                return self._view('failed', error)
             try:
                 fact = self.runtime.observe(self.settings)
-                state, message = fact.state, fact.message
-                if state == 'occupied':
-                    self._unconfirmed = False
-                elif self._unconfirmed and state == 'free':
-                    state, message = 'unknown', '启动已返回但未观察到专用目录占用，创建归属无法确认；请检查窗口并重新打开 GUI。'
             except Exception as exc:
-                state, message = 'unknown', f'无法读取浏览器事实：{exc}'
+                fact = Facts('unreadable', f'无法读取浏览器事实：{exc}；'
+                                           '本次不拦开轮，界面会继续自动核对。')
+            state, message = fact.state, fact.message
+            if state == 'occupied':
+                self._unconfirmed = False
+            elif self._unconfirmed and state in ('free', 'unreadable', 'unknown'):
+                state, message = 'unconfirmed', '启动已返回但未观察到专用目录占用，创建归属无法确认；请检查窗口并重新打开 GUI。'
             if self._opening:
                 state, message = 'opening', '正在打开专用 Edge，请使用即将出现的窗口。'
             elif state == 'free':
@@ -184,11 +249,21 @@ class DedicatedBrowser:
             error = self.configuration_error()
             if error:
                 state, message = 'failed', error
-            elif self._failure and state in ('free', 'closed'):
+            elif self._failure and state in _STARTABLE_STATES:
                 state, message = 'failed', self._failure
-            return {**dataclasses.asdict(self.settings), 'state': state,
-                    'message': message, 'retry': RETRY,
-                    'can_start': state in ('free', 'closed')}
+            self._note(state, message, fact)
+            return self._view(state, message)
+
+    def _view(self, state, message):
+        return {**dataclasses.asdict(self.settings), 'state': state,
+                'message': message, 'retry': RETRY,
+                'can_start': state in _STARTABLE_STATES}
+
+    def _note(self, state, message, fact):
+        """每次事实核对留一行：命中哪一档、花了多久、查询自己的返回码与 stderr 摘要。"""
+        log.info('浏览器事实（%s）：档位=%s %s', self.role, state,
+                 getattr(fact, 'detail', '') or message[:120])
+
 
     def reserve_open(self):
         with self._lock:
@@ -257,34 +332,54 @@ def _exists_readable(path):
 
 
 def _check_directory(profile):
+    """目录级的判定：读到的东西（锁文件、文件被持着）拦人，读不成的只记不拦。"""
     current = profile
     while not _exists_readable(current):
         if current.parent == current:
-            raise OSError('专用目录没有可读取的父目录')
+            raise _ProbeFact('unreadable', '专用目录没有可读取的父目录')
         current = current.parent
+    if not current.is_dir():
+        raise _ProbeFact('failed', '专用数据目录或父目录不是目录')
     # Explicit enumeration surfaces PermissionError; exists() alone can hide it.
     list(current.iterdir())
-    if not current.is_dir():
-        raise OSError('专用数据目录或父目录不是目录')
     if _exists_readable(profile):
         for name in ('SingletonLock', 'SingletonSocket', 'SingletonCookie'):
             if _exists_readable(profile/name):
-                raise OSError('专用目录仍有浏览器锁，不能证明已释放')
+                raise _ProbeFact('occupied', '专用目录仍有浏览器锁，不能证明已释放')
         # Windows Chromium uses file-sharing locks, not a Unix SingletonLock.
         # Probe existing metadata handles exclusively; never read credential data.
         for file in (profile/'Local State', profile/'Default'/'Preferences'):
             if not _exists_readable(file):
                 continue
-            create = ctypes.windll.kernel32.CreateFileW
-            create.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
-                ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
-            create.restype = ctypes.c_void_p
-            handle = create(str(file), 0x80000000, 0, None, 3, 0x80, None)
-            if handle == ctypes.c_void_p(-1).value:
-                raise OSError('专用目录文件被占用或无读取权限')
-            close = ctypes.windll.kernel32.CloseHandle
-            close.argtypes = [ctypes.c_void_p]
-            close(handle)
+            held = _sharing_probe(file)
+            if held == _SHARING_VIOLATION:
+                raise _ProbeFact('occupied', '专用目录文件被其它实例占用')
+            if held == _ACCESS_DENIED:
+                raise _ProbeFact('unreadable', '专用目录文件无读取权限')
+            if held:
+                raise _ProbeFact('unreadable', f'专用目录文件无法核验（WinError {held}）')
+
+
+def _sharing_probe(path):
+    """独占打开探一次这个文件：0 = 没人持着，否则是 WinError 码。
+
+    共享冲突（32）本身就是「有实例在跑」的证据；权限不足（5）只是我们没读成——这两件事
+    在旧代码里共用一个 OSError 文案，靠的是把最后错误码取回来才分得开。
+    """
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    create = kernel32.CreateFileW
+    create.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+    create.restype = ctypes.c_void_p
+    handle = create(str(path), 0x80000000, 0, None, 3, 0x80, None)
+    if handle == ctypes.c_void_p(-1).value:
+        return ctypes.get_last_error() or -1
+    close = kernel32.CloseHandle
+    close.argtypes = [ctypes.c_void_p]
+    close.restype = ctypes.c_void_p
+    close(handle)
+    return 0
+
 
 
 def verify_gui_settings(cfg, *, runtime=None):
@@ -300,7 +395,7 @@ def verify_gui_settings(cfg, *, runtime=None):
         expected = Settings(**json.loads(frozen))
         if Settings.of(cfg, expected.source) != expected:
             raise ValueError('浏览器配置与界面快照不一致，请重新打开界面。')
-        service = DedicatedBrowser(cfg, expected.source, runtime=runtime)
+        service = DedicatedBrowser(cfg, expected.source, runtime=runtime, role='采集子进程复核')
         reason = service.start_error()
         if reason:
             raise ValueError(reason)

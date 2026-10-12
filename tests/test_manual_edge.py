@@ -374,28 +374,22 @@ class ManualEdgeTests(unittest.TestCase):
         reopened = gui.Api(config_file=self.config, browser_runtime=self.os)
         self.assertTrue(reopened.open_login_browser()['reused'])
         self.assertEqual(len(self.os.starts), 1)
-    def test_unknown_permission_and_missing_edge_refuse_api_and_page(self):
+    def test_attribution_uncertainty_is_reported_but_missing_edge_still_refuses(self):
+        # 票 02：读到但归属核不实（unknown）不再拦人——归属判定交给开抓时的身份门；
+        # 确定性读到的配置错误（这里：Edge 不在）照旧拦。检测类不预置灰的页面面不变。
         self.store_plan()
         self.os.state = 'unknown'
         page = self.page()
-        # 票 02：检测/配置类不再预置灰——两按钮亮，点击弹同源原因的信息框；
-        # 服务端拒绝照旧（下面的 API 断言保持不动）。
         self.assertFalse(page.locator('#loginBrowserBtn').is_disabled())
         self.assertFalse(page.locator('#startBtn').is_disabled())
-        expected = self.api.open_login_browser()['error']
-        page.click('#loginBrowserBtn')
-        page.wait_for_selector('#confirmModal.show', timeout=5000)
-        self.assertEqual(page.locator('#confirmSub').inner_text(), expected, '原样报因')
-        page.click('#confirmOk')
-        page.wait_for_selector('#confirmModal', state='hidden', timeout=5000)
-        self.assertFalse(self.api.open_login_browser()['ok'])
-        with patch('gui.subprocess.Popen') as spawn:
-            self.assertFalse(self.api.start_run(['A'])['ok'])
-            spawn.assert_not_called()
-        self.os.state = 'free'
+        self.assertIn('测试 OS 事实：unknown',
+                      page.locator('#loginBrowserBtn').get_attribute('title'),
+                      '看到的档位照实进悬浮提示（此处由夹具的「测试 OS 事实」句代言）')
+        self.assertTrue(self.api.open_login_browser()['ok'])
+        self.assertEqual(len(self.os.starts), 1)
         (self.tmp/'Edge 浏览器.exe').unlink()
         self.assertIn('未找到 Edge', self.api.open_login_browser()['error'])
-        self.assertEqual(len(self.os.starts), 0)
+        self.assertEqual(len(self.os.starts), 1, '配置错误不拉起第二个浏览器')
     def test_false_mode_and_invalid_config_have_accurate_errors(self):
         self.store_plan()
         self.config.write_text(self.config.read_text('utf-8').replace('start_browser = true','start_browser = false'),'utf-8')
@@ -411,16 +405,160 @@ class ManualEdgeTests(unittest.TestCase):
         from bestseller_monitor.dedicated_browser import BrowserRuntime
         runtime = BrowserRuntime()
         api = gui.Api(config_file=self.config, browser_runtime=runtime)
-        for response in [SimpleNamespace(returncode=1,stdout=b''),
-                SimpleNamespace(returncode=0,stdout=json.dumps({'processes':[{'name':'msedge.exe','pid':1,'parent':0,'cmd':None}], 'ports':[]}).encode())]:
-            with patch('bestseller_monitor.dedicated_browser.subprocess.run',return_value=response):
-                self.assertEqual(api.get_start()['browser']['state'], 'unknown')
-                self.assertFalse(api.open_login_browser()['ok'])
+        # 票 02：查询自己失败叫「没问成」——读不成档，不拦开轮（先红：旧代码这两条都折进
+        # unknown 并一律判 can_start=False，正是 issue 15 现场那条链）。
+        for response in [SimpleNamespace(returncode=1, stdout=b'', stderr=b''),
+                SimpleNamespace(returncode=0, stdout=json.dumps({'processes':[{'name':'msedge.exe','pid':1,'parent':0,'cmd':None}], 'ports':[]}).encode(), stderr=b'')]:
+            with patch('bestseller_monitor.dedicated_browser.subprocess.run', return_value=response):
+                view = api.get_start()['browser']
+                self.assertIn(view['state'], ('unreadable', 'unknown'))
+                self.assertTrue(view['can_start'], '读不成/核不实都不该拦开轮')
+        # 锁文件是**读到的事实**：归入占用档，照旧拦开轮、不开第二个浏览器，
+        # 而且连查询都不必发。
         self.cfg.user_data_path.mkdir(parents=True)
         (self.cfg.user_data_path/'SingletonLock').touch()
         with patch('bestseller_monitor.dedicated_browser.subprocess.run') as query:
-            self.assertFalse(api.open_login_browser()['ok'])
+            self.assertEqual(api.get_start()['browser']['state'], 'occupied')
+            self.assertFalse(api.get_start()['browser']['can_start'])
+            self.assertTrue(api.open_login_browser()['reused'], '占用态入口引导用已有窗口')
             query.assert_not_called()
+
+    # ---------- 票 02：事实分档（只有读到的东西才拦人） ----------
+    def browser_settings(self, profile=None):
+        from bestseller_monitor.dedicated_browser import Settings
+        return Settings(root=str(self.tmp), source=str(self.config),
+                        executable=str(self.tmp/'Edge 浏览器.exe'),
+                        profile=str(profile or self.cfg.user_data_path),
+                        port=9222, start_browser=True)
+
+    def test_probe_timeout_is_a_read_failure_not_an_occupancy_fact(self):
+        import subprocess
+        from bestseller_monitor.dedicated_browser import BrowserRuntime
+        settings = self.browser_settings()
+        expired = subprocess.TimeoutExpired(cmd='powershell.exe', timeout=30)
+        with patch('bestseller_monitor.dedicated_browser.subprocess.run', side_effect=expired):
+            fact = BrowserRuntime().observe(settings)
+        self.assertEqual(fact.state, 'unreadable', '超时是「没读到」，不是「读到占用」')
+        self.assertIn('超时', fact.message)
+        self.assertIn('耗时=', fact.detail)
+        # 门禁侧：读不成不构成拒绝，开轮照走（真问题由采集子进程复核与归属门说清）。
+        self.store_plan()
+        api = gui.Api(config_file=self.config, browser_runtime=BrowserRuntime(),
+                      now=lambda: '2026-10-09T04:00:00+00:00')
+        with patch('bestseller_monitor.dedicated_browser.subprocess.run', side_effect=expired):
+            view = api.get_start()
+            self.assertEqual(view['browser']['state'], 'unreadable')
+            self.assertNotIn('browser_error', view, '读不成不进拦停原因')
+            with patch('gui.subprocess.Popen') as spawn:
+                self.assertTrue(api.start_run(['A'])['ok'], '读不成照常开轮')
+                spawn.assert_called_once()
+
+    def test_unread_process_evidence_never_becomes_a_refusal(self):
+        import json
+        from bestseller_monitor.dedicated_browser import BrowserRuntime
+        settings = self.browser_settings()
+        # 返回码非 0、返回码 0 但正文解不开：都是「没问成」。
+        broken = [SimpleNamespace(returncode=1, stdout=b'', stderr=b'sharing violation'),
+                  SimpleNamespace(returncode=0, stdout=b'not json', stderr=b'')]
+        for response in broken:
+            with patch('bestseller_monitor.dedicated_browser.subprocess.run', return_value=response):
+                fact = BrowserRuntime().observe(settings)
+            self.assertEqual(fact.state, 'unreadable')
+            self.assertIn('不拦开轮', fact.message, '读不成要对人说清它会自动重试')
+        with patch('bestseller_monitor.dedicated_browser.subprocess.run',
+                   return_value=SimpleNamespace(returncode=1, stdout=b'', stderr='拒绝访问'.encode('gbk'))):
+            fact = BrowserRuntime().observe(settings)
+        self.assertIn('返回码=1', fact.detail)
+        self.assertIn('拒绝访问', fact.detail, 'stderr 摘要进诊断明细')
+
+    def test_attribution_uncertainty_is_its_own_tier(self):
+        import json
+        from bestseller_monitor.dedicated_browser import BrowserRuntime
+        settings = self.browser_settings()
+        profile = self.cfg.user_data_path
+        uncertain = [
+            [{'name': 'msedge.exe', 'pid': 9, 'parent': 0, 'cmd': None}],
+            [{'name': 'msedge.exe', 'pid': 9, 'parent': 0,
+              'cmd': 'msedge.exe --user-data-dir=profiles/相对路径'}],
+            [{'name': 'msedge.exe', 'pid': 9, 'parent': 404, 'cmd': 'msedge.exe --type=renderer'}],
+        ]
+        for processes in uncertain:
+            body = json.dumps({'processes': processes, 'ports': []}).encode()
+            with patch('bestseller_monitor.dedicated_browser.subprocess.run',
+                       return_value=SimpleNamespace(returncode=0, stdout=body, stderr=b'')):
+                fact = BrowserRuntime().observe(settings)
+            self.assertEqual(fact.state, 'unknown', processes)
+            self.assertIn('不拦开轮', fact.message)
+        # 但归属确实对上时仍是 occupied——分档不放松这条。
+        matched = [{'name': 'msedge.exe', 'pid': 9, 'parent': 0,
+                    'cmd': f'msedge.exe "--user-data-dir={profile}"'}]
+        body = json.dumps({'processes': matched, 'ports': []}).encode()
+        with patch('bestseller_monitor.dedicated_browser.subprocess.run',
+                   return_value=SimpleNamespace(returncode=0, stdout=body, stderr=b'')):
+            fact = BrowserRuntime().observe(settings)
+        self.assertEqual(fact.state, 'occupied')
+
+    def test_directory_held_and_unreadable_are_told_apart(self):
+        from bestseller_monitor.dedicated_browser import BrowserRuntime
+        settings = self.browser_settings()
+        profile = self.cfg.user_data_path
+        profile.mkdir(parents=True)
+        (profile/'Local State').write_text('{}', 'utf-8')
+        # 共享冲突＝读到的事实（有人持着）；权限不足＝没读成。旧代码两句共用、
+        # 而且不取最后错误码，两者根本分不开。
+        for code, state in [(32, 'occupied'), (5, 'unreadable'), (87, 'unreadable')]:
+            with patch('bestseller_monitor.dedicated_browser._sharing_probe', return_value=code):
+                fact = BrowserRuntime().observe(settings)
+            self.assertEqual(fact.state, state, f'WinError {code}')
+        # 路径不是目录：读到的东西，但既不是占用也不是「没读到」。
+        not_a_dir = self.tmp/'不是目录'
+        not_a_dir.write_text('x', 'utf-8')
+        fact = BrowserRuntime().observe(self.browser_settings(profile=not_a_dir))
+        self.assertEqual(fact.state, 'failed')
+        # 没有可读父目录：读不成。
+        orphan = self.tmp/'不存在'/'更深'/'专用目录'
+        with patch('bestseller_monitor.dedicated_browser._exists_readable', return_value=False):
+            fact = BrowserRuntime().observe(self.browser_settings(profile=orphan))
+        self.assertEqual(fact.state, 'unreadable')
+
+    def test_unconfirmed_launch_keeps_its_own_state(self):
+        self.store_plan()
+        self.os.launch = lambda settings: self.os.starts.append(settings)
+        self.assertTrue(self.api.open_login_browser()['ok'])
+        view = self.api.get_start()['browser']
+        self.assertEqual(view['state'], 'unconfirmed', '建立未确认有自己的档位，不再借 unknown')
+        self.assertFalse(view['can_start'], '我们启动了却看不见它：仍要拦住')
+        self.assertIn('无法确认', view['message'])
+
+    def test_every_probe_leaves_one_diagnostic_line(self):
+        import json
+        from bestseller_monitor.dedicated_browser import BrowserRuntime
+        self.store_plan()
+        api = gui.Api(config_file=self.config, browser_runtime=BrowserRuntime())
+        evidence = json.dumps({'processes': [], 'ports': []}).encode()
+        with self.assertLogs('bestseller_monitor.dedicated_browser', level='INFO') as logs:
+            with patch('bestseller_monitor.dedicated_browser.subprocess.run',
+                       return_value=SimpleNamespace(returncode=0, stdout=evidence, stderr=b'')):
+                api.get_start()
+        line = '\n'.join(logs.output)
+        self.assertIn('浏览器事实（界面）', line, '来源标记在场')
+        self.assertIn('档位=free', line)
+        self.assertIn('耗时=', line)
+        self.assertIn('返回码=0', line)
+
+    def test_subprocess_recheck_uses_the_same_tiers(self):
+        from bestseller_monitor.dedicated_browser import BrowserRuntime, Settings, verify_gui_settings
+        self.store_plan()
+        cfg = self.cfg.replace(gui_browser_settings=Settings.of(self.cfg, self.config).to_json())
+        with patch('bestseller_monitor.dedicated_browser.BrowserRuntime.observe',
+                   side_effect=self.os.observe):
+            self.os.state = 'unreadable'
+            verify_gui_settings(cfg)   # 读不成：子进程侧同样不拒绝
+            self.os.state = 'unknown'
+            verify_gui_settings(cfg)   # 核不实：同样不拒绝
+            self.os.state = 'occupied'
+            with self.assertRaises(ValueError, msg='读到占用：子进程侧照旧拒绝'):
+                verify_gui_settings(cfg)
     def test_gui_close_does_not_close_manual_window(self):
         self.api.open_login_browser()
         snapshot = self.api.close_snapshot()

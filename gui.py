@@ -160,7 +160,7 @@ CLOSING_REFUSAL = "正在关闭程序，不能开始、续跑或暂停。"
 
 # 手动入口在这些浏览器状态下不提供：启动/观察失败、占用核不实、调试端口被无关实例占着、
 # 正在打开。「已打开/占用」放行——引导用户用已有窗口，不另开标签也不接管。
-_BROWSER_ENTRY_BLOCKED = ("failed", "unknown", "port_busy", "opening")
+_BROWSER_ENTRY_BLOCKED = ("failed", "port_busy", "opening", "unconfirmed")
 
 
 class Api:

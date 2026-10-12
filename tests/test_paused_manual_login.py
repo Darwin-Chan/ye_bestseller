@@ -238,23 +238,23 @@ class PausedManualLoginTests(unittest.TestCase):
         self.assertNotIn('已关闭', sub, '绝不显示假的「已关闭」')
         self.assertEqual(len(self.os.starts), 1, '不重复开窗')
 
-    def test_paused_run_entry_lit_on_detection_class_and_reports_reason_on_click(self):
-        # 票 04：检测类（无法确认）在暂停资格具备后亮起；点击弹同源原因的信息框，
-        # 不误开（启动计数为零）、不接管无关实例。
+    def test_paused_run_entry_lit_on_detection_class_and_no_longer_blocks(self):
+        # 票 02：检测类（读不成 / 读到但核不实）在暂停资格具备后亮起，且不再拦人——
+        # 点过程页的登录入口照常开窗（归属交给开抓时的身份门判，见 ADR-0056）。
         from playwright.sync_api import expect
         self.start_round()
         self.pause_and_settle()
+        for state in ('unknown', 'unreadable'):
+            self.os.state = state
+            view = self.api.get_run()
+            self.assertTrue(view['can_resume'])
+            self.assertIsNone(view['continue_gate'], f'{state} 不再拦继续')
         self.os.state = 'unknown'
         page = self.page()
         page.evaluate('tickRun()')
         expect(page.locator('#runLoginBrowserBtn')).to_be_enabled()
-        expected = self.api.open_login_browser()['error']
-        self.assertEqual(self.os.starts, [])
-        page.click('#runLoginBrowserBtn')
-        page.wait_for_selector('#confirmModal.show', timeout=5000)
-        self.assertEqual(page.locator('#confirmSub').inner_text(), expected, '原样报因')
-        self.assertEqual(page.locator('#confirmOk').inner_text().strip(), '知道了')
-        self.assertEqual(len(self.os.starts), 0, '不接管无关实例')
+        self.assertTrue(self.api.open_login_browser()['ok'], '核不实不再拦：照常开登录窗口')
+        self.assertEqual(len(self.os.starts), 1, '检测类照常开窗，不误判成占用')
 
     def test_pause_banner_says_closing_the_window_never_auto_resumes(self):
         # 票 04：原卡里「关闭窗口不会自动继续本轮」句迁入暂停横幅（卡片已删）。
@@ -267,10 +267,12 @@ class PausedManualLoginTests(unittest.TestCase):
         self.assertIn('关闭专用 Edge 窗口不会自动继续本轮',
                       page.locator('#rPaused').inner_text())
 
-    def test_unverifiable_release_refuses_continue(self):
+    def test_read_facts_still_refuse_continue(self):
+        # 票 02：拦继续的只剩**读到的占用事实**（occupied / port_busy）；
+        # 读不成与「读到但核不实」不再拦（见 test_paused_run_entry_lit_on_detection_class_…）。
         self.start_round()
         self.pause_and_settle()
-        for state in ('unknown', 'port_busy'):
+        for state in ('occupied', 'port_busy'):
             self.os.state = state
             with self.subTest(state=state):
                 view = self.api.get_run()
