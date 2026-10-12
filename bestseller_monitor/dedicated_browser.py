@@ -28,9 +28,12 @@ _SHARING_VIOLATION = 32
 _ACCESS_DENIED = 5
 
 # 「读到的东西」与「没读到」的分界，就是这份放行表：只有读到占用（occupied / port_busy）
-# 与配置错误（failed）落在表外——读不成（unreadable）不许冒充读到占用。
-_STARTABLE_STATES = ('free', 'closed', 'unknown', 'unreadable')
+# 与配置错误（failed）落在表外——读不成（unreadable）不许冒充读到占用。checking 是
+# 「还没读到第一份事实」：同样不拦，界面显示「正在核对」。
+_STARTABLE_STATES = ('free', 'closed', 'unknown', 'unreadable', 'checking')
 
+# 读路径最多等这么久让一次刷新落地——够快就当场拿到新事实，不够就先用上一份快照。
+_INLINE_WAIT_SEC = 0.25
 
 
 @dataclasses.dataclass(frozen=True)
@@ -205,6 +208,64 @@ class DedicatedBrowser:
         self._opening = False
         self._failure = None
         self._unconfirmed = False
+        # 事实快照：读路径只读它，从不在请求线程里跑那条 PowerShell。快照本身由一把
+        # 只护它的锁守着——探测与等待都在锁外，免得刷新线程与读路径互相堵死。
+        self._facts_lock = threading.Lock()
+        self._facts = None
+        self._facts_at = 0.0
+        self._refreshing = False
+        self._refresh_done = threading.Event()
+        self._refresh_done.set()
+
+    # ---------- 事实快照：探测在后台，读路径不等它 ----------
+    def _start_refresh(self):
+        """安排一次后台刷新（单飞）；返回是否有刷新在飞。
+
+        每次读都安排一次，与今天「每次取数都跑一次探测」同节奏——变的是探测不再占请求
+        线程。要降频率属于枚举降本，另议（见 spec 的 Out of Scope）。
+        """
+        with self._facts_lock:
+            if self._refreshing:
+                return True
+            self._refreshing = True
+            self._refresh_done.clear()
+        threading.Thread(target=self._refresh, daemon=True,
+                         name=f'浏览器事实核对-{self.role}').start()
+        return True
+
+    def _refresh(self):
+        try:
+            fact = self.runtime.observe(self.settings)
+        except Exception as exc:
+            fact = Facts('unreadable', f'无法读取浏览器事实：{exc}；'
+                                       '本次不拦开轮，界面会继续自动核对。')
+        with self._facts_lock:
+            self._facts = fact
+            self._facts_at = time.monotonic()
+            self._refreshing = False
+            self._refresh_done.set()
+        # 每次探测留一行：命中哪一档、花了多久、查询自己的返回码与 stderr 摘要。
+        log.info('浏览器事实（%s）：档位=%s %s', self.role, fact.state,
+                 getattr(fact, 'detail', '') or fact.message[:120])
+
+    def _read_facts(self):
+        """读路径：必要时安排一次刷新，最多等一小会儿；等不到就用上一份（可能还没有）。"""
+        if self._start_refresh():
+            self._refresh_done.wait(_INLINE_WAIT_SEC)
+        with self._facts_lock:
+            return self._facts, self._refreshing
+
+    def refresh_now(self, timeout=None):
+        """强制取一次新事实并等它落地；`timeout=None` 等满一次探测的缰绳。
+
+        给**主动动作**用：采集子进程启动时的契约复核要一份当场的事实（等满），界面上的
+        主动动作（打开专用 Edge、开始/继续）只等 `_INLINE_WAIT_SEC`——它们要的是一个
+        眼下够用的结论，等不到就先用上一份，真问题由采集子进程复核那道门兜底。
+        """
+        self._start_refresh()
+        self._refresh_done.wait(_PROBE_TIMEOUT_SEC + 5 if timeout is None else timeout)
+        with self._facts_lock:
+            return self._facts
 
     def configuration_error(self):
         try:
@@ -220,29 +281,30 @@ class DedicatedBrowser:
         error = self.configuration_error()
         if error:
             return error
+        # 主动动作：先催一次当下的事实（最多等一小会儿），再照分档给结论。
+        self.refresh_now(_INLINE_WAIT_SEC)
         view = self.status()
         if not view['can_start']:
             return view['message'] + RETRY
         return None
 
     def status(self):
+        """读一份事实快照（必要时安排后台刷新）。**不在请求线程里跑探测**。"""
         with self._lock:
+            if self._opening:
+                return self._view('opening', '正在打开专用 Edge，请使用即将出现的窗口。')
             error = self.configuration_error()
             if error:
                 return self._view('failed', error)
-            try:
-                fact = self.runtime.observe(self.settings)
-            except Exception as exc:
-                fact = Facts('unreadable', f'无法读取浏览器事实：{exc}；'
-                                           '本次不拦开轮，界面会继续自动核对。')
-            state, message = fact.state, fact.message
+        fact, pending = self._read_facts()
+        with self._lock:
+            state, message = ((fact.state, fact.message) if fact is not None
+                              else ('checking', '正在核对浏览器事实…'))
             if state == 'occupied':
                 self._unconfirmed = False
-            elif self._unconfirmed and state in ('free', 'unreadable', 'unknown'):
+            elif self._unconfirmed and state in ('free', 'unreadable', 'unknown', 'checking'):
                 state, message = 'unconfirmed', '启动已返回但未观察到专用目录占用，创建归属无法确认；请检查窗口并重新打开 GUI。'
-            if self._opening:
-                state, message = 'opening', '正在打开专用 Edge，请使用即将出现的窗口。'
-            elif state == 'free':
+            if state == 'free':
                 state, message = ('closed', '已关闭，专用目录未占用。') if self._opened else ('free', '专用目录未占用。')
             elif state == 'occupied':
                 message = '专用目录仍被浏览器占用，请使用已有窗口，不会另开标签。'
@@ -251,21 +313,21 @@ class DedicatedBrowser:
                 state, message = 'failed', error
             elif self._failure and state in _STARTABLE_STATES:
                 state, message = 'failed', self._failure
-            self._note(state, message, fact)
-            return self._view(state, message)
+            # 还没有可用事实、而且有刷新在飞：让页面接着问，读到就停（别一直轮询）。
+            hold = bool(pending) and state in ('checking', 'unreadable')
+            return self._view(state, message, pending=hold)
 
-    def _view(self, state, message):
+    def _view(self, state, message, *, pending=False):
         return {**dataclasses.asdict(self.settings), 'state': state,
                 'message': message, 'retry': RETRY,
-                'can_start': state in _STARTABLE_STATES}
-
-    def _note(self, state, message, fact):
-        """每次事实核对留一行：命中哪一档、花了多久、查询自己的返回码与 stderr 摘要。"""
-        log.info('浏览器事实（%s）：档位=%s %s', self.role, state,
-                 getattr(fact, 'detail', '') or message[:120])
+                'can_start': state in _STARTABLE_STATES, 'pending': pending}
 
 
     def reserve_open(self):
+        # 主动动作：先催一次当下的事实（锁外等），别拿一份旧快照决定「复用还是新开」。
+        # 配置确定不对（如用了日常 profile）时不发探测——与目录判据同一纪律。
+        if self.configuration_error() is None:
+            self.refresh_now(_INLINE_WAIT_SEC)
         with self._lock:
             self._failure = None
             view = self.status()
@@ -396,6 +458,8 @@ def verify_gui_settings(cfg, *, runtime=None):
         if Settings.of(cfg, expected.source) != expected:
             raise ValueError('浏览器配置与界面快照不一致，请重新打开界面。')
         service = DedicatedBrowser(cfg, expected.source, runtime=runtime, role='采集子进程复核')
+        # 子进程要的是**当场**的事实：界面那份快照可能已经旧了，而且这里没有界面可等。
+        service.refresh_now()
         reason = service.start_error()
         if reason:
             raise ValueError(reason)

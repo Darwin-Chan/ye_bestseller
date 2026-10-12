@@ -559,6 +559,77 @@ class ManualEdgeTests(unittest.TestCase):
             self.os.state = 'occupied'
             with self.assertRaises(ValueError, msg='读到占用：子进程侧照旧拒绝'):
                 verify_gui_settings(cfg)
+
+    # ---------- 票 03：事实核对退出同步路径 ----------
+    class SlowOS:
+        """探测慢得像那条 PowerShell（冷态秒级）的替身；config_error 走真判据。"""
+        def __init__(self, state='free', delay=2.0):
+            from bestseller_monitor.dedicated_browser import BrowserRuntime
+            self.state, self.delay, self.calls = state, delay, 0
+            self.peak = 0
+            self._live = 0
+            self._real = BrowserRuntime()
+        def config_error(self, settings):
+            return self._real.config_error(settings)
+        def observe(self, settings):
+            import time
+            self.calls += 1
+            self._live += 1
+            self.peak = max(self.peak, self._live)
+            try:
+                time.sleep(self.delay)
+            finally:
+                self._live -= 1
+            return SimpleNamespace(state=self.state, message='慢探测：' + self.state)
+        def launch(self, settings):
+            raise AssertionError('本替身不许开浏览器')
+
+    def test_status_never_waits_for_a_slow_probe(self):
+        import time
+        self.store_plan()
+        slow = self.SlowOS(delay=2.0)
+        api = gui.Api(config_file=self.config, browser_runtime=slow,
+                      now=lambda: '2026-10-09T04:00:00+00:00')
+        started = time.monotonic()
+        view = api.get_start()['browser']
+        elapsed = time.monotonic() - started
+        # 先红：旧代码这里同步跑探测，会等满 2 秒（现场那条 12 秒就是这么把界面拖死的）。
+        self.assertLess(elapsed, 1.0, '读路径不等探测落地')
+        self.assertEqual(view['state'], 'checking', '还没有事实时如实说「正在核对」')
+        self.assertTrue(view['can_start'], '还没读到事实不构成拒绝')
+        self.assertTrue(view['pending'], '页面据此接着问一次')
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            view = api.get_start()['browser']
+            if view['state'] != 'checking':
+                break
+            time.sleep(0.05)
+        self.assertEqual(view['state'], 'free', '一次探测落地后就用它，不再「正在核对」')
+        self.assertFalse(view['pending'], '读到可用事实就停，页面不再接着问')
+
+    def test_concurrent_reads_never_stack_probes(self):
+        import threading
+        self.store_plan()
+        slow = self.SlowOS(delay=0.5)
+        api = gui.Api(config_file=self.config, browser_runtime=slow,
+                      now=lambda: '2026-10-09T04:00:00+00:00')
+        views = []
+        threads = [threading.Thread(target=lambda: views.append(api.get_start())) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(len(views), 4)
+        self.assertEqual(slow.peak, 1, '同一时刻只有一次探测在飞，读请求不排队堆积')
+
+    def test_subprocess_recheck_reads_fresh_instead_of_a_snapshot(self):
+        from bestseller_monitor.dedicated_browser import Settings, verify_gui_settings
+        self.store_plan()
+        slow = self.SlowOS(state='occupied', delay=0.5)
+        cfg = self.cfg.replace(gui_browser_settings=Settings.of(self.cfg, self.config).to_json())
+        # 慢探测超过读路径的短等预算：子进程侧必须等它落地再判，而不是拿「还没读到」放行。
+        with self.assertRaises(ValueError, msg='子进程复核不许拿未落地的快照放行'):
+            verify_gui_settings(cfg, runtime=slow)
     def test_gui_close_does_not_close_manual_window(self):
         self.api.open_login_browser()
         snapshot = self.api.close_snapshot()

@@ -456,7 +456,9 @@
     api.__shops = d.shops;
     // 准备还在跑：接着问，落定后这一页自动更新；停了就不再排。锁人的是
     // plan_locked（30 秒预算之内），轮询看的是 plan_waiting（准备真跑完才算完）。
-    if (d.plan_waiting) schedulePrepPoll(); else clearPrepPoll();
+    // 票 03：事实核对搬进后台之后，页面只在「还没读到可用事实」时接着问（pending），
+    // 读到就停——取数本身不再在请求线程里跑探测，轮询回到「拿一份算好的结果」。
+    if (d.plan_waiting || (d.browser && d.browser.pending)) schedulePrepPoll(); else clearPrepPoll();
     return d;   // 取数结果交给调用方（点开始的自动核对要读最新事实，票 02）
   }
 
