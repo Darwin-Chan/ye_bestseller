@@ -170,13 +170,18 @@ class MatchingTests(unittest.TestCase):
         try:
             # Restore the real transport while keeping the environment fixture.
             from urllib.request import build_opener
+            # 回环响应是瞬时的，超时只是兜底：30 秒是给真实供应商的预算。2026-10-12 并发全量
+            # 窗口里进程饥饿把这趟亚秒往返拖过了它，红成通用文案（环境噪声，非本用例语义）；
+            # 取产品允许的上限 300 秒，兜底仍在、饥饿够不着。
             with patch('bestseller_monitor.matching.urlopen', side_effect=lambda request, timeout: build_opener(matching.NoModelRedirect()).open(request, timeout=timeout)):
                 with self.assertRaises(ModelFailure) as ctx:
-                    request_json(ModelConfig(endpoint=f'http://127.0.0.1:{server.server_port}/model'), [], 'test')
-            # 重定向文案要原样出来，还要被认成「需配置」（票 17）：通用失败文案不能把它顶掉。
-            self.assertIn('模型地址发生重定向', str(ctx.exception))
-            self.assertEqual(matching.state_of_status(str(ctx.exception)), matching.MATCH_NEEDS_CONFIG)
+                    request_json(ModelConfig(endpoint=f'http://127.0.0.1:{server.server_port}/model', timeout=300), [], 'test')
+            # 先钉「只碰过 /model」再对文案：重定向若被跟过去，一样以通用文案收场（空响应体），
+            # 先看 hits 才能把产品红（凭据外发）与环境噪声（饥饿/超时）分开。
             self.assertEqual(hits, ['/model'])
+            # 重定向文案要原样出来，还要被认成「需配置」（票 17）：通用失败文案不能把它顶掉。
+            self.assertEqual(str(ctx.exception), CONFIG_FAILURE_REDIRECT)
+            self.assertEqual(matching.state_of_status(str(ctx.exception)), matching.MATCH_NEEDS_CONFIG)
         finally:
             server.shutdown()
             server.server_close()
