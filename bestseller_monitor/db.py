@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 import hashlib
 import json
 from dataclasses import dataclass
@@ -939,6 +940,15 @@ class PacingSeed:
     visits: int
     idle_sec: float | None
     idle_reset: bool
+
+
+@dataclass(frozen=True)
+class DenySeed:
+    """deny 账本的回读种子（issue 13/ADR-0054）：窗口内既有 deny 的 (时刻, 店铺)，以及
+    本轮是否已经发过首次降温（`deny_cooldown` 事件在，续跑就不重复罚停）。"""
+
+    hits: tuple[tuple[float, str], ...]
+    cooldown_fired: bool
 
 
 @dataclass(frozen=True)
@@ -2054,6 +2064,29 @@ class Database:
         if idle >= idle_reset_sec:
             return PacingSeed(visits=0, idle_sec=idle, idle_reset=True)
         return PacingSeed(visits=visits, idle_sec=idle, idle_reset=False)
+
+    def deny_seed(self, round_id: int, window_sec: float, *,
+                  now: float | None = None) -> DenySeed:
+        """deny 账本的回读种子（issue 13/ADR-0054）：窗口内既有 deny_hit 与首次降温记忆。
+
+        窗口过期自然清零——不另设停机规则（deny 的机制量纲就是窗口）。时刻转成 epoch
+        秒，与 `DenyTracker` 的时钟（`time.time()`）同基准；`now` 可注入（用例）。
+        """
+        from .guard import DENY_COOLDOWN_EVENT, DENY_HIT_EVENT  # guard→stop_request→db 是环，调用时早已加载
+        cutoff = (time.time() if now is None else now) - window_sec
+        rows = self.conn.execute(
+            "SELECT event, ts, shop_key FROM event_log WHERE round_id=? AND event IN (?, ?) "
+            "ORDER BY id",
+            (round_id, DENY_HIT_EVENT, DENY_COOLDOWN_EVENT),
+        ).fetchall()
+        hits = tuple(
+            (datetime.fromisoformat(row["ts"]).timestamp(), row["shop_key"])
+            for row in rows
+            if row["event"] == DENY_HIT_EVENT
+            and datetime.fromisoformat(row["ts"]).timestamp() >= cutoff
+        )
+        fired = any(row["event"] == DENY_COOLDOWN_EVENT for row in rows)
+        return DenySeed(hits=hits, cooldown_fired=fired)
 
     def commit(self) -> None:
         self.conn.commit()

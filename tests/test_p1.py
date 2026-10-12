@@ -297,7 +297,9 @@ class P1Tests(unittest.TestCase):
             return [(1, oid, f"https://detail.1688.com/offer/{oid}.html", f"商品{oid}", "")], 1
 
         tracker = guard.DenyTracker(600)
-        with patch.object(click_listing, "crawl_store_by_click", side_effect=fake_crawl), \
+        # 跳店随后会真睡一个 deny 窗口的降温（issue 13/ADR-0054）：桩掉拟人化睡眠。
+        with patch.object(pipeline, "Humanizer", return_value=MagicMock()), \
+             patch.object(click_listing, "crawl_store_by_click", side_effect=fake_crawl), \
              patch.object(browser_pw, "navigate_detail",
                           return_value=self._opened_detail("<html>deny</html>", deny=True)):
             pipeline._run_listing_pw(self.db, cfg, round_id, shops, page,
@@ -651,7 +653,8 @@ class P1Tests(unittest.TestCase):
                             )
                             raise _exc
 
-                        with patch.object(click_listing, "crawl_store_by_click",
+                        with patch.object(pipeline, "Humanizer", return_value=MagicMock()), \
+                             patch.object(click_listing, "crawl_store_by_click",
                                           side_effect=fake_crawl):
                             if raises:
                                 with self.assertRaises(type(exc)):
@@ -777,7 +780,9 @@ class P1Tests(unittest.TestCase):
                                    (1, "11", url11, "商品11", ""))
             raise ShopDenyExceeded("店铺 A01 10 分钟内 deny≥7")
 
-        with patch.object(click_listing, "crawl_store_by_click", side_effect=fake_crawl):
+        # 跳店随后会真睡一个 deny 窗口的降温（issue 13/ADR-0054）：桩掉拟人化睡眠。
+        with patch.object(pipeline, "Humanizer", return_value=MagicMock()), \
+             patch.object(click_listing, "crawl_store_by_click", side_effect=fake_crawl):
             pipeline._run_listing_pw(self.db, crawler_cfg(), round_id, [shop], MagicMock())
 
         row = self.conn.execute(
@@ -793,6 +798,43 @@ class P1Tests(unittest.TestCase):
             (round_id,),
         ).fetchall()
         self.assertEqual([r["offer_id"] for r in offers], ["11"], "已发现商品留在榜单里")
+
+    def test_shop_deny_skip_cools_down_before_the_next_shop(self):
+        """issue 13/ADR-0054：跳店之后、下一家店开始之前，整轮停一个 deny 窗口降温。"""
+        round_id = new_round(self.db)
+        shops = [
+            Shop("A01", "店铺A", "https://shop-a.example/"),
+            Shop("A02", "店铺B", "https://shop-b.example/"),
+        ]
+        for shop in shops:
+            self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        cfg = crawler_cfg()
+        human = MagicMock()
+        order: list[str] = []
+        events: list[tuple[str, dict]] = []
+        human.sleep.side_effect = lambda seconds: order.append(f"sleep:{seconds:g}")
+
+        def crawl(listing_page, shop, *args, **kwargs):
+            order.append(f"shop:{shop.key}")
+            if shop.key == "A01":
+                raise ShopDenyExceeded("店铺 A01 10 分钟内 deny≥3")
+            return [(1, "22", "https://detail.1688.com/offer/22.html", "商品22", "")], 1
+
+        with patch.object(pipeline, "Humanizer", return_value=human), \
+             patch.object(pipeline, "_retry_shop_pending_pw"), \
+             patch.object(click_listing, "crawl_store_by_click", side_effect=crawl):
+            pipeline._run_listing_pw(self.db, cfg, round_id, shops, MagicMock(),
+                                     emit=lambda event, **kw: events.append((event, kw)))
+
+        seconds = cfg.deny_window_minutes * 60
+        self.assertEqual(order, ["shop:A01", f"sleep:{seconds:g}", "shop:A02"],
+                         "降温夹在跳店与下一家店之间；跳店不终止整轮")
+        cooldowns = [(event, kw) for event, kw in events
+                     if event == guard.DENY_COOLDOWN_EVENT]
+        self.assertEqual(len(cooldowns), 1)
+        self.assertEqual(cooldowns[0][1]["shop_key"], "A01")
+        self.assertEqual(cooldowns[0][1]["note"],
+                         f"reason=shop_skip&sec={int(seconds)}")
 
     def test_listing_failure_keeps_that_shop_pending_and_continues(self):
         round_id = new_round(self.db)
@@ -871,7 +913,8 @@ class P1Tests(unittest.TestCase):
             listing_calls.append(kwargs["round_id"])
             return offers, 1
 
-        with patch.object(click_listing, "crawl_store_by_click", side_effect=crawl), \
+        with patch.object(pipeline, "Humanizer", return_value=MagicMock()), \
+             patch.object(click_listing, "crawl_store_by_click", side_effect=crawl), \
              patch.object(pipeline, "_capture_pending_offers",
                           side_effect=ShopDenyExceeded("详情 deny 达到店铺阈值")):
             pipeline._run_listing_pw(self.db, cfg, round_id, [shop], MagicMock())

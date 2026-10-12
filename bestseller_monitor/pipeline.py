@@ -13,7 +13,7 @@ from typing import Callable
 
 from . import (browser_proc, browser_pw, crawler_identity, click_listing, dedupe, detail, detail_visit, elapsed, plan_step, shop_progress,
                rounds, single_instance, stop_request, weekly_plan)
-from .guard import DenyTracker, RoundDenyExceeded, ShopDenyExceeded
+from .guard import DenyTracker, RoundDenyExceeded, ShopDenyExceeded, emit_deny_cooldown
 from .config import Config, Shop, load_shops
 from .db import (
     Database,
@@ -477,7 +477,16 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
             started_at = row["started_at"] if row is not None else None
         config_hash = db.record_params(cfg)
         emit = db.event_logger(round_id, config_hash)
-        deny_tracker = DenyTracker(cfg.deny_window_minutes * 60)
+        # deny 账本也按轮次累计、跨续跑延续（ADR-0054）：窗口内既有 deny 从事件回读，
+        # 首次降温是否已发过以 deny_cooldown 事件为记忆；降温睡的是可打断的拟人化分片。
+        deny_window_sec = cfg.deny_window_minutes * 60
+        deny_state = db.deny_seed(round_id, deny_window_sec)
+        if deny_state.hits or deny_state.cooldown_fired:
+            log.info("deny 账本接着数：窗口内已有 %s 次 deny；首次降温已发过=%s",
+                     len(deny_state.hits), deny_state.cooldown_fired)
+        deny_tracker = DenyTracker(deny_window_sec, seed=deny_state.hits,
+                                   cooldown_fired=deny_state.cooldown_fired,
+                                   emit=emit, cooldown=Humanizer(cfg).sleep)
         pw, br, page, ctx = browser_pw.open_session(cfg, publish_browser=publish)
     except STOP_WITH_OUTCOME:
         raise  # Preserve explicit stop and intervention semantics.
@@ -548,6 +557,20 @@ def _record_shop_stop(db: Database, round_id: int, shop: Shop, exc: BaseExceptio
     return outcome.scope is StopScope.SHOP
 
 
+def _cool_down_after_shop_skip(cfg: Config, human, emit, shop_key: str) -> None:
+    """跳店后的整轮降温（ADR-0054）：换下一家店之前先把站点侧的火降一降。
+
+    与「整轮首次 deny」的降温同一量纲（deny 窗口长度），同样走 `Humanizer.sleep`——
+    停止请求、跨天边界、当日截止线都能在分片内打断。事件先写后睡：降温被打断也算
+    已发过，续跑靠这条事件不重复触发首次降温。
+    """
+    seconds = float(cfg.deny_window_minutes * 60)
+    log.info("店铺 %s 因 deny 跳店：停 %.0f 分钟再换下一家（ADR-0054）",
+             shop_key, seconds / 60)
+    emit_deny_cooldown(emit, shop_key, reason="shop_skip", seconds=seconds)
+    human.sleep(seconds)
+
+
 def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop], page,
                     emit=None, deny_tracker=None, pacing_seed=0) -> None:
     done = shop_progress.listing_complete_keys(db, round_id)
@@ -581,6 +604,8 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
             if not _record_shop_stop(db, round_id, shop, exc,
                                      listing_complete=listing_complete):
                 raise
+            if isinstance(exc, ShopDenyExceeded):
+                _cool_down_after_shop_skip(cfg, human, emit, shop.key)
             continue
         except ListingLoadFailed as exc:
             _record_listing_failure(db, cfg, round_id, shop, exc)

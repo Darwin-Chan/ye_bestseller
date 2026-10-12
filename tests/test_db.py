@@ -20,7 +20,7 @@ from bestseller_monitor.db import (
     connect,
     cst_date,
 )
-from bestseller_monitor import db, pacing, shop_progress
+from bestseller_monitor import db, guard, pacing, shop_progress
 from helpers import new_round, product_picture
 from bestseller_monitor.parse import DEFAULT_SKU_ID, DEFAULT_SKU_NAME
 
@@ -2066,6 +2066,62 @@ class PacingSeedQueryTests(unittest.TestCase):
         self.assertEqual((at_floor.visits, at_floor.idle_reset), (0, True),
                          "≥ 下限：停机本身就相当于停过一次")
         self.assertAlmostEqual(at_floor.idle_sec, 1500.0, places=3)
+
+
+class DenySeedQueryTests(unittest.TestCase):
+    """issue 13/ADR-0054：deny 账本的回读种子——窗口内既有 deny_hit 与首次降温的记忆。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = connect(Path(self.tmp.name) / "deny-seed.db")
+        self.db = Database(self.conn)
+        self.round_id = new_round(self.db, "A01")
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _deny_hit(self, shop: str = "A01") -> None:
+        self.db.append_event(self.round_id, guard.DENY_HIT_EVENT, shop_key=shop,
+                             kind="deny", note="shop_n=1&round_n=1")
+
+    def _last_epoch(self) -> float:
+        ts = self.conn.execute(
+            "SELECT ts FROM event_log ORDER BY id DESC LIMIT 1").fetchone()["ts"]
+        return datetime.fromisoformat(ts).timestamp()
+
+    def test_an_empty_round_reads_an_empty_seed(self):
+        seed = self.db.deny_seed(self.round_id, 600)
+
+        self.assertEqual((seed.hits, seed.cooldown_fired), ((), False))
+
+    def test_hits_inside_the_window_carry_their_shop_and_time(self):
+        self._deny_hit("A01")
+        self._deny_hit("A02")
+
+        seed = self.db.deny_seed(self.round_id, 600)
+
+        self.assertEqual([shop for _, shop in seed.hits], ["A01", "A02"])
+        self.assertAlmostEqual(seed.hits[1][0], self._last_epoch(), places=3)
+
+    def test_hits_outside_the_window_do_not_come_back(self):
+        self._deny_hit()
+        epoch = self._last_epoch()
+
+        inside = self.db.deny_seed(self.round_id, 600, now=epoch + 300)
+        outside = self.db.deny_seed(self.round_id, 600, now=epoch + 601)
+
+        self.assertEqual(len(inside.hits), 1)
+        self.assertEqual(outside.hits, (), "窗口过期自然清零")
+
+    def test_a_recorded_cooldown_is_remembered_and_is_not_a_hit(self):
+        self.db.append_event(self.round_id, guard.DENY_COOLDOWN_EVENT, shop_key="A01",
+                             kind="deny", note="reason=first_deny&sec=600")
+
+        seed = self.db.deny_seed(self.round_id, 600)
+
+        self.assertTrue(seed.cooldown_fired)
+        self.assertEqual(seed.hits, (), "降温事件不算 deny 命中")
 
 
 if __name__ == "__main__":

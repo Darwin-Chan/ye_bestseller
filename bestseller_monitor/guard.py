@@ -48,16 +48,39 @@ class RoundDenyExceeded(RoundPauseRequired):
     """整轮滚动窗口内 deny 数达到阈值，中止本轮。"""
 
 
+# deny 事件编码（账本的落点；`db.deny_seed` 按同一份口径回读——续跑接着数，issue 13）
+DENY_HIT_EVENT = "deny_hit"
+DENY_COOLDOWN_EVENT = "deny_cooldown"
+
+
+def emit_deny_cooldown(emit, shop_key: str, *, reason: str, seconds: float) -> None:
+    """写一条整轮降温事件：首次 deny 与跳店共用同一份编码（ADR-0054）。"""
+    if emit is None:
+        return
+    emit(DENY_COOLDOWN_EVENT, shop_key=shop_key, kind="deny",
+         note=f"reason={reason}&sec={int(round(seconds))}")
+
+
 class DenyTracker:
     """滚动窗口内的 deny 计数（按店 + 整轮）。
 
     点击式列表与逐店补采共用同一个实例：deny 是「这台机器正在被限流」的同一个信号，
     不能因为走哪条路而两种待遇（候选 04）。
+
+    账本按轮次累计、跨续跑延续（ADR-0054）：构造时可给 `seed`（窗口内既有 deny 的
+    `(时刻, 店铺)`，续跑入口从事件回读）与 `cooldown_fired`（本轮是否已发过首次降温）；
+    窗口过期自然清零，不另设停机规则。`emit` 给事件面（`deny_hit` / `deny_cooldown`），
+    `cooldown` 是可打断的睡眠（`Humanizer.sleep`），`None` = 不降温。
     """
 
-    def __init__(self, window_sec: float):
+    def __init__(self, window_sec: float, *, seed=(), cooldown_fired: bool = False,
+                 emit=None, cooldown=None):
         self.window_sec = window_sec
-        self.events: list[tuple[float, str]] = []
+        self.events: list[tuple[float, str]] = list(seed)
+        self._cooldown_fired = bool(cooldown_fired)
+        self._emit = emit
+        self._cooldown = cooldown
+        self._prune(time.time())
 
     def _prune(self, now: float) -> None:
         self.events = [(t, s) for t, s in self.events if now - t <= self.window_sec]
@@ -66,6 +89,20 @@ class DenyTracker:
         now = time.time()
         self.events.append((now, shop_key))
         self._prune(now)
+        if self._emit is not None:
+            self._emit(DENY_HIT_EVENT, shop_key=shop_key, kind="deny",
+                       note=f"shop_n={self.shop_count(shop_key)}&round_n={self.round_count()}")
+        self._maybe_cool_down(shop_key)
+
+    def _maybe_cool_down(self, shop_key: str) -> None:
+        """整轮首次 deny 后停一段给站点降温；以事件为记忆（先写事件后睡），续跑不重复。"""
+        if self._cooldown is None or self._cooldown_fired:
+            return
+        self._cooldown_fired = True
+        seconds = float(self.window_sec)
+        emit_deny_cooldown(self._emit, shop_key, reason="first_deny", seconds=seconds)
+        log.info("整轮首次 deny：停 %.0f 分钟给站点降温（窗口随后重起）", seconds / 60)
+        self._cooldown(seconds)
 
     def shop_count(self, shop_key: str) -> int:
         self._prune(time.time())
