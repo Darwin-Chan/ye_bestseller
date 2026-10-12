@@ -407,6 +407,94 @@ class BrowserSessionEstablishmentTests(unittest.TestCase):
             ],
         )
 
+    def test_browser_born_from_the_dead_launcher_is_owned_and_closed_by_proof(self):
+        """启动进程交棒（作业对象逃逸/引导启动器）后，真浏览器仍归本次会话。"""
+        proc = FakeProcess(20320)
+        proc.alive = False
+        factory, pw, br, ctx, page = self.stack(browser_pid=6107)
+        states = []
+        publish = lambda *state: states.append(state) or True
+        proofs = {proc.pid: "1000000", 6107: "1002000"}  # 交棒：晚 0.2 毫秒出生
+        close = MagicMock(return_value=6107)
+
+        with patch("playwright.sync_api.sync_playwright", return_value=factory), \
+                patch("bestseller_monitor.dedicated_browser.verify_gui_settings"), \
+                patch.object(browser_pw.subprocess, "Popen", return_value=proc), \
+                patch.object(browser_proc, "process_creation_proof",
+                             side_effect=lambda pid: proofs.get(pid)), \
+                patch.object(browser_proc, "close_browser", close), \
+                patch.object(browser_proc, "terminate_process_tree") as terminate:
+            browser_pw.open_session(self.cfg(gui_browser_settings="{}"),
+                                    publish_browser=publish)
+            ctx.new_page.assert_called_once_with()
+            browser_pw.close_session(pw, br, publish_browser=publish)
+
+        terminate.assert_not_called()
+        self.assertEqual(
+            states,
+            [
+                ("STARTING", 9222, None, None),
+                ("OWNED", 9222, 6107, "1002000"),
+                ("CLOSED", None, None, None),
+            ],
+        )
+        # 交棒出来的浏览器只能按冻结的创建证明关，就关这一只。
+        self.assertEqual(close.call_args_list,
+                         [unittest.mock.call(9222, launched_by_us=True,
+                                             browser_pid=6107,
+                                             browser_os_started="1002000")])
+
+    def test_browser_older_than_our_launch_stays_borrowed_and_is_never_closed(self):
+        """端口上那只比启动进程还老：是别人先起的，拒绝采集也不动它。"""
+        proc = FakeProcess(20321)
+        proc.alive = False
+        factory, pw, br, ctx, _ = self.stack(browser_pid=6108)
+        states = []
+        publish = lambda *state: states.append(state) or True
+        proofs = {proc.pid: "9000000", 6108: "5000000"}  # 借用：比我们老
+        close = MagicMock(return_value=6108)
+
+        with patch("playwright.sync_api.sync_playwright", return_value=factory), \
+                patch("bestseller_monitor.dedicated_browser.verify_gui_settings"), \
+                patch.object(browser_pw.subprocess, "Popen", return_value=proc), \
+                patch.object(browser_proc, "process_creation_proof",
+                             side_effect=lambda pid: proofs.get(pid)), \
+                patch.object(browser_proc, "close_browser", close):
+            with self.assertRaisesRegex(RuntimeError, "归属"):
+                browser_pw.open_session(self.cfg(gui_browser_settings="{}"),
+                                        publish_browser=publish)
+
+        ctx.new_page.assert_not_called()
+        close.assert_not_called()
+        self.assertEqual(states, [("STARTING", 9222, None, None),
+                                  ("CLOSED", None, None, None)])
+
+    def test_browser_born_far_after_our_launch_is_not_ours(self):
+        """出生时刻离得太远：不是这次交的棒，同样拒绝。"""
+        proc = FakeProcess(20322)
+        proc.alive = False
+        factory, pw, br, ctx, _ = self.stack(browser_pid=6109)
+        states = []
+        publish = lambda *state: states.append(state) or True
+        late = int(browser_pw._HANDOFF_WINDOW_TICKS) + 10_000_000
+        proofs = {proc.pid: "1000000", 6109: str(1_000_000 + late)}
+        close = MagicMock(return_value=6109)
+
+        with patch("playwright.sync_api.sync_playwright", return_value=factory), \
+                patch("bestseller_monitor.dedicated_browser.verify_gui_settings"), \
+                patch.object(browser_pw.subprocess, "Popen", return_value=proc), \
+                patch.object(browser_proc, "process_creation_proof",
+                             side_effect=lambda pid: proofs.get(pid)), \
+                patch.object(browser_proc, "close_browser", close):
+            with self.assertRaisesRegex(RuntimeError, "归属"):
+                browser_pw.open_session(self.cfg(gui_browser_settings="{}"),
+                                        publish_browser=publish)
+
+        ctx.new_page.assert_not_called()
+        close.assert_not_called()
+        self.assertEqual(states, [("STARTING", 9222, None, None),
+                                  ("CLOSED", None, None, None)])
+
     def test_profile_handoff_keeps_transport_when_page_close_needs_retry(self):
         proc = FakeProcess(20311)
         proc.alive = False

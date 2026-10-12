@@ -44,6 +44,10 @@ class _SessionResources:
     start_browser: bool
     proc: Any = None
     launch_proof: str | None = None
+    # 启动进程交棒给新进程时（作业对象逃逸、引导启动器），真浏览器不是本次
+    # Popen 那个进程，按它的创建证明单独记账，收尾时照它关。
+    owned_pid: int | None = None
+    owned_proof: str | None = None
     pw: Any = None
     br: Any = None
     page: Any = None
@@ -74,6 +78,12 @@ _resolved = resolved
 
 # 条件等待的上限兜底（秒）——优先“等条件满足”，超时才继续，替代固定 sleep。
 _WAIT_LAUNCH_SEC = 25.0    # 等浏览器调试端口可连接
+
+# 启动进程交棒给新浏览器进程时，两者创建时刻的允许间距（秒）。实测 msedge.exe
+# 交棒只差 20~50 毫秒，收得很紧只是为了区分「刚出生的才可能是我们交棒的那只」；
+# 比启动进程还老的浏览器一定不是本次启动的。
+_HANDOFF_WINDOW_SEC = 10.0
+_HANDOFF_WINDOW_TICKS = int(_HANDOFF_WINDOW_SEC * 10_000_000)  # FILETIME 100ns
 
 # 搬到 listing.py 的榜单页原语：诊断工具仍按旧私有名引用，这里留兼容别名（同 guard 那组）。
 # 本文件内部一律走 listing.*，别名只给工具用——否则测试打桩 listing 的改动会静默失效
@@ -140,8 +150,11 @@ def open_session(cfg: Config, *, publish_browser=None):
                 f"无法连接浏览器调试端口 {resources.port}（{last_exc}）")
 
         if getattr(cfg, 'gui_browser_settings', None) is not None:
+            stage = "ownership"
             state, pid, proof = _browser_publication(resources)
             if state != 'OWNED':
+                log.warning("浏览器创建归属未核实（判定 %s，启动进程 %s，端口上的浏览器 %s）。",
+                            state, getattr(resources.proc, 'pid', None), pid)
                 resources.br = None
                 # No context/page/navigation on a redirected or unknown instance.
                 raise RuntimeError('浏览器创建归属无法核实，拒绝采集，不接管已有实例。')
@@ -196,15 +209,34 @@ def _browser_publication(resources: _SessionResources) -> tuple[str, int | None,
     if not resources.start_browser:
         return "BORROWED", None, None
     proc = resources.proc
-    if proc is None or proc.poll() is not None:
+    if proc is None:
         return "BORROWED", None, None
     browser_pid = cdp_browser_pid(resources.br)
-    current_proof = (browser_proc.process_creation_proof(browser_pid)
+    browser_proof = (browser_proc.process_creation_proof(browser_pid)
                      if browser_pid is not None else None)
+    if proc.poll() is not None:
+        # 启动进程已经退出。它不是交棒给旧实例（那是借用），就是自己把浏览器交给
+        # 了刚出生的新进程：作业对象限制下 msedge.exe 会另起一个进程逃出去，引导
+        # 启动器同理（2026-10-12 m1 现场）。出生在本次启动之后、间距很小的那个才
+        # 可能是我们交的棒；比启动进程还老、或者核不实的，一律不认。
+        if _born_from_our_launch(resources.launch_proof, browser_proof):
+            resources.owned_pid = browser_pid
+            resources.owned_proof = browser_proof
+            return "OWNED", browser_pid, browser_proof
+        return "BORROWED", None, None
     if (browser_pid == proc.pid and resources.launch_proof is not None
-            and current_proof == resources.launch_proof):
+            and browser_proof == resources.launch_proof):
         return "OWNED", browser_pid, resources.launch_proof
     return "UNKNOWN", None, None
+
+
+def _born_from_our_launch(launch_proof: str | None, browser_proof: str | None) -> bool:
+    """端口上这只浏览器是不是本次启动进程交棒出来的（创建时刻的先后与间距）。"""
+    try:
+        gap = int(browser_proof) - int(launch_proof)
+    except (TypeError, ValueError):
+        return False
+    return 0 < gap <= _HANDOFF_WINDOW_TICKS
 
 
 def _clear_pending_before_open() -> None:
@@ -275,8 +307,21 @@ def _cleanup(resources: _SessionResources) -> bool:
             except Exception as exc:  # noqa: BLE001
                 log.warning("浏览器会话清理失败（资源 playwright，阶段 cleanup）：%s", exc)
 
+    # 交棒出来的浏览器握在 Popen 句柄之外，只能按绑定的创建证明关；关不掉且它
+    # 还在，就留着待清理，不把这次收尾算成干净。
+    if resources.proc is None and resources.owned_pid is not None:
+        closed = browser_proc.close_browser(
+            resources.port, launched_by_us=True,
+            browser_pid=resources.owned_pid, browser_os_started=resources.owned_proof)
+        if closed is not None or browser_proc.process_alive(resources.owned_pid) is False:
+            resources.owned_pid = None
+            resources.owned_proof = None
+        else:
+            log.warning("交棒浏览器（PID %s）清理未完成，保留待清理。", resources.owned_pid)
+
     clean = resources.page is None and resources.br is None \
-        and resources.pw is None and resources.proc is None
+        and resources.pw is None and resources.proc is None \
+        and resources.owned_pid is None
     resources.phase = "clean" if clean else "pending"
     return clean
 
