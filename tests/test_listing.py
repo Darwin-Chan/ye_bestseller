@@ -12,7 +12,8 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import listing, stop_request
+from bestseller_monitor import guard, listing, stop_request
+from bestseller_monitor.guard import InterventionTimeout
 from bestseller_monitor.listing import ListingLoadFailed
 from helpers import crawler_cfg
 
@@ -141,9 +142,10 @@ class PrepareTests(unittest.TestCase):
             self.calls.append(name)
             return result
 
+        signal = guard.Intervention(kind, f"test:{kind}") if kind else None
         with patch.object(listing, "wait_cards",
                           side_effect=lambda *a, **k: step("等卡片", cards_ready)) as wait_cards, \
-             patch.object(listing, "intervention_kind", return_value=kind), \
+             patch.object(listing, "intervention_detail", return_value=signal), \
              patch.object(listing, "wait_for_resolution",
                           side_effect=lambda *a, **k: step("人工介入", None)) as resolve, \
              patch.object(listing, "click_text_in_frames",
@@ -167,6 +169,23 @@ class PrepareTests(unittest.TestCase):
 
         self.assertLess(self.calls.index("人工介入"), self.calls.index("排序"),
                         "验证挡着的时候「销量」点不着，先处理人工介入")
+
+    def test_the_criterion_reaches_the_wait(self):
+        """判定交出来的那一半要一路传到等待（issue 12 票 01 的端到端面）。
+
+        「在等哪一页」是等待自己读的，「为什么判成介入」只有判定知道——不传，事件里就只剩一句
+        「滑块」，三条判据事后分不出来（m2 现场那 2 分 20 秒就是这么丢的）。
+        """
+        with patch.object(listing, "wait_cards", return_value=True), \
+             patch.object(listing, "intervention_detail",
+                          return_value=guard.Intervention("滑块", "slider-body:请按住滑块")), \
+             patch.object(listing, "wait_for_resolution",
+                          side_effect=InterventionTimeout("超时")) as resolve:
+            with self.assertRaises(InterventionTimeout):
+                listing.prepare(self.page, "https://shop.example/", self.cfg, self.human,
+                                describe="店铺 A01 首屏")
+
+        self.assertEqual(resolve.call_args.kwargs["criterion"], "slider-body:请按住滑块")
 
     def test_missing_first_screen_cards_fail_instead_of_reading_an_empty_list(self):
         with self.assertRaises(ListingLoadFailed) as ctx:

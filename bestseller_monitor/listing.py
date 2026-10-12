@@ -15,7 +15,7 @@ from pathlib import Path
 
 from . import waiting
 from .config import Config
-from .guard import intervention_kind, vtype, wait_for_resolution
+from .guard import intervention_detail, vtype, wait_for_resolution
 
 log = logging.getLogger(__name__)
 
@@ -242,11 +242,12 @@ def prepare(page, url: str, cfg, human, *, describe: str, emit=None) -> None:
     page.goto(url, wait_until="domcontentloaded")
     human.after_load()          # read_delay_sec：页面加载后、读取数据前的拟人化延迟
     cards_ready = wait_cards(page, min_count=1, describe=f"{describe}商品卡片")
-    kind = intervention_kind(page)
-    if kind:
+    found = intervention_detail(page)
+    if found:
         wait_for_resolution(page, cfg.human_pause_minutes, emit=emit,
-                            verification_type=vtype(kind),
-                            confirm_sec=cfg.intervention_confirmation_sec, target_url=url)
+                            verification_type=vtype(found.kind),
+                            confirm_sec=cfg.intervention_confirmation_sec, target_url=url,
+                            criterion=found.criterion)
     if not cards_ready and not wait_cards(page, min_count=1,
                                           describe=f"{describe}（验证后）商品卡片"):
         raise listing_load_failed(page, f"{describe}未加载商品卡片：{url}")

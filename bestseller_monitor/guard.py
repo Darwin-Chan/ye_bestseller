@@ -18,6 +18,11 @@ from .config import Config
 
 log = logging.getLogger(__name__)
 
+# 等待期自己的两个节拍：响铃循环的轮询间隔（秒），以及每几轮写一行进度。
+# 3 秒一轮、上限 10 分钟——每轮一行会给一段等待留下两百行，抽成 5 约四十行。
+WAIT_POLL_SEC = 3.0
+WAIT_PROGRESS_EVERY = 5
+
 
 class RoundPauseRequired(RuntimeError):
     """轮次必须暂停并保留进度，等待后续人工或环境恢复。"""
@@ -201,29 +206,61 @@ def _page_evidence(page) -> _PageEvidence:
         raise PageEvidenceUnavailable("页面证据读取失败，不能确认业务状态") from exc
 
 
-def _intervention_of(evidence: _PageEvidence) -> str | None:
-    """三样证据 → 需不需要人工介入。纯函数，判据只有这一份。"""
+@dataclass(frozen=True)
+class Intervention:
+    """一次人工介入判定：是什么，以及判据是从哪一支来的。
+
+    `criterion` 是事后能核对的那一半。现场只留下一句「滑块」时，分不出是地址撞上 punish、
+    正文命中了哪个词、还是只看到了验证容器——三种情况的后续处置不同（issue 12）。
+    """
+
+    kind: str
+    criterion: str
+
+
+def _intervention_detail(evidence: _PageEvidence) -> Intervention | None:
+    """三样证据 → 要不要人工介入，以及判据来源。纯函数，判据只有这一份。"""
     url = evidence.url.lower()
     if (evidence.identity_page and
             "为确认是你本人操作，请完成以下验证" in evidence.body):
-        return "身份验证"
+        return Intervention("身份验证", "identity-page")
     if is_login_url(url):
-        return "登录墙"
+        return Intervention("登录墙", "url:login")
     if is_punish_url(url):
-        return "滑块"
+        return Intervention("滑块", "url:punish")
     for m in SLIDER_MARKERS:
         if m in evidence.body:
-            return "滑块"
+            return Intervention("滑块", f"slider-body:{m}")
     if evidence.captcha:
         # 可见验证容器：带文案的页上面正文支就已经判走；这一支只对「有容器、无表内文案」的页
         # 做「点我反馈」豁免——有它（纯反爬拦截页的记号）不算滑块。正文支先于本支的次序由
         # test_guard 的 captcha=True 用例钉着（ADR-0036）。
         if "点我反馈" not in evidence.body:
-            return "滑块"
+            return Intervention("滑块", "captcha-container")
     for m in LOGIN_MARKERS:
         if m in evidence.body and len(evidence.body) < 3000:
-            return "登录墙"
+            return Intervention("登录墙", f"login-body:{m}")
     return None
+
+
+def _intervention_of(evidence: _PageEvidence) -> str | None:
+    """三样证据 → 需不需要人工介入。判定的薄壳：判据在 `_intervention_detail` 里，只有那一份。"""
+    found = _intervention_detail(evidence)
+    return found.kind if found else None
+
+
+def intervention_detail(page) -> Intervention | None:
+    """判定 + 判据来源：与 `intervention_kind` 同一份证据、同一次判读。
+
+    要「事后能核对」的调用方走这一条——`kind` 与 `criterion` 一起交出来；只要类型的调用方
+    走 `intervention_kind`。同一页不许两个入口各来一次：那就是把同一页读两遍，也正是
+    ADR-0030 要收掉的那种「两套读法」。
+    """
+    evidence = _page_evidence(page)
+    found = _intervention_detail(evidence)
+    if found is None and (evidence.identity_page or not evidence.business_page):
+        raise PageEvidenceUnavailable("页面上下文未知，不能确认业务页面可用")
+    return found
 
 
 def intervention_kind(page) -> str | None:
@@ -233,12 +270,10 @@ def intervention_kind(page) -> str | None:
     形参，但读它的那行与地址判定是同一条谓词，对任何输入都到不了，已整个撤掉（ADR-0029）。
 
     判据只有这一份：`resolved` 是它的另一种读法，不再自己认一遍证据（ADR-0030）。
+    需要判据来源的调用方用 `intervention_detail`，不要两个都调。
     """
-    evidence = _page_evidence(page)
-    kind = _intervention_of(evidence)
-    if kind is None and (evidence.identity_page or not evidence.business_page):
-        raise PageEvidenceUnavailable("页面上下文未知，不能确认业务页面可用")
-    return kind
+    found = intervention_detail(page)
+    return found.kind if found else None
 
 
 def resolved(page, *, target_url: str | None = None) -> bool:
@@ -286,25 +321,44 @@ def ready_detail_page(page, cfg: Config, *, emit=None,
                     f"店铺 {shop_key} {cfg.deny_window_minutes} 分钟内"
                     f" deny≥{cfg.deny_shop_limit}")
         return True
-    kind = intervention_kind(page)
-    if kind:
+    found = intervention_detail(page)
+    if found:
         wait_for_resolution(page, cfg.human_pause_minutes, emit=emit,
-                            verification_type=vtype(kind),
+                            verification_type=vtype(found.kind),
                             confirm_sec=cfg.intervention_confirmation_sec,
-                            target_url=target_url)
+                            target_url=target_url, criterion=found.criterion)
     return False
 
 
 def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | None = None,
-                        confirm_sec: float = 2.0, *, target_url: str | None = None) -> None:
+                        confirm_sec: float = 2.0, *, target_url: str | None = None,
+                        criterion: str | None = None) -> None:
     """需要人工介入时：先过确认窗口过滤瞬时报错信号，再持续响铃直到解决。
 
     两段等待都走 `waiting.until`：每一轮都问一次「该不该停」（ADR-0009）——这时用户最
     可能去按界面上的暂停，而最长可等 human_pause_minutes 分钟，不打断就会把停止拖成十分钟。
     取消钩子由原语默认接上（与睡眠分片同一个判据），本模块不再手写检查点。
+
+    `criterion` 是这一支判据的来源（`intervention_detail` 交出来的那一半）。它和页面地址一起
+    进事件备注与进度行：现场那 2 分 20 秒事后只剩一句「滑块」，等的是哪一页、为什么判成介入
+    都查不到（issue 12）。
     """
     vtype_name = verification_type or "slider"
     target_url = (target_url or page.url) if vtype_name == "identity" else None
+
+    def where() -> str:
+        """写下这一刻页面在哪个地址。
+
+        每次读、不缓存：等待期间页面会被刷新、也可能被站点换掉，而「程序在等的页」与
+        「人正在操作的页」是不是同一份，正是现场要靠地址对齐的那件事（issue 12）。
+
+        读不到就给空串：这段只喂日志与事件，**不许把等待弄断**——观测的活儿不配改变控制流。
+        """
+        try:
+            return page.url or ""
+        except Exception:
+            return ""
+
     deadline = None
     def probe():
         if vtype_name == "identity":
@@ -321,35 +375,62 @@ def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | 
     # 超过确认窗口仍未解决 => 确认为真正需要人工介入
     # 先尝试一次刷新：反爬拦截页/瞬时 block 常可通过刷新解除，刷新后恢复则不响铃
     if vtype_name != "identity":
+        refreshed = True
         try:
             page.reload(wait_until="domcontentloaded")
             time.sleep(1.5)
-        except Exception:
-            pass
+        except Exception as exc:
+            refreshed = False
+            # 刷新只是「试一试」：没做成照旧进等待，但这一步不能无声无息（issue 12 票 02）。
+            log.debug("等待前的刷新没做成（%s）：%s", exc, where())
         if resolved(page):
-            log.info("刷新后已恢复，忽略（原为瞬时报错/反爬拦截）")
+            log.info("刷新后已恢复，忽略（原为瞬时报错/反爬拦截）：%s", where())
             return
+        if refreshed:
+            log.info("刷新未解除，转入等待人工处理：%s", where())
     deadline = time.monotonic() + minutes * 60
     appear_ts = time.time()
     log.warning("检测到需要人工介入，请在浏览器窗口处理（持续响铃直到解决）……最长 %s 分钟", minutes)
     if emit:
         emit("verification_appear", kind="verification", verification_type=vtype_name,
-             note=f"type={vtype_name};wait_minutes={minutes}")
+             note=_wait_note(f"type={vtype_name};wait_minutes={minutes}", where(), criterion))
+    ticks = 0
     def ring() -> None:
+        nonlocal ticks
+        ticks += 1
+        if ticks % WAIT_PROGRESS_EVERY == 0:
+            log.info("仍在等待人工处理（已等 %.0f 秒）：%s", time.time() - appear_ts, where())
         sound.play_alarm(count=1)   # 每次约 1 秒，循环播放
 
     timeout_sec = (max(0.0, deadline - time.monotonic())
                    if vtype_name == "identity" else minutes * 60)
-    if waiting.until(probe, timeout_sec=timeout_sec, poll_sec=3,
+    if waiting.until(probe, timeout_sec=timeout_sec, poll_sec=WAIT_POLL_SEC,
                      on_wait=ring) is None:
         if vtype_name == "identity":
             stop_request.check()
             if emit:
                 emit("verification_timeout", kind="verification", verification_type="identity",
-                     note="reason=IDENTITY_VERIFICATION_TIMEOUT")
+                     note=_wait_note("reason=IDENTITY_VERIFICATION_TIMEOUT", where(), criterion))
             raise IdentityVerificationTimeout("身份验证等待超时，本轮自动中止，已保存数据保留")
         raise InterventionTimeout("人工介入超时")
     if emit:
         emit("verification_solved", kind="verification", verification_type=vtype_name,
-             note=f"resolution_seconds={time.time() - appear_ts:.1f}")
+             note=_wait_note(f"resolution_seconds={time.time() - appear_ts:.1f}",
+                             where(), criterion))
     log.info("人工介入已解决，停止响铃，继续。")
+
+
+def _wait_note(base: str, page_url: str, criterion: str | None) -> str:
+    """等待事件的备注：既有字段在前，页面地址与判据来源追加在后。
+
+    备注的既有读法按 `;` 分片、`=` 取值（界面的身份验证倒计时就这么读），所以追加的这段
+    不能改变前面那段的位置与写法。
+
+    地址与判据都按原样写入，不做转义：地址里真出现 `;`（矩阵参数那种）时，切出来的碎片
+    大多不含 `=`，会被读法直接丢掉；含 `=` 的碎片会落成一个谁都不读的键。既不覆盖既有键，
+    也不改变既有键的位置。
+    """
+    note = f"{base};url={page_url}"
+    if criterion:
+        note = f"{note};criterion={criterion}"
+    return note

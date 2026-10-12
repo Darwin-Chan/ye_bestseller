@@ -89,7 +89,8 @@ class ReadyDetailPageTests(unittest.TestCase):
         self.assertEqual(tracker.shop_count("A02"), 1, "另一家店的计数远没到店铺阈值")
 
     def test_a_slider_page_waits_for_the_human(self):
-        with patch.object(guard, "intervention_kind", return_value="滑块"), \
+        slider = guard.Intervention("滑块", "slider-body:请按住滑块")
+        with patch.object(guard, "intervention_detail", return_value=slider), \
              patch.object(guard, "wait_for_resolution") as wait:
             denied = ready_detail_page(self.page("https://detail.1688.com/offer/11.html"),
                                        self.CFG, emit=MagicMock(), shop_key="A01")
@@ -100,7 +101,8 @@ class ReadyDetailPageTests(unittest.TestCase):
         self.assertEqual(wait.call_args.kwargs["verification_type"], "slider")
 
     def test_an_intervention_timeout_passes_through(self):
-        with patch.object(guard, "intervention_kind", return_value="滑块"), \
+        slider = guard.Intervention("滑块", "slider-body:请按住滑块")
+        with patch.object(guard, "intervention_detail", return_value=slider), \
              patch.object(guard, "wait_for_resolution",
                           side_effect=InterventionTimeout("超时")):
             with self.assertRaises(InterventionTimeout):
@@ -351,7 +353,8 @@ class InterventionResolutionTests(unittest.TestCase):
                          "先报出现、再报解决")
         solved = emit.call_args_list[-1].kwargs
         self.assertEqual(solved["verification_type"], "login")
-        self.assertRegex(solved["note"], r"^resolution_seconds=\d+\.\d$")
+        self.assertRegex(solved["note"], r"^resolution_seconds=\d+\.\d;url=",
+                         "既有字段仍打头，页面地址追加在后（issue 12 票 01）")
 
     def test_the_settling_entry_only_reports_a_page_once_the_signal_is_gone(self):
         """`ready_detail_page` 说「页面可用」之后，判据不能再认得这个页面上的信号。
@@ -371,6 +374,203 @@ class InterventionResolutionTests(unittest.TestCase):
         self.assertFalse(denied, "登录墙不是 deny")
         self.assertIsNone(guard.intervention_kind(page),
                           "判据说页面可用了，就不该再认得这个页面")
+
+
+class _AddressUnreadable:
+    """地址一读就炸的页面替身：只换 `url` 这一样，别处原样转发给内层页面。"""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    @property
+    def url(self):
+        raise RuntimeError("浏览器没了")
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class InterventionCriterionTests(unittest.TestCase):
+    """等待窗口要留下「在等哪一页、命中了哪条判据、等了多久」（issue 12 票 01/02）。
+
+    m2 现场那 2 分 20 秒事后只剩一句 `type=slider;wait_minutes=1`：既不知道等的是哪个地址，
+    也分不出三条判据（地址 / 正文哪个词 / 可见容器）里是哪一条命中的，操作者说的「7 次以上」
+    在程序侧因此根本不存在。同一段等待还会先做一次不写日志的页面刷新。
+    """
+
+    CFG = crawler_cfg()
+    PRODUCT = "https://detail.1688.com/offer/11.html"
+    SLIDER_BODY = "请按住滑块，拖动到最右边"
+
+    def test_each_criterion_names_itself(self):
+        """判据只有一份：类型与来源从同一次判读里一起交出来（票 01）。"""
+        from bestseller_monitor.guard import _PageEvidence as Evidence, _intervention_detail
+
+        cases = [
+            (Evidence("https://x/punish?x5secdata=1", "", False), "滑块", "url:punish"),
+            (Evidence("https://login.1688.com/", "", False), "登录墙", "url:login"),
+            (Evidence(self.PRODUCT, self.SLIDER_BODY, False), "滑块", "slider-body:请按住滑块"),
+            (Evidence(self.PRODUCT, "", True), "滑块", "captcha-container"),
+        ]
+        for evidence, kind, criterion in cases:
+            with self.subTest(criterion=criterion):
+                found = _intervention_detail(evidence)
+                self.assertEqual((found.kind, found.criterion), (kind, criterion))
+
+    def test_a_page_without_intervention_has_no_criterion(self):
+        from bestseller_monitor.guard import _PageEvidence as Evidence, _intervention_detail
+
+        self.assertIsNone(_intervention_detail(Evidence(self.PRODUCT, "正常的商品详情页", False)))
+
+    def test_the_kind_reading_is_unchanged(self):
+        """既有读法不动：`_intervention_of` 还是只交类型（`resolved` 与既有用例都靠它）。"""
+        from bestseller_monitor.guard import _PageEvidence as Evidence
+
+        self.assertEqual(guard._intervention_of(Evidence(self.PRODUCT, self.SLIDER_BODY, False)),
+                         "滑块")
+        self.assertEqual(guard._intervention_of(Evidence(self.PRODUCT, "", True)), "滑块")
+        self.assertIsNone(guard._intervention_of(Evidence(self.PRODUCT, "正常的商品详情页", False)))
+
+    def test_the_detail_reads_the_page_once(self):
+        """一次判读一份证据：新入口不许为了拿来源多读一遍页面。"""
+        page = FakePage(self.PRODUCT, body=self.SLIDER_BODY)
+        with patch.object(guard, "_page_evidence", wraps=guard._page_evidence) as read:
+            found = guard.intervention_detail(page)
+
+        self.assertEqual((found.kind, found.criterion), ("滑块", "slider-body:请按住滑块"))
+        self.assertEqual(read.call_count, 1)
+
+    def test_the_appear_event_carries_the_page_and_the_criterion(self):
+        page = FakePage(self.PRODUCT, body=self.SLIDER_BODY)
+        emit = MagicMock()
+        clock = GuardClock(step=1.0)
+        with patch.object(guard, "time", clock), patch.object(waiting, "time", clock), \
+             patch.object(guard.sound, "play_alarm"), self.assertRaises(InterventionTimeout):
+            guard.wait_for_resolution(page, 1, emit=emit, confirm_sec=0,
+                                      criterion="slider-body:请按住滑块")
+
+        note = emit.call_args_list[0].kwargs["note"]
+        self.assertIn(f"url={self.PRODUCT}", note)
+        self.assertIn("criterion=slider-body:请按住滑块", note)
+        self.assertIn("type=slider", note, "既有字段可读性不变")
+        self.assertIn("wait_minutes=1", note)
+
+    def test_a_page_whose_address_cannot_be_read_never_breaks_the_wait(self):
+        """地址读不出来只该让事件里少一段地址，不该把等待弄断。
+
+        这段地址每 3 秒读一次（进度行）——观测的活儿不许改变控制流，与 `db.event_logger`
+        那条「记录失败只写日志，绝不中断抓取主流程」是同一条规矩。
+        """
+        page = _AddressUnreadable(FakePage(self.PRODUCT, body=self.SLIDER_BODY))
+        emit = MagicMock()
+        clock = GuardClock(step=1.0)
+        with patch.object(guard, "time", clock), patch.object(waiting, "time", clock), \
+             patch.object(guard.sound, "play_alarm"), self.assertRaises(InterventionTimeout):
+            guard.wait_for_resolution(page, 1, emit=emit, confirm_sec=0)
+
+        self.assertEqual(emit.call_args_list[0].kwargs["note"],
+                         "type=slider;wait_minutes=1;url=",
+                         "读不到地址就留空，等待照旧走完")
+
+    def test_the_note_names_the_page_as_it_is_when_it_is_written(self):
+        """地址现读不缓存：刷新把页面换到别处，事件里就该是换过之后的那个地址。
+
+        「程序在等的页」与「人正在操作的页」是不是同一份，靠的就是这个地址（issue 12）。
+        """
+        page = FakePage(self.PRODUCT, body=self.SLIDER_BODY)
+        moved = "https://detail.1688.com/offer/22.html"
+        page.reload = MagicMock(side_effect=lambda **kw: setattr(page, "url", moved))
+        emit = MagicMock()
+        clock = GuardClock(step=1.0)
+        with patch.object(guard, "time", clock), patch.object(waiting, "time", clock), \
+             patch.object(guard.sound, "play_alarm"), self.assertRaises(InterventionTimeout):
+            guard.wait_for_resolution(page, 1, emit=emit, confirm_sec=0)
+
+        self.assertIn(f"url={moved}", emit.call_args_list[0].kwargs["note"])
+
+    def test_the_solved_event_carries_the_same_page_and_criterion(self):
+        page = FakePage(self.PRODUCT, body=self.SLIDER_BODY)
+        emit = MagicMock()
+        clock = GuardClock(step=1.0)
+        with patch.object(guard, "time", clock), patch.object(waiting, "time", clock), \
+             patch.object(guard.sound, "play_alarm", side_effect=lambda count=1: page.solve()):
+            guard.wait_for_resolution(page, 1, emit=emit, confirm_sec=0,
+                                      criterion="slider-body:请按住滑块")
+
+        solved = emit.call_args_list[-1]
+        self.assertEqual(solved.args[0], "verification_solved")
+        self.assertIn(f"url={self.PRODUCT}", solved.kwargs["note"])
+        self.assertIn("criterion=slider-body:请按住滑块", solved.kwargs["note"])
+
+    def test_the_detail_entry_hands_the_criterion_to_the_wait(self):
+        """接缝：判定 → 等待，来源一路传到位（票 01 的端到端面）。"""
+        page = FakePage(self.PRODUCT, body=self.SLIDER_BODY)
+        with patch.object(guard, "wait_for_resolution",
+                          side_effect=InterventionTimeout("超时")) as wait:
+            with self.assertRaises(InterventionTimeout):
+                ready_detail_page(page, self.CFG, emit=MagicMock(), shop_key="A01")
+
+        self.assertEqual(wait.call_args.kwargs.get("criterion"), "slider-body:请按住滑块")
+
+    def test_the_wait_reports_progress_on_a_throttled_tick(self):
+        """等待期按节拍写进度（票 02）：不许每轮一条，也不许一行不写。"""
+        page = FakePage(self.PRODUCT, body=self.SLIDER_BODY)
+        clock = GuardClock(step=1.0)
+        with self.assertLogs("bestseller_monitor.guard", level="INFO") as logs:
+            with patch.object(guard, "time", clock), patch.object(waiting, "time", clock), \
+                 patch.object(guard.sound, "play_alarm") as alarm, \
+                 self.assertRaises(InterventionTimeout):
+                guard.wait_for_resolution(page, 1, emit=MagicMock(), confirm_sec=0)
+
+        progress = [line for line in logs.output if "仍在等待" in line]
+        self.assertGreaterEqual(len(progress), 2, "一次走满的等待要留下不止一条进度")
+        self.assertIn(self.PRODUCT, progress[0], "进度行要说清在等哪一页")
+        self.assertLess(len(progress), alarm.call_count, "抽稀：进度行数少于响铃轮数")
+
+    def test_the_reload_that_cannot_help_leaves_a_line(self):
+        """那次无声刷新要可见（票 02）：刷新过后仍未解除，明说转入等待。"""
+        page = FakePage(self.PRODUCT, body=self.SLIDER_BODY)   # 刷新也救不回来
+        clock = GuardClock(step=1.0)
+        with self.assertLogs("bestseller_monitor.guard", level="INFO") as logs:
+            with patch.object(guard, "time", clock), patch.object(waiting, "time", clock), \
+                 patch.object(guard.sound, "play_alarm"), self.assertRaises(InterventionTimeout):
+                guard.wait_for_resolution(page, 1, emit=MagicMock(), confirm_sec=0)
+
+        self.assertEqual(page.reloads, 1)
+        self.assertTrue(any("刷新" in line for line in logs.output),
+                        "刷新这一步不能无声无息")
+        self.assertTrue(any("未解除" in line for line in logs.output),
+                        "刷新没救回来这件事要说出来")
+
+    def test_a_reload_that_recovers_still_says_so(self):
+        """刷新后恢复的那条路：行为不变（不发事件、不响铃），但日志里看得出刷新发生过。"""
+        page = FakePage(self.PRODUCT, body=self.SLIDER_BODY, body_after_reload="")
+        emit = MagicMock()
+        clock = GuardClock(step=1.0)
+        with self.assertLogs("bestseller_monitor.guard", level="INFO") as logs:
+            with patch.object(guard, "time", clock), patch.object(waiting, "time", clock), \
+                 patch.object(guard.sound, "play_alarm") as alarm:
+                guard.wait_for_resolution(page, 0, emit=emit, confirm_sec=0)
+
+        self.assertEqual(page.reloads, 1)
+        emit.assert_not_called()
+        alarm.assert_not_called()
+        self.assertTrue(any("刷新" in line and "恢复" in line for line in logs.output))
+
+    def test_a_failed_reload_is_recorded_without_changing_the_wait(self):
+        """刷新本身抛错：行为不变（照旧进等待），但不再被无声吞掉。"""
+        page = FakePage(self.PRODUCT, body=self.SLIDER_BODY)
+        page.reload = MagicMock(side_effect=RuntimeError("boom"))
+        emit = MagicMock()
+        clock = GuardClock(step=1.0)
+        with self.assertLogs("bestseller_monitor.guard", level="DEBUG") as logs:
+            with patch.object(guard, "time", clock), patch.object(waiting, "time", clock), \
+                 patch.object(guard.sound, "play_alarm"), self.assertRaises(InterventionTimeout):
+                guard.wait_for_resolution(page, 1, emit=emit, confirm_sec=0)
+
+        self.assertEqual(emit.call_args_list[0].args[0], "verification_appear",
+                         "刷新失败不该改变等待本身")
+        self.assertTrue(any("刷新" in line and "boom" in line for line in logs.output))
 
 
 if __name__ == "__main__":
