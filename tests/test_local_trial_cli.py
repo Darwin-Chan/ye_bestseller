@@ -132,6 +132,46 @@ class LocalTrialCliTests(unittest.TestCase):
         with self.assertRaises(TrialUnavailable):
             for_collection(formal, local_trial=True)
 
+    def test_trial_refuses_link_when_soft_predicates_are_blind(self):
+        """m2 现象回归（2026-10-12）：主机让 is_symlink/is_junction/resolve 对真实链接
+        静默失效（对链接的 lstat/readlink 报 WinError 1921，被吞成 False/原样路径）时，
+        守卫仍要凭原始事实拒绝——「查不出来」不是「没问题」。"""
+        formal = Config.from_file(self.config, root=self.root)
+        home = self.root / "local-trial"
+        (home / "data").mkdir(parents=True)
+        try:
+            (home / "logs").symlink_to(self.root / "logs", target_is_directory=True)
+        except OSError:
+            return  # 目录符号链接需要特权，与上一用例同口径
+        with patch.object(Path, "is_symlink", return_value=False), \
+                patch.object(Path, "is_junction", return_value=False), \
+                patch.object(Path, "resolve", new=lambda self, *args, **kwargs: self):
+            with self.assertRaises(TrialUnavailable):
+                for_collection(formal, local_trial=True)
+
+    def test_trial_refuses_entry_that_cannot_be_verified(self):
+        """同一课的另一半：连 lstat 都问不出来的条目（m2 上即此形态）按拒绝处理，
+        错误信息点名路径——不把「核实不了」当「安全」。"""
+        formal = Config.from_file(self.config, root=self.root)
+        home = self.root / "local-trial"
+        (home / "data").mkdir(parents=True)
+        try:
+            link = home / "logs"
+            link.symlink_to(self.root / "logs", target_is_directory=True)
+        except OSError:
+            return
+        real_lstat = os.lstat
+
+        def blind_lstat(path, *args, **kwargs):
+            if os.fspath(path) == os.fspath(link):
+                raise OSError(22, "模拟 m2：ERROR_CANT_RESOLVE_FILENAME", os.fspath(path), 1921)
+            return real_lstat(path, *args, **kwargs)
+
+        with patch("os.lstat", new=blind_lstat):
+            with self.assertRaises(TrialUnavailable) as caught:
+                for_collection(formal, local_trial=True)
+        self.assertIn(os.fspath(link), str(caught.exception))
+
     def test_trial_refuses_analysis_database_inside_trial_namespace(self):
         (self.root / "analysis.toml").write_text(
             '[analysis]\ndatabase="local-trial/data/bestseller.db"\n', encoding="utf-8")

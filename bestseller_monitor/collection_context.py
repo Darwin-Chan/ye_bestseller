@@ -4,6 +4,7 @@ Formal tools keep using the original Config.  Trial collection has a stable,
 local-only namespace and does not impersonate a collector machine.
 """
 import os
+import stat
 from pathlib import Path
 import tempfile
 
@@ -62,16 +63,26 @@ def for_collection(cfg: Config, *, local_trial: bool = False,
         for path in protected:
             if _overlaps(home, path):
                 raise TrialUnavailable(f"试采空间与正式目标重合：{path}")
-        # Resolve junctions/symlinks throughout existing storage, including assets.
-        # Hard-linked files cannot be proven isolated; refuse rather than modifying them.
+        # 条目安全只认原始 lstat：重解析点（符号链接/联结点等）一律拒绝，lstat 失败也拒绝。
+        # 便捷判据（Path.is_symlink/is_junction/resolve）查不到时会静默退回「没问题」——
+        # 2026-10-12 m2 上正是这样把目录符号链接放进了正式 logs（lstat/readlink 报
+        # WinError 1921 被吞成 False，resolve 原样返回空间内路径），别再用它们做判据。
+        # 硬链接没法证明与正式存储隔离（st_nlink>1 的正则文件），同样拒绝。
         if home.exists():
             for directory, dirs, files in os.walk(home, followlinks=False, onerror=_walk_error):
                 for name in [*dirs, *files]:
                     path = Path(directory) / name
-                    if path.is_symlink() or path.is_junction() or not path.resolve().is_relative_to(home.resolve()):
+                    try:
+                        st = os.lstat(path)
+                    except OSError as exc:
+                        raise TrialUnavailable(f"无法核实试采空间条目（{exc}）：{path}") from exc
+                    attributes = getattr(st, "st_file_attributes", 0)
+                    if stat.S_ISLNK(st.st_mode) or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
                         raise TrialUnavailable(f"试采空间包含外部链接：{path}")
-                    if path.is_file() and path.stat().st_nlink > 1:
+                    if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
                         raise TrialUnavailable(f"试采文件存在硬链接，无法保证隔离：{path}")
+                    if not path.resolve().is_relative_to(home.resolve()):
+                        raise TrialUnavailable(f"试采空间包含外部链接：{path}")
     except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
         raise TrialUnavailable(str(exc)) from exc
     return cfg.replace(
