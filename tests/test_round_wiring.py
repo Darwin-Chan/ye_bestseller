@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_pw, guard, pacing, pipeline, plan_step, rounds, weekly_plan
+from bestseller_monitor import browser_pw, pacing, pipeline, plan_step, rounds, weekly_plan
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import CST, Database, connect, cst_date
 from bestseller_monitor.rounds import RoundRequest, ScopeMismatch, ShopScope
@@ -243,8 +243,9 @@ class RoundScopeWiringTests(unittest.TestCase):
 class PwCdpRoundAssemblyTests(unittest.TestCase):
     """IS-23 / ADR-0010：删掉旧的直连路径之后，这是整轮采集唯一的装配入口。
 
-    会话的打开与收尾、事件埋点与 deny 追踪都从这一处挂到轮次上，
-    所以这几件事在这里锁住，而不是散在已经不存在的旧路径里。
+    会话的打开与收尾、事件埋点都从这一处挂到轮次上，所以这几件事在这里锁住，
+    而不是散在已经不存在的旧路径里；两个账本（主动停顿、deny）由列表阶段自己
+    构造（issue 13 复议后归位，测试见 test_p1 的跳店降温用例）。
     """
 
     def setUp(self):
@@ -281,12 +282,9 @@ class PwCdpRoundAssemblyTests(unittest.TestCase):
 
         self.assertEqual(closed.call_args.args, session[:2], "异常也不能漏掉浏览器收尾")
 
-    def test_listing_phase_records_events_and_deny_tracking_for_this_round(self):
-        captured = {}
-
+    def test_listing_phase_records_events_for_this_round(self):
         def fake_listing(db, cfg, round_id, shops, page, emit=None, deny_tracker=None,
                          pacing_seed=0):
-            captured["deny_tracker"] = deny_tracker
             emit("click_deny", shop_key="A01", phase="listing")
 
         self._run(fake_listing)
@@ -296,7 +294,6 @@ class PwCdpRoundAssemblyTests(unittest.TestCase):
         )]
         self.assertEqual(events, [(self.round_id, "click_deny", "A01")],
                          "埋点要落在本轮的事件表里，界面过程页读的就是它")
-        self.assertIsInstance(captured["deny_tracker"], guard.DenyTracker)
         params = self.db.conn.execute("SELECT COUNT(*) c FROM run_params").fetchone()["c"]
         self.assertEqual(params, 1, "本轮生效的参数要留档")
 

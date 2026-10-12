@@ -2079,14 +2079,16 @@ class Database:
             "ORDER BY id",
             (round_id, DENY_HIT_EVENT, DENY_COOLDOWN_EVENT),
         ).fetchall()
-        hits = tuple(
-            (datetime.fromisoformat(row["ts"]).timestamp(), row["shop_key"])
-            for row in rows
-            if row["event"] == DENY_HIT_EVENT
-            and datetime.fromisoformat(row["ts"]).timestamp() >= cutoff
-        )
-        fired = any(row["event"] == DENY_COOLDOWN_EVENT for row in rows)
-        return DenySeed(hits=hits, cooldown_fired=fired)
+        hits: list[tuple[float, str]] = []
+        fired = False
+        for row in rows:
+            if row["event"] == DENY_COOLDOWN_EVENT:
+                fired = True
+                continue
+            epoch = datetime.fromisoformat(row["ts"]).timestamp()
+            if epoch >= cutoff:
+                hits.append((epoch, row["shop_key"]))
+        return DenySeed(hits=tuple(hits), cooldown_fired=fired)
 
     def commit(self) -> None:
         self.conn.commit()

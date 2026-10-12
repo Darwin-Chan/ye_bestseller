@@ -60,6 +60,7 @@ class StopOutcome:
     ladder_log: str = ""      # 单店阶梯额外要记的那一行（多数异常不需要）
     log_level: int = logging.INFO
     scope: StopScope = StopScope.ROUND
+    cool_down: bool = False   # 该店收尾后、换下一家店之前整轮降温一段（ADR-0054）
 
 
 # 「这个异常代表哪种停止」只有这一处定义；两套阶梯都查它。
@@ -114,6 +115,7 @@ _STOP_OUTCOMES: dict[type, StopOutcome] = {
     ShopDenyExceeded: StopOutcome(
         shop_note="deny 超过阈值，这家店本轮到此为止：{exc}",
         scope=StopScope.SHOP,
+        cool_down=True,
     ),
 }
 
@@ -477,16 +479,6 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
             started_at = row["started_at"] if row is not None else None
         config_hash = db.record_params(cfg)
         emit = db.event_logger(round_id, config_hash)
-        # deny 账本也按轮次累计、跨续跑延续（ADR-0054）：窗口内既有 deny 从事件回读，
-        # 首次降温是否已发过以 deny_cooldown 事件为记忆；降温睡的是可打断的拟人化分片。
-        deny_window_sec = cfg.deny_window_minutes * 60
-        deny_state = db.deny_seed(round_id, deny_window_sec)
-        if deny_state.hits or deny_state.cooldown_fired:
-            log.info("deny 账本接着数：窗口内已有 %s 次 deny；首次降温已发过=%s",
-                     len(deny_state.hits), deny_state.cooldown_fired)
-        deny_tracker = DenyTracker(deny_window_sec, seed=deny_state.hits,
-                                   cooldown_fired=deny_state.cooldown_fired,
-                                   emit=emit, cooldown=Humanizer(cfg).sleep)
         pw, br, page, ctx = browser_pw.open_session(cfg, publish_browser=publish)
     except STOP_WITH_OUTCOME:
         raise  # Preserve explicit stop and intervention semantics.
@@ -512,7 +504,7 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
             # Durable execution acknowledgement; unlike diagnostic emit this
             # must commit successfully before consuming GUI pause permission.
             db.append_event(round_id, "resume_started", kind="run", note=resume_intent.attempt)
-        _run_listing_pw(db, cfg, round_id, shops, page, emit=emit, deny_tracker=deny_tracker,
+        _run_listing_pw(db, cfg, round_id, shops, page, emit=emit,
                         pacing_seed=pacing_seed.visits)
     except IdentityVerificationTimeout as exc:
         identity_timeout = exc
@@ -557,18 +549,22 @@ def _record_shop_stop(db: Database, round_id: int, shop: Shop, exc: BaseExceptio
     return outcome.scope is StopScope.SHOP
 
 
-def _cool_down_after_shop_skip(cfg: Config, human, emit, shop_key: str) -> None:
+def _cool_down_after_shop_skip(human, emit, shop_key: str, *, seconds: float) -> None:
     """跳店后的整轮降温（ADR-0054）：换下一家店之前先把站点侧的火降一降。
 
-    与「整轮首次 deny」的降温同一量纲（deny 窗口长度），同样走 `Humanizer.sleep`——
+    时长与账本同一个 deny 窗口（由账本持有，量纲只写一处）；同样走 `Humanizer.sleep`——
     停止请求、跨天边界、当日截止线都能在分片内打断。事件先写后睡：降温被打断也算
     已发过，续跑靠这条事件不重复触发首次降温。
     """
-    seconds = float(cfg.deny_window_minutes * 60)
     log.info("店铺 %s 因 deny 跳店：停 %.0f 分钟再换下一家（ADR-0054）",
              shop_key, seconds / 60)
     emit_deny_cooldown(emit, shop_key, reason="shop_skip", seconds=seconds)
     human.sleep(seconds)
+
+
+def _deny_window_sec(cfg: Config) -> float:
+    """一次 deny 窗口的长度——账本窗口、首次降温与跳店降温共用同一量纲（ADR-0054）。"""
+    return float(cfg.deny_window_minutes * 60)
 
 
 def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop], page,
@@ -578,6 +574,17 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
     # 主动停顿的配额账本也是整轮一个：点击路径与逐店补采共用（ADR-0038）。
     # 种子在续跑入口从事件回读（issue 13）——续跑＝新进程，账本不能从 0 起重数。
     pacing = Pacing(cfg, human, emit=emit, seed=pacing_seed)
+    if deny_tracker is None:
+        # deny 账本同规（ADR-0054）：窗口内既有 deny 从事件回读、首次降温以事件为记忆；
+        # 降温睡的是本阶段这一个可打断的拟人化睡眠。显式传入的账本优先（用例注入）。
+        window_sec = _deny_window_sec(cfg)
+        deny_state = db.deny_seed(round_id, window_sec)
+        if deny_state.hits or deny_state.cooldown_fired:
+            log.info("deny 账本接着数：窗口内已有 %s 次 deny；首次降温已发过=%s",
+                     len(deny_state.hits), deny_state.cooldown_fired)
+        deny_tracker = DenyTracker(window_sec, seed=deny_state.hits,
+                                   cooldown_fired=deny_state.cooldown_fired,
+                                   emit=emit, cooldown=human.sleep)
     for shop in shops:
         # 每家店开始之前先问轮次：跨天收尾发生在还没动这家店的干净点上。
         rounds.ensure_workable(db, round_id, utcnow())
@@ -604,8 +611,9 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
             if not _record_shop_stop(db, round_id, shop, exc,
                                      listing_complete=listing_complete):
                 raise
-            if isinstance(exc, ShopDenyExceeded):
-                _cool_down_after_shop_skip(cfg, human, emit, shop.key)
+            if stop_outcome(exc).cool_down:
+                _cool_down_after_shop_skip(human, emit, shop.key,
+                                           seconds=deny_tracker.window_sec)
             continue
         except ListingLoadFailed as exc:
             _record_listing_failure(db, cfg, round_id, shop, exc)

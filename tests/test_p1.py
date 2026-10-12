@@ -812,10 +812,12 @@ class P1Tests(unittest.TestCase):
         human = MagicMock()
         order: list[str] = []
         events: list[tuple[str, dict]] = []
+        trackers: list[object] = []
         human.sleep.side_effect = lambda seconds: order.append(f"sleep:{seconds:g}")
 
         def crawl(listing_page, shop, *args, **kwargs):
             order.append(f"shop:{shop.key}")
+            trackers.append(kwargs["deny_tracker"])
             if shop.key == "A01":
                 raise ShopDenyExceeded("店铺 A01 10 分钟内 deny≥3")
             return [(1, "22", "https://detail.1688.com/offer/22.html", "商品22", "")], 1
@@ -826,6 +828,9 @@ class P1Tests(unittest.TestCase):
             pipeline._run_listing_pw(self.db, cfg, round_id, shops, MagicMock(),
                                      emit=lambda event, **kw: events.append((event, kw)))
 
+        self.assertIsInstance(trackers[0], guard.DenyTracker,
+                              "deny 账本由列表阶段自己构造（与 Pacing 相邻）")
+        self.assertEqual(trackers[0].window_sec, cfg.deny_window_minutes * 60)
         seconds = cfg.deny_window_minutes * 60
         self.assertEqual(order, ["shop:A01", f"sleep:{seconds:g}", "shop:A02"],
                          "降温夹在跳店与下一家店之间；跳店不终止整轮")
@@ -835,6 +840,24 @@ class P1Tests(unittest.TestCase):
         self.assertEqual(cooldowns[0][1]["shop_key"], "A01")
         self.assertEqual(cooldowns[0][1]["note"],
                          f"reason=shop_skip&sec={int(seconds)}")
+
+    def test_a_round_stop_does_not_cool_down(self):
+        """非跳店的停止族（人工介入、整轮中止…）直接收场，不触发换店降温（ADR-0054）。"""
+        round_id = new_round(self.db)
+        shop = Shop("A01", "店铺A", "https://shop-a.example/")
+        self.db.add_shop(round_id, shop.key, shop.url, shop.name)
+        human = MagicMock()
+
+        def crawl(listing_page, shop, *args, **kwargs):
+            raise InterventionTimeout("人工验证超时")
+
+        with patch.object(pipeline, "Humanizer", return_value=human), \
+             patch.object(click_listing, "crawl_store_by_click", side_effect=crawl):
+            with self.assertRaises(InterventionTimeout):
+                pipeline._run_listing_pw(self.db, crawler_cfg(), round_id, [shop],
+                                         MagicMock())
+
+        self.assertEqual(human.sleep.call_args_list, [])
 
     def test_listing_failure_keeps_that_shop_pending_and_continues(self):
         round_id = new_round(self.db)

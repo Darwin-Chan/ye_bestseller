@@ -70,7 +70,8 @@ class DenyTracker:
     账本按轮次累计、跨续跑延续（ADR-0054）：构造时可给 `seed`（窗口内既有 deny 的
     `(时刻, 店铺)`，续跑入口从事件回读）与 `cooldown_fired`（本轮是否已发过首次降温）；
     窗口过期自然清零，不另设停机规则。`emit` 给事件面（`deny_hit` / `deny_cooldown`），
-    `cooldown` 是可打断的睡眠（`Humanizer.sleep`），`None` = 不降温。
+    `cooldown` 是可打断的睡眠（`Humanizer.sleep`），`None` = 不降温。**两者要成对给**：
+    事件是跨续跑的记忆——只给 `cooldown` 不给 `emit`，续跑会把首次降温再罚一遍。
     """
 
     def __init__(self, window_sec: float, *, seed=(), cooldown_fired: bool = False,
