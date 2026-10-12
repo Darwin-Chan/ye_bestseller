@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,7 +20,7 @@ from bestseller_monitor.db import (
     connect,
     cst_date,
 )
-from bestseller_monitor import db, shop_progress
+from bestseller_monitor import db, pacing, shop_progress
 from helpers import new_round, product_picture
 from bestseller_monitor.parse import DEFAULT_SKU_ID, DEFAULT_SKU_NAME
 
@@ -1972,6 +1973,99 @@ class CrawlerIdentityTests(unittest.TestCase):
 
         self.assertIsNone(self.db.crawler_process())
         self.assertEqual(self._row_count(), 0)
+
+
+class PacingSeedQueryTests(unittest.TestCase):
+    """issue 13：续跑种子的回读——数「最近一条 pause/resume 之后」的本轮 pacing_visit。
+
+    停机清零：本轮最后一条事件距计算时刻 ≥ 阈值时，配额视为已停过、种子交回 0。
+    时间基准用事件自己的 ts（真实钟写的）＋可注入的 now，用例不靠冻钟。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = connect(Path(self.tmp.name) / "pacing-seed.db")
+        self.db = Database(self.conn)
+        self.round_id = new_round(self.db, "A01")
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _visit(self, n: int) -> None:
+        self.db.append_event(self.round_id, pacing.VISIT_EVENT, shop_key="A01",
+                             phase="pacing", note=f"n={n}")
+
+    def _last_ts(self) -> str:
+        return self.conn.execute(
+            "SELECT ts FROM event_log ORDER BY id DESC LIMIT 1").fetchone()["ts"]
+
+    def _now_after_last(self, minutes: float) -> str:
+        return (datetime.fromisoformat(self._last_ts())
+                + timedelta(minutes=minutes)).isoformat()
+
+    def seed(self, *, idle_reset_sec: float = 1500.0, now: str | None = None):
+        return self.db.pacing_visits_since_last_pause(
+            self.round_id, idle_reset_sec=idle_reset_sec, now=now)
+
+    def test_an_empty_round_reads_zero_with_no_idle_fact(self):
+        seed = self.seed()
+
+        self.assertEqual((seed.visits, seed.idle_sec, seed.idle_reset), (0, None, False))
+
+    def test_only_visits_after_the_last_marker_count(self):
+        self._visit(1)
+        self._visit(2)
+        self.db.append_event(self.round_id, pacing.PAUSE_EVENT, shop_key="A01",
+                             phase="pacing", note="sec=1800")
+        self._visit(1)   # 停顿之后重新数
+
+        seed = self.seed()
+
+        self.assertEqual(seed.visits, 1, "停顿之前的那两次已经入账，不该再算进来")
+        self.assertFalse(seed.idle_reset)
+
+    def test_resume_also_starts_a_new_segment(self):
+        self.db.append_event(self.round_id, pacing.PAUSE_EVENT, phase="pacing",
+                             note="sec=1800")
+        self.db.append_event(self.round_id, pacing.RESUME_EVENT, phase="pacing",
+                             note="sec=1800")
+        self._visit(1)
+
+        seed = self.seed()
+
+        self.assertEqual(seed.visits, 1)
+
+    def test_an_interrupted_pause_carries_nothing(self):
+        """停在停顿中被打断（有 pause 没 resume）：那次停顿已经入账，种子 0。"""
+        self._visit(1)
+        self._visit(2)
+        self.db.append_event(self.round_id, pacing.PAUSE_EVENT, shop_key="A01",
+                             phase="pacing", note="sec=1800")
+
+        seed = self.seed()
+
+        self.assertEqual(seed.visits, 0)
+
+    def test_other_events_do_not_count_as_visits(self):
+        self.db.append_event(self.round_id, "popup_open", shop_key="A01", offer_id="11")
+        self.db.append_event(self.round_id, "detail_parse", shop_key="A01", offer_id="11")
+
+        seed = self.seed()
+
+        self.assertEqual(seed.visits, 0)
+
+    def test_idle_at_or_beyond_the_floor_zeroes_the_seed(self):
+        self._visit(1)
+        self._visit(2)
+
+        short = self.seed(idle_reset_sec=1500.0, now=self._now_after_last(24))
+        self.assertEqual((short.visits, short.idle_reset), (2, False), "24 分钟还没到下限")
+
+        at_floor = self.seed(idle_reset_sec=1500.0, now=self._now_after_last(25))
+        self.assertEqual((at_floor.visits, at_floor.idle_reset), (0, True),
+                         "≥ 下限：停机本身就相当于停过一次")
+        self.assertAlmostEqual(at_floor.idle_sec, 1500.0, places=3)
 
 
 if __name__ == "__main__":

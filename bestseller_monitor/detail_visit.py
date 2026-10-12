@@ -212,7 +212,7 @@ def begin_detail_visit(
         raise TypeError(f"详情 adapter 必须交回 OpenedDetail，收到 {type(opened)!r}")
 
     if pacing is not None:
-        pacing.detail_visit_opened()
+        pacing.detail_visit_opened(shop_key=shop_key)
 
     try:
         denied = _settle_detail_page(

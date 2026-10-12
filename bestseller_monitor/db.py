@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 from . import click_events
+from .pacing import PAUSE_EVENT, RESUME_EVENT, VISIT_EVENT
 from .parse import DEFAULT_SKU_ID, sku_name_source
 
 log = logging.getLogger(__name__)
@@ -924,6 +925,20 @@ class RoundTally:
             if one.shop_key == shop_key:
                 return one
         return ShopTally(shop_key=shop_key)
+
+
+@dataclass(frozen=True)
+class PacingSeed:
+    """停顿账本的回读种子（issue 13）：续跑接着数的输入。
+
+    `visits` 是「最近一条 pause/resume 之后」的本轮 pacing_visit 条数；停机时长达到
+    阈值时已按 0 交回（`idle_reset=True`）。`idle_sec` 是本轮最后一条事件距今的秒数，
+    本轮还没有任何事件时为 None。
+    """
+
+    visits: int
+    idle_sec: float | None
+    idle_reset: bool
 
 
 @dataclass(frozen=True)
@@ -2008,6 +2023,37 @@ class Database:
             except Exception as exc:  # noqa: BLE001
                 log.debug("事件记录失败 %s：%s", event, exc)
         return emit
+
+    def pacing_visits_since_last_pause(self, round_id: int, *, idle_reset_sec: float,
+                                       now: str | None = None) -> PacingSeed:
+        """停顿账本的回读种子（issue 13）：数「最近一条 pause/resume 之后」的 pacing_visit。
+
+        续跑＝新进程，账本从事件回读接着数。停机清零：本轮最后一条事件距计算时刻
+        ≥ `idle_reset_sec` 时，`visits` 交回 0——停机本身就相当于停过一次（阈值取
+        一次停顿的下限）。调用方必须在本轮写下任何新事件**之前**问（续跑入口在
+        `resume_started` 之前），否则「最后一条事件」就是刚写的这条，停机时长恒为 0。
+        `now` 可注入（用例）；空轮次没有 idle 事实，交回 None。
+        """
+        marker = self.conn.execute(
+            "SELECT id FROM event_log WHERE round_id=? AND event IN (?, ?) "
+            "ORDER BY id DESC LIMIT 1",
+            (round_id, PAUSE_EVENT, RESUME_EVENT),
+        ).fetchone()
+        visits = self.conn.execute(
+            "SELECT COUNT(*) c FROM event_log WHERE round_id=? AND event=? AND id>?",
+            (round_id, VISIT_EVENT, marker["id"] if marker else 0),
+        ).fetchone()["c"]
+        last = self.conn.execute(
+            "SELECT ts FROM event_log WHERE round_id=? ORDER BY id DESC LIMIT 1",
+            (round_id,),
+        ).fetchone()
+        if last is None:
+            return PacingSeed(visits=0, idle_sec=None, idle_reset=False)
+        now_dt = datetime.fromisoformat(now or utcnow_us())
+        idle = max(0.0, (now_dt - datetime.fromisoformat(last["ts"])).total_seconds())
+        if idle >= idle_reset_sec:
+            return PacingSeed(visits=0, idle_sec=idle, idle_reset=True)
+        return PacingSeed(visits=visits, idle_sec=idle, idle_reset=False)
 
     def commit(self) -> None:
         self.conn.commit()

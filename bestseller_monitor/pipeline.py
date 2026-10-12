@@ -492,11 +492,19 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
     identity_timeout = None
     browser_binding = db.crawler_process()
     try:
+        # 停顿账本的回读种子必须先于 resume_started 算：那条事件一写，「本轮最后一条
+        # 事件」就成了它自己，停机时长会永远算成 0（issue 13）。
+        pacing_seed = db.pacing_visits_since_last_pause(
+            round_id, idle_reset_sec=cfg.pause_sec[0])
+        if pacing_seed.idle_reset:
+            log.info("距上段已停机 %.0f 分钟（≥ 停顿下限 %.0f 分钟）：停顿配额视为已停过，从 0 重数",
+                     (pacing_seed.idle_sec or 0.0) / 60, cfg.pause_sec[0] / 60)
         if resume_intent is not None:
             # Durable execution acknowledgement; unlike diagnostic emit this
             # must commit successfully before consuming GUI pause permission.
             db.append_event(round_id, "resume_started", kind="run", note=resume_intent.attempt)
-        _run_listing_pw(db, cfg, round_id, shops, page, emit=emit, deny_tracker=deny_tracker)
+        _run_listing_pw(db, cfg, round_id, shops, page, emit=emit, deny_tracker=deny_tracker,
+                        pacing_seed=pacing_seed.visits)
     except IdentityVerificationTimeout as exc:
         identity_timeout = exc
         raise
@@ -541,11 +549,12 @@ def _record_shop_stop(db: Database, round_id: int, shop: Shop, exc: BaseExceptio
 
 
 def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop], page,
-                    emit=None, deny_tracker=None) -> None:
+                    emit=None, deny_tracker=None, pacing_seed=0) -> None:
     done = shop_progress.listing_complete_keys(db, round_id)
     human = Humanizer(cfg)
     # 主动停顿的配额账本也是整轮一个：点击路径与逐店补采共用（ADR-0038）。
-    pacing = Pacing(cfg, human, emit=emit)
+    # 种子在续跑入口从事件回读（issue 13）——续跑＝新进程，账本不能从 0 起重数。
+    pacing = Pacing(cfg, human, emit=emit, seed=pacing_seed)
     for shop in shops:
         # 每家店开始之前先问轮次：跨天收尾发生在还没动这家店的干净点上。
         rounds.ensure_workable(db, round_id, utcnow())

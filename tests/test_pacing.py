@@ -73,11 +73,13 @@ class PacingTests(unittest.TestCase):
         for _ in range(3):
             self.visit(p)
 
-        names = [event for event, _ in self.events]
-        self.assertEqual(names, [pacing.PAUSE_EVENT, pacing.RESUME_EVENT])
-        self.assertEqual(pacing.note_seconds(self.events[0][1]["note"]), 30.0)
-        self.assertEqual(self.events[0][1]["shop_key"], "A01")
-        self.assertEqual(pacing.note_seconds(self.events[1][1]["note"]), 30.0)
+        pairs = [(event, kw) for event, kw in self.events
+                 if event in (pacing.PAUSE_EVENT, pacing.RESUME_EVENT)]
+        self.assertEqual([event for event, _ in pairs],
+                         [pacing.PAUSE_EVENT, pacing.RESUME_EVENT])
+        self.assertEqual(pacing.note_seconds(pairs[0][1]["note"]), 30.0)
+        self.assertEqual(pairs[0][1]["shop_key"], "A01")
+        self.assertEqual(pacing.note_seconds(pairs[1][1]["note"]), 30.0)
 
     def test_the_pause_is_interruptible_within_a_slice(self):
         cfg = crawler_cfg(pause_every_detail_visits=1, pause_sec=(600.0, 600.0))
@@ -90,6 +92,34 @@ class PacingTests(unittest.TestCase):
         with self.assertRaises(DayBoundaryReached):
             p.before_detail_visit(shop_key="A01")   # 到点该停了：跨天要在第一片内打断
         self.assertLess(time.time() - started, 1.0)
+
+    def test_a_carried_seed_pauses_before_the_visit_that_fills_the_quota(self):
+        """续跑接着数（issue 13）：种子 2、配额 3——第 2 次访问开始前就该停。"""
+        p = pacing.Pacing(crawler_cfg(pause_every_detail_visits=3, pause_sec=(30.0, 30.0)),
+                          self.human, emit=self.emit, seed=2)
+        self.visit(p)
+        self.assertEqual(self.sleeps(), [], "2 + 1 = 3：这次刚好凑满，先不白停")
+
+        self.visit(p)
+
+        self.assertEqual(self.sleeps(), [30.0], "凑满之后的请求要挡在停顿后面")
+        names = [event for event, _ in self.events]
+        self.assertEqual(names, [pacing.VISIT_EVENT, pacing.PAUSE_EVENT,
+                                 pacing.RESUME_EVENT, pacing.VISIT_EVENT])
+        self.assertEqual(self.events[0][1]["note"], "n=3", "记账事件带距上次停顿的计数")
+        self.assertEqual(self.events[3][1]["note"], "n=1", "停顿之后重新数")
+
+    def test_a_seed_that_already_filled_the_quota_pauses_before_the_first_visit(self):
+        """凑满配额后进程死掉：续跑第一次访问就地停——罕见，但方向正确。"""
+        p = pacing.Pacing(crawler_cfg(pause_every_detail_visits=2, pause_sec=(30.0, 30.0)),
+                          self.human, emit=self.emit, seed=2)
+
+        self.visit(p)
+
+        self.assertEqual(self.sleeps(), [30.0])
+        names = [event for event, _ in self.events]
+        self.assertEqual(names[0], pacing.PAUSE_EVENT,
+                         "第一个动作是停顿，之后才是这一次访问的记账")
 
 
 class PacingWalkTests(unittest.TestCase):
@@ -180,6 +210,46 @@ class PacingWalkTests(unittest.TestCase):
         self.assertEqual(pages_read, 4)
         self.assertEqual(len(offers), 2, "只有真打开的两张卡拿到了商品")
         self.assertEqual(self.human.sleep.call_args_list, [])
+
+    def test_a_second_leg_resumes_the_quota_from_the_rounds_events(self):
+        """issue 13 的现场复刻：同一轮分两段跑（续跑＝新进程），第二段从事件里读回种子。
+
+        第一段 2 次访问（配额 3）没到点；续跑时种子应当是 2——第 2 段第 2 次访问前必须停。
+        """
+        cfg = crawler_cfg(pause_every_detail_visits=3, pause_sec=(30.0, 30.0),
+                          max_pages_per_shop=4)
+        emit = self.db.event_logger(self.round_id)
+
+        def leg(offers):
+            seed = self.db.pacing_visits_since_last_pause(
+                self.round_id, idle_reset_sec=cfg.pause_sec[0]).visits
+            pages = [[FakeCard(f"商品{o}", offer_id=str(o))] for o in offers]
+            page = ScriptedListing(pages)
+            walk = click_listing.ShopWalk(
+                page, self.shop, cfg, self.human, db=self.db, round_id=self.round_id,
+                emit=emit, pacing=pacing.Pacing(cfg, self.human, emit=emit, seed=seed))
+            return page, walk.run()
+
+        page1, (offers1, _) = leg([11, 12])
+        self.assertEqual(self.human.sleep.call_args_list, [],
+                         "第一段 2 次访问没到配额 3，不该停")
+
+        page2, (offers2, _) = leg([13, 14])
+
+        self.assertEqual(len(offers1) + len(offers2), 4, "两段各采到两个商品")
+        self.assertEqual([call.args[0] for call in self.human.sleep.call_args_list], [30.0],
+                         "续跑接着数：种子 2 + 第 1 次访问 = 3，第 2 次访问前必须停")
+        pacing_events = [(row["event"], row["note"]) for row in self.db.conn.execute(
+            "SELECT event, note FROM event_log WHERE round_id=? AND event IN (?, ?, ?) "
+            "ORDER BY id",
+            (self.round_id, pacing.VISIT_EVENT, pacing.PAUSE_EVENT,
+             pacing.RESUME_EVENT))]
+        self.assertEqual(
+            pacing_events,
+            [(pacing.VISIT_EVENT, "n=1"), (pacing.VISIT_EVENT, "n=2"),
+             (pacing.VISIT_EVENT, "n=3"), (pacing.PAUSE_EVENT, "sec=30"),
+             (pacing.RESUME_EVENT, "sec=30"), (pacing.VISIT_EVENT, "n=1")],
+            "停顿夹在第二段的两次访问之间；两段的计数在同一条账上延续")
 
 
 class PacingBackfillTests(unittest.TestCase):
@@ -300,6 +370,21 @@ class PacingDetailVisitSeamTests(unittest.TestCase):
                 detail_visit.begin_detail_visit(self.open_page, self.cfg, pacing=self.ledger)
 
         self.assertTrue(self.charged())
+
+    def test_the_charged_visit_is_recorded_as_an_event(self):
+        """记账落事件（issue 13）：续跑的回读就靠它；命中 deny 的拦截页照记。"""
+        events: list[tuple[str, dict]] = []
+        ledger = pacing.Pacing(self.cfg, self.human,
+                               emit=lambda event, **kw: events.append((event, kw)))
+
+        with patch.object(detail_visit, "ready_detail_page", return_value=True):
+            visit = detail_visit.begin_detail_visit(
+                self.open_page, self.cfg, pacing=ledger, shop_key="A01")
+
+        self.assertIsInstance(visit, detail_visit.DeniedVisit)
+        self.assertEqual([event for event, _ in events], [pacing.VISIT_EVENT])
+        self.assertEqual(events[0][1]["shop_key"], "A01")
+        self.assertEqual(events[0][1]["note"], "n=1", "备注带距上次停顿的计数")
 
 
 NOW = "2026-09-13T04:00:00+00:00"

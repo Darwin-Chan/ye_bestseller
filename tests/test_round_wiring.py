@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import browser_pw, guard, pipeline, plan_step, rounds, weekly_plan
+from bestseller_monitor import browser_pw, guard, pacing, pipeline, plan_step, rounds, weekly_plan
 from bestseller_monitor.config import Shop
 from bestseller_monitor.db import CST, Database, connect, cst_date
 from bestseller_monitor.rounds import RoundRequest, ScopeMismatch, ShopScope
@@ -284,7 +284,8 @@ class PwCdpRoundAssemblyTests(unittest.TestCase):
     def test_listing_phase_records_events_and_deny_tracking_for_this_round(self):
         captured = {}
 
-        def fake_listing(db, cfg, round_id, shops, page, emit=None, deny_tracker=None):
+        def fake_listing(db, cfg, round_id, shops, page, emit=None, deny_tracker=None,
+                         pacing_seed=0):
             captured["deny_tracker"] = deny_tracker
             emit("click_deny", shop_key="A01", phase="listing")
 
@@ -298,3 +299,69 @@ class PwCdpRoundAssemblyTests(unittest.TestCase):
         self.assertIsInstance(captured["deny_tracker"], guard.DenyTracker)
         params = self.db.conn.execute("SELECT COUNT(*) c FROM run_params").fetchone()["c"]
         self.assertEqual(params, 1, "本轮生效的参数要留档")
+
+
+class PacingSeedWiringTests(unittest.TestCase):
+    """issue 13：停顿账本的种子在续跑入口算好、传进列表阶段。
+
+    次序是承重的：`resume_started` 一写，「本轮最后一条事件」就成了它自己，
+    停机时长会永远算成 0——种子必须先于它回读。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tmp.name) / "test.db"
+        self.db = Database(connect(self.db_path))
+        self.round_id = new_round(self.db, "A01")
+        self.shops = [Shop("A01", "店铺A01", "https://A01.example/")]
+
+    def tearDown(self):
+        self.db.conn.close()
+        self.tmp.cleanup()
+
+    def _cfg(self):
+        return crawler_cfg(db_file=self.db_path, driver="pw_cdp",
+                           pause_sec=(1500.0, 2100.0))
+
+    def test_the_seed_is_read_before_any_event_is_written(self):
+        order: list[str] = []
+        real_query = self.db.pacing_visits_since_last_pause
+
+        def spy_query(round_id, **kw):
+            order.append("seed")
+            return real_query(round_id, **kw)
+
+        real_append = self.db.append_event
+
+        def spy_append(round_id, event, **kw):
+            order.append(event)
+            return real_append(round_id, event, **kw)
+
+        session = ("pw", "br", "page", "ctx")
+        with patch.object(type(self.db), "pacing_visits_since_last_pause",
+                          side_effect=spy_query), \
+                patch.object(type(self.db), "append_event", side_effect=spy_append), \
+                patch.object(browser_pw, "open_session", return_value=session), \
+                patch.object(browser_pw, "close_session"), \
+                patch.object(pipeline, "_run_listing_pw"):
+            pipeline._run_pwcdp_round(self.db, self._cfg(), self.round_id, self.shops,
+                                      resume_intent=MagicMock(attempt="01"))
+
+        self.assertEqual(order[0], "seed", "回读种子必须发生在任何事件写入之前")
+        self.assertIn("resume_started", order)
+        self.assertLess(order.index("seed"), order.index("resume_started"),
+                        "先写 resume_started 的话，停机时长的判据就废了")
+
+    def test_the_listing_phase_receives_the_carried_seed(self):
+        for n in (1, 2):
+            self.db.append_event(self.round_id, pacing.VISIT_EVENT, shop_key="A01",
+                                 phase="pacing", note=f"n={n}")
+
+        session = ("pw", "br", "page", "ctx")
+        with patch.object(browser_pw, "open_session", return_value=session), \
+                patch.object(browser_pw, "close_session"), \
+                patch.object(pipeline, "_run_listing_pw") as listing:
+            pipeline._run_pwcdp_round(self.db, self._cfg(), self.round_id, self.shops)
+
+        self.assertEqual(listing.call_args.kwargs["pacing_seed"], 2,
+                         "这一轮已用掉的 2 次详情访问要传进列表阶段接着数")

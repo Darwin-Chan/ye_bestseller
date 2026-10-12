@@ -2,7 +2,9 @@
 
 - 状态：已接受（一条决策被 [ADR-0038](0038-pacing-counts-detail-visits.md) 取代：主动停顿的
   计价单位由「页」改为「详情访问」（`pause_every_detail_visits = 180`）；背景、惰性触发与
-  可打断的约定、以及 deny 阶梯部分仍有效）
+  可打断的约定、以及 deny 阶梯部分仍有效。其中「配额只活在进程内存里」一句随后亦被
+  [ADR-0053](0053-pacing-ledger-spans-resumes.md) 取代；deny 阶梯后被
+  [ADR-0054](0054-deny-ledger-and-round-cooldowns.md) 补充两级整轮降温）
 - 日期：2026-09-22
 
 ## 背景
