@@ -6,10 +6,10 @@ from dataclasses import dataclass
 
 from playwright.sync_api import Error as PlaywrightError
 
-from . import detail, waiting
+from . import detail, raw_pages, waiting
 from .config import Config
-from .guard import (DenyTracker, PageEvidenceUnavailable, intervention_kind,
-                    is_deny_url, ready_detail_page)
+from .guard import (DenyTracker, PageEvidenceUnavailable, RoundDenyExceeded, ShopDenyExceeded,
+                    intervention_kind, is_deny_url, ready_detail_page)
 
 log = logging.getLogger(__name__)
 
@@ -44,9 +44,14 @@ class ReadFailedVisit:
 
 @dataclass(frozen=True)
 class DeniedVisit:
-    """详情页已确认是 deny；账目与阈值已由 guard 处理。"""
+    """详情页已确认是 deny；账目与阈值已由 guard 处理。
+
+    `raw_path` 是这次命中留下的原始页面存档路径（相对 `raw_page_dir`；拿不到页面时为 `None`）——
+    交回调用方，让它把路径写进事件备注（ADR-0057）。
+    """
 
     raw_html: str = ""
+    raw_path: str | None = None
 
 
 @dataclass
@@ -60,6 +65,10 @@ class ReadyDetailVisit:
     _shop_key: str | None = None
     _target_url: str | None = None
     _observed: bool = False
+    #: 命中人工介入时把页面交回调用方留证：`(page, vtype, criterion) -> 存档相对路径 | None`。
+    _on_intervention: object = None
+    #: 命中 deny 时留证：`(html) -> 存档相对路径 | None`（来源与身份已由调用方闭包捕获）。
+    _archive_deny: object = None
 
     def observe(self, product_url: str) -> detail.Observation | DeniedVisit:
         """等待 guard 后的页面可读，再翻译当前 HTML；同一 capability 只能调用一次。
@@ -86,7 +95,7 @@ class ReadyDetailVisit:
                 if isinstance(guarded, detail.Observation):
                     return guarded
                 if guarded:
-                    return DeniedVisit(_read_raw_html(self._page))
+                    return self._denied_visit()
 
             try:
                 intervention = intervention_kind(self._page)
@@ -97,7 +106,7 @@ class ReadyDetailVisit:
                 if isinstance(guarded, detail.Observation):
                     return guarded
                 if guarded:
-                    return DeniedVisit(_read_raw_html(self._page))
+                    return self._denied_visit()
                 # 人工介入结束后，给当前页面一个完整的可读窗口。
                 return waiting.EXTEND
 
@@ -122,13 +131,21 @@ class ReadyDetailVisit:
                 return html
             return detail.observe_html(html, product_url)
 
+    def _denied_visit(self) -> DeniedVisit:
+        """把当前页读成一次 deny 结果，并顺手留一份原始页（ADR-0057）。"""
+        html = _read_raw_html(self._page)
+        return DeniedVisit(html, _archive(self._archive_deny, html))
+
     def _guard(self) -> bool | detail.Observation:
         try:
             return ready_detail_page(
                 self._page, self._cfg, emit=self._emit,
                 deny_tracker=self._deny_tracker, shop_key=self._shop_key,
-                target_url=self._target_url,
+                target_url=self._target_url, on_intervention=self._on_intervention,
             )
+        except (ShopDenyExceeded, RoundDenyExceeded) as exc:
+            _archive_threshold_deny(self._archive_deny, self._page, exc)
+            raise
         except BROWSER_IO_ERRORS as exc:
             return detail.Observation.read_failed(exc)
 
@@ -141,7 +158,8 @@ class ReadyDetailVisit:
 
 def _settle_detail_page(opened: OpenedDetail, cfg: Config, *, emit=None,
                         deny_tracker: DenyTracker | None = None,
-                        shop_key: str | None = None) -> bool:
+                        shop_key: str | None = None,
+                        on_intervention=None) -> bool:
     """刚打开的详情页先判读一次；「还没渲染出来」时给一段就绪窗口等待重判。
 
     「还没渲染出来」不是「无法验证」：弹窗可能先落在空白页或空壳文档上，交接的同一瞬间
@@ -156,7 +174,8 @@ def _settle_detail_page(opened: OpenedDetail, cfg: Config, *, emit=None,
     def judge() -> bool:
         return ready_detail_page(
             opened.page, cfg, emit=emit, deny_tracker=deny_tracker,
-            shop_key=shop_key, target_url=opened.target_url)
+            shop_key=shop_key, target_url=opened.target_url,
+            on_intervention=on_intervention)
 
     try:
         return judge()
@@ -187,6 +206,8 @@ def begin_detail_visit(
     deny_tracker: DenyTracker | None = None,
     shop_key: str | None = None,
     pacing=None,
+    round_id: int | None = None,
+    offer_id=None,
 ) -> NotOpenedVisit | ReadFailedVisit | DeniedVisit | ReadyDetailVisit:
     """取得详情页并完成初次 guard，交回一次性的后续读取 capability。
 
@@ -198,6 +219,11 @@ def begin_detail_visit(
     （配额到点就停在这里，请求还没发出）、**adapter 真的交回页面之后**记一次。记账点放在
     取得之后，所以「点了没打开」与「取得时报错」都不占配额，而 guard 判出来的 deny 页、
     以及在 deny 页上越界抛出的那一次都算——配额量的是打到详情接口的请求。
+
+    `round_id` 与 `offer_id` 用来组「命中拦截/介入时留一份原始页」的闭包（ADR-0057）：本 seam
+    只把闭包塞进 `ReadyDetailVisit` 与两个 deny 出口，**判据层（guard）不认识磁盘**。`offer_id`
+    可以是字符串或返回字符串的无参函数——点击路径点开之后才拿得到编号，所以按值取而不是按
+    引用捕获；编号缺失（`None`）时这一路不留证，采集照常。
     """
     if pacing is not None:
         pacing.before_detail_visit(shop_key=shop_key)
@@ -214,17 +240,74 @@ def begin_detail_visit(
     if pacing is not None:
         pacing.detail_visit_opened(shop_key=shop_key)
 
+    resolved: str | None = None
+    resolved_done = False
+
+    def identity() -> str | None:
+        """这次的存档身份：调用方给的编号（可按值取——点击路径点开后才拿得到）。只解析一次。"""
+        nonlocal resolved, resolved_done
+        if not resolved_done:
+            resolved = _resolve_identity(offer_id)
+            resolved_done = True
+        return resolved
+
+    def archive_deny(html: str) -> str | None:
+        key = identity()
+        if not html or key is None or round_id is None:
+            return None
+        return raw_pages.relpath(cfg, raw_pages.save_detail_page(cfg, round_id, key, html))
+
+    def archive_intervention(page, vtype: str, criterion: str | None = None) -> str | None:
+        key = identity()
+        if key is None or round_id is None:
+            return None
+        html = _read_raw_html(page)
+        if not html:
+            return None
+        return raw_pages.relpath(cfg, raw_pages.save_intervention_page(
+            cfg, round_id, key, vtype, html))
+
     try:
         denied = _settle_detail_page(
-            opened, cfg, emit=emit, deny_tracker=deny_tracker, shop_key=shop_key)
+            opened, cfg, emit=emit, deny_tracker=deny_tracker, shop_key=shop_key,
+            on_intervention=archive_intervention)
+    except (ShopDenyExceeded, RoundDenyExceeded) as exc:
+        _archive_threshold_deny(archive_deny, opened.page, exc)
+        raise
     except BROWSER_IO_ERRORS as exc:
         return ReadFailedVisit(exc, detail.Observation.read_failed(exc))
     if denied:
-        return DeniedVisit(_read_raw_html(opened.page))
+        html = _read_raw_html(opened.page)
+        return DeniedVisit(html, _archive(archive_deny, html))
     return ReadyDetailVisit(
         _page=opened.page, _cfg=cfg, _emit=emit, _deny_tracker=deny_tracker,
         _shop_key=shop_key, _target_url=opened.target_url,
+        _on_intervention=archive_intervention, _archive_deny=archive_deny,
     )
+
+
+def _resolve_identity(value):
+    """`offer_id` 实参可以是字符串或返回字符串的无参函数（点击路径点开后才拿得到编号）。"""
+    return value() if callable(value) else value
+
+
+def _archive_threshold_deny(archive_deny, page, exc) -> None:
+    """触发店铺/整轮阈值的 deny 也要留证：它恰是「赔掉一家店 / 中止整轮」的那一页（ADR-0057）。
+
+    两处出口（初次判读与可读等待）共用这一份，异常由调用方原样上抛。
+    """
+    exc.raw_path = _archive(archive_deny, _read_raw_html(page))
+
+
+def _archive(archive_deny, html: str) -> str | None:
+    """调用调用方给的 deny 留证闭包；没给、html 为空或写盘失败都只记日志、不影响控制流。"""
+    if archive_deny is None or not html:
+        return None
+    try:
+        return archive_deny(html)
+    except Exception:
+        log.debug("deny 存档失败，忽略", exc_info=True)
+        return None
 
 
 def _read_raw_html(page) -> str:

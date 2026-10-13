@@ -66,6 +66,7 @@ class ClickEvent:
     skip_reason: SkipReason | None = None
     deny_step: int | None = None
     deny_terminal: str | None = None
+    raw_page: str | None = None
 
 
 def classify(event: str, note: str | None) -> ClickEvent | None:
@@ -80,6 +81,7 @@ def classify(event: str, note: str | None) -> ClickEvent | None:
         skip_reason=_skip_reason(outcome, note),
         deny_step=_deny_step(outcome, note),
         deny_terminal=_deny_terminal(outcome, note),
+        raw_page=_search(_RAW_RE, note),
     )
 
 
@@ -123,13 +125,19 @@ def no_offer(card: CardRef) -> tuple[str, dict]:
     return ClickOutcome.NO_OFFER.value, {"note": card.note}
 
 
-def denied(card: CardRef, step: int, terminal: str | None = None) -> tuple[str, dict]:
+def denied(card: CardRef, step: int, terminal: str | None = None,
+           raw: str | None = None) -> tuple[str, dict]:
     """在 deny 阶梯上的第 `step` 次；`terminal` 是这一档的收场方式。
+
+    `raw` 是这一命中留下的原始页存档路径（相对 `raw_page_dir`，可空）——deny 事件据此回指
+    证据文件（ADR-0057）。
 
     只有 deny 走 `phase="detail"`，其余五种都在 listing 阶段——这条差别原来散在
     调用点的 `phase=` 实参里，现在跟着事件名一起收在这里。
     """
     suffix = f"&n={step}" + (f"&{terminal}" if terminal else "")
+    if raw:
+        suffix += f"&raw={raw}"
     return ClickOutcome.DENIED.value, {"phase": _DENY_PHASE, "note": card.note + suffix}
 
 
@@ -202,6 +210,7 @@ _OFFER_ID_RE = re.compile(r"&offer_id=([^&]+)")
 _DUPLICATE_RE = re.compile(r"&dup=1")
 _DENY_STEP_RE = re.compile(r"&n=(\d+)")
 _DENY_TERMINAL_RE = re.compile(r"&(round_abort|shop_skip|skip)")
+_RAW_RE = re.compile(r"&raw=([^&\s]+)")
 
 #: 只有 deny 落在详情阶段，其余五种点击事件都在列表阶段。
 _DENY_PHASE = "detail"

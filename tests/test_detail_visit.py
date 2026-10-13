@@ -209,11 +209,12 @@ class DetailVisitTests(unittest.TestCase):
         import（与它引出的那条 import 环）一并去掉。
 
         **这条非用签名不可**：多传一个位置实参会被静默绑到下一个参数上。加参数也要在这里
-        露一面——`pacing` 就是 2026-09-22 按 ADR-0038 加进来的那一个（主动停顿的两步都收在
-        这条 seam 上）。
+        露一面——`pacing` 是 2026-09-22 按 ADR-0038 加进来的；`round_id`/`offer_id` 是
+        2026-10-13 按 ADR-0057 加进来的（命中拦截/介入时留一份原始页，身份由调用方闭包捕获）。
         """
         self.assertEqual(list(inspect.signature(detail_visit.begin_detail_visit).parameters),
-                         ["acquire", "cfg", "emit", "deny_tracker", "shop_key", "pacing"])
+                         ["acquire", "cfg", "emit", "deny_tracker", "shop_key", "pacing",
+                          "round_id", "offer_id"])
         self.assertNotIn("_reraise",
                          {field.name for field in dataclasses.fields(detail_visit.ReadyDetailVisit)})
         with self.assertRaises(TypeError):
@@ -436,6 +437,83 @@ class DetailVisitTests(unittest.TestCase):
         if "error" in box:
             raise box["error"]
         return box.get("value")
+
+
+class VisitArchiveTests(unittest.TestCase):
+    """共享 seam 命中拦截 / deny 时留一份原始页（ADR-0057 / issue 12 票 03）。
+
+    身份（轮次 + 商品编号）由调用方给；本 seam 只把闭包塞进 `ReadyDetailVisit` 与两个 deny
+    出口。这里测「写没写、写在哪、写的是什么、身份缺了会不会崩」这几件外部可见的事。
+    """
+
+    DENY_URL = "https://s.1688.com/bsop-punish?x=1"
+
+    def setUp(self):
+        self.cfg = crawler_cfg()
+
+    def begin(self, page, **kw):
+        kw.setdefault("round_id", 7)
+        kw.setdefault("offer_id", "11")
+        return detail_visit.begin_detail_visit(
+            lambda: detail_visit.OpenedDetail(page), self.cfg, **kw)
+
+    def archived(self, relpath) -> str:
+        return (self.cfg.raw_page_dir / relpath).read_text(encoding="utf-8")
+
+    def test_an_initial_deny_leaves_the_raw_page(self):
+        page = FakePage(self.DENY_URL, html="<html>deny</html>")
+        visit = self.begin(page)
+        self.assertIsInstance(visit, detail_visit.DeniedVisit)
+        self.assertEqual(visit.raw_path, "round_7/11.html")
+        self.assertEqual(self.archived(visit.raw_path), "<html>deny</html>")
+
+    def test_the_offer_id_may_be_resolved_lazily(self):
+        """点击路径点开之后才拿得到编号，所以身份用取值函数（不是按引用捕获的空值）。"""
+        page = FakePage(self.DENY_URL, html="<html>deny</html>")
+        visit = detail_visit.begin_detail_visit(
+            lambda: detail_visit.OpenedDetail(page), self.cfg,
+            round_id=7, offer_id=lambda: "1053796056")
+        self.assertEqual(visit.raw_path, "round_7/1053796056.html")
+
+    def test_without_an_identity_no_archive_and_no_crash(self):
+        page = FakePage(self.DENY_URL, html="<html>deny</html>")
+        visit = detail_visit.begin_detail_visit(
+            lambda: detail_visit.OpenedDetail(page), self.cfg)
+        self.assertIsInstance(visit, detail_visit.DeniedVisit)
+        self.assertIsNone(visit.raw_path)
+        self.assertFalse((self.cfg.raw_page_dir / "round_7").exists())
+
+    def test_a_threshold_deny_is_archived_before_the_exception_flies(self):
+        page = FakePage(self.DENY_URL, html="<html>deny</html>")
+        tracker = guard.DenyTracker(self.cfg.deny_window_minutes * 60)
+        tracker.record("A01")
+        tracker.record("A01")           # 再记一次就到店阈值（3）
+        with self.assertRaises(guard.ShopDenyExceeded) as raised:
+            detail_visit.begin_detail_visit(
+                lambda: detail_visit.OpenedDetail(page), self.cfg,
+                deny_tracker=tracker, shop_key="A01", round_id=7, offer_id="11")
+
+        self.assertEqual(raised.exception.raw_path, "round_7/11.html")
+        self.assertEqual(self.archived("round_7/11.html"), "<html>deny</html>")
+
+    def test_a_deny_seen_while_reading_is_archived(self):
+        page = readable_mock_page()
+        page.url = PRODUCT_URL
+        page.content.return_value = "<html>deny-late</html>"
+        calls = []
+
+        def ready(page_, cfg, **kwargs):
+            calls.append(kwargs)
+            return len(calls) == 2
+
+        with patch.object(detail_visit, "ready_detail_page", side_effect=ready), \
+             patch.object(detail_visit, "is_deny_url", side_effect=[False, True]):
+            visit = self.begin(page)
+            result = visit.observe(PRODUCT_URL)
+
+        self.assertIsInstance(result, detail_visit.DeniedVisit)
+        self.assertEqual(result.raw_path, "round_7/11.html")
+        self.assertEqual(self.archived("round_7/11.html"), "<html>deny-late</html>")
 
 
 if __name__ == "__main__":

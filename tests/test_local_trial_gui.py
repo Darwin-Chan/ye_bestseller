@@ -335,7 +335,7 @@ class LocalTrialGuiTests(unittest.TestCase):
             with patch.object(run, "ROOT", self.root), patch.object(sys, "argv", command[1:]), \
                     patch.object(browser_pw, "open_session", return_value=(None, None, object(), None)), \
                     patch.object(browser_pw, "close_session"), \
-                    patch.object(click_listing, "PlaywrightListing", side_effect=lambda *a: ScriptedListing([[card]])), \
+                    patch.object(click_listing, "PlaywrightListing", side_effect=lambda *a, **k: ScriptedListing([[card]])), \
                     patch.object(product_images, "urlopen", side_effect=lambda *a, **k: io.BytesIO(product_picture("green")["content"])), \
                     contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(run.main(), 0)

@@ -334,12 +334,16 @@ def resolved(page, *, target_url: str | None = None) -> bool:
 def ready_detail_page(page, cfg: Config, *, emit=None,
                       deny_tracker: DenyTracker | None = None,
                       shop_key: str | None = None,
-                      target_url: str | None = None) -> bool:
+                      target_url: str | None = None,
+                      on_intervention=None) -> bool:
     """一个刚打开的详情页能不能用：先认 deny（记账 + 阈值），不是 deny 才判人工介入并等人解决。
 
     两条详情访问（点击式列表的弹窗、逐店补采的详情页）打开页面之后都先走这里，「deny 该不该
     退避、滑块要不要响铃等人」只判一次（候选 04）。顺序是有意的：deny 页是自动限流，该退避，
     不该当成滑块去响铃等人（`is_deny_url` 的注释就是这么写的）。
+
+    `on_intervention` 给了就在确认为人工介入、刷新之前把它交回调用方留证（见 ADR-0057）——
+    本函数与 `wait_for_resolution` 都不认识磁盘与轮次，只把「页面 + 判据」传出去。
 
     交回 `True` 表示这次落在 deny 页上（记账已经做完；阈值越界会抛下面两个异常），
     `False` 表示页面可用——需要人工介入的话，已经等人解决完了。
@@ -364,13 +368,14 @@ def ready_detail_page(page, cfg: Config, *, emit=None,
         wait_for_resolution(page, cfg.human_pause_minutes, emit=emit,
                             verification_type=vtype(found.kind),
                             confirm_sec=cfg.intervention_confirmation_sec,
-                            target_url=target_url, criterion=found.criterion)
+                            target_url=target_url, criterion=found.criterion,
+                            on_intervention=on_intervention)
     return False
 
 
 def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | None = None,
                         confirm_sec: float = 2.0, *, target_url: str | None = None,
-                        criterion: str | None = None) -> None:
+                        criterion: str | None = None, on_intervention=None) -> None:
     """需要人工介入时：先过确认窗口过滤瞬时报错信号，再持续响铃直到解决。
 
     两段等待都走 `waiting.until`：每一轮都问一次「该不该停」（ADR-0009）——这时用户最
@@ -380,6 +385,10 @@ def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | 
     `criterion` 是这一支判据的来源（`intervention_detail` 交出来的那一半）。它和页面地址一起
     进事件备注与进度行：现场那 2 分 20 秒事后只剩一句「滑块」，等的是哪一页、为什么判成介入
     都查不到（issue 12）。
+
+    `on_intervention` 给了就在**确认介入之后、那次 `reload` 之前**调用一次
+    `on_intervention(page, vtype, criterion)`，把它交回的存档路径（可空）写进事件备注；本函数
+    不认识磁盘，只把「页面 + 判据」传出去，存档失败也不影响等待（见 ADR-0057）。
     """
     vtype_name = verification_type or "slider"
     target_url = (target_url or page.url) if vtype_name == "identity" else None
@@ -410,6 +419,8 @@ def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | 
     if waiting.until(probe, timeout_sec=confirm_sec, poll_sec=0.3):
         log.debug("人工介入信号瞬时就消失，判定为误报，忽略")
         return
+    # 确认为真正的人工介入：刷新之前先把这一刻的页面交回调用方留证（命中的就是它，ADR-0057）。
+    archive = _run_archive(on_intervention, page, vtype_name, criterion)
     # 超过确认窗口仍未解决 => 确认为真正需要人工介入
     # 先尝试一次刷新：反爬拦截页/瞬时 block 常可通过刷新解除，刷新后恢复则不响铃
     if vtype_name != "identity":
@@ -431,7 +442,8 @@ def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | 
     log.warning("检测到需要人工介入，请在浏览器窗口处理（持续响铃直到解决）……最长 %s 分钟", minutes)
     if emit:
         emit("verification_appear", kind="verification", verification_type=vtype_name,
-             note=_wait_note(f"type={vtype_name};wait_minutes={minutes}", where(), criterion))
+             note=_wait_note(f"type={vtype_name};wait_minutes={minutes}", where(), criterion,
+                             archive))
     ticks = 0
     def ring() -> None:
         nonlocal ticks
@@ -448,27 +460,46 @@ def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | 
             stop_request.check()
             if emit:
                 emit("verification_timeout", kind="verification", verification_type="identity",
-                     note=_wait_note("reason=IDENTITY_VERIFICATION_TIMEOUT", where(), criterion))
+                     note=_wait_note("reason=IDENTITY_VERIFICATION_TIMEOUT", where(), criterion,
+                                     archive))
             raise IdentityVerificationTimeout("身份验证等待超时，本轮自动中止，已保存数据保留")
         raise InterventionTimeout("人工介入超时")
     if emit:
         emit("verification_solved", kind="verification", verification_type=vtype_name,
              note=_wait_note(f"resolution_seconds={time.time() - appear_ts:.1f}",
-                             where(), criterion))
+                             where(), criterion, archive))
     log.info("人工介入已解决，停止响铃，继续。")
 
 
-def _wait_note(base: str, page_url: str, criterion: str | None) -> str:
-    """等待事件的备注：既有字段在前，页面地址与判据来源追加在后。
+def _run_archive(on_intervention, page, vtype_name: str, criterion: str | None) -> str | None:
+    """把命中那一刻的页面交回调用方留证，返回它交回的存档路径（可空）。
+
+    存档失败只记日志、绝不影响等待：观测的活儿不配改变控制流（与「记录失败只写日志」同规）。
+    本模块不认识磁盘——写盘与命名全在调用方的闭包里（ADR-0057）。
+    """
+    if on_intervention is None:
+        return None
+    try:
+        return on_intervention(page, vtype_name, criterion)
+    except Exception:
+        log.debug("介入存档失败，忽略", exc_info=True)
+        return None
+
+
+def _wait_note(base: str, page_url: str, criterion: str | None,
+               archive: str | None = None) -> str:
+    """等待事件的备注：既有字段在前，页面地址、判据来源与存档路径追加在后。
 
     备注的既有读法按 `;` 分片、`=` 取值（界面的身份验证倒计时就这么读），所以追加的这段
     不能改变前面那段的位置与写法。
 
     地址与判据都按原样写入，不做转义：地址里真出现 `;`（矩阵参数那种）时，切出来的碎片
     大多不含 `=`，会被读法直接丢掉；含 `=` 的碎片会落成一个谁都不读的键。既不覆盖既有键，
-    也不改变既有键的位置。
+    也不改变既有键的位置。`archive` 是留证文件相对 `raw_page_dir` 的路径（见 ADR-0057）。
     """
     note = f"{base};url={page_url}"
     if criterion:
         note = f"{note};criterion={criterion}"
+    if archive:
+        note = f"{note};archive={archive}"
     return note

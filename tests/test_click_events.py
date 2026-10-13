@@ -108,6 +108,14 @@ class ClassifyTests(unittest.TestCase):
 
         self.assertIsNone(classify("click_deny", "page=1&idx=0").deny_step)
 
+    def test_the_deny_archive_path_is_read_back_from_the_note(self):
+        """deny 事件回指原始页存档（ADR-0057）：备注里的 `&raw=` 要能读回路径。"""
+        got = classify("click_deny", "page=1&idx=0&n=1&raw=round_7/11.html")
+        self.assertEqual(got.raw_page, "round_7/11.html")
+
+        # 没有存档时不留空键，读法不受扰
+        self.assertIsNone(classify("click_deny", "page=1&idx=0&n=1").raw_page)
+
 
 class RecordTests(unittest.TestCase):
     """生产者侧：调用方拿 `(事件名, kwargs)` 去发，不再自己拼事件名与备注。"""
@@ -154,6 +162,13 @@ class RecordTests(unittest.TestCase):
         self.assertEqual(first, {"phase": "detail", "note": "page=1&idx=0&n=1"})
         self.assertEqual(last["note"], "page=1&idx=0&n=3&skip")
         self.assertEqual(abort["note"], "page=1&idx=0&n=1&round_abort")
+
+    def test_a_denied_card_can_point_at_its_archived_page(self):
+        """带存档路径时接在末尾；不给就不留空键（ADR-0057）。"""
+        _, payload = denied(CardRef(page=1, index=0), 1, raw="round_7/11.html")
+
+        self.assertEqual(payload["note"], "page=1&idx=0&n=1&raw=round_7/11.html")
+        self.assertEqual(classify("click_deny", payload["note"]).raw_page, "round_7/11.html")
 
     def test_the_recorded_payload_is_read_back_by_the_classifier(self):
         """写出去的东西要能被读回来——同一条协议的两端在这里对上。"""

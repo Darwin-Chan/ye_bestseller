@@ -222,7 +222,7 @@ class LocalTrialCliTests(unittest.TestCase):
             '"price":1,"canBookCount":3}}}</script>'])]
         self.last_cards = cards
         self.listings = []
-        def listing(page, shop, cfg, human):
+        def listing(page, shop, cfg, human, round_id=None):
             adapter = ScriptedListing(pages if pages is not None else [cards])
             self.listings.append(adapter)
             return adapter

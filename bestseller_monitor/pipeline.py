@@ -593,7 +593,8 @@ def _run_listing_pw(db: Database, cfg: Config, round_id: int, shops: list[Shop],
             if listing_complete:
                 log.info("店铺 %s 本轮已完成榜单，跳过列表", shop.key)
             else:
-                listing_page = click_listing.PlaywrightListing(page, shop, cfg, human)
+                listing_page = click_listing.PlaywrightListing(page, shop, cfg, human,
+                                                               round_id=round_id)
                 offers, pages_read = click_listing.crawl_store_by_click(
                     listing_page, shop, cfg, human, db=db, round_id=round_id, emit=emit,
                     deny_tracker=deny_tracker, pacing=pacing,
@@ -666,6 +667,7 @@ def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, 
                 page, offer["product_url"], emit=emit_detail),
             cfg, emit=emit_detail, deny_tracker=deny_tracker,
             shop_key=offer["shop_key"], pacing=pacing,
+            round_id=round_id, offer_id=offer["offer_id"],
         )
         if isinstance(visit, detail_visit.NotOpenedVisit):
             raise RuntimeError("逐店补采的导航 adapter 不应返回 NotOpenedVisit")

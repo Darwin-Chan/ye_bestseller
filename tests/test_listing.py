@@ -187,6 +187,21 @@ class PrepareTests(unittest.TestCase):
 
         self.assertEqual(resolve.call_args.kwargs["criterion"], "slider-body:请按住滑块")
 
+    def test_the_archive_callback_reaches_the_wait(self):
+        """榜单首屏命中的页面也要能被留证：回调一路传到等待（ADR-0057）。
+
+        榜单首屏没有商品身份，留证按店铺命名；本模块不认识磁盘，只把它交出去。
+        """
+        callback = object()
+        with patch.object(listing, "wait_cards", return_value=True), \
+             patch.object(listing, "intervention_detail",
+                          return_value=guard.Intervention("滑块", "slider-body:x")), \
+             patch.object(listing, "wait_for_resolution") as resolve:
+            listing.prepare(self.page, "https://shop.example/", self.cfg, self.human,
+                            describe="店铺 A01 首屏", on_intervention=callback)
+
+        self.assertIs(resolve.call_args.kwargs["on_intervention"], callback)
+
     def test_missing_first_screen_cards_fail_instead_of_reading_an_empty_list(self):
         with self.assertRaises(ListingLoadFailed) as ctx:
             self._prepare(cards_ready=False)

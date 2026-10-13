@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from . import dedupe, rounds
+from . import dedupe, raw_pages, rounds
 from .config import Config
 from .db import (SKU_IMAGE_FILLED, SKU_IMAGE_NONE, SKU_IMAGE_OWN, Database, cst_date,
                  utcnow)
@@ -43,11 +43,8 @@ def parse_detail_html(html: str, product_url: str) -> dict:
 
 
 def save_raw_page(cfg: Config, round_id: int, offer_id: str, html: str) -> Path:
-    d = cfg.raw_page_dir / f"round_{round_id}"
-    d.mkdir(parents=True, exist_ok=True)
-    path = d / f"{offer_id}.html"
-    path.write_text(html, encoding="utf-8")
-    return path
+    """详情页失败 / deny 的存档；落点与命名由 `raw_pages` 一处持有。"""
+    return raw_pages.save_detail_page(cfg, round_id, offer_id, html)
 
 
 def readable(html: str) -> bool:

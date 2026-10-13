@@ -573,5 +573,81 @@ class InterventionCriterionTests(unittest.TestCase):
         self.assertTrue(any("刷新" in line and "boom" in line for line in logs.output))
 
 
+class InterventionArchiveTests(unittest.TestCase):
+    """命中人工介入时把页面交回调用方留证，事件回指存档路径（ADR-0057 / issue 12 票 03）。
+
+    判据层不认识磁盘：`wait_for_resolution` 只把「页面 + 判据」交给 `on_intervention`，由调用方
+    写盘。这条契约测四件事——回调何时调、带什么、路径怎么进事件、以及不介入时它不被调。
+    """
+
+    PRODUCT = "https://detail.1688.com/offer/11.html"
+    SLIDER_BODY = "请按住滑块，拖动到最右边"
+    CRITERION = "slider-body:请按住滑块"
+
+    def _run(self, page, **kwargs):
+        clock = GuardClock(step=1.0)
+        with patch.object(guard, "time", clock), patch.object(waiting, "time", clock), \
+             patch.object(guard.sound, "play_alarm"), self.assertRaises(InterventionTimeout):
+            guard.wait_for_resolution(page, 1, confirm_sec=0, criterion=self.CRITERION,
+                                      **kwargs)
+
+    def test_the_callback_runs_once_before_the_reload_with_the_criterion(self):
+        """留证在刷新之前：冻结的是「被拦下来那一刻」的页面，不是程序自己刷新后的。"""
+        page = FakePage(self.PRODUCT, body=self.SLIDER_BODY)
+        seen = []
+
+        def archive(page_obj, vtype, criterion):
+            seen.append((vtype, criterion, page.reloads))
+            return "round_7/11.slider.html"
+
+        self._run(page, on_intervention=archive)
+
+        self.assertEqual(len(seen), 1, "一次命中只留一次证")
+        vtype_seen, criterion_seen, reloads_at_call = seen[0]
+        self.assertEqual(vtype_seen, "slider")
+        self.assertEqual(criterion_seen, self.CRITERION)
+        self.assertEqual(reloads_at_call, 0, "留证发生在刷新之前")
+
+    def test_the_appear_event_points_at_the_archived_page(self):
+        page = FakePage(self.PRODUCT, body=self.SLIDER_BODY)
+        emit = MagicMock()
+        self._run(page, emit=emit,
+                  on_intervention=lambda *a: "round_7/11.slider.html")
+
+        note = emit.call_args_list[0].kwargs["note"]
+        self.assertIn("archive=round_7/11.slider.html", note)
+        self.assertIn("type=slider", note, "既有字段可读性不变")
+        self.assertIn(f"url={self.PRODUCT}", note)
+
+    def test_no_callback_means_no_archive_field(self):
+        """没给回调时备注里不该冒出空的 archive= 键（既有读法不受扰）。"""
+        page = FakePage(self.PRODUCT, body=self.SLIDER_BODY)
+        emit = MagicMock()
+        self._run(page, emit=emit)
+
+        note = emit.call_args_list[0].kwargs["note"]
+        self.assertNotIn("archive=", note)
+
+    def test_a_callback_that_returns_nothing_leaves_no_archive_field(self):
+        page = FakePage(self.PRODUCT, body=self.SLIDER_BODY)
+        emit = MagicMock()
+        self._run(page, emit=emit, on_intervention=lambda *a: None)
+
+        note = emit.call_args_list[0].kwargs["note"]
+        self.assertNotIn("archive=", note)
+
+    def test_a_false_alarm_leaves_no_archive(self):
+        """信号在确认窗口内自己消失 → 判为误报、不响铃、也不留证。"""
+        page = FakePage(self.PRODUCT, body=self.SLIDER_BODY)
+        called = []
+        clock = GuardClock(step=1.0)
+        with patch.object(guard, "resolved", return_value=True), \
+             patch.object(guard, "time", clock), patch.object(waiting, "time", clock):
+            guard.wait_for_resolution(page, 1, confirm_sec=1.0,
+                                      on_intervention=lambda *a: called.append(a))
+
+        self.assertEqual(called, [])
+
+
 if __name__ == "__main__":
     unittest.main()

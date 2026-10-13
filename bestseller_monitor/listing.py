@@ -10,10 +10,9 @@
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 
-from . import waiting
+from . import raw_pages, waiting
 from .config import Config
 from .guard import intervention_detail, vtype, wait_for_resolution
 
@@ -33,13 +32,8 @@ class ListingLoadFailed(Exception):
 
 
 def save_raw_listing_page(cfg: Config, round_id: int, shop_key: str, html: str) -> Path:
-    """存档失败列表页，供选择器或页面结构校准。"""
-    d = cfg.raw_page_dir / f"round_{round_id}"
-    d.mkdir(parents=True, exist_ok=True)
-    safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", shop_key)
-    path = d / f"listing_{safe_key}.html"
-    path.write_text(html, encoding="utf-8")
-    return path
+    """存档失败列表页，供选择器或页面结构校准；落点与命名由 `raw_pages` 一处持有。"""
+    return raw_pages.save_listing_page(cfg, round_id, shop_key, html)
 
 
 # ---------- 商品卡片与条件等待 ----------
@@ -231,11 +225,13 @@ def wait_for_list_change(page, before: tuple, describe: str,
 
 # ---------- 推进：换到下一批 ----------
 
-def prepare(page, url: str, cfg, human, *, describe: str, emit=None) -> None:
+def prepare(page, url: str, cfg, human, *, describe: str, emit=None,
+            on_intervention=None) -> None:
     """打开发榜页并把它准备好：等首屏卡片 → 人工介入 → 点「销量」排序。
 
     `describe` 是这次准备的上下文（如「店铺 A01 首屏」），用于日志与失败文案；
     `emit` 给了就记 `list_load` / `list_sort` 与人工介入事件（调用方决定这一遍要不要记）。
+    `on_intervention` 给了就把命中的页面交回调用方留证（见 ADR-0057）——本模块不认识磁盘。
 
     首屏拿不到商品卡片 → 抛 `ListingLoadFailed`：不能把空结果写成完成榜单。
     """
@@ -247,7 +243,7 @@ def prepare(page, url: str, cfg, human, *, describe: str, emit=None) -> None:
         wait_for_resolution(page, cfg.human_pause_minutes, emit=emit,
                             verification_type=vtype(found.kind),
                             confirm_sec=cfg.intervention_confirmation_sec, target_url=url,
-                            criterion=found.criterion)
+                            criterion=found.criterion, on_intervention=on_intervention)
     if not cards_ready and not wait_cards(page, min_count=1,
                                           describe=f"{describe}（验证后）商品卡片"):
         raise listing_load_failed(page, f"{describe}未加载商品卡片：{url}")

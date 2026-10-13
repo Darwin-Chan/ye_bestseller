@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 
 from playwright.sync_api import Error as PlaywrightError
 
-from . import click_events, dedupe, detail, detail_visit, listing, rounds
+from . import click_events, dedupe, detail, detail_visit, listing, raw_pages, rounds
 from .config import CARDS_PER_PAGE, Config, Shop, effective_pages_limit
 from .db import cst_date, utcnow
 from .delay import Humanizer
@@ -31,7 +31,22 @@ log = logging.getLogger(__name__)
 
 
 class _LateDenied(Exception):
-    """详情已知后在可读等待中再次命中 deny，交回当前商品的 deny 阶梯。"""
+    """详情已知后在可读等待中再次命中 deny，交回当前商品的 deny 阶梯。
+
+    `raw_path` 是这一命中留下的原始页存档路径（相对 `raw_page_dir`；可空），供 deny 事件
+    回指证据文件（ADR-0057）。
+    """
+
+    def __init__(self, raw_path: str | None = None):
+        super().__init__()
+        self.raw_path = raw_path
+
+
+def _card_identity(card) -> str:
+    """这张卡的存档身份：优先商品编号（点开之后才拿得到），拿不到就用卡片位置。"""
+    ref = card.card_ref
+    return card.offer_id or f"card-p{ref.page}-i{ref.index}"
+
 
 # 条件等待的上限兜底（秒）
 WAIT_POPUP_MS = 2500       # 点击后等待新标签页；有效弹窗通常在 2 秒内出现
@@ -176,13 +191,15 @@ class ShopWalk:
                 visit = detail_visit.begin_detail_visit(
                     card.acquire, self.cfg, emit=self.emit,
                     deny_tracker=self.deny_tracker, shop_key=self.shop.key,
-                    pacing=self.pacing,
+                    pacing=self.pacing, round_id=self.round_id,
+                    offer_id=lambda: _card_identity(card),
                 )
             except (ShopDenyExceeded, RoundDenyExceeded) as exc:
                 # 账目与判据都在 guard，这里只把它记成事件再上抛。
                 flag = ("round_abort" if isinstance(exc, RoundDenyExceeded)
                         else "shop_skip")
-                self.record(click_events.denied(ref, per_product_denies + 1, terminal=flag))
+                self.record(click_events.denied(ref, per_product_denies + 1, terminal=flag,
+                                                raw=getattr(exc, "raw_path", None)))
                 raise
 
             if isinstance(visit, detail_visit.NotOpenedVisit):
@@ -194,6 +211,7 @@ class ShopWalk:
                 # 商品编号尚未可靠取得，点击路径没有商品可记；保留原异常。
                 raise visit.error
 
+            deny_path = visit.raw_path if isinstance(visit, detail_visit.DeniedVisit) else None
             denied = isinstance(visit, detail_visit.DeniedVisit)
             if not denied:
                 try:
@@ -203,32 +221,34 @@ class ShopWalk:
                     flag = ("round_abort" if isinstance(exc, RoundDenyExceeded)
                             else "shop_skip")
                     self.record(click_events.denied(ref, per_product_denies + 1,
-                                                   terminal=flag))
+                                                   terminal=flag,
+                                                   raw=getattr(exc, "raw_path", None)))
                     raise
-                except _LateDenied:
+                except _LateDenied as exc:
                     self.emit("popup_close", offer_id=card.offer_id)
                     card.close()
                     closed_for_deny = True
                     retry_after_late_deny = True
                     denied = True
+                    deny_path = exc.raw_path
 
             if denied:
                 per_product_denies += 1
                 log.warning("店铺 %s 商品命中 deny（该商品第 %s 次）",
                             self.shop.key, per_product_denies)
                 if per_product_denies == 1:
-                    self.record(click_events.denied(ref, 1))
+                    self.record(click_events.denied(ref, 1, raw=deny_path))
                     if not closed_for_deny:
                         card.close()
                     self.human.sleep(self.cfg.deny_backoff_sec)
                     continue
                 if per_product_denies == 2:
-                    self.record(click_events.denied(ref, 2))
+                    self.record(click_events.denied(ref, 2, raw=deny_path))
                     if not closed_for_deny:
                         card.close()
                     self.human.sleep(self.cfg.deny_retry2_backoff_sec)
                     continue
-                self.record(click_events.denied(ref, 3, terminal="skip"))
+                self.record(click_events.denied(ref, 3, terminal="skip", raw=deny_path))
                 log.warning("店铺 %s 商品第 3 次命中 deny，跳过当前商品", self.shop.key)
                 if not closed_for_deny:
                     card.close()
@@ -287,7 +307,7 @@ class ShopWalk:
         """读取当前详情，并按「这次读成什么样」记事件。"""
         observation = visit.observe(product_url)
         if isinstance(observation, detail_visit.DeniedVisit):
-            raise _LateDenied()
+            raise _LateDenied(observation.raw_path)
         if observation.ok:
             self.emit("detail_parse", offer_id=offer_id,
                     note=f"sku_count={observation.sku_count}")
@@ -367,11 +387,13 @@ class PlaywrightListing:
     `card(i)` 给卡片句柄，`advance` 换下一批。页号由它自己记（卡片事件备注与失败文案都用它）。
     """
 
-    def __init__(self, page, shop: Shop, cfg: Config, human: Humanizer):
+    def __init__(self, page, shop: Shop, cfg: Config, human: Humanizer,
+                 round_id: int | None = None):
         self.page = page
         self.shop = shop
         self.cfg = cfg
         self.human = human
+        self.round_id = round_id
         self.page_no = 0
         self._emit = None
 
@@ -379,7 +401,22 @@ class PlaywrightListing:
         self.page_no = 1
         self._emit = emit
         listing.prepare(self.page, self.shop.url, self.cfg, self.human,
-                        describe=describe, emit=emit)
+                        describe=describe, emit=emit,
+                        on_intervention=self._archive_intervention)
+
+    def _archive_intervention(self, page, vtype: str, criterion: str | None = None) -> str | None:
+        """榜单首屏命中拦截/介入时留一份页面（无商品身份，按店铺命名；ADR-0057）。"""
+        if self.round_id is None:
+            return None
+        try:
+            html = page.content()
+        except Exception:
+            return None
+        if not html:
+            return None
+        path = raw_pages.save_listing_intervention_page(
+            self.cfg, self.round_id, self.shop.key, vtype, html)
+        return raw_pages.relpath(self.cfg, path)
 
     def scroll_to_load(self, describe: str) -> int:
         return scroll_cards_until_stable(self.page, describe)

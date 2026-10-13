@@ -636,5 +636,82 @@ class ClickListingDependencyTests(unittest.TestCase):
         self.assertNotIn("pipeline", imported, "点这条路径不该认识编排层")
 
 
+class DenyArchiveTests(ClickListingTestCase):
+    """点击路径命中 deny 时留下原始页、事件回指它（ADR-0057 / issue 12 票 03）。
+
+    点击路径过去把 `DeniedVisit.raw_html` 随 `_LateDenied` 一起丢掉（补采路径倒是有档）——
+    这里钉住「同一条 deny 两条路径都有档」以及「事件能点到文件」。
+    """
+
+    def test_an_initial_deny_leaves_a_raw_page_and_the_event_points_at_it(self):
+        cfg = crawler_cfg(deny_shop_limit=7)   # 别让店铺层在商品层阶梯走完前先弃店
+        card = FakeCard("商品1", offer_id="11", denied=True)
+        walk = self.walk(ScriptedListing([[card]]), cfg=cfg, deny_tracker=guard.DenyTracker(600))
+        result = walk.capture(card, "商品1")
+
+        self.assertIsNone(result, "第 3 次 deny 跳过当前商品")
+        notes = self.notes("click_deny")
+        self.assertTrue(notes, "命中了 deny 就该有 click_deny 事件")
+        self.assertIn("&raw=", notes[0], "deny 事件回指证据文件")
+        rel = notes[0].split("&raw=", 1)[1]
+        path = cfg.raw_page_dir / rel
+        self.assertTrue(path.exists(), rel)
+        self.assertEqual(path.read_text(encoding="utf-8"), "<html>deny</html>")
+
+    def test_a_late_deny_also_leaves_a_raw_page(self):
+        class LateDenyCard(FakeCard):
+            def acquire(self):
+                opened = super().acquire()
+                if opened is not None and not getattr(self, "_armed", False):
+                    self._armed = True
+                    page = opened.page
+                    reads = 0
+
+                    def content():
+                        nonlocal reads
+                        reads += 1
+                        if reads == 1:
+                            page.url = FakeCard.DENY_URL     # 读了一趟才变成 deny
+                            return "<html>仍在渲染</html>"
+                        return "<html>deny</html>"
+
+                    page.content = content
+                return opened
+
+        cfg = crawler_cfg()
+        card = LateDenyCard("商品1", offer_id="11")
+        with patch.object(waiting.time, "sleep"):
+            self.walk(ScriptedListing([[card]]), cfg).capture(card, "商品1")
+
+        notes = self.notes("click_deny")
+        self.assertTrue(notes, "晚到 deny 也该记 click_deny")
+        self.assertIn("&raw=", notes[0])
+        rel = notes[0].split("&raw=", 1)[1]
+        self.assertEqual((cfg.raw_page_dir / rel).read_text(encoding="utf-8"), "<html>deny</html>")
+
+    def test_the_listing_path_archives_under_the_shop_name(self):
+        """榜单首屏没有商品身份，按店铺命名（`intervention_<safe_shop>.<vtype>.html`）。"""
+        cfg = crawler_cfg()
+        page = MagicMock()
+        page.content.return_value = "<html>login</html>"
+        owner = click_listing.PlaywrightListing(page, self.shop, cfg, self.human,
+                                                round_id=self.round_id)
+
+        rel = owner._archive_intervention(page, "login", "url:login")
+
+        self.assertEqual(rel, f"round_{self.round_id}/intervention_A01.login.html")
+        self.assertEqual((cfg.raw_page_dir / rel).read_text(encoding="utf-8"),
+                         "<html>login</html>")
+
+    def test_the_listing_archive_is_silent_without_a_round(self):
+        """没有轮次身份就不落盘——采集照常，不留半个空目录。"""
+        cfg = crawler_cfg()
+        page = MagicMock()
+        owner = click_listing.PlaywrightListing(page, self.shop, cfg, self.human)
+
+        self.assertIsNone(owner._archive_intervention(page, "slider", None))
+        self.assertFalse(cfg.raw_page_dir.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
