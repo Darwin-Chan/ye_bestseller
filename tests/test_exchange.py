@@ -648,7 +648,7 @@ class WeeklyReportTests(unittest.TestCase):
 
 
 class MissingRemotePackageTests(unittest.TestCase):
-    """远端整份周包未到是正常空结果；已到包的覆盖缺口仍由 GapAndConflictTests 覆盖。"""
+    """远端整份周包未到是正常空结果；已到包的覆盖缺口仍由 WeeklyReportTests 覆盖。"""
 
     def test_an_unpublished_remote_package_is_a_clean_noop(self):
         world = ConsoleWorld(self)

@@ -316,7 +316,7 @@ class PackageTests(unittest.TestCase):
     def test_a_missing_package_that_the_report_names_passes(self):
         for machine in ("m1", "m2"):
             self.publish_package(machine)
-        self.write_report("**结果**：有需要人看一眼的地方（退出码 1）· 缺口 0 · 冲突 0 · "
+        self.write_report("**结果**：干净（退出码 0）· 缺口 0 · 冲突 0 · "
                           "还没来的包 1\n- 还没收到的包：raw-m3 的 W40 还没发布或没拉到\n")
 
         result = self.check()
@@ -338,7 +338,7 @@ class PackageTests(unittest.TestCase):
         for machine in ("m1", "m2"):
             self.publish_package(machine)
         # 「收进来的包」表的来源列里也有 raw-m3 这几个字：那不是「还没收到的包」的说明
-        self.write_report("**结果**：有需要人看一眼的地方（退出码 1）· 缺口 0 · 冲突 0 · "
+        self.write_report("**结果**：干净（退出码 0）· 缺口 0 · 冲突 0 · "
                           "还没来的包 1\n\n"
                           "## 二、收进来的包\n"
                           "| 来源 | 周 | 行数 | 新增 | 覆盖 | 冲突 | 图片 | 结果 |\n"
