@@ -105,7 +105,7 @@ class BrowserRuntime:
         started = time.monotonic()
         if os.name != 'nt':
             return Facts('unreadable', '此浏览器事实适配器仅支持 Windows，无法安全核验' + _UNREAD_SUFFIX,
-                         detail='非 Windows 主机')
+                         detail=self._detail(started, None, '非 Windows 主机'))
         result = None
         try:
             _check_directory(Path(settings.profile))
@@ -182,12 +182,13 @@ $t=@(Get-NetTCPConnection -State Listen -ErrorAction Stop | ForEach-Object {
     @staticmethod
     def _detail(started, result, note=''):
         parts = [f'耗时={time.monotonic() - started:.2f}s']
-        if result is not None:
+        if result is None:
+            parts.extend(['返回码=N/A', 'stderr=N/A'])
+        else:
             parts.append(f'返回码={result.returncode}')
             # PowerShell 的 stderr 跟随控制台码页（中文 Windows 是 GBK），与 netstat 同一档。
             stderr = decode_console_output(getattr(result, 'stderr', b'')).strip()
-            if stderr:
-                parts.append('stderr=' + stderr[:200].replace('\n', ' '))
+            parts.append('stderr=' + (stderr[:200].replace('\n', ' ') if stderr else 'N/A'))
         if note:
             parts.append(note)
         return ' '.join(parts)
@@ -238,10 +239,12 @@ class DedicatedBrowser:
                          name=f'浏览器事实核对-{self.role}').start()
 
     def _refresh(self):
+        started = time.monotonic()
         try:
             fact = self.runtime.observe(self.settings)
         except Exception as exc:
-            fact = Facts('unreadable', f'无法读取浏览器事实：{exc}' + _UNREAD_SUFFIX)
+            fact = Facts('unreadable', f'无法读取浏览器事实：{exc}' + _UNREAD_SUFFIX,
+                         detail=BrowserRuntime._detail(started, None, '刷新异常'))
         with self._facts_lock:
             self._facts = fact
             self._refreshing = False
@@ -280,10 +283,34 @@ class DedicatedBrowser:
         error = self.configuration_error()
         if error:
             return error
-        view = self.status()
+        return self._start_error_for_view(self.status())
+
+    def start_error_from_snapshot(self, fact, pending=False):
+        """Decide from a completed probe without scheduling another refresh."""
+        error = self.configuration_error()
+        if error:
+            return error
+        if pending or fact is None:
+            return '正在核对浏览器事实…' + RETRY
+        state, message = self._project_fact(fact)
+        return self._start_error_for_view(self._view(state, message))
+
+    @staticmethod
+    def _start_error_for_view(view):
         if not view['can_start']:
             return view['message'] + RETRY
         return None
+
+    def _project_fact(self, fact):
+        state, message = ((fact.state, fact.message) if fact is not None
+                          else ('checking', '正在核对浏览器事实…'))
+        if state == 'occupied':
+            message = '专用目录仍被浏览器占用，请使用已有窗口，不会另开标签。'
+        if self._unconfirmed and state in ('free',) + _UNREAD_STATES:
+            state, message = 'unconfirmed', '启动已返回但未观察到专用目录占用，创建归属无法确认；请检查窗口并重新打开 GUI。'
+        if state == 'free':
+            state, message = ('closed', '已关闭，专用目录未占用。') if self._opened else ('free', '专用目录未占用。')
+        return state, message
 
     def status(self):
         """读一份事实快照（必要时安排后台刷新）。**不在请求线程里跑探测**。"""
@@ -295,16 +322,9 @@ class DedicatedBrowser:
                 return self._view('failed', error)
         fact, pending = self.snapshot()
         with self._lock:
-            state, message = ((fact.state, fact.message) if fact is not None
-                              else ('checking', '正在核对浏览器事实…'))
-            if state == 'occupied':
+            if fact is not None and fact.state == 'occupied':
                 self._unconfirmed = False
-            elif self._unconfirmed and state in ('free',) + _UNREAD_STATES:
-                state, message = 'unconfirmed', '启动已返回但未观察到专用目录占用，创建归属无法确认；请检查窗口并重新打开 GUI。'
-            if state == 'free':
-                state, message = ('closed', '已关闭，专用目录未占用。') if self._opened else ('free', '专用目录未占用。')
-            elif state == 'occupied':
-                message = '专用目录仍被浏览器占用，请使用已有窗口，不会另开标签。'
+            state, message = self._project_fact(fact)
             error = self.configuration_error()
             if error:
                 state, message = 'failed', error
@@ -455,8 +475,9 @@ def verify_gui_settings(cfg, *, runtime=None):
             raise ValueError('浏览器配置与界面快照不一致，请重新打开界面。')
         service = DedicatedBrowser(cfg, expected.source, runtime=runtime, role='采集进程复核')
         # 子进程要的是**当场**的事实：界面那份快照可能已经旧了，而且这里没有界面可等。
-        service.snapshot(wait=_PROBE_TIMEOUT_SEC + 5)
-        reason = service.start_error()
+        # 这一次等待返回的事实就是 readiness decision 的输入，不能再经 status() 触发第二次刷新。
+        fact, pending = service.snapshot(wait=_PROBE_TIMEOUT_SEC + 5)
+        reason = service.start_error_from_snapshot(fact, pending)
         if reason:
             raise ValueError(reason)
     except (TypeError, KeyError, json.JSONDecodeError) as exc:

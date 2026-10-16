@@ -441,6 +441,8 @@ class ManualEdgeTests(unittest.TestCase):
         self.assertEqual(fact.state, 'unreadable', '超时是「没读到」，不是「读到占用」')
         self.assertIn('超时', fact.message)
         self.assertIn('耗时=', fact.detail)
+        self.assertIn('返回码=N/A', fact.detail)
+        self.assertIn('stderr=N/A', fact.detail)
         # 门禁侧：读不成不构成拒绝，开轮照走（真问题由采集子进程复核与归属门说清）。
         self.store_plan()
         api = gui.Api(config_file=self.config, browser_runtime=BrowserRuntime(),
@@ -622,6 +624,39 @@ class ManualEdgeTests(unittest.TestCase):
         self.assertEqual(len(views), 4)
         self.assertEqual(slow.peak, 1, '同一时刻只有一次探测在飞，读请求不排队堆积')
 
+    def test_subprocess_recheck_decides_from_the_fresh_fact_once(self):
+        import threading
+        from bestseller_monitor.dedicated_browser import Facts, Settings, verify_gui_settings
+        self.store_plan()
+        cfg = self.cfg.replace(gui_browser_settings=Settings.of(self.cfg, self.config).to_json())
+
+        class SequenceOS:
+            def __init__(self):
+                from bestseller_monitor.dedicated_browser import BrowserRuntime
+                self.real = BrowserRuntime()
+                self.calls = 0
+                self.second_started = threading.Event()
+                self.release = threading.Event()
+
+            def config_error(self, settings):
+                return self.real.config_error(settings)
+
+            def observe(self, settings):
+                self.calls += 1
+                if self.calls == 1:
+                    return Facts('occupied', '第一次读到占用')
+                self.second_started.set()
+                self.release.wait(2)
+                return Facts('free', '第二次读到空闲')
+
+        runtime = SequenceOS()
+        try:
+            with self.assertRaises(ValueError, msg='采集进程应使用同一次新鲜事实作 readiness decision'):
+                verify_gui_settings(cfg, runtime=runtime)
+        finally:
+            runtime.release.set()
+        self.assertEqual(runtime.calls, 1, 'readiness decision 不应触发第二次刷新')
+        self.assertFalse(runtime.second_started.is_set(), 'readiness decision 不应触发第二次刷新')
     def test_subprocess_recheck_reads_fresh_instead_of_a_snapshot(self):
         from bestseller_monitor.dedicated_browser import Settings, verify_gui_settings
         self.store_plan()

@@ -691,8 +691,8 @@ class Api:
             finally:
                 conn.close()
             # 续跑与新建同一道浏览器门禁（票 05）：手动窗口没关、专用目录仍被
-            # 占用或释不释放核不实，都不许继续——否则会借错误登录态或撞同一目录。
-            # 关键配置在这次启动后变化也一样拒绝，不静默换目录。
+            # 确定占用、启动归属未确认或配置已变化时不许继续；读不成或归属核不实
+            # 不把事实降级成拒绝，交给后续启动身份门核验。
             reason = self._browser.start_error()
             if reason:
                 return {"ok": False, "error": reason, "retryable": True}
