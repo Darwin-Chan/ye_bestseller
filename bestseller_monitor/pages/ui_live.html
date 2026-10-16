@@ -9,7 +9,8 @@
   body{margin:0;background:var(--bg);color:var(--txt)}
   .wrap{max-width:1080px;margin:0 auto;padding:20px}
   header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
-  header h1{font-size:20px;margin:0}
+  header h1{font-size:20px;margin:0;display:flex;align-items:baseline;gap:10px;min-width:0}
+  .collection-mode{font-size:12px;font-weight:400;color:var(--mut);line-height:1.4}
   .tabs{display:flex;align-items:stretch;margin-bottom:14px}
   .step{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;position:relative}
   .step .dot{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;background:#fff;border:2px solid var(--line);color:var(--mut);z-index:1}
@@ -65,7 +66,7 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>1688 畅销品监控 · 库存数据抓取</h1>
+    <h1>1688 畅销品监控 · 库存数据抓取<span class="collection-mode" id="collectionMode" role="status" hidden></span></h1>
     <!-- 试采是纯汇总机的功能（ADR-0049 修订段）：默认收起，由后端按角色投影显隐 -->
     <div style="display:flex;gap:10px">
       <button class="btn ghost sm" id="loginBrowserBtn">打开专用 Edge</button>
@@ -73,7 +74,6 @@
       <button class="btn ghost sm" id="trialModeBtn" hidden>进入本机试采</button>
     </div>
   </header>
-  <div class="banner warn" id="collectionMode" role="status">正式采集</div>
 
   <div class="banner err" id="apiError" style="display:none"></div>
 
@@ -271,6 +271,7 @@
   function renderCollectionMode(d) {
     if (!d || !d.collection_label) return;
     localTrial = !!d.local_trial;
+    $("collectionMode").hidden = !d.trial_available;
     $("collectionMode").textContent = d.collection_label
       + (localTrial ? " · 历史保留；同日已采商品可能跳过。正式交换与判断集共享不受影响。" : "");
     $("trialModeBtn").textContent = localTrial ? "返回正式采集" : "进入本机试采";

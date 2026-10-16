@@ -139,7 +139,7 @@ class LocalTrialGuiTests(unittest.TestCase):
                 self.assertIsNone(Database(formal).stop_request())
                 self.assertEqual(formal.execute("SELECT count(*) FROM rounds").fetchone()[0], 0)
 
-    def test_page_has_explicit_entry_and_persistent_mode_banner(self):
+    def test_page_has_explicit_entry_and_mode_status(self):
         html = (gui.PROJECT_ROOT / "bestseller_monitor/pages/ui_live.html").read_text(encoding="utf-8")
         self.assertIn('id="collectionMode"', html)
         self.assertIn('id="trialModeBtn"', html)

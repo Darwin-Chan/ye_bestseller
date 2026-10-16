@@ -35,8 +35,16 @@ window.pywebview = { platform: "edgechromium", api: {
       plan_note: window.__planNote || "",
       crawler: window.__crawler || null,
       ...(window.__collectionLabel ? {collection_label: window.__collectionLabel} : {}),
+      ...(window.__localTrial !== undefined ? {local_trial: window.__localTrial} : {}),
       ...(window.__trialAvailable !== undefined ? {trial_available: window.__trialAvailable} : {}),
     };
+  },
+
+  set_local_trial: async (enabled) => {
+    window.__localTrial = !!enabled;
+    return {ok: true, local_trial: window.__localTrial,
+            collection_label: window.__localTrial ? "本机试采，不共享" : "正式采集",
+            trial_available: true};
   },
   get_run: async () => {
     window.__calls.push("get_run");
@@ -131,7 +139,7 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
     def open_page(self, fail_on: str | None = None, message: str | None = None,
                   start_error: str | None = None, crawler: dict | None = None,
                   plan_note: str | None = None, collection_label: str | None = None,
-                  trial_available: bool | None = None):
+                  local_trial: bool | None = None, trial_available: bool | None = None):
         """加载真实页面，注入一个会按需抛错、按需拒绝启动的 pywebview 桥。"""
         page = self.browser.new_page(viewport={"width": 1100, "height": 1000})
         if fail_on:
@@ -146,6 +154,9 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
             page.add_init_script(f"window.__planNote = {plan_note!r};")
         if collection_label is not None:
             page.add_init_script(f"window.__collectionLabel = {collection_label!r};")
+        if local_trial is not None:
+            page.add_init_script(
+                f"window.__localTrial = {'true' if local_trial else 'false'};")
         if trial_available is not None:
             # JS 的布尔字面量：Python 的 True/False 在页面里不是真值。
             page.add_init_script(
@@ -301,22 +312,56 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
         finally:
             page.close()
 
-    def test_the_trial_entry_appears_only_where_the_machine_offers_it(self):
-        """试采入口按机器角色投影：纯汇总机看得见，采集机上页面里没有它（不是灰着）。"""
+    def test_collection_mode_is_projected_into_the_title_only_on_merge_machine(self):
+        """采集机完全不显示模式状态，纯汇总机把它显示在标题右侧。"""
         page = self.open_page(trial_available=True, collection_label="正式采集")
         try:
-            page.wait_for_selector("#trialModeBtn", state="visible", timeout=5000)
+            page.wait_for_selector("#collectionMode", state="visible", timeout=5000)
+            self.assertEqual(page.inner_text("#collectionMode"), "正式采集")
+            self.assertEqual(
+                page.eval_on_selector(
+                    "#collectionMode",
+                    "el => { const s = getComputedStyle(el); return [s.fontSize, s.color]; }",
+                ),
+                ["12px", "rgb(107, 114, 128)"],
+            )
+            self.assertEqual(
+                page.eval_on_selector("#collectionMode", "el => el.parentElement.tagName"),
+                "H1",
+            )
             self.assertEqual(page.inner_text("#trialModeBtn"), "进入本机试采")
         finally:
             page.close()
-        page = self.open_page(trial_available=False, collection_label="正式采集·渲染标记")
+
+        page = self.open_page(
+            trial_available=False,
+            collection_label="正式采集·渲染标记",
+        )
         try:
-            # 事实行按注入的标签渲染出来 = renderCollectionMode 真的跑过，
-            # 这样「不可见」不会只是「还没渲染」的假象。
-            page.wait_for_function(
-                "() => document.querySelector('#collectionMode').textContent.trim() === '正式采集·渲染标记'",
-                timeout=5000)
+            page.wait_for_selector("#rows input", timeout=5000)
+            self.assertFalse(page.locator("#collectionMode").is_visible())
             self.assertFalse(page.locator("#trialModeBtn").is_visible())
+        finally:
+            page.close()
+
+    def test_local_trial_mode_keeps_its_status_in_the_title(self):
+        page = self.open_page(
+            trial_available=True,
+            local_trial=True,
+            collection_label="本机试采，不共享",
+        )
+        try:
+            page.wait_for_selector("#collectionMode", state="visible", timeout=5000)
+            self.assertIn("本机试采，不共享", page.inner_text("#collectionMode"))
+            self.assertIn("正式交换与判断集共享不受影响", page.inner_text("#collectionMode"))
+            self.assertEqual(page.inner_text("#trialModeBtn"), "返回正式采集")
+
+            page.click("#trialModeBtn")
+            page.wait_for_function(
+                "() => document.querySelector(\"#collectionMode\").textContent === \"正式采集\"",
+                timeout=5000,
+            )
+            self.assertEqual(page.inner_text("#trialModeBtn"), "进入本机试采")
         finally:
             page.close()
 
