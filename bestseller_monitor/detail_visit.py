@@ -46,12 +46,12 @@ class ReadFailedVisit:
 class DeniedVisit:
     """详情页已确认是 deny；账目与阈值已由 guard 处理。
 
-    `raw_path` 是这次命中留下的原始页面存档路径（相对 `raw_page_dir`；拿不到页面时为 `None`）——
-    交回调用方，让它把路径写进事件备注（ADR-0057）。
+    `evidence` 是这次命中留下的原始页面存档引用；拿不到页面或写盘失败时为 `None`——
+    交回调用方，让它把引用转换成事件备注（ADR-0057）。
     """
 
     raw_html: str = ""
-    raw_path: str | None = None
+    evidence: raw_pages.RawPageReference | None = None
 
 
 @dataclass
@@ -67,8 +67,11 @@ class ReadyDetailVisit:
     _observed: bool = False
     #: 命中人工介入时把页面交回调用方留证：`(page, vtype, criterion) -> 存档相对路径 | None`。
     _on_intervention: object = None
-    #: 命中 deny 时留证：`(html) -> 存档相对路径 | None`（来源与身份已由调用方闭包捕获）。
+    #: 介入页面的最近一次原始存档引用；验证过程仍由 guard 负责。
+    evidence: raw_pages.RawPageReference | None = None
+    #: 命中 deny 时留证：`(html) -> RawPageReference | None`。
     _archive_deny: object = None
+    _intervention_state: dict | None = None
 
     def observe(self, product_url: str) -> detail.Observation | DeniedVisit:
         """等待 guard 后的页面可读，再翻译当前 HTML；同一 capability 只能调用一次。
@@ -138,11 +141,14 @@ class ReadyDetailVisit:
 
     def _guard(self) -> bool | detail.Observation:
         try:
-            return ready_detail_page(
+            result = ready_detail_page(
                 self._page, self._cfg, emit=self._emit,
                 deny_tracker=self._deny_tracker, shop_key=self._shop_key,
                 target_url=self._target_url, on_intervention=self._on_intervention,
             )
+            if self._intervention_state is not None:
+                self.evidence = self._intervention_state.get("evidence")
+            return result
         except (ShopDenyExceeded, RoundDenyExceeded) as exc:
             _archive_threshold_deny(self._archive_deny, self._page, exc)
             raise
@@ -251,21 +257,25 @@ def begin_detail_visit(
             resolved_done = True
         return resolved
 
-    def archive_deny(html: str) -> str | None:
+    intervention_state = {"evidence": None}
+
+    def archive_deny(html: str) -> raw_pages.RawPageReference | None:
         key = identity()
         if not html or key is None or round_id is None:
             return None
-        return raw_pages.relpath(cfg, raw_pages.save_detail_page(cfg, round_id, key, html))
+        return raw_pages.reference(cfg, raw_pages.save_detail_page(cfg, round_id, key, html))
 
-    def archive_intervention(page, vtype: str, criterion: str | None = None) -> str | None:
+    def archive_intervention(page, vtype: str, criterion: str | None = None):
         key = identity()
         if key is None or round_id is None:
             return None
         html = _read_raw_html(page)
         if not html:
             return None
-        return raw_pages.relpath(cfg, raw_pages.save_intervention_page(
+        reference = raw_pages.reference(cfg, raw_pages.save_intervention_page(
             cfg, round_id, key, vtype, html))
+        intervention_state["evidence"] = reference
+        return reference
 
     try:
         denied = _settle_detail_page(
@@ -282,7 +292,9 @@ def begin_detail_visit(
     return ReadyDetailVisit(
         _page=opened.page, _cfg=cfg, _emit=emit, _deny_tracker=deny_tracker,
         _shop_key=shop_key, _target_url=opened.target_url,
+        evidence=intervention_state["evidence"],
         _on_intervention=archive_intervention, _archive_deny=archive_deny,
+        _intervention_state=intervention_state,
     )
 
 
@@ -296,10 +308,10 @@ def _archive_threshold_deny(archive_deny, page, exc) -> None:
 
     两处出口（初次判读与可读等待）共用这一份，异常由调用方原样上抛。
     """
-    exc.raw_path = _archive(archive_deny, _read_raw_html(page))
+    exc.evidence = _archive(archive_deny, _read_raw_html(page))
 
 
-def _archive(archive_deny, html: str) -> str | None:
+def _archive(archive_deny, html: str) -> raw_pages.RawPageReference | None:
     """调用调用方给的 deny 留证闭包；没给、html 为空或写盘失败都只记日志、不影响控制流。"""
     if archive_deny is None or not html:
         return None

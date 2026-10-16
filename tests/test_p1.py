@@ -234,8 +234,8 @@ class P1Tests(unittest.TestCase):
 
         self.assertEqual(events, ["detail_nav", "detail_parse"])
 
-    def test_a_deny_page_during_backfill_is_counted_and_named(self):
-        """补采命中 deny：计入整轮账目（候选 04 的 Q1 决定），失败记录里写清是 deny。"""
+    def test_a_deny_page_during_backfill_is_counted_without_product_failure(self):
+        """补采命中 deny：计入整轮账目，但不把访问层拦截写成商品失败。"""
         round_id = new_round(self.db)
         self.db.add_shop(round_id, "A01", "https://shop.example/", "店铺A")
         url = "https://detail.1688.com/offer/11.html"
@@ -246,20 +246,27 @@ class P1Tests(unittest.TestCase):
                      if row["offer_id"] == "11")
         tracker = guard.DenyTracker(600)
         page = SimpleNamespace(url="https://s.1688.com/bsop-punish?x=1")
+        before = self.conn.execute(
+            "SELECT COUNT(*) FROM snapshots WHERE round_id=? AND page_status='失败'",
+            (round_id,),
+        ).fetchone()[0]
+        events: list[str] = []
 
         with patch.object(browser_pw, "navigate_detail",
                           return_value=self._opened_detail("<html>deny</html>", deny=True)):
             pipeline._capture_one_pw(
                 self.db, crawler_cfg(raw_page_dir=Path(self.tmp.name) / "raw"),
-                MagicMock(), round_id, offer, page, deny_tracker=tracker)
+                MagicMock(), round_id, offer, page, deny_tracker=tracker,
+                emit=lambda event, **kw: events.append(event))
 
         self.assertEqual((tracker.shop_count("A01"), tracker.round_count()), (1, 1),
                          "补采的 deny 与点击路径共用一个账目")
-        note = self.conn.execute(
-            "SELECT detail_note FROM snapshots WHERE round_id=? AND page_status='失败' "
-            "ORDER BY id DESC LIMIT 1", (round_id,)).fetchone()["detail_note"]
-        self.assertIn("反爬拦截（deny）", note, "失败理由要说清是 deny，不是这个商品的锅")
-        self.assertIn("原始页面：", note, "deny 页的原文留着供校准")
+        after = self.conn.execute(
+            "SELECT COUNT(*) FROM snapshots WHERE round_id=? AND page_status='失败'",
+            (round_id,),
+        ).fetchone()[0]
+        self.assertEqual(after, before, "deny 不应新增商品失败记录")
+        self.assertNotIn("detail_fail", events, "deny 不应发商品失败事件")
 
     def test_the_backfill_shop_is_skipped_when_deny_hits_the_limit(self):
         """补采撞上店铺阈值：这家店记为未完成，后面的店接着跑（与点击路径同款收尾）。"""

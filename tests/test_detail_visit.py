@@ -464,8 +464,8 @@ class VisitArchiveTests(unittest.TestCase):
         page = FakePage(self.DENY_URL, html="<html>deny</html>")
         visit = self.begin(page)
         self.assertIsInstance(visit, detail_visit.DeniedVisit)
-        self.assertEqual(visit.raw_path, "round_7/11.html")
-        self.assertEqual(self.archived(visit.raw_path), "<html>deny</html>")
+        self.assertEqual(visit.evidence.path, "round_7/11.html")
+        self.assertEqual(self.archived(visit.evidence.path), "<html>deny</html>")
 
     def test_the_offer_id_may_be_resolved_lazily(self):
         """点击路径点开之后才拿得到编号，所以身份用取值函数（不是按引用捕获的空值）。"""
@@ -473,14 +473,32 @@ class VisitArchiveTests(unittest.TestCase):
         visit = detail_visit.begin_detail_visit(
             lambda: detail_visit.OpenedDetail(page), self.cfg,
             round_id=7, offer_id=lambda: "1053796056")
-        self.assertEqual(visit.raw_path, "round_7/1053796056.html")
+        self.assertEqual(visit.evidence.path, "round_7/1053796056.html")
+
+    def test_an_archive_is_exposed_as_a_minimal_reference(self):
+        page = FakePage(self.DENY_URL, html="<html>deny</html>")
+        visit = self.begin(page)
+
+        self.assertIsInstance(visit.evidence, detail_visit.raw_pages.RawPageReference)
+        self.assertEqual(str(visit.evidence), "round_7/11.html")
+        self.assertEqual(visit.evidence.path, "round_7/11.html")
+
+    def test_an_archive_write_failure_keeps_the_deny_fact(self):
+        page = FakePage(self.DENY_URL, html="<html>deny</html>")
+        with patch.object(detail_visit.raw_pages, "save_detail_page",
+                          side_effect=OSError("磁盘不可写")):
+            visit = self.begin(page)
+
+        self.assertIsInstance(visit, detail_visit.DeniedVisit)
+        self.assertIsNone(visit.evidence)
+        self.assertEqual(visit.raw_html, "<html>deny</html>")
 
     def test_without_an_identity_no_archive_and_no_crash(self):
         page = FakePage(self.DENY_URL, html="<html>deny</html>")
         visit = detail_visit.begin_detail_visit(
             lambda: detail_visit.OpenedDetail(page), self.cfg)
         self.assertIsInstance(visit, detail_visit.DeniedVisit)
-        self.assertIsNone(visit.raw_path)
+        self.assertIsNone(visit.evidence)
         self.assertFalse((self.cfg.raw_page_dir / "round_7").exists())
 
     def test_a_threshold_deny_is_archived_before_the_exception_flies(self):
@@ -493,8 +511,31 @@ class VisitArchiveTests(unittest.TestCase):
                 lambda: detail_visit.OpenedDetail(page), self.cfg,
                 deny_tracker=tracker, shop_key="A01", round_id=7, offer_id="11")
 
-        self.assertEqual(raised.exception.raw_path, "round_7/11.html")
+        self.assertEqual(raised.exception.evidence.path, "round_7/11.html")
         self.assertEqual(self.archived("round_7/11.html"), "<html>deny</html>")
+
+    def test_a_late_intervention_keeps_its_archive_reference_on_the_visit(self):
+        page = readable_mock_page()
+        page.url = PRODUCT_URL
+        page.content.return_value = DETAIL_HTML
+
+        def ready(page_, cfg, **kwargs):
+            if kwargs.get("on_intervention") is not None and len(ready.calls) > 0:
+                kwargs["on_intervention"](page_, "login", "url:login")
+            ready.calls.append(True)
+            return False
+
+        ready.calls = []
+        with patch.object(detail_visit, "ready_detail_page", side_effect=ready), \
+             patch.object(detail_visit, "intervention_kind", side_effect=["login", None]), \
+             patch.object(detail_visit, "is_deny_url", return_value=False), \
+             patch.object(waiting.time, "sleep"):
+            visit = self.begin(page)
+            result = visit.observe(PRODUCT_URL)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(visit.evidence.path, "round_7/11.login.html")
+        self.assertEqual(self.archived(visit.evidence.path), DETAIL_HTML)
 
     def test_a_deny_seen_while_reading_is_archived(self):
         page = readable_mock_page()
@@ -512,7 +553,7 @@ class VisitArchiveTests(unittest.TestCase):
             result = visit.observe(PRODUCT_URL)
 
         self.assertIsInstance(result, detail_visit.DeniedVisit)
-        self.assertEqual(result.raw_path, "round_7/11.html")
+        self.assertEqual(result.evidence.path, "round_7/11.html")
         self.assertEqual(self.archived("round_7/11.html"), "<html>deny-late</html>")
 
 

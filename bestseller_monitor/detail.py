@@ -68,6 +68,7 @@ class Outcome(str, Enum):
     SKIPPED_TODAY = "skipped_today"  # 今天已经采过，跳过（不消耗详情机会）
     ATTEMPTS_EXHAUSTED = "attempts_exhausted"   # 本轮尝试额度已用尽，没有读页面
     FAILED = "failed"                # 观测失败，已记失败行
+    DENIED = "denied"                # 访问期间再次确认 deny，不算商品失败
     DUPLICATE = "duplicate"          # 同一次遍历里已经观测过这个商品
 
 
@@ -76,6 +77,7 @@ class FailureKind(str, Enum):
 
     READ = "read"        # 读不到页面内容（导航、连接、取内容都算）
     PARSE = "parse"      # 读到了页面，但解析不了（或取主图时崩了）
+    DENY = "deny"        # 访问层再次确认反爬拦截，不是商品失败
 
 
 @dataclass(frozen=True)
@@ -107,6 +109,7 @@ class Observation:
     failure: str | None = None
     raw_html: str = ""        # 失败时的原始页内容，有则存档供校准
     kind: FailureKind | None = None
+    evidence: raw_pages.RawPageReference | None = None
 
     @property
     def ok(self) -> bool:
@@ -123,12 +126,10 @@ class Observation:
         return cls(failure=f"详情页读取失败：{exc}", kind=FailureKind.READ)
 
     @classmethod
-    def denied(cls, html: str = "") -> "Observation":
-        """落到反爬拦截页（deny）：不是这个商品自己的问题，但得说清是它没读到。
-
-        账目与阈值在 `guard.ready_detail_page()`；这一条只是把理由写进失败记录、留下原始页
-        供校准（候选 04，补采路径与点击路径一样「deny 不算这个商品的失败原因」）。"""
-        return cls(failure="详情页被反爬拦截（deny）", raw_html=html, kind=FailureKind.READ)
+    def denied(cls, html: str = "", evidence=None) -> "Observation":
+        """把访问层已经确认的 deny 交给详情规则，不把它记成商品失败。"""
+        return cls(failure="详情页被反爬拦截（deny）", raw_html=html,
+                   kind=FailureKind.DENY, evidence=evidence)
 
     @classmethod
     def parse_failed(cls, exc: Exception, html: str = "") -> "Observation":
@@ -161,6 +162,7 @@ class CaptureResult:
     outcome: Outcome
     offer_id: str | None = None
     sku_count: int | None = None   # 提交成功时的 SKU 行数（调用方记事件用）
+    evidence: raw_pages.RawPageReference | None = None
 
 
 def capture_observation(db: Database, cfg: Config, human, round_id: int,
@@ -229,6 +231,8 @@ def _capture_attempts(db: Database, cfg: Config, human, round_id: int, target: D
     note = ""
     for attempt in range(first_attempt, last_attempt + 1):
         observation = read()
+        if observation.kind is FailureKind.DENY:
+            return CaptureResult(Outcome.DENIED, offer_id, evidence=observation.evidence)
         payload = observation.payload if observation.failure is None else None
         if payload is None:
             note = _failure_note(cfg, round_id, offer_id, observation)

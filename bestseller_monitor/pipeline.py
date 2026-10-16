@@ -676,12 +676,12 @@ def _capture_one_pw(db: Database, cfg: Config, human: Humanizer, round_id: int, 
         if isinstance(visit, detail_visit.DeniedVisit):
             log.warning("店铺 %s 商品 %s 补采命中 deny 页", offer["shop_key"],
                         offer["offer_id"])
-            return detail.Observation.denied(visit.raw_html)
+            return detail.Observation.denied(visit.raw_html, visit.evidence)
         observation = visit.observe(offer["product_url"])
         if isinstance(observation, detail_visit.DeniedVisit):
             log.warning("店铺 %s 商品 %s 补采等待中命中 deny 页", offer["shop_key"],
                         offer["offer_id"])
-            return detail.Observation.denied(observation.raw_html)
+            return detail.Observation.denied(observation.raw_html, observation.evidence)
         if observation.ok:
             emit_detail("detail_parse", phase="detail",
                         note=f"sku_count={observation.sku_count}")

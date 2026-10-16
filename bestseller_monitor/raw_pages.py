@@ -17,9 +17,25 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Config
+
+
+@dataclass(frozen=True)
+class RawPageReference:
+    """最小的原始页面存档引用；不暴露存档目录或写入细节。"""
+
+    path: str
+
+    def __str__(self) -> str:
+        return self.path
+
+
+def reference(cfg: Config, path: Path) -> RawPageReference:
+    """把存档路径转换成相对 raw_page_dir 的稳定引用。"""
+    return RawPageReference(relpath(cfg, path))
 
 
 def _round_dir(cfg: Config, round_id: int) -> Path:

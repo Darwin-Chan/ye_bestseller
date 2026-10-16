@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import TYPE_CHECKING
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from . import sound
 from . import waiting, stop_request
 from .config import Config
+
+if TYPE_CHECKING:
+    from .raw_pages import RawPageReference
 
 log = logging.getLogger(__name__)
 
@@ -43,9 +47,17 @@ class IdentityVerificationTimeout(InterventionTimeout):
 class ShopDenyExceeded(Exception):
     """某店滚动窗口内 deny 数达到阈值，跳过该店。"""
 
+    def __init__(self, message: str = "", *, evidence: "RawPageReference | None" = None):
+        super().__init__(message)
+        self.evidence = evidence
+
 
 class RoundDenyExceeded(RoundPauseRequired):
     """整轮滚动窗口内 deny 数达到阈值，中止本轮。"""
+
+    def __init__(self, message: str = "", *, evidence: "RawPageReference | None" = None):
+        super().__init__(message)
+        self.evidence = evidence
 
 
 # deny 事件编码（账本的落点；`db.deny_seed` 按同一份口径回读——续跑接着数，issue 13）
@@ -471,7 +483,7 @@ def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | 
     log.info("人工介入已解决，停止响铃，继续。")
 
 
-def _run_archive(on_intervention, page, vtype_name: str, criterion: str | None) -> str | None:
+def _run_archive(on_intervention, page, vtype_name: str, criterion: str | None) -> RawPageReference | None:
     """把命中那一刻的页面交回调用方留证，返回它交回的存档路径（可空）。
 
     存档失败只记日志、绝不影响等待：观测的活儿不配改变控制流（与「记录失败只写日志」同规）。
@@ -487,7 +499,7 @@ def _run_archive(on_intervention, page, vtype_name: str, criterion: str | None) 
 
 
 def _wait_note(base: str, page_url: str, criterion: str | None,
-               archive: str | None = None) -> str:
+               archive: RawPageReference | None = None) -> str:
     """等待事件的备注：既有字段在前，页面地址、判据来源与存档路径追加在后。
 
     备注的既有读法按 `;` 分片、`=` 取值（界面的身份验证倒计时就这么读），所以追加的这段

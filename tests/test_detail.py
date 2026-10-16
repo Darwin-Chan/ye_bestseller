@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from bestseller_monitor import dedupe, detail, rounds
+from bestseller_monitor import dedupe, detail, raw_pages, rounds
 from bestseller_monitor.db import (Database, DayBoundaryReached, SKU_IMAGE_FILLED,
                                    SKU_IMAGE_NONE, SKU_IMAGE_OWN, connect, cst_date, utcnow)
 from frozen_clock import FROZEN_DATE, FROZEN_NOW, frozen_clock
@@ -323,6 +323,20 @@ class SameDaySkipTests(DetailTestCase):
 
         self.assertEqual(result.outcome, detail.Outcome.FAILED)
         self.assertEqual(self.snapshots("失败")[0]["detail_note"], "详情页读取失败")
+
+    def test_a_denied_observation_is_not_recorded_as_a_product_failure(self):
+        """访问层确认 deny 后只交回访问结果，不把商品写成失败。"""
+        evidence = raw_pages.RawPageReference("round_2/11.html")
+
+        result = self.capture(
+            self.target(), self.observe(detail.Observation.denied(
+                "<html>deny</html>", evidence)), attempts=1,
+        )
+
+        self.assertEqual(result.outcome, detail.Outcome.DENIED)
+        self.assertIs(result.evidence, evidence)
+        self.assertEqual(self.snapshots("失败"), [])
+        self.assertEqual(self.snapshots("成功"), [])
 
 
 class FailureTests(DetailTestCase):

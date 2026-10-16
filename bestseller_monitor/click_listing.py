@@ -30,18 +30,6 @@ from .guard import RoundDenyExceeded, ShopDenyExceeded
 log = logging.getLogger(__name__)
 
 
-class _LateDenied(Exception):
-    """详情已知后在可读等待中再次命中 deny，交回当前商品的 deny 阶梯。
-
-    `raw_path` 是这一命中留下的原始页存档路径（相对 `raw_page_dir`；可空），供 deny 事件
-    回指证据文件（ADR-0057）。
-    """
-
-    def __init__(self, raw_path: str | None = None):
-        super().__init__()
-        self.raw_path = raw_path
-
-
 def _card_identity(card) -> str:
     """这张卡的存档身份：优先商品编号（点开之后才拿得到），拿不到就用卡片位置。"""
     ref = card.card_ref
@@ -99,6 +87,17 @@ class ShopWalk:
         事件名与备注由协议模块产出，遍历只决定**什么时候**记——这里是这两件事的接缝。
         """
         self.emit(spec[0], **spec[1])
+
+    def _deny_event(self, ref: str, step: int, *, evidence=None,
+                    terminal: str | None = None) -> tuple[str, dict]:
+        """把访问层的 deny 结果翻译成点击路径事件。"""
+        raw = evidence.path if evidence is not None else None
+        return click_events.denied(ref, step, terminal=terminal, raw=raw)
+
+    def _record_deny_threshold(self, ref: str, step: int, exc: Exception) -> None:
+        """记录阈值 deny 的终态事件，再把控制流异常原样交回编排层。"""
+        terminal = "round_abort" if isinstance(exc, RoundDenyExceeded) else "shop_skip"
+        self.record(self._deny_event(ref, step, evidence=exc.evidence, terminal=terminal))
 
     # ---------- 遍历 ----------
     def run(self):
@@ -196,10 +195,7 @@ class ShopWalk:
                 )
             except (ShopDenyExceeded, RoundDenyExceeded) as exc:
                 # 账目与判据都在 guard，这里只把它记成事件再上抛。
-                flag = ("round_abort" if isinstance(exc, RoundDenyExceeded)
-                        else "shop_skip")
-                self.record(click_events.denied(ref, per_product_denies + 1, terminal=flag,
-                                                raw=getattr(exc, "raw_path", None)))
+                self._record_deny_threshold(ref, per_product_denies + 1, exc)
                 raise
 
             if isinstance(visit, detail_visit.NotOpenedVisit):
@@ -211,44 +207,40 @@ class ShopWalk:
                 # 商品编号尚未可靠取得，点击路径没有商品可记；保留原异常。
                 raise visit.error
 
-            deny_path = visit.raw_path if isinstance(visit, detail_visit.DeniedVisit) else None
+            deny_evidence = visit.evidence if isinstance(visit, detail_visit.DeniedVisit) else None
             denied = isinstance(visit, detail_visit.DeniedVisit)
             if not denied:
                 try:
-                    return self._ingest(card, list_title, visit,
-                                        retry=retry_after_late_deny)
-                except (ShopDenyExceeded, RoundDenyExceeded) as exc:
-                    flag = ("round_abort" if isinstance(exc, RoundDenyExceeded)
-                            else "shop_skip")
-                    self.record(click_events.denied(ref, per_product_denies + 1,
-                                                   terminal=flag,
-                                                   raw=getattr(exc, "raw_path", None)))
-                    raise
-                except _LateDenied as exc:
-                    self.emit("popup_close", offer_id=card.offer_id)
-                    card.close()
+                    ingested = self._ingest(card, list_title, visit,
+                                            retry=retry_after_late_deny)
+                    if not isinstance(ingested, detail_visit.DeniedVisit):
+                        return ingested
+                    # 晚到 deny 已由 _ingest 关闭页面，继续走同一 deny 阶梯。
                     closed_for_deny = True
                     retry_after_late_deny = True
                     denied = True
-                    deny_path = exc.raw_path
+                    deny_evidence = ingested.evidence
+                except (ShopDenyExceeded, RoundDenyExceeded) as exc:
+                    self._record_deny_threshold(ref, per_product_denies + 1, exc)
+                    raise
 
             if denied:
                 per_product_denies += 1
                 log.warning("店铺 %s 商品命中 deny（该商品第 %s 次）",
                             self.shop.key, per_product_denies)
                 if per_product_denies == 1:
-                    self.record(click_events.denied(ref, 1, raw=deny_path))
+                    self.record(self._deny_event(ref, 1, evidence=deny_evidence))
                     if not closed_for_deny:
                         card.close()
                     self.human.sleep(self.cfg.deny_backoff_sec)
                     continue
                 if per_product_denies == 2:
-                    self.record(click_events.denied(ref, 2, raw=deny_path))
+                    self.record(self._deny_event(ref, 2, evidence=deny_evidence))
                     if not closed_for_deny:
                         card.close()
                     self.human.sleep(self.cfg.deny_retry2_backoff_sec)
                     continue
-                self.record(click_events.denied(ref, 3, terminal="skip", raw=deny_path))
+                self.record(self._deny_event(ref, 3, evidence=deny_evidence, terminal="skip"))
                 log.warning("店铺 %s 商品第 3 次命中 deny，跳过当前商品", self.shop.key)
                 if not closed_for_deny:
                     card.close()
@@ -256,7 +248,7 @@ class ShopWalk:
         return None
 
     def _ingest(self, card, list_title: str,
-                visit: detail_visit.ReadyDetailVisit, *, retry: bool = False) -> str | None:
+                visit: detail_visit.ReadyDetailVisit, *, retry: bool = False) -> str | None | detail_visit.DeniedVisit:
         """一张卡的详情观测：认领商品、按结果记事件、把卡片关掉。"""
         offer_id = card.offer_id
         if offer_id is None:
@@ -270,6 +262,16 @@ class ShopWalk:
             remember_discovery(self.db, self.round_id, self.shop, self.offers,
                                offer_id, card.url, list_title or "")
             log.info("命中商品 %s（累计 %s）", offer_id, len(self.offers))
+        denied_visit = None
+
+        def read():
+            nonlocal denied_visit
+            observation = visit.observe(card.url)
+            if isinstance(observation, detail_visit.DeniedVisit):
+                denied_visit = observation
+                return detail.Observation.denied(observation.raw_html, observation.evidence)
+            return self._record_read(observation, card, offer_id)
+
         try:
             result = detail.capture_observation(
                 self.db, self.cfg, self.human, self.round_id,
@@ -278,15 +280,17 @@ class ShopWalk:
                     shop_name=self.shop.name, product_url=card.url,
                     slot_key=card.ref, offer_id=offer_id, list_title=list_title,
                     duplicate=not first_time and not retry),
-                lambda: self._read(visit, card, card.url, offer_id), attempts=1)
-        except _LateDenied:
-            raise
+                read, attempts=1)
         except BaseException:
             # 停止判定（跨天／暂停／预算）从规则里抛出来：弹窗照常关掉再上抛。
             self.emit("popup_close", offer_id=offer_id)
             card.close()
             raise
 
+        if result.outcome is detail.Outcome.DENIED:
+            self.emit("popup_close", offer_id=offer_id)
+            card.close()
+            return denied_visit
         if result.outcome is detail.Outcome.SKIPPED_TODAY:
             self.record(click_events.skipped(card.card_ref, offer_id,
                                             click_events.SkipReason.TODAY))
@@ -302,12 +306,8 @@ class ShopWalk:
         # 失败与「没读到编号」一样：对调用方来说这张卡没有拿到商品（只留了失败行）。
         return None if result.outcome is detail.Outcome.FAILED else result.offer_id
 
-    def _read(self, visit: detail_visit.ReadyDetailVisit, card, product_url: str,
-              offer_id: str) -> detail.Observation:
-        """读取当前详情，并按「这次读成什么样」记事件。"""
-        observation = visit.observe(product_url)
-        if isinstance(observation, detail_visit.DeniedVisit):
-            raise _LateDenied(observation.raw_path)
+    def _record_read(self, observation: detail.Observation, card, offer_id: str) -> detail.Observation:
+        """把一次已翻译的详情观测映射成点击路径事件。"""
         if observation.ok:
             self.emit("detail_parse", offer_id=offer_id,
                     note=f"sku_count={observation.sku_count}")
