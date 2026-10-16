@@ -3,7 +3,7 @@
 **一次运行**（`run_once`，手工触发）：刷新来源清单 → 检查 → 导出 → 发布判断集 → 拉取 →
 汇总 → 接入来源 → 收取判断集 → 报告；`--only export|merge|publish|collect` 只跑其中一个动作（刷新来源
 清单、检查与写报告照常，其余各个环节的「没做」如实写）。退出码：`0` 干净 / `1` 有需要人看一眼的
-（缺口、冲突、别人的包还没来、通道没拉成、图片缺、判断集本周记下的决定冲突、来源清单有来源减少/
+（已发布包的覆盖缺口、冲突、通道没拉成、图片缺、判断集本周记下的决定冲突、来源清单有来源减少/
 改址、来源接入被阻断或用了上一版快照）/ `2` 本机没做成事（导出没成功、有包没导成、纯汇总机被要求只导出、
 判断集没发出去或没收进来、来源清单没刷新、接收通道未就绪）。
 
@@ -829,7 +829,8 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
     failures += _source_failures(source_refresh)
     failures += _source_prep_failures(source_prep)
     failures += _sku_failures(sku_publish, sku_collect)
-    soft = bool(gaps) or bool(conflicts) or bool(missing) or any(not p.ok for p in pulls) \
+    # 整份远端周包未到是正常的空结果；报告仍保留 missing，只有已发布包的覆盖缺口才升级为软告警。
+    soft = bool(gaps) or bool(conflicts) or any(not p.ok for p in pulls) \
         or (export_result is not None and export_result.images is not None
             and export_result.images.failure is not None) or image_missing_total > 0 \
         or bool(judgment_conflicts) or _judgment_soft(judgment_collect) \

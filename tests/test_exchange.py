@@ -647,6 +647,26 @@ class WeeklyReportTests(unittest.TestCase):
         self.assertIn("raw-m3 的包缺一天（A02 09-16）", todo)
 
 
+class MissingRemotePackageTests(unittest.TestCase):
+    """远端整份周包未到是正常空结果；已到包的覆盖缺口仍由 GapAndConflictTests 覆盖。"""
+
+    def test_an_unpublished_remote_package_is_a_clean_noop(self):
+        world = ConsoleWorld(self)
+        world.plan(("A01", "m1", 3), ("A02", "m2", 3))
+        world.crawls([("A01", day) for day in DAYS])
+
+        outcome = world.run()
+
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(outcome.missing_machines, ("m2",))
+        report = world.report()
+        self.assertIn(
+            "**结果**：干净（退出码 0）· 缺口 0 · 冲突 0 · 还没来的包 1 · 判断集冲突 0",
+            report)
+        self.assertIn("- 还没收到的包：raw-m2 的 W38 还没发布或没拉到", report)
+        self.assertIn("raw-m2 的 W38 还没发布或没拉到", todo_of(report))
+
+
 class OnlyHalfTests(unittest.TestCase):
     """`--only export|merge` 两个方向各跑一半：另一半真的没动。"""
 
