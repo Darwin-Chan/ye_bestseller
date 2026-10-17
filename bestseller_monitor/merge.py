@@ -3,7 +3,7 @@
 **一次导入**（`import_package`，交换台与测试都走这一个口）：
 
 1. **包身份** = 包文件（发布形态是 `.db.gz`）内容的 SHA-256。幂等账（`import_packages`）
-   里见过这个哈希就不做任何事；包被拉图、被合并都只发生一次。
+   里见过这个哈希就不重复合并行；若账本仍有缺图，重跑只补图片资产。
 2. **先拉图、再插行**：包里引用的图片 key 在本机还缺字节的，先从图片库取回、落进本机
    资产表（图片是独立通道，这一步在导入事务之外、独立提交——合并事务回滚不回滚图片）。
    取不到、没配桶、内容对不上哈希的都如实记缺，不挡导入（spec §9「仍缺的照插」）。包的
@@ -155,7 +155,7 @@ class _ImagePull:
 class ImportResult:
     """一次导入做了什么（交换台的报告从这里长出来）。
 
-    `skipped` 为真表示同哈希已导过：这次什么都没做，计数回放幂等账里那份。
+    `skipped` 为真表示同哈希已导过：行数据不重复合并；有缺图时重跑可能只补图片资产。
     `failure` 非空表示这次整包没导成（事务已全部回滚），重跑等价于首次导入。
     """
 
@@ -173,6 +173,7 @@ class ImportResult:
     images_skipped: int = 0
     images_missing: int = 0
     images_note: str | None = None
+    images_retried: bool = False          # 本次同包重跑是否实际尝试了补图
     failure: str | None = None
 
     @property
@@ -241,6 +242,31 @@ def import_package(conn: sqlite3.Connection, package_path: pathlib.Path, *,
     known = conn.execute(
         "SELECT * FROM import_packages WHERE package_sha256=?", (sha,)).fetchone()
     if known is not None:
+        # 行数据已经幂等导入，但首次拉图可能因临时网络故障留下缺口。重跑时只补
+        # 资产通道，不重新合并七张交换表，也不改变原来的行级导入计数。
+        if known["images_missing"] > 0 and store is not None:
+            try:
+                with open_package(package_path) as pkg:
+                    rows = _read_package_rows(pkg)
+                assets = _package_assets(rows)
+                if not assets:
+                    raise ValueError("包内没有可用于补拉的图片引用")
+                images = _pull_images(conn, assets, store)
+            except (sqlite3.Error, OSError, KeyError, ValueError) as exc:
+                log.warning("已导入包 %s 补拉图片失败，保留原缺口：%s", package_path.name, exc)
+            else:
+                conn.execute(
+                    "UPDATE import_packages SET images_pulled = images_pulled + ?, "
+                    "images_missing = ? WHERE package_sha256=?",
+                    (images.pulled, len(images.missing), sha))
+                conn.commit()
+                known = conn.execute(
+                    "SELECT * FROM import_packages WHERE package_sha256=?", (sha,)).fetchone()
+                log.info("已导入包 %s 补拉图片 %d 张（仍缺 %d）",
+                         package_path.name, images.pulled, len(images.missing))
+                return _result_from_ledger(
+                    known, images_bytes=images.pulled_bytes, images_note=images.note,
+                    images_retried=True)
         return _result_from_ledger(known)
 
     try:
@@ -271,15 +297,18 @@ def import_package(conn: sqlite3.Connection, package_path: pathlib.Path, *,
             failure=f"整包没有导入（已全部回滚）：{exc}")
 
 
-def _result_from_ledger(row: sqlite3.Row) -> ImportResult:
-    """同哈希跳过的回执：计数回放账里首次导入那份。"""
+def _result_from_ledger(row: sqlite3.Row, *, images_bytes: int = 0,
+                        images_note: str | None = None,
+                        images_retried: bool = False) -> ImportResult:
+    """同哈希跳过的回执：计数回放幂等账当前那份。"""
     return ImportResult(
         package=row["package_name"], sha256=row["package_sha256"],
         machine_id=row["machine_id"], week=row["week"] or "", skipped=True,
         rows_total=row["rows_total"], rows_inserted=row["rows_inserted"],
         rows_replaced=row["rows_replaced"], conflicts=row["conflicts"],
-        images_pulled=row["images_pulled"], images_skipped=row["images_skipped"],
-        images_missing=row["images_missing"])
+        images_pulled=row["images_pulled"], images_bytes=images_bytes,
+        images_skipped=row["images_skipped"], images_missing=row["images_missing"],
+        images_note=images_note, images_retried=images_retried)
 
 
 # ---------- 读包（显式投影） ----------

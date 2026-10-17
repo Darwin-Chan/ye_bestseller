@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import gzip
+import hashlib
 import io
 import json
 import shutil
@@ -1223,6 +1224,24 @@ class PullAndImageTroubleTests(unittest.TestCase):
         # 缺图不挡导入：行照插
         self.assertEqual(world.conn.execute(
             "SELECT COUNT(*) FROM inventory WHERE shop_key='A03'").fetchone()[0], 7)
+
+
+    def test_checked_default_image_store_is_used_by_merge(self):
+        world = ConsoleWorld(self)
+        world.plan(("A01", "m1", 3), ("A03", "m3", 3))
+        world.crawls([("A01", day) for day in DAYS])
+        image_hash = hashlib.sha256(b"jpeg-bytes").hexdigest()
+        world.publish("m3", [("A03", day) for day in DAYS], image_hash=image_hash)
+        key = f"img/{image_hash[:2]}/{image_hash}.jpg"
+        world.store.fetched[key] = b"jpeg-bytes"
+
+        with patch.object(export, "default_store", return_value=world.store):
+            outcome = world.run(store=None)
+
+        row = world.conn.execute(
+            "SELECT images_pulled, images_missing FROM import_packages"
+        ).fetchone()
+        self.assertEqual(tuple(row), (1, 0))
 
 
 class ExportOwnershipTests(unittest.TestCase):

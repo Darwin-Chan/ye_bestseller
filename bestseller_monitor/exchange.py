@@ -488,13 +488,14 @@ def _merge_packages(cfg, db: Database, *, week: str, machine_id: str, store,
 
     不只收本周：账里还没有的历史包也一起收——冷启动一次重放全部（spec §11），
     别的机器迟到补发的历史包下次运行自动补上（各台最终收敛到同一份全量库）。
-    账里已有的历史包安静跳过：不占这次运行的账、不重进报告表（状态累积以本周为焦点）。
-    同哈希的重复导入本来就安全（幂等账），这里只是让「本周的」照旧走一次好让报告
+    账里已有且没有缺图的历史包安静跳过：不占这次运行的账、不重进报告表（状态累积以本周为焦点）。
+    同哈希的重复导入本来就安全（幂等账）；仍有缺图的历史包也照旧走一次来补图。这里只是让「本周的」照旧走一次好让报告
     把它标成「已导入过 → 跳过」。
     """
     root = pathlib.Path(cfg.exchange_root)
-    known = {str(row["package_sha256"])
-             for row in db.conn.execute("SELECT package_sha256 FROM import_packages")}
+    known = {str(row["package_sha256"]): int(row["images_missing"])
+             for row in db.conn.execute(
+                 "SELECT package_sha256, images_missing FROM import_packages")}
     imported: dict[pathlib.Path, merge.ImportResult] = {}
     for ref in export.all_packages(root):
         if ref.machine == machine_id:
@@ -504,7 +505,7 @@ def _merge_packages(cfg, db: Database, *, week: str, machine_id: str, store,
                 sha = merge.package_sha256(ref.path)
             except OSError:
                 sha = None                       # 读不动：交给导入那一步如实报
-            if sha is not None and sha in known:
+            if sha is not None and sha in known and known[sha] == 0:
                 say(f"跳过 {ref.path.name}：{ref.week or '历史'} 的包账里已有")
                 continue
         result = merge.import_package(db.conn, ref.path, machine_id=machine_id, store=store)
@@ -512,7 +513,11 @@ def _merge_packages(cfg, db: Database, *, week: str, machine_id: str, store,
         if result.failed:
             say(f"导入 {ref.path.name}：没导成（{_first_line(result.failure)}）")
         elif result.skipped:
-            say(f"跳过 {ref.path.name}：已导入过（同哈希）")
+            if result.images_retried:
+                say(f"重跑 {ref.path.name}：补拉图片 {result.images_pulled:,} 张（仍缺 "
+                    f"{result.images_missing:,} 张）")
+            else:
+                say(f"跳过 {ref.path.name}：已导入过（同哈希）")
         else:
             say(f"导入 {ref.path.name}：新增 {result.rows_inserted:,} 行、"
                 f"覆盖 {result.rows_replaced:,} 行、冲突 {result.conflicts} 处、"
@@ -551,6 +556,8 @@ def run_once(cfg, *, only: str | None = None, week: str | None = None,
     week = week or export.current_week()
     machine_id = str(cfg.machine_id)
     role = str(cfg.role)
+    # 环境检查会验证默认图片库；后续汇总必须复用同一个实例，才能实际拉图.
+    store = store if store is not None else export.default_store(cfg)
     say = _emitter(emit)
     task_id = _task_id(machine_id, now)      # 票 03：这次运行的 ID（收取日志与报告共用）
 
@@ -1039,6 +1046,10 @@ def _package_row(db: Database, ref: export.PackageRef,
                      result="")
     if result is not None and result.failed:
         return dataclasses.replace(row, result=f"导入没成功：{_first_line(result.failure)}")
+    if result is not None and result.images_retried:
+        status = (f"补图后仍缺 {result.images_missing:,} 张"
+                  if result.images_missing else "图片已补齐")
+        return dataclasses.replace(row, rows=result.rows_total, result=f"已导入过 → {status}")
     if result is not None and result.skipped:
         return dataclasses.replace(row, rows=result.rows_total, result="已导入过 → 跳过")
     if result is not None:
@@ -1156,15 +1167,19 @@ def _summary(*, only, export_result, export_note, imported, merge_ran,
     if merge_ran:
         results = list(imported.values())
         fresh = [r for r in results if not r.skipped and not r.failed]
-        skipped = [r for r in results if r.skipped]
+        retried = [r for r in results if r.images_retried and not r.failed]
+        skipped = [r for r in results if r.skipped and not r.images_retried]
         failed = [r for r in results if r.failed]
         if fresh:
             parts.append(f"新收 {len(fresh)} 个包（{sum(r.rows_total for r in fresh):,} 行）")
+        if retried:
+            missing = sum(r.images_missing for r in retried)
+            parts.append(f"为 {len(retried)} 个已导入包补图（仍缺 {missing:,} 张）")
         if skipped:
             parts.append(f"跳过 {len(skipped)} 个已导入")
         if failed:
             parts.append(f"{len(failed)} 个包没导成")
-        if not (fresh or skipped or failed):
+        if not (fresh or retried or skipped or failed):
             parts.append("没有新包")
     if source_prep is not None:
         if not source_prep.ready:

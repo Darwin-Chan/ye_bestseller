@@ -762,6 +762,31 @@ class ImageTests(MergeCase):
         self.assertEqual(
             self.rows(conn, "SELECT 1 FROM product_image_assets"), [])
 
+    def test_rerunning_an_import_with_missing_images_retries_the_image_pull(self):
+        conn = self.local()
+        package = self.package("m2", machine_world(D16_0900, stock=5))
+
+        first = self.import_(conn, package, store=FakeImageStore())
+        self.assertFalse(first.failed, first.failure)
+        self.assertEqual(first.images_missing, 1)
+
+        store = FakeImageStore({KEY1: JPEG})
+        second = self.import_(conn, package, store=store)
+
+        self.assertTrue(second.skipped, "行数据已经导入，重跑只补图片")
+        self.assertFalse(second.failed, second.failure)
+        self.assertEqual(second.images_pulled, 1)
+        self.assertEqual(second.images_missing, 0)
+        self.assertEqual(store.fetched, [KEY1])
+        self.assertEqual(
+            self.rows(conn, "SELECT content FROM product_image_assets WHERE content_hash=?",
+                      (H1,)), [(JPEG,)])
+        self.assertEqual(
+            self.rows(conn, "SELECT images_pulled, images_missing FROM import_packages"),
+            [(1, 0)])
+        self.assertEqual(
+            self.rows(conn, "SELECT COUNT(*) FROM inventory"), [(1,)],
+            "补图不重复插入已导入的库存行")
     def test_bytes_that_do_not_match_the_hash_are_not_stored(self):
         conn = self.local()
         store = FakeImageStore({KEY1: b"corrupted-bytes"})
