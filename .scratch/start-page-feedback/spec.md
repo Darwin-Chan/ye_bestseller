@@ -1,6 +1,6 @@
 # 开始页交互调整：登录入口常亮报因、去刷新按钮、入口上移
 
-Status: ready-for-agent
+Status: resolved
 Type: spec
 Feature: start-page-feedback
 Date: 2026-10-10（Asia/Shanghai）
@@ -122,3 +122,12 @@ Related: [issues-08-11 联合 spec](../issues-08-11/spec.md)（可用性表与�
 - 已交付的相关口径：票 08（e2cee2c）的试采豁免与开始页原因显示为本批的前置，已并入 main；本批不再回头改动它。（v3：其中「开始页原因显示」的显示面随事实卡删除改为「悬停可见＋点击报因」，口径改写挂票 03。）
 - 上线后需同步：issues-08-11 验收语言（08-A12/A14 的「入口禁用」措辞改为「点击报因+服务端拒绝」）与相关交付/台账记录。（v2 扩：该措辞更新范围覆盖过程页入口——检测/配置类点击报因、忙/资格类维持禁用；另母 spec 描述改范围路径处与《issues 处理状态台账》各补一句「改范围按钮已删（快捷方式；路径语义不变）」。）（v3 扩：08 系材料凡引「开始页事实行/入口禁用可见原因/配置可查看」处（母 spec、08 票、docs/design 走查记录、台账）改写为「点击报因＋悬停可见」；`docs/reviews/` 归档报告不改，其中的 `browserFactsText(d)` 抽取建议随之作废。均挂在票 03。）
 - 工单落点：`.scratch/start-page-feedback/issues/<NN>-*.md`（to-tickets 阶段生成）。
+
+## Resolution
+
+- 状态：**resolved**（2026-10-11）。票 01–04 已完成，开始页/过程页入口位置、点击报因、按钮收整和相关 UI 契约同步均已交付并合并 main。
+- 交付：票 03 完成整体收口与语言同步，票 04 完成双轴审查和交付记录；主仓合并提交为 `c7f5a9c`，后续适配提交已记录在本线台账。
+- 证据：`.scratch/start-page-feedback/issues/01-*` 至 `04-*`；最终审查与证据位于 `.scratch/logs/tickets/start-page-feedback/03/20261011-t03-01/`、`04/20261011-t04-01/`，归档审查见 `docs/reviews/start-page-feedback-batch-review-2026-10-11.md`。
+- 后续：页面新反馈另开事项；不再因父规格顶部的旧 `ready-for-agent` 文字重新排队。
+
+
