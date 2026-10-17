@@ -210,6 +210,19 @@ class AnalysisBrowserTests(unittest.TestCase):
         self.page.get_by_label("开始日期", exact=True).fill("2026-09-07")
         self.page.get_by_label("结束日期", exact=True).fill("2026-09-14")
 
+    def wait_for_analysis_response(self, action):
+        """等本次异步分析的最终快照到达后再断言页面内容。"""
+        with self.page.expect_response(
+                lambda response: response.request.method == 'GET'
+                and '/api/analysis?id=' in response.url
+                and response.ok,
+                timeout=30000):
+            action()
+
+    def enter_review(self):
+        self.wait_for_analysis_response(
+            lambda: self.page.get_by_role('button', name='下一步、进入同款确认').click())
+
     def test_select_dates_freeze_and_keep_data_while_source_changes(self):
         self.dates()
         expect(self.page.get_by_role("table").first.get_by_role("row")).to_have_count(13)

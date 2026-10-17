@@ -282,6 +282,8 @@ class MatchingBrowserTests(unittest.TestCase):
     stop_server = browser_fixture.AnalysisBrowserTests.stop_server
     submit = browser_fixture.AnalysisBrowserTests.submit
     dates = browser_fixture.AnalysisBrowserTests.dates
+    enter_review = browser_fixture.AnalysisBrowserTests.enter_review
+    wait_for_analysis_response = browser_fixture.AnalysisBrowserTests.wait_for_analysis_response
     switch_tab = browser_fixture.AnalysisBrowserTests.switch_tab
 
     def test_browser_grouping_retry_cache_and_version_change(self):
@@ -299,11 +301,12 @@ class MatchingBrowserTests(unittest.TestCase):
         with patch.dict(os.environ, {'DEEPSEEK_API_KEY': 'secret-value'}), patch('bestseller_monitor.matching.urlopen', side_effect=transport):
             transport.fail_comparisons = True
             self.dates()
-            self.page.get_by_role('button', name='下一步、进入同款确认').click()
+            self.enter_review()
             expect(self.page.locator('.group-choice')).to_have_count(3)
             expect(self.page.get_by_text('模型请求失败或响应格式无效，请检查后台配置后重试').first).to_be_visible()
             transport.fail_comparisons = False
-            self.page.get_by_role('button', name='模型匹配同款').click()
+            self.wait_for_analysis_response(
+                lambda: self.page.get_by_role('button', name='模型匹配同款').click())
             expect(self.page.locator('.group-choice')).to_have_count(2)
             expect(self.page.get_by_role('article').first).to_contain_text('陶瓷饮具')
             expect(self.page.get_by_role('article').first).to_contain_text('月牙杯')
@@ -325,7 +328,7 @@ class MatchingBrowserTests(unittest.TestCase):
             self.page.get_by_role('button', name='重新选择日期').click()
             self.page.get_by_role('button', name='放弃修改').click()
             self.dates()
-            self.page.get_by_role('button', name='下一步、进入同款确认').click()
+            self.enter_review()
             expect(self.page.get_by_text('缓存', exact=True).first).to_be_visible()
             self.assertEqual(len(transport.calls), calls)
             # Same URL, new image bytes: new evidence and new suggestions.
@@ -335,7 +338,7 @@ class MatchingBrowserTests(unittest.TestCase):
                 collected_at='2026-09-14T04:00:00+00:00', attempt=1, image_evidence=picture('green'))
             self.page.get_by_role('button', name='重新选择日期').click()
             self.dates()
-            self.page.get_by_role('button', name='下一步、进入同款确认').click()
+            self.enter_review()
             expect(self.page.locator('.matching-tags').get_by_text('信息变更', exact=True)).to_be_visible()
             expect(self.page.locator('.group-choice')).to_have_count(3)
             self.assertEqual(len(transport.calls), calls+2)
@@ -345,6 +348,6 @@ class MatchingBrowserTests(unittest.TestCase):
                 collected_at='2026-09-14T04:00:00+00:00', attempt=1, image_evidence=picture('red'))
             self.page.get_by_role('button', name='重新选择日期').click()
             self.dates()
-            self.page.get_by_role('button', name='下一步、进入同款确认').click()
+            self.enter_review()
             expect(self.page.locator('.matching-tags').get_by_text('信息变更', exact=True)).to_be_visible()
             self.assertNotIn('secret-value', self.page.content())

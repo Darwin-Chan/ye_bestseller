@@ -168,6 +168,8 @@ class MatchingControlBrowserTests(unittest.TestCase):
     stop_server = browser_fixture.AnalysisBrowserTests.stop_server
     submit = browser_fixture.AnalysisBrowserTests.submit
     dates = browser_fixture.AnalysisBrowserTests.dates
+    enter_review = browser_fixture.AnalysisBrowserTests.enter_review
+    wait_for_analysis_response = browser_fixture.AnalysisBrowserTests.wait_for_analysis_response
     switch_tab = browser_fixture.AnalysisBrowserTests.switch_tab
 
     def use_matcher(self, key_env='DEEPSEEK_API_KEY'):
@@ -188,7 +190,7 @@ class MatchingControlBrowserTests(unittest.TestCase):
 
     def open_review(self):
         self.dates()
-        self.page.get_by_role('button', name='下一步、进入同款确认').click()
+        self.enter_review()
 
     def test_button_reports_the_result_and_grays_out_once_judgements_complete(self):
         self.use_matcher()
@@ -201,7 +203,7 @@ class MatchingControlBrowserTests(unittest.TestCase):
             expect(button).to_be_enabled()
             expect(self.page.locator('#matchingStatus')).to_have_text('3 个商品模型判断失败，可重试')
             transport.fail_comparisons = False
-            button.click()
+            self.wait_for_analysis_response(button.click)
             expect(self.page.locator('#matchingStatus')).to_have_text('模型匹配完成：3 个商品已判断')
             expect(button).to_be_disabled()
             expect(self.page.locator('#matchControl')).to_have_attribute('title', '本次分析的模型匹配已完成')
@@ -218,7 +220,7 @@ class MatchingControlBrowserTests(unittest.TestCase):
             self.open_review()
             button = self.page.get_by_role('button', name='模型匹配同款')
             expect(self.page.locator('#matchingStatus')).to_have_text('2 个商品模型判断失败，可重试')
-            button.click()
+            self.wait_for_analysis_response(button.click)
             expect(self.page.locator('#matchingStatus')).to_have_text(
                 '模型匹配完成：1 个商品已判断，2 个仍未成功——模型请求失败或响应格式无效，请检查后台配置后重试，建议重试')
             expect(button).to_be_enabled()
@@ -228,7 +230,7 @@ class MatchingControlBrowserTests(unittest.TestCase):
             expect(self.page.locator('#matchingStatus')).to_have_text('2 个商品模型判断失败，可重试')
             self.switch_tab('待确认')
             transport.fail_names = set()
-            button.click()
+            self.wait_for_analysis_response(button.click)
             expect(self.page.locator('#matchingStatus')).to_have_text('模型匹配完成：3 个商品已判断')
             expect(button).to_be_disabled()
 
@@ -247,7 +249,7 @@ class MatchingControlBrowserTests(unittest.TestCase):
             button = self.page.get_by_role('button', name='模型匹配同款')
             expect(self.page.locator('#matchingStatus')).to_have_text('2 个商品模型判断失败，可重试')
             transport.fail_comparisons = False
-            button.click()
+            self.wait_for_analysis_response(button.click)
             expect(self.page.locator('#matchingStatus')).to_have_text(
                 '模型匹配完成：2 个商品已判断；另有 1 个商品缺少完整名称与图片证据，未进入判断')
 
