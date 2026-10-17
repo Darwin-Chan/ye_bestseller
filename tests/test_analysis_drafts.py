@@ -37,6 +37,33 @@ class DraftPersistenceTests(unittest.TestCase):
     def submit(self, offer, day, stock, *, name, color='red'):
         submit_offer(self.db, offer, day, stock, name=name, color=color)
 
+    def test_first_save_batches_schema_durability_for_product_and_sku(self):
+        """首次保存不逐表触发磁盘持久化；两种草稿仍能完整读回。"""
+        real_connect = sqlite3.connect
+        for kind in ('product', 'sku'):
+            with self.subTest(member_kind=kind):
+                config = AnalysisConfig(self.path, member_kind=kind,
+                                        store=Path(self.tmp.name) / f'{kind}-drafts.db')
+                service = AnalysisService(config, running=lambda: False)
+                snapshot = service.start('2026-09-07', '2026-09-14')
+                autocommitted_ddl = []
+
+                class ObservedConnection(sqlite3.Connection):
+                    def execute(self, sql, *args, **kwargs):
+                        if sql.lstrip().upper().startswith(('CREATE ', 'ALTER ')):
+                            if not self.in_transaction:
+                                autocommitted_ddl.append(sql.splitlines()[0])
+                        return super().execute(sql, *args, **kwargs)
+
+                with patch('bestseller_monitor.analysis_store.sqlite3.connect',
+                           side_effect=lambda *a, **kw: real_connect(
+                               *a, factory=ObservedConnection, **kw)):
+                    saved = service.save_draft(snapshot['id'])
+                self.assertEqual(autocommitted_ddl, [],
+                                 '建表和迁移应批量提交，避免首次保存逐表等待磁盘')
+                restarted = AnalysisService(config, running=lambda: False)
+                self.assertEqual(restarted.get(snapshot['id']), saved)
+
     def test_saved_draft_restores_frozen_snapshot_and_progress_after_restart(self):
         snapshot = self.service.start('2026-09-07', '2026-09-14')
         sid = snapshot['id']

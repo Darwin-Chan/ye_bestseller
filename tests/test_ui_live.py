@@ -42,8 +42,9 @@ window.pywebview = { platform: "edgechromium", api: {
 
   set_local_trial: async (enabled) => {
     window.__localTrial = !!enabled;
+    window.__collectionLabel = window.__localTrial ? "本机试采，不共享" : "正式采集";
     return {ok: true, local_trial: window.__localTrial,
-            collection_label: window.__localTrial ? "本机试采，不共享" : "正式采集",
+            collection_label: window.__collectionLabel,
             trial_available: true};
   },
   get_run: async () => {
@@ -362,6 +363,19 @@ class UiLiveErrorFeedbackTests(unittest.TestCase):
                 timeout=5000,
             )
             self.assertEqual(page.inner_text("#trialModeBtn"), "进入本机试采")
+            start = page.evaluate("() => window.pywebview.api.get_start()")
+            self.assertFalse(start['local_trial'])
+            self.assertEqual(start['collection_label'], '正式采集')
+
+            page.click("#trialModeBtn")
+            page.wait_for_function(
+                "() => document.querySelector('#trialModeBtn').textContent === '返回正式采集'",
+                timeout=5000,
+            )
+            self.assertIn('本机试采，不共享', page.inner_text('#collectionMode'))
+            start = page.evaluate("() => window.pywebview.api.get_start()")
+            self.assertTrue(start['local_trial'])
+            self.assertEqual(start['collection_label'], '本机试采，不共享')
         finally:
             page.close()
 

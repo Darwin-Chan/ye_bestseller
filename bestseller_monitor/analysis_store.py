@@ -147,52 +147,56 @@ class DraftStore:
 
     def _connect(self):
         conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        # 与同款缓存同款的做法：每次打开都带条件建表，已有库只付一次判断。
-        conn.execute("""CREATE TABLE IF NOT EXISTS analysis_drafts (
-            id TEXT PRIMARY KEY,
-            saved_at TEXT NOT NULL,
-            schema_version INTEGER NOT NULL,
-            start TEXT NOT NULL,
-            end TEXT NOT NULL,
-            payload TEXT NOT NULL)""")
-        for table, statement in _DECISION_TABLES.items():
-            conn.execute(statement)
-            self._add_machine_column(conn, table)
-        for statement in SKU_DECISION_TABLES.values():
-            conn.execute(statement)
-        conn.execute(_SKU_CONFLICT_DDL)
-        conn.execute("""CREATE TABLE IF NOT EXISTS analysis_draft_save_order (
-            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-            draft_id TEXT NOT NULL UNIQUE)""")
-        conn.execute(_CONFLICT_DDL)
-        self._add_resolved_column(conn)
-        self._add_source_commit_column(conn)
-        return conn
+        try:
+            # sqlite3 默认不会为 DDL 开事务；显式批量提交，避免首次保存逐表
+            # 等待磁盘持久化。迁移与建表一起成功或一起回滚。
+            with conn:
+                conn.execute('BEGIN')
+                conn.row_factory = sqlite3.Row
+                conn.execute("""CREATE TABLE IF NOT EXISTS analysis_drafts (
+                    id TEXT PRIMARY KEY,
+                    saved_at TEXT NOT NULL,
+                    schema_version INTEGER NOT NULL,
+                    start TEXT NOT NULL,
+                    end TEXT NOT NULL,
+                    payload TEXT NOT NULL)""")
+                for table, statement in _DECISION_TABLES.items():
+                    conn.execute(statement)
+                    self._add_machine_column(conn, table)
+                for statement in SKU_DECISION_TABLES.values():
+                    conn.execute(statement)
+                conn.execute(_SKU_CONFLICT_DDL)
+                conn.execute("""CREATE TABLE IF NOT EXISTS analysis_draft_save_order (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    draft_id TEXT NOT NULL UNIQUE)""")
+                conn.execute(_CONFLICT_DDL)
+                self._add_resolved_column(conn)
+                self._add_source_commit_column(conn)
+            return conn
+        except BaseException:
+            conn.close()
+            raise
 
     def _add_resolved_column(self, conn):
         """老库补上裁决时刻列（一次性，票 07）：补列前的冲突都没裁决过，空串即未裁决。"""
         if 'resolved_at' in {row[1] for row in conn.execute(f'PRAGMA table_info({CONFLICT_TABLE})')}:
             return
-        with conn:
-            conn.execute(f'ALTER TABLE {CONFLICT_TABLE}'
-                         " ADD COLUMN resolved_at TEXT NOT NULL DEFAULT ''")
+        conn.execute(f'ALTER TABLE {CONFLICT_TABLE}'
+                     " ADD COLUMN resolved_at TEXT NOT NULL DEFAULT ''")
 
     def _add_source_commit_column(self, conn):
         """老库补上来源提交列（一次性，issue 06 票 04）：补列前的冲突没记过外来包的来源提交，空串即未记。"""
         if 'source_commit' in {row[1] for row in conn.execute(f'PRAGMA table_info({CONFLICT_TABLE})')}:
             return
-        with conn:
-            conn.execute(f'ALTER TABLE {CONFLICT_TABLE}'
-                         " ADD COLUMN source_commit TEXT NOT NULL DEFAULT ''")
+        conn.execute(f'ALTER TABLE {CONFLICT_TABLE}'
+                     " ADD COLUMN source_commit TEXT NOT NULL DEFAULT ''")
 
     def _add_machine_column(self, conn, table):
         """老库补上来源机器列（一次性，票 02）：补列前的行只有本机能写，记本机编号。"""
         if 'machine_id' in {row[1] for row in conn.execute(f'PRAGMA table_info({table})')}:
             return
-        with conn:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN machine_id TEXT NOT NULL DEFAULT ''")
-            conn.execute(f"UPDATE {table} SET machine_id=? WHERE machine_id=''", (self.machine,))
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN machine_id TEXT NOT NULL DEFAULT ''")
+        conn.execute(f"UPDATE {table} SET machine_id=? WHERE machine_id=''", (self.machine,))
 
     def write(self, analysis_id, start, end, saved_at, payload, ledger, *, resolved=()):
         """保存一版草稿与账本；`resolved` 里是这次保存认定的、人已裁决过的冲突摘要。
@@ -402,6 +406,8 @@ class DraftStore:
         conn = self._connect()
         try:
             with conn:
+                # SKU 草稿表也按需创建，与本次保存共用一次提交。
+                conn.execute('BEGIN')
                 conn.execute("""CREATE TABLE IF NOT EXISTS sku_analysis_drafts (
                     id TEXT PRIMARY KEY, saved_at TEXT NOT NULL, schema_version INTEGER NOT NULL,
                     start TEXT NOT NULL, end TEXT NOT NULL, payload TEXT NOT NULL)""")

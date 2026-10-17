@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from datetime import datetime, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
@@ -1540,8 +1541,39 @@ class GuiSingleInstanceTests(unittest.TestCase):
         self.assertEqual(gui.WINDOW_TITLE, "1688 畅销品监控 · 库存数据抓取")
         page = (Path(gui.__file__).resolve().parent / "bestseller_monitor" / "pages"
                 / "ui_live.html").read_text(encoding="utf-8")
-        self.assertIn(f"<title>{gui.WINDOW_TITLE}</title>", page)
-        self.assertIn(f"<h1>{gui.WINDOW_TITLE}</h1>", page)
+        class HeadingParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.target = None
+                self.depth = 0
+                self.text = {'title': '', 'h1': ''}
+                self.status = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag in self.text:
+                    self.target = tag
+                    self.depth = 0
+                if self.target:
+                    self.depth += 1
+                    if tag == 'span' and self.target == 'h1':
+                        self.status.append(dict(attrs))
+
+            def handle_endtag(self, tag):
+                if self.target:
+                    self.depth -= 1
+                    if self.depth == 0:
+                        self.target = None
+
+            def handle_data(self, data):
+                if self.target and self.depth == 1:
+                    self.text[self.target] += data
+
+        heading = HeadingParser()
+        heading.feed(page)
+        self.assertEqual(heading.text, {'title': gui.WINDOW_TITLE, 'h1': gui.WINDOW_TITLE})
+        self.assertEqual(len(heading.status), 1)
+        self.assertEqual(heading.status[0]['id'], 'collectionMode')
+        self.assertEqual(heading.status[0]['role'], 'status')
 
 
 
