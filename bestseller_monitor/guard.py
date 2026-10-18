@@ -457,17 +457,34 @@ def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | 
              note=_wait_note(f"type={vtype_name};wait_minutes={minutes}", where(), criterion,
                              archive))
     ticks = 0
+    alarm_failures = 0
+
     def ring() -> None:
-        nonlocal ticks
+        nonlocal ticks, alarm_failures
         ticks += 1
         if ticks % WAIT_PROGRESS_EVERY == 0:
             log.info("仍在等待人工处理（已等 %.0f 秒）：%s", time.time() - appear_ts, where())
-        sound.play_alarm(count=1)   # 每次约 1 秒，循环播放
+        result = sound.play_alarm(count=1)   # 每次约 2.5 秒，循环播放
+        if result is False:
+            alarm_failures += 1
+            if alarm_failures == 1:
+                log.warning("人工介入响铃播放失败，后续仍会继续等待")
+        if ticks == 1:
+            if result is True:
+                log.info("人工介入响铃已启动（首次播放成功）")
+            elif result is None:
+                log.info("人工介入响铃未启用，继续等待人工处理")
 
     timeout_sec = (max(0.0, deadline - time.monotonic())
                    if vtype_name == "identity" else minutes * 60)
-    if waiting.until(probe, timeout_sec=timeout_sec, poll_sec=WAIT_POLL_SEC,
-                     on_wait=ring) is None:
+    try:
+        wait_result = waiting.until(probe, timeout_sec=timeout_sec, poll_sec=WAIT_POLL_SEC,
+                                    on_wait=ring)
+    except Exception:
+        log.info("人工介入响铃结束：结果=中断；轮次=%d；失败=%d", ticks, alarm_failures)
+        raise
+    if wait_result is None:
+        log.info("人工介入响铃结束：结果=超时；轮次=%d；失败=%d", ticks, alarm_failures)
         if vtype_name == "identity":
             stop_request.check()
             if emit:
@@ -476,6 +493,7 @@ def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | 
                                      archive))
             raise IdentityVerificationTimeout("身份验证等待超时，本轮自动中止，已保存数据保留")
         raise InterventionTimeout("人工介入超时")
+    log.info("人工介入响铃结束：结果=已解决；轮次=%d；失败=%d", ticks, alarm_failures)
     if emit:
         emit("verification_solved", kind="verification", verification_type=vtype_name,
              note=_wait_note(f"resolution_seconds={time.time() - appear_ts:.1f}",

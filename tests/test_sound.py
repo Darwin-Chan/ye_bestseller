@@ -24,18 +24,40 @@ class AlarmDefaultTests(unittest.TestCase):
         sound.configure(True)
         beep = MagicMock()
         with patch.dict("sys.modules", {"winsound": beep}):
-            sound.play_alarm(count=1)
+            result = sound.play_alarm(count=1)
 
         self.assertEqual(beep.Beep.call_count, 3, "一次警报 = 高-低-高三声")
+        self.assertTrue(result)
+        self.assertEqual(
+            [call.args for call in beep.Beep.call_args_list],
+            [(1200, 800), (650, 800), (1200, 800)],
+        )
+
+    def test_disabled_alarm_reports_that_it_did_not_play(self):
+        beep = MagicMock()
+        with patch.dict("sys.modules", {"winsound": beep}):
+            result = sound.play_alarm(count=1)
+
+        self.assertIsNone(result)
+
+    def test_playback_failure_is_reported_without_raising(self):
+        sound.configure(True)
+        beep = MagicMock()
+        beep.Beep.side_effect = OSError("no audio device")
+        with patch.dict("sys.modules", {"winsound": beep}):
+            result = sound.play_alarm(count=1)
+
+        self.assertFalse(result)
 
     def test_configured_off_stays_off(self):
         sound.configure(True)
         sound.configure(False)
         beep = MagicMock()
         with patch.dict("sys.modules", {"winsound": beep}):
-            sound.play_alarm(count=2)
+            result = sound.play_alarm(count=2)
 
         beep.Beep.assert_not_called()
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":

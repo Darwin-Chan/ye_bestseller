@@ -527,6 +527,19 @@ class InterventionCriterionTests(unittest.TestCase):
         self.assertIn(self.PRODUCT, progress[0], "进度行要说清在等哪一页")
         self.assertLess(len(progress), alarm.call_count, "抽稀：进度行数少于响铃轮数")
 
+    def test_the_wait_reports_alarm_failure_and_end_summary(self):
+        """播放失败要在默认日志可见，结束时给出轮次和失败次数。"""
+        page = FakePage(self.PRODUCT, body=self.SLIDER_BODY)
+        clock = GuardClock(step=1.0)
+        with self.assertLogs("bestseller_monitor.guard", level="INFO") as logs:
+            with patch.object(guard, "time", clock), patch.object(waiting, "time", clock), \
+                 patch.object(guard.sound, "play_alarm", return_value=False), \
+                 self.assertRaises(InterventionTimeout):
+                guard.wait_for_resolution(page, 1, emit=MagicMock(), confirm_sec=0)
+
+        self.assertEqual(sum("响铃播放失败" in line for line in logs.output), 1)
+        self.assertTrue(any("结果=超时" in line and "失败=" in line for line in logs.output))
+
     def test_the_reload_that_cannot_help_leaves_a_line(self):
         """那次无声刷新要可见（票 02）：刷新过后仍未解除，明说转入等待。"""
         page = FakePage(self.PRODUCT, body=self.SLIDER_BODY)   # 刷新也救不回来
