@@ -1,0 +1,16 @@
+{
+  "confirmed": true,
+  "source": "synthetic TEST prices only; never use for paid requests",
+  "effective_at": "synthetic fixture",
+  "currency": "TEST",
+  "models": [
+    {
+      "endpoint": "https://offline.invalid/v1/chat/completions",
+      "model": "frozen-test-model",
+      "input_per_million": "2",
+      "cached_input_per_million": "1",
+      "output_per_million": "3",
+      "request_reserve": "0.01"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "usage": {
+    "prompt_tokens": 100,
+    "completion_tokens": 20,
+    "total_tokens": 120,
+    "prompt_cache_hit_tokens": 10,
+    "prompt_cache_miss_tokens": 90
+  },
+  "responses": {
+    "judgment": [
+      {
+        "value": {
+          "same": true,
+          "confidence": 0.95,
+          "reason": "synthetic same object"
+        }
+      }
+    ]
+  }
+}

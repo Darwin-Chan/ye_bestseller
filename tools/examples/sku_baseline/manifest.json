@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "synthetic": true,
+  "analysis": {
+    "start": "2026-10-01",
+    "end": "2026-10-02"
+  },
+  "provenance": "synthetic demonstration; dates and evidence are fictional",
+  "sets": [
+    {
+      "id": "synthetic-1",
+      "stratum": "1-10",
+      "candidate_source": "same_offer",
+      "members": [
+        {
+          "shop_key": "synthetic-shop",
+          "offer_id": "synthetic-offer",
+          "sku_id": "1",
+          "product_name": "physical shared product words alpha beta",
+          "raw_sku_name": "plain sku",
+          "single_sku": false,
+          "name_source": "sku",
+          "matching_input": {
+            "product_name": "physical shared product words alpha beta",
+            "sku_name": "plain sku"
+          },
+          "observed_at": "2026-10-01T10:00:00+08:00",
+          "observed_date": "2026-10-01",
+          "asset_path": "synthetic-red.png",
+          "image_hash": "5c05e501d97ab5c801ad06aecbe54bfcbd8a57c848b2a4cf92c04efe4b38ceec",
+          "image_source": "sku",
+          "image_error": "",
+          "provenance": "synthetic demonstration only; not a historical observation",
+          "merchant_code": null,
+          "merchant_codes": [],
+          "code_ambiguous": false,
+          "code_source": "raw_sku_name",
+          "evidence_rule": "sku-merchant-codes-v1",
+          "evidence_version": "4584c3353c336f98646d21888dff21d48bf55755cd8a354f1f2ad178bb2e8421"
+        },
+        {
+          "shop_key": "synthetic-shop",
+          "offer_id": "synthetic-offer",
+          "sku_id": "2",
+          "product_name": "physical shared product words alpha beta",
+          "raw_sku_name": "plain sku",
+          "single_sku": false,
+          "name_source": "sku",
+          "matching_input": {
+            "product_name": "physical shared product words alpha beta",
+            "sku_name": "plain sku"
+          },
+          "observed_at": "2026-10-01T10:00:00+08:00",
+          "observed_date": "2026-10-01",
+          "asset_path": "synthetic-red.png",
+          "image_hash": "5c05e501d97ab5c801ad06aecbe54bfcbd8a57c848b2a4cf92c04efe4b38ceec",
+          "image_source": "sku",
+          "image_error": "",
+          "provenance": "synthetic demonstration only; not a historical observation",
+          "merchant_code": null,
+          "merchant_codes": [],
+          "code_ambiguous": false,
+          "code_source": "raw_sku_name",
+          "evidence_rule": "sku-merchant-codes-v1",
+          "evidence_version": "eafeacbde84c5ea9da29c91b125b034428cf8e495ceaa08be349211d388c9edb"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+# Synthetic offline fixture only. No runtime database/cache paths.
+[matching]
+mode = "direct"
+concurrency = 2
+candidates = 6
+min_score = 4
+[matching.model]
+endpoint = "https://offline.invalid/v1/chat/completions"
+model = "frozen-test-model"
+key_env = "SKU_BASELINE_EXAMPLE_UNUSED_KEY"
+timeout = 30
