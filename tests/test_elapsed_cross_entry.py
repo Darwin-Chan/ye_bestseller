@@ -221,7 +221,7 @@ class ElapsedCrossEntryTests(unittest.TestCase):
         self.assertEqual(api.get_result()['reason'], rounds.TerminalReason.ABANDONED.value)
         tasks.pop()()
         self.assertTrue(window.destroyed)
-        self.assertIn('本轮已暂停', prompts[0])
+        self.assertIn('本轮已由用户主动暂停', prompts[0])
         self.assertEqual(self.fact(rid), elapsed.Fact(12, 'complete'))
     def test_pause_stopping_or_cleanup_close_uses_same_settlement_not_a_new_timer(self):
         for phase in ('stopping', 'cleanup'):
@@ -271,7 +271,8 @@ class ElapsedCrossEntryTests(unittest.TestCase):
                 self.assertTrue(window.destroyed)
                 self.assertEqual(self.fact(rid), elapsed.Fact(12, 'complete'))
                 self.assertEqual(api.get_result()['reason'], rounds.TerminalReason.ABANDONED.value)
-                self.assertIn('正在暂停' if phase == 'stopping' else '暂停收尾', prompts[0])
+                self.assertIn('已收到用户暂停请求，采集进程正在停止' if phase == 'stopping'
+                              else '用户暂停请求正在收尾', prompts[0])
 
     def test_existing_abort_close_does_not_reconfirm_or_credit_another_segment(self):
         api, window, tasks = self.api(), Window(), []

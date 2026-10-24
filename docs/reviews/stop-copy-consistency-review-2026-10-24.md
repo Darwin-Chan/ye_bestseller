@@ -21,6 +21,6 @@
 
 - 页面原因文本渲染问题通过真实数据库事件和真实 HTML 页面先复现失败，再修复通过。
 - 暂停升级为关窗中止时，如果首次升级失败，重试原来会使用普通中止来源；现已保留关窗来源。同样通过 GUI 动作、临时数据库及失败重试先复现失败，再修复通过。
-- 本次审查后的代码修正、源码 SHA-256 清单和定向验证日志位于 `F:/AI/projects/bestseller/.scratch/logs/tickets/stop-copy-consistency/03/20261024-review-fixes/`；最终计数及全量验收见交付记录。
+- 本次审查后的代码修正、源码 SHA-256 清单和定向验证日志位于 `F:/AI/projects/bestseller/.scratch/logs/tickets/stop-copy-consistency/03/20261024-review-fixes/`；307 项审查修正定向验证通过；全量初跑的 4 处旧文案断言随后同步，对应两模块 18 项复测通过，原始全量 FAILED 记录保留。完整结果见交付记录。
 
 Standards：原始 2 项（最严重 P2），均已修正；Spec：原始 0 项；主代理另补 2 项修正与回归，最终测试结论见交付记录。

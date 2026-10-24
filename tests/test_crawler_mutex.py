@@ -175,7 +175,7 @@ class CrawlerMutexTests(unittest.TestCase):
             self.assertFalse(single_instance.is_held(single_instance.CRAWLER_LOCK),
                              "停下之后要放锁，否则续跑起不来")
 
-        self.assertIn("本轮已暂停", out.getvalue())
+        self.assertIn("本轮已按界面请求暂停", out.getvalue())
         self.assertIsNotNone(seen["ack_at"], "认领时回执，界面据此放宽窗口")
         self.assertIsNone(self._stop_request_row(), "退出时把消费过的请求删掉")
         self.assertIsNone(self._terminal()[0], "暂停不是终态：这一轮还能续跑")

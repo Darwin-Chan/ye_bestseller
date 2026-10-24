@@ -1,6 +1,6 @@
 # 停止原因文案一致性：规格
 
-Status: in-progress
+Status: done
 
 2026-10-24：用户已批准全部文案建议，并以“按建议”确认测试入口与三张工单拆分。按 01→02→03 实施。
 
@@ -77,4 +77,4 @@ Status: in-progress
 - 用户已批准的文案基准：[修改前后对照](F:/AI/projects/bestseller/docs/reviews/stop-copy-proposals-2026-10-24.md)。允许为正确区分暂停/中止来源而按真实请求选择相应句子，不把旧模板硬套到其他请求。
 - [拟发布工单](F:/AI/projects/bestseller/docs/design/stop-copy-consistency-2026-10-24/tickets.md)共三张，都是独立可验收的纵向切片，实施可按 01→02→03 顺序。
 - 沿用既有停止分类、冻结目标和分析终态后无写入的 ADR；目前没有需要新 ADR 的不可逆决策。
-- 当前实施与定向验证中；此前 2163 项全量结果属于历史输入，本次另建隔离副本验收。
+- 本次三张工单均已完成。全量初跑完整执行 2172 项并对账，报告的 4 处旧文案断言已同步，相关两模块 18 项复测通过；审查修正的 8 个模块另有 307 项通过。原始全量结论为 FAILED，未覆盖或改写成全量通过；验收依据及处置见[交付记录](F:/AI/projects/bestseller/docs/design/stop-copy-consistency-2026-10-24/delivery.md)。
