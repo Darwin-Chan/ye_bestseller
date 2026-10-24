@@ -492,7 +492,8 @@ def wait_for_resolution(page, minutes: int, emit=None, verification_type: str | 
                      note=_wait_note("reason=IDENTITY_VERIFICATION_TIMEOUT", where(), criterion,
                                      archive))
             raise IdentityVerificationTimeout("身份验证等待超时，本轮自动中止，已保存数据保留")
-        raise InterventionTimeout("人工介入超时")
+        label = {"slider": "滑块", "login": "登录墙"}.get(vtype_name, vtype_name)
+        raise InterventionTimeout(f"人工介入（{label}）等待超时")
     log.info("人工介入响铃结束：结果=已解决；轮次=%d；失败=%d", ticks, alarm_failures)
     if emit:
         emit("verification_solved", kind="verification", verification_type=vtype_name,

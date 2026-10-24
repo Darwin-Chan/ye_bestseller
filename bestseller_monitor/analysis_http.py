@@ -1,5 +1,7 @@
 """仅监听本机的分析页面与 JSON 接口。"""
 from __future__ import annotations
+
+from .matching_stop import BUTTON_STOP
 import json
 import logging
 import sqlite3
@@ -82,7 +84,7 @@ def create_server(service, port=0):
                     if data.get('action') == 'retry_matching':
                         return self.reply(service.retry_matching_job(data['id']))
                     if data.get('action') == 'stop_matching':
-                        return self.reply(service.request_stop(data['id']))
+                        return self.reply(service.request_stop(data['id'], reason=BUTTON_STOP))
                     if data.get('action') in ('move', 'remove', 'exclude', 'undo_exclude', 'rejoin'):
                         return self.reply(service.edit_group(data['id'], data['action'], data['group'],
                                                              data['member'], data.get('target')))

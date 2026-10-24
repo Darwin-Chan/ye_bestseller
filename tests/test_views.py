@@ -75,6 +75,21 @@ class ViewsTestCase(unittest.TestCase):
         self.submit(round_id, first_id, ("蓝", 3), shop_key=shop_key)
 
 
+class StopCauseViewTests(ViewsTestCase):
+    def test_result_uses_its_own_startup_failure_and_unknown_fallback(self):
+        rid = new_round(self.db, "A01", run_date=TODAY)
+        rounds.finish(self.db, rounds.load(self.db, rid), TerminalReason.STARTUP_FAILED,
+                      note="专用浏览器启动失败 <detail>")
+        view = views.result_view(self.conn, state=views.UiState(round_id=rid), now=NOW)
+        self.assertIn("失败原因：专用浏览器启动失败 <detail>", view["note"])
+        rid = new_round(self.db, "A01", run_date=TODAY)
+        self.conn.execute("UPDATE rounds SET terminal_reason=? WHERE id=?",
+                          (TerminalReason.LEGACY_UNKNOWN.value, rid))
+        view = views.result_view(self.conn, state=views.UiState(round_id=rid), now=NOW)
+        self.assertEqual(view["tag"], "非正常结束")
+        self.assertIn("停止原因：未记录", view["note"])
+
+
 class StartViewTests(ViewsTestCase):
     def test_start_page_counts_today_inventory_and_offers_shops_to_crawl(self):
         round_id = new_round(self.db, "A01", run_date=TODAY)
@@ -601,6 +616,25 @@ class SharedMetricsTests(ViewsTestCase):
         self.assertEqual((run["done_count"], run["total_count"], run["deny"]),
                          (result["done_count"], result["total_count"], result["deny"]))
         self.assertEqual((result["products_total"], result["skus_total"]), (2, 3))
+
+
+class InterruptionReasonTests(ViewsTestCase):
+    def test_a_new_execution_does_not_reuse_an_old_timeout_reason(self):
+        rid = new_round(self.db, "A01", run_date=TODAY)
+        reason = "人工介入（滑块）等待超时"
+        self.db.append_event(rid, "collection_interrupted", kind="run", note=reason)
+        self.db.append_event(rid, "collection_started", kind="run")
+        view = views.run_view(self.conn, state=views.UiState(round_id=rid), now=NOW)
+        self.assertIn("停止原因：未记录", view["note"])
+        self.assertNotIn(reason, view["note"])
+
+    def test_old_rounds_do_not_borrow_another_rounds_reason(self):
+        old = new_round(self.db, "A01", run_date=YESTERDAY)
+        rid = new_round(self.db, "A01", run_date=TODAY)
+        self.db.append_event(old, "collection_interrupted", kind="run", note="旧轮超时")
+        view = views.run_view(self.conn, state=views.UiState(round_id=rid), now=NOW)
+        self.assertIn("停止原因：未记录", view["note"])
+        self.assertNotIn("旧轮超时", view["note"])
 
 
 class RefusedStartTests(ViewsTestCase):

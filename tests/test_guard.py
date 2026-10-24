@@ -245,6 +245,17 @@ class InterventionResolutionTests(unittest.TestCase):
         self.assertIsNone(_intervention_of(_PageEvidence(product, "点我反馈 >", True)))
         self.assertEqual(_intervention_of(_PageEvidence(product, "", True)), "滑块")
 
+    def test_timeout_reason_identifies_the_intervention(self):
+        for kind, label, body in (("slider", "滑块", "请按住滑块"),
+                                  ("login", "登录墙", self.LOGIN_WALL)):
+            with self.subTest(kind=kind):
+                page = FakePage(self.PRODUCT, body=body)
+                clock = GuardClock(step=1.0)
+                with patch.object(guard, "time", clock), patch.object(waiting, "time", clock), \
+                        patch.object(guard.sound, "play_alarm"), \
+                        self.assertRaisesRegex(InterventionTimeout, f"人工介入（{label}）等待超时"):
+                    guard.wait_for_resolution(page, 1, verification_type=kind, confirm_sec=2.0)
+
     def test_a_body_only_signal_survives_the_confirmation_window(self):
         """落在 DOM 上的信号不该被确认窗口当成「没有落点的瞬时报错」丢掉。
 

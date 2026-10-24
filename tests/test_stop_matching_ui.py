@@ -41,13 +41,14 @@ class MatchingStopTests(unittest.TestCase):
         mask, transport = self.stopped_run()
 
         expect(mask.locator('#maskTitle')).to_have_text('正在停止匹配…')
+        expect(mask.locator('#maskPhase')).to_contain_text('停止原因：用户主动停止匹配')
         expect(mask.locator('#maskPhase')).to_contain_text('最多 30 秒')
-        expect(mask.locator('#maskPhase')).to_contain_text('已判的会留下')
+        expect(mask.locator('#maskPhase')).to_contain_text('已完成的判断会保留')
         expect(mask.locator('#maskStop')).to_be_disabled()
         expect(mask.locator('#maskMain')).to_have_text('已完成 2 / 6 对')     # 数字停在被点那一刻
         # 停止态的两句实话：停下后怎么落，以及两个入口同一态、窗口留到收尾完（票 03 那半）。
         expect(mask.locator('#maskStopNote')).to_be_visible()
-        expect(mask.locator('#maskStopNote')).to_contain_text('没判断的对记为「失败」')
+        expect(mask.locator('#maskStopNote')).to_contain_text('因停止而未判断的对保留为可重试的「失败」状态')
         expect(mask.locator('#maskStopNote')).to_contain_text('进的都是这一态')
         expect(mask.locator('#maskStopNote')).to_contain_text('收尾完成前窗口不消失')
         expect(mask.locator('.mask-steps li.cur')).to_have_text('逐对判断同款')
@@ -55,9 +56,9 @@ class MatchingStopTests(unittest.TestCase):
         transport.release.set()                    # 在途的两对收尾：这遮罩才关
         expect(mask).to_be_hidden()
         expect(self.page.locator('#matchingStatus')).to_have_text(
-            '本次匹配已停止：已完成 4 / 6 对，未判完的对记为「失败」，建议重试')
+            '本次匹配已停止；停止原因：用户主动停止匹配；已完成 4 / 6 对。未完成项保留为可重试的「失败」状态，建议重试。')
         expect(self.page.get_by_role('button', name='模型匹配同款')).to_be_enabled()
-        expect(self.page.locator('#groupDetail')).to_contain_text('已停止匹配，未判断')
+        expect(self.page.locator('#groupDetail')).to_contain_text('匹配已停止，本对未完成判断；停止原因：用户主动停止匹配。')
         expect(self.page.locator('.group-choice', has_text='4 个商品')).to_be_visible()
 
     def test_retry_runs_through_the_same_mask_with_only_the_pairs_left(self):

@@ -482,7 +482,7 @@ class CrawlerCloseTests(unittest.TestCase):
         self.api.pause_run()
         self.install(answer=False)
         self.assertFalse(self.window.close())
-        self.assertIn("本轮正在暂停，采集进程正在停止", self.messages[0])
+        self.assertIn("已收到用户暂停请求，采集进程正在停止", self.messages[0])
         self.assertIsNone(self.terminal())
         self.assertFalse(self.window.destroyed)
         self.assertEqual(len(self.tasks), 1, "independent driver must continue original pause")
@@ -500,7 +500,7 @@ class CrawlerCloseTests(unittest.TestCase):
         self.api.round_id = None  # abort_run historically returns no-op success here
         self.install(answer=True)
         self.assertFalse(self.window.close())
-        self.assertIn("本轮已暂停", self.messages[0])
+        self.assertIn("本轮已由用户主动暂停", self.messages[0])
         self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
         self.tasks.pop()()
         self.assertTrue(self.window.destroyed)
@@ -541,7 +541,7 @@ class CrawlerCloseTests(unittest.TestCase):
             runtime.fail_close = False
         self.install(answer=True, wait=wait)
         self.assertFalse(self.window.close())
-        self.assertIn("本轮正在完成暂停收尾", self.messages[0])
+        self.assertIn("用户暂停请求正在收尾", self.messages[0])
         self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
         self.tasks.pop()()
         self.assertTrue(self.window.destroyed)
@@ -574,8 +574,8 @@ class CrawlerCloseTests(unittest.TestCase):
                      wait=(lambda seconds: setattr(runtime, "fail_close", False))
                      if runtime else None)
         self.assertFalse(self.window.close())
-        headings = {"stopping": "本轮正在暂停，采集进程正在停止",
-                    "cleanup": "本轮正在完成暂停收尾", "paused": "本轮已暂停"}
+        headings = {"stopping": "已收到用户暂停请求，采集进程正在停止",
+                    "cleanup": "用户暂停请求正在收尾", "paused": "本轮已由用户主动暂停"}
         self.assertIn(headings[stage], self.messages[0])
         self.assertIn("不可续跑", self.messages[0])
         self.assertFalse(self.window.destroyed)
@@ -824,7 +824,7 @@ class CrawlerCloseTests(unittest.TestCase):
             self.clock.advance(2)
         self.install(answer=True, wait=wait)
         self.assertFalse(self.window.close())
-        self.assertIn("本轮正在暂停，采集进程正在停止", self.messages[0])
+        self.assertIn("已收到用户暂停请求，采集进程正在停止", self.messages[0])
         self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
         self.assertIn("正在中止", self.window.title)
         conn = connect(self.path)
@@ -843,7 +843,7 @@ class CrawlerCloseTests(unittest.TestCase):
         self.api.get_start()
         self.install(answer=True)
         self.assertFalse(self.window.close())
-        self.assertIn("本轮已暂停", self.messages[0])
+        self.assertIn("本轮已由用户主动暂停", self.messages[0])
         self.assertEqual(self.terminal(), rounds.TerminalReason.ABANDONED)
         self.assertFalse(self.api.resume_run()["ok"])
         self.tasks.pop()()

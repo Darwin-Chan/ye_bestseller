@@ -144,7 +144,7 @@
       </div>
       <div class="muted" style="margin:10px 0 0" id="rProgressLine">正在启动…</div>
       <div class="bar"><i id="rBar" style="width:0%"></i></div>
-      <div class="banner warn" id="rPaused" style="display:none">已暂停（轮次保留为「进行中」，点「继续」接着抓取本轮剩余任务）。</div>
+      <div class="banner warn" id="rPaused" style="display:none">本轮已由用户主动暂停，已抓取数据已保留；轮次保留为「进行中」，点击「继续」接着抓取本轮剩余任务。</div>
       <div class="banner err" id="rUnfinished" style="display:none"></div>
       <div class="banner warn" id="rStopping" style="display:none">正在停止采集进程…</div>
     </div>
@@ -208,7 +208,7 @@
 <div id="confirmModal">
   <div class="modal-mask"></div>
   <div class="modal-box">
-    <div class="modal-title" id="confirmTitle">确认终止本轮抓取？</div>
+    <div class="modal-title" id="confirmTitle">确认中止本轮抓取？</div>
     <div class="modal-sub" id="confirmSub">本轮将结束且不能继续；已抓取数据保留。收尾完成后，需明确点击开始才能新建。</div>
     <div class="modal-actions">
       <button class="btn ghost" id="confirmCancel">取消</button>
@@ -352,11 +352,14 @@
 
   // 停止途中要说的话只写一遍：过程页与结果页共用，窗口秒数由后端给（ADR-0009）。
   function stoppingText(d) {
-    if (d.stopping === "closing") return "正在收尾：采集进程在关掉自己启动的浏览器…";
-    if (d.stopping === "verifying") return "正在核验停止目标：暂不执行破坏性操作…";
-    if (d.stopping === "cleanup_pending") return "正在重试收尾：仍只处理原停止目标…";
+    const cause = "停止原因：" + (d.stop_reason || "未记录") + "；";
+    const failure = d.stop_failure ? "收尾失败原因：" + d.stop_failure + "；" : "";
+    const prefix = cause + failure;
+    if (d.stopping === "closing") return prefix + "正在收尾：关闭本次采集启动的浏览器…";
+    if (d.stopping === "verifying") return prefix + "正在核验采集进程身份，核验完成前不结束进程或关闭浏览器…";
+    if (d.stopping === "cleanup_pending") return prefix + "正在重试收尾，仅处理本次停止请求对应的采集进程和浏览器…";
     const wait = d.stop_grace_sec ? "最多 " + Math.round(d.stop_grace_sec) + " 秒，" : "";
-    return "正在停止采集进程…（" + wait + "超时会强制结束）";
+    return prefix + "正在停止采集进程…（" + wait + "超时会强制结束）";
   }
 
   // ---------- 开始页 ----------
@@ -595,15 +598,15 @@
       const orphan = !crossDay && !stopping && !d.running && !d.can_resume;
       $("rUnfinished").style.display = (crossDay || orphan) ? "block" : "none";
       $("rUnfinished").textContent = crossDay
-        ? (d.note || "本轮已跨天，不能继续；请中止本轮后开始新轮。")
-        : "采集已停止，本轮未正常结束；请确认中止并完成收尾后，再开始新轮。";
+        ? (d.note || "采集已停止且已跨天，本轮未正常结束、不能继续；停止原因：未记录；请确认中止并完成收尾后，再开始新轮。")
+        : (d.note || "采集已停止，本轮未正常结束；停止原因：未记录；请确认中止并完成收尾后，再开始新轮。");
       $("rPaused").style.display = (!stopping && d.can_resume) ? "block" : "none";
       $("rPaused").textContent = d.resume_error
-        ? "继续启动未成功：" + d.resume_error + "。原轮暂停资格保留，请明确点击继续重试。"
+        ? "本轮已由用户主动暂停；本次继续启动失败，原因：" + d.resume_error + "。原轮暂停资格保留，请明确点击「继续」重试。"
         : d.continue_gate
-          ? "已暂停（轮次保留为「进行中」），但还不能继续：" + d.continue_gate
-            + "；关闭专用 Edge 窗口不会自动继续本轮。"
-          : "已暂停（轮次保留为「进行中」，点「继续」接着抓取本轮剩余任务；关闭专用 Edge 窗口不会自动继续本轮）。";
+          ? "本轮已由用户主动暂停，轮次保留为「进行中」；暂不能继续，原因：" + d.continue_gate
+            + "。关闭专用 Edge 窗口不会自动继续本轮。"
+          : "本轮已由用户主动暂停，已抓取数据已保留；轮次保留为「进行中」，点击「继续」接着抓取本轮剩余任务。关闭专用 Edge 窗口不会自动继续本轮。";
       // 过程页登录入口（票 04：已上移页头、有轮次才显）：沿用票 02 的点击报因口径——
       // 非检测类（忙/资格/服务端拒绝）置灰、原因挂悬浮提示；检测/配置类亮起、点击弹
       // 信息框。有浏览器事实（明确暂停且收尾完成）时提示带配置来源与专用目录。
@@ -671,7 +674,7 @@
       if (!prepared || !prepared.ok) { if (prepared) showNotice(prepared.error); return; }
       action = () => doAbort(prepared.confirmation);
     }
-    $("confirmTitle").textContent = opts.title || "确认终止本轮抓取？";
+    $("confirmTitle").textContent = opts.title || "确认中止本轮抓取？";
     $("confirmSub").textContent = opts.sub || "本轮将结束且不能继续；已抓取数据保留。收尾完成后，需明确点击开始才能新建。";
     $("confirmOk").textContent = opts.ok || "确定";
     $("confirmCancel").style.display = "";

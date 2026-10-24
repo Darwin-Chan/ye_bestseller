@@ -14,6 +14,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+from .matching_stop import MatchingStop
 from .stock_series import aggregate_points as _aggregate_points
 from . import crawler_identity
 from .analysis_store import DraftStore, SIDE_EXCLUSION, SIDE_STANDALONE, source_of
@@ -93,7 +94,7 @@ class _Progress:
         self._judging_started = None
         self._state = 'matching'
         self._error = ''
-        self._stop = threading.Event()
+        self._stop = MatchingStop()
         self._finished = threading.Event()
         self._lock = threading.Lock()
         self._fields = {'phase_index': phase_index, 'products': 0, 'eligible': 0,
@@ -130,7 +131,7 @@ class _Progress:
             self.failure = exception
         self._finished.set()
 
-    def request_stop(self) -> bool:
+    def request_stop(self, reason=None) -> bool:
         """请求停下这次运行：置标志、状态转「正在停止」；收尾由运行自己走完（票 02）。
 
         已经到终态的运行不再受理——它没有还剩的写入了，停止请求落空是实话。
@@ -138,7 +139,7 @@ class _Progress:
         with self._lock:
             if self._state in TERMINAL_STATES:
                 return False
-            self._stop.set()
+            self._stop.request(reason)
             self._state = 'stopping'
             return True
 
@@ -147,9 +148,10 @@ class _Progress:
         with self._lock:
             return self._state in TERMINAL_STATES
 
-    def stop_requested(self) -> bool:
-        """给匹配层用的回调：该不该停（判断循环在每对之间问一次）。"""
-        return self._stop.is_set()
+    @property
+    def stop_requested(self):
+        """带本次请求原因的检查点；调用仍返回是否该停。"""
+        return self._stop
 
     def wait(self, timeout) -> bool:
         return self._finished.wait(timeout)
@@ -161,7 +163,7 @@ class _Progress:
                            start=self.start, end=self.end, error=self._error,
                            elapsed_sec=round(self._clock() - self._started, 1),
                            eta_text=self._eta_text(), retry=self.retry,
-                           stop_requested=self._stop.is_set(),
+                           stop_requested=self._stop(), stop_reason=self._stop.reason,
                            stop_timeout_sec=int(round(self.stop_timeout)))
         return payload
 
@@ -320,14 +322,14 @@ class AnalysisService:
         """这次运行到哪了：阶段、对数、时长、预计（样本不足不给）、失败原因。"""
         return self._job(analysis_id).snapshot()
 
-    def request_stop(self, analysis_id):
+    def request_stop(self, analysis_id, *, reason=None):
         """请求停下这次运行（协作停止）：立刻返回读数，收尾由运行自己走完（票 02）。
 
         停止请求不打断装配与排名（那一段改了会毁掉本次结果）；判断循环在每对之间认领它，
         在途的那几个模型调用等它们自己回来（最多一个模型超时）。
         """
         progress = self._job(analysis_id)
-        progress.request_stop()
+        progress.request_stop(reason)
         return progress.snapshot()
 
     def wait_terminal(self, analysis_id, timeout=None):
@@ -641,6 +643,8 @@ class AnalysisService:
             for group in snapshot['groups']:
                 if group.get('confirmed') or group.get('adjusted') or group.get('excluded_group'):
                     group.setdefault('manual_membership', True)
+            from .sku_lifecycle import restore_stop_reasons
+            restore_stop_reasons(snapshot)
             refresh_sku(snapshot)
             from .sku_matching import LIMITATIONS
             snapshot['limitations'] = list(LIMITATIONS)
@@ -790,6 +794,8 @@ class AnalysisService:
         for product in payload['products']:
             if not product.get('matching_state'):
                 product['matching_state'] = state_of_status(product.get('matching_status'))
+            if product.get('matching_status') == '已停止匹配，未判断':
+                product['matching_status'] = '匹配已停止，本对未完成判断；停止原因：未记录。'
             product.setdefault('matching_source', '')   # 票 07 之前的草稿没有来源列
         payload['matching'] = matching_summary(payload['products'])
         # 票 05 之前保存的草稿没有确认屏次序：读回时按现行规则补算（幂等，规则换了也跟着新）。

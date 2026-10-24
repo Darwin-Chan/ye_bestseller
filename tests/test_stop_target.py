@@ -28,6 +28,20 @@ class StopTargetTests(unittest.TestCase):
     def _watch(self, runtime):
         return stop_request.StopWatch(runtime, now=self.clock)
 
+    def test_close_cause_survives_replacement_and_cleanup_retry(self):
+        runtime = stop_request.RecordingStopRuntime(alive=True)
+        watch = self._watch(runtime)
+        watch.begin(self.conn, stop_request.StopCommand(
+            stop_request.ABORT, self.a, 1, reason="用户确认关闭采集窗口"))
+        self.db.record_crawler_process(pid=9001, round_id=2)
+        self.clock.value += 20
+        status = watch.tick(self.conn)
+        self.assertEqual(status.reason, "用户确认关闭采集窗口")
+        self.assertEqual(status.target, self.a)
+        status = watch.tick(self.conn)
+        self.assertEqual(status.reason, "用户确认关闭采集窗口")
+        self.assertNotIn("terminate", [name for name, _ in runtime.actions])
+
     def test_replacement_never_terminates_or_cleans_b(self):
         runtime = stop_request.RecordingStopRuntime(alive=True)
         watch = self._watch(runtime)

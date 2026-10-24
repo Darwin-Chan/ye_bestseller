@@ -180,7 +180,7 @@ class LeftoverRoundTests(unittest.TestCase):
             db = Database(conn)
             rounds.finish(db, rounds.load(db, rid), rounds.TerminalReason.FAIL_RATE_EXCEEDED)
         result = self.api.get_result()
-        self.assertEqual(result["tag"], "暂停待处理")
+        self.assertEqual(result["tag"], "失败率超限中止")
         self.assertNotIn("人工中止", result["tag"])
         self.assertFalse(self.api.resume_run()["ok"])
         # 历史无终态（如旧验证超时保留的轮）按未正常结束呈现，不冒充已暂停
@@ -415,7 +415,7 @@ class LeftoverRoundTests(unittest.TestCase):
 
         def spawn(*args, **kwargs):
             rid, process, death = self.running()
-            handles.update(death=death)
+            handles.update(death=death, rid=rid)
             return process
 
         with patch.object(gui.subprocess, "Popen", side_effect=spawn):
@@ -423,9 +423,13 @@ class LeftoverRoundTests(unittest.TestCase):
             page.locator("#startBtn").click()
             expect(page.locator("#panel-run")).to_have_class("panel active")
             handles["death"]()
+            with closing(connect(self.db_path)) as conn:
+                Database(conn).append_event(handles["rid"], "collection_interrupted", kind="run",
+                                            note="人工介入（滑块）等待超时")
             page.evaluate("tickRun()")
             expect(page.locator("#rUnfinished")).to_be_visible(timeout=8000)
             expect(page.locator("#rUnfinished")).to_contain_text("采集已停止，本轮未正常结束")
+            expect(page.locator("#rUnfinished")).to_contain_text("停止原因：人工介入（滑块）等待超时")
             expect(page.locator("#resumeBtn")).to_be_hidden()
             expect(page.locator("#pauseBtn")).to_be_hidden()
             expect(page.locator("#abortBtn")).to_be_enabled()

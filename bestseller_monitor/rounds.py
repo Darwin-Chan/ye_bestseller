@@ -401,6 +401,16 @@ def load(db: Database, round_id: int) -> Round:
     return _load_round(db, row)
 
 
+def ending_detail(db: Database, round_id: int) -> str | None:
+    """本轮收尾备注；开轮时记录的计划偏离不是停止原因。"""
+    row = db.conn.execute("SELECT note FROM rounds WHERE id=?", (round_id,)).fetchone()
+    if row is None or not row["note"]:
+        return None
+    lines = row["note"].splitlines()
+    return "\n".join(line for line in lines
+                     if not line.startswith(("越权补采：", "计划外采集："))).strip() or None
+
+
 def ensure_workable(db: Database, round_id: int, now) -> None:
     """开始一件新的采集工作之前问一次轮次；该停就抛 DayBoundaryReached。
 

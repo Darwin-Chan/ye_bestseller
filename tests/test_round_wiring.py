@@ -6,7 +6,8 @@ from unittest.mock import MagicMock, patch
 
 from bestseller_monitor import browser_pw, pacing, pipeline, plan_step, rounds, weekly_plan
 from bestseller_monitor.config import Shop
-from bestseller_monitor.db import CST, Database, connect, cst_date
+from bestseller_monitor.db import CST, Database, connect, cst_date, utcnow
+from bestseller_monitor.guard import InterventionTimeout
 from bestseller_monitor.rounds import RoundRequest, ScopeMismatch, ShopScope
 from helpers import crawler_cfg, isolated_locks, new_round, store_weekly_plan
 
@@ -99,6 +100,51 @@ class RoundScopeWiringTests(unittest.TestCase):
                 tuple(ShopScope(k, f"https://{k}.example/", f"店铺{k}") for k in keys),
             ))
             return opened.round.id
+        finally:
+            conn.close()
+
+    def test_cli_interruption_explains_same_day_same_scope_resume(self):
+        import io
+        from contextlib import redirect_stdout
+        output = io.StringIO()
+        with isolated_locks(), redirect_stdout(output), patch.object(
+                pipeline, "_run_pwcdp_round", side_effect=InterventionTimeout("滑块超时")):
+            pipeline.run_round(self._cfg(), [self._shop("A01")])
+        self.assertIn("停止原因：滑块超时", output.getvalue())
+        self.assertIn("同日、同范围重新运行可续跑", output.getvalue())
+        self.assertNotIn("本轮已暂停", output.getvalue())
+
+    def test_gui_interruption_output_requires_abort_and_new_round(self):
+        import io
+        from contextlib import redirect_stdout
+        request = RoundRequest(cst_date(), (ShopScope("A01", "https://A01.example/", "店铺A01"),))
+        intent = rounds.NewRoundIntent(request, after_round=0)
+        output = io.StringIO()
+        with isolated_locks(), redirect_stdout(output), patch.object(
+                pipeline, "_run_pwcdp_round", side_effect=InterventionTimeout("登录墙超时")):
+            pipeline.run_round(self._cfg(), [self._shop("A01")], new_intent=intent)
+        self.assertIn("停止原因：登录墙超时", output.getvalue())
+        self.assertIn("请确认中止并完成收尾后，再开始新轮", output.getvalue())
+        self.assertNotIn("同日、同范围重新运行可续跑", output.getvalue())
+
+    def test_slider_timeout_keeps_the_reason_for_the_gui(self):
+        from bestseller_monitor import views
+        reason = "人工介入（滑块）等待超时"
+        with isolated_locks(), patch.object(pipeline, "_run_pwcdp_round",
+                                            side_effect=InterventionTimeout(reason)):
+            pipeline.run_round(self._cfg(), [self._shop("A01")])
+        conn = connect(self.db_path)
+        try:
+            row = self._round_rows()[-1]
+            state = views.UiState(round_id=row["id"])
+            run = views.run_view(conn, state=state, now=utcnow())
+            start = views.start_view(conn, cfg=self._cfg(), shops=[self._shop("A01")],
+                                     state=state, crawler=None, now=utcnow())
+            self.assertIn("停止原因：" + reason, run["note"])
+            self.assertIn(reason, start["pending"]["rounds"][0]["text"])
+            self.assertIn(reason, start["start_hint"])
+            self.assertIsNone(row["terminal_reason"])
+            self.assertFalse(run["can_resume"])
         finally:
             conn.close()
 
@@ -292,7 +338,8 @@ class PwCdpRoundAssemblyTests(unittest.TestCase):
         events = [tuple(row) for row in self.db.conn.execute(
             "SELECT round_id, event, shop_key FROM event_log"
         )]
-        self.assertEqual(events, [(self.round_id, "click_deny", "A01")],
+        self.assertEqual(events, [(self.round_id, "collection_started", None),
+                                  (self.round_id, "click_deny", "A01")],
                          "埋点要落在本轮的事件表里，界面过程页读的就是它")
         params = self.db.conn.execute("SELECT COUNT(*) c FROM run_params").fetchone()["c"]
         self.assertEqual(params, 1, "本轮生效的参数要留档")

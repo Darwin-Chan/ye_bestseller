@@ -162,9 +162,9 @@ def install_close_guard(window, api, *, confirm, notify, title,
                 return False
             text = CONFIRM_TEXT
             if state.kind == "paused":
-                heading = {"stopping": "本轮正在暂停，采集进程正在停止",
-                           "cleanup": "本轮正在完成暂停收尾",
-                           "paused": "本轮已暂停"}[state.pause_phase]
+                heading = {"stopping": "已收到用户暂停请求，采集进程正在停止",
+                           "cleanup": "用户暂停请求正在收尾",
+                           "paused": "本轮已由用户主动暂停"}[state.pause_phase]
                 text = heading + "。\n\n" + CONFIRM_TEXT.split("\n\n", 1)[1]
             if state.kind in ("running", "paused") and not confirm(text):
                 return False

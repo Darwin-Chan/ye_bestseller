@@ -83,8 +83,10 @@ class StopRequestStoreTests(unittest.TestCase):
     def test_ensure_workable_acknowledges_the_request_that_stops_the_round(self):
         self._request()
 
-        with self.assertRaises(stop_request.StopRequested):
+        with self.assertRaises(stop_request.StopRequested) as caught:
             rounds.ensure_workable(self.db, self.rid, utcnow())
+        self.assertEqual(caught.exception.kind, stop_request.PAUSE)
+        self.assertIn("暂停", str(caught.exception))
 
         self.assertIsNotNone(self.db.stop_request()["ack_at"], "认领时回执，界面据此放宽窗口")
 

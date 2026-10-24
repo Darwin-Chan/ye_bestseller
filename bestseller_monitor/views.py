@@ -46,6 +46,7 @@ def stop_failure_text(code: str) -> str:
     """Stable StopWatch protocol codes become user-facing reasons only here."""
     return {
         "terminate_failed": "无法强制停止采集，请检查进程权限",
+        "target_replaced": "原采集进程已被替换，暂不处置新进程",
         "target_unverifiable": "暂时无法核验原采集身份",
         "database_unavailable": "数据库暂不可用",
         "observation_failed": "暂时无法读取采集进程状态",
@@ -136,7 +137,7 @@ _TERMINAL_TEXT = {
         "身份验证超时中止", "身份验证等待超时，本轮自动中止；已抓取数据已保留、不可续跑。请完成安全收尾后明确开始新轮。",
     ),
     rounds.TerminalReason.STARTUP_FAILED: (
-        "启动失败", "本次新建在启动或初始化时失败，未进入采集；请核实收尾与配置后明确开始新轮。",
+        "启动失败", "本次新建在启动或初始化时失败，未进入采集；失败原因：{cause}；请核实收尾与配置后明确开始新轮。",
     ),
     rounds.TerminalReason.COMPLETED: ("正常完成", "本轮正常完成。"),
     rounds.TerminalReason.DAY_BOUNDARY: (
@@ -148,8 +149,8 @@ _TERMINAL_TEXT = {
         "本轮因整轮 deny 达到阈值而意外中止，已抓取数据已保留；本轮不可续跑，请启动新的抓取轮次。",
     ),
     rounds.TerminalReason.FAIL_RATE_EXCEEDED: (
-        "暂停待处理",
-        "本轮因失败率超过阈值而暂停，需人工决策；未抓取店铺见下方。",
+        "失败率超限中止",
+        "本轮因失败率超过阈值而中止，已抓取数据已保留；本轮不可续跑，请完成收尾后再开始新轮；未抓取店铺见下方。",
     ),
     rounds.TerminalReason.DETAIL_BUDGET_EXHAUSTED: (
         "预算耗尽",
@@ -162,12 +163,15 @@ _TERMINAL_TEXT = {
 }
 
 
-def _terminal_text(reason) -> tuple[str, str]:
+def _terminal_text(reason, detail=None) -> tuple[str, str]:
     """轮次终态 → 结果页的标签与说明。改文案不影响任何判定。"""
     if reason is None:
         return "进行中", "本轮仍在进行；未抓取店铺见下方。"
-    return _TERMINAL_TEXT.get(
-        reason, ("意外中止", "本轮非正常结束，已抓取数据已保留；未抓取店铺见下方。"))
+    cause = detail or "未记录"
+    tag, text = _TERMINAL_TEXT.get(
+        reason, ("非正常结束", "本轮非正常结束；停止原因：{cause}；"
+                            "已抓取数据已保留；未抓取店铺见下方。"))
+    return tag, text.format(cause=cause)
 
 
 def _terminal_suffix(reason) -> str:
@@ -261,18 +265,35 @@ def _round_can_resume(state: UiState, round_: rounds.Round, now: str) -> bool:
             and round_.resumable_on(now))
 
 
-def _pending_round_text(row: rounds.Round, *, today: str, resumable: bool) -> str:
+def _interruption_reason(conn: sqlite3.Connection, round_id: int) -> str:
+    """只认本次执行保存的原因；新一次开始后，旧原因不再适用。"""
+    row = conn.execute(
+        "SELECT event, note FROM event_log WHERE round_id=? "
+        "AND event IN ('collection_started', 'collection_interrupted') "
+        "ORDER BY id DESC LIMIT 1", (round_id,),
+    ).fetchone()
+    if row is not None and row["event"] == "collection_interrupted" and row["note"]:
+        return row["note"]
+    return "未记录"
+
+
+def _unfinished_text(reason: str, *, cross_day: bool = False) -> str:
+    head = ("采集已停止且已跨天，本轮未正常结束、不能继续" if cross_day
+            else "采集已停止，本轮未正常结束")
+    return (f"{head}；停止原因：{reason}；"
+            "请确认中止并完成收尾后，再开始新轮。")
+
+
+def _pending_round_text(row: rounds.Round, *, today: str, resumable: bool,
+                        reason: str) -> str:
     keys = "、".join(row.shop_keys) or "（无店铺）"
     head = f"轮次 #{row.id}（{row.run_date}，{keys}）"
     if resumable:
-        return (head + "：已暂停，可到过程页继续；如需换范围或新建，请先确认中止。")
-    if row.run_date != today:
-        return (head + "：采集已停止且已跨天，本轮未正常结束、不能继续；"
-                "请确认中止并等待收尾完成后开始新轮。")
-    return head + "：采集已停止，本轮未正常结束；请确认中止并等待收尾完成后开始新轮。"
+        return (head + "：已由用户主动暂停，可到过程页继续；如需换范围或新建，请先确认中止。")
+    return head + "：" + _unfinished_text(reason, cross_day=row.run_date != today)
 
 
-def _pending_payload(pending: tuple[rounds.Round, ...], state: UiState,
+def _pending_payload(conn: sqlite3.Connection, pending: tuple[rounds.Round, ...], state: UiState,
                      now: str, today: str) -> list[dict]:
     rows = []
     for row in pending:
@@ -283,16 +304,17 @@ def _pending_payload(pending: tuple[rounds.Round, ...], state: UiState,
             "shops": list(row.shop_keys),
             "cross_day": row.run_date != today,
             "resumable": resumable,
-            "text": _pending_round_text(row, today=today, resumable=resumable),
+            "text": _pending_round_text(row, today=today, resumable=resumable,
+                                        reason=_interruption_reason(conn, row.id)),
         })
     return rows
 
 
-def _pending_hint(pending: tuple[rounds.Round, ...], state: UiState,
+def _pending_hint(conn: sqlite3.Connection, pending: tuple[rounds.Round, ...], state: UiState,
                   now: str, today: str) -> str:
     if len(pending) == 1 and _round_can_resume(state, pending[0], now):
         row = pending[0]
-        return (f"轮次 #{row.id}（{row.run_date}）已暂停：请到过程页继续；"
+        return (f"轮次 #{row.id}（{row.run_date}）已由用户主动暂停：请到过程页继续；"
                 "如需新建，请先确认中止本轮。")
     heads = []
     if any(row.run_date == today and not _round_can_resume(state, row, now)
@@ -302,8 +324,12 @@ def _pending_hint(pending: tuple[rounds.Round, ...], state: UiState,
         heads.append("有轮次已跨天，不能继续")
     resumed = [row for row in pending if _round_can_resume(state, row, now)]
     if resumed:
-        heads.append("、".join(f"轮次 #{row.id} 已暂停" for row in resumed))
+        heads.append("、".join(f"轮次 #{row.id} 已由用户主动暂停" for row in resumed))
     ids = "、".join(f"#{row.id}（{row.run_date}）" for row in pending)
+    causes = "；".join(f"#{row.id}：{_interruption_reason(conn, row.id)}"
+                       for row in pending if not _round_can_resume(state, row, now))
+    if causes:
+        heads.append("停止原因：" + causes)
     return (f"未结束的轮次：{ids}。" + "；".join(heads)
             + "。请在下方逐个确认中止并等待收尾完成，再开始新轮。")
 
@@ -410,7 +436,7 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
         hint = _crawler_hint(crawler)
         start_allowed = False
     elif pending:
-        hint = _pending_hint(pending, state, now, today)
+        hint = _pending_hint(conn, pending, state, now, today)
         start_allowed = False
     else:
         hint = ""
@@ -427,7 +453,7 @@ def start_view(conn: sqlite3.Connection, *, cfg, shops, state: UiState,
         "total_shops": len(shops),
         "start_hint": hint,
         "start_allowed": start_allowed,
-        "pending": ({"rounds": _pending_payload(pending, state, now, today)}
+        "pending": ({"rounds": _pending_payload(conn, pending, state, now, today)}
                     if pending else None),
         "residue": residue,
         "plan_idle": idle,
@@ -601,7 +627,9 @@ def run_view(conn: sqlite3.Connection | None, *, state: UiState, now: str,
         "has_round": True,
         "round_id": round_id,
         "cross_day": cross_day,
-        "note": ("本轮已跨天，不能继续；请中止本轮后开始新轮。" if cross_day else None),
+        "note": (_unfinished_text(_interruption_reason(conn, round_id), cross_day=cross_day)
+                 if cross_day or (not state.crawler_running and not state.stopping
+                                  and not _round_can_resume(state, active, now)) else None),
         "verification": _identity_wait(conn, round_id, state),
         "can_resume": _round_can_resume(state, active, now),
         "can_abort": True,
@@ -668,7 +696,7 @@ def result_view(conn: sqlite3.Connection, *, state: UiState, now: str,
                    + [row for row in todo if row["key"] not in partial_keys],
                    key=lambda row: row["key"])
     products_total, skus_total = tally.success_offers, tally.success_skus
-    tag, note = _terminal_text(run.reason)
+    tag, note = _terminal_text(run.reason, rounds.ending_detail(Database(conn), run.id))
     return {
         "has_round": True,
         "round_id": round_id,

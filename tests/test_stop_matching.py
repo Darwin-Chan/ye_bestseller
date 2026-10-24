@@ -91,6 +91,49 @@ class StopSeamTests(unittest.TestCase):
         self.assertEqual(reading['state'], 'matching')
         return accepted['id']
 
+    def test_first_stop_source_reaches_unfinished_pairs_and_resets_on_retry(self):
+        analysis_id = self.judging_stopped()
+        first = self.service.request_stop(analysis_id, reason="用户主动停止匹配")
+        self.assertEqual(first['stop_reason'], "用户主动停止匹配")
+        repeated = self.service.request_stop(analysis_id, reason="用户关闭窗口")
+        self.assertEqual(repeated['stop_reason'], "用户主动停止匹配")
+        self.transport.release.set()
+        self.wait_state(analysis_id)
+        reasons = self.service.get(analysis_id)['matching']['reasons']
+        self.assertIn("匹配已停止，本对未完成判断；停止原因：用户主动停止匹配。", reasons)
+        self.transport = self.use_transport(pass_first=0)
+        self.service.retry_matching_job(analysis_id)
+        reading = self.wait_for(analysis_id, lambda r: r['todo'] == 2)
+        self.assertFalse(reading['stop_requested'])
+        self.assertEqual(reading['stop_reason'], "未记录")
+        self.transport.release.set()
+        self.wait_state(analysis_id)
+        self.assertEqual(self.service.get(analysis_id)['matching']['retryable'], 0)
+
+    def test_legacy_product_stop_is_unknown_and_remains_retryable_after_restore(self):
+        import json
+        analysis_id = self.judging_stopped()
+        self.service.request_stop(analysis_id)
+        self.transport.release.set()
+        self.wait_state(analysis_id)
+        self.service.save_draft(analysis_id)
+        with closing(sqlite3.connect(self.service.store.path)) as conn:
+            raw = conn.execute("SELECT payload FROM analysis_drafts WHERE id=?", (analysis_id,)).fetchone()[0]
+            payload = json.loads(raw)
+            for product in payload['products']:
+                if product.get('matching_state') == '失败':
+                    product['matching_status'] = STATUS_STOPPED
+                    product.pop('matching_state')
+            with conn:
+                conn.execute("UPDATE analysis_drafts SET payload=? WHERE id=?",
+                             (json.dumps(payload), analysis_id))
+        restored = AnalysisService(self.service.config, running=lambda: False)
+        saved = restored.get(analysis_id)
+        self.assertGreater(saved['matching']['retryable'], 0)
+        self.assertIn("匹配已停止，本对未完成判断；停止原因：未记录。", saved['matching']['reasons'])
+        final = restored.retry_matching(analysis_id)
+        self.assertEqual(final['matching']['retryable'], 0)
+
     def test_stop_records_unjudged_pairs_as_retryable_failures(self):
         analysis_id = self.judging_stopped()
 
@@ -111,7 +154,7 @@ class StopSeamTests(unittest.TestCase):
         snapshot = self.service.get(analysis_id)
         summary = snapshot['matching']
         self.assertEqual(summary['retryable'], summary['failed'])
-        self.assertIn(STATUS_STOPPED, summary['reasons'], '未判的对说的是「已停止匹配，未判断」')
+        self.assertIn('匹配已停止，本对未完成判断；停止原因：未记录。', summary['reasons'])
         self.assertEqual(summary['judged'] + summary['failed'], 4, '四个商品的结论都定稿了')
         self.assertEqual(len(snapshot['groups']), 1, '装配照常跑完：四件同图商品仍是一组')
         self.assertEqual(snapshot['matching']['failed'], summary['failed'])

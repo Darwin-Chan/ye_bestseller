@@ -631,6 +631,20 @@ class WeeklyReportTests(unittest.TestCase):
         self.assertIn("本机缺一天（A03 09-17 —— 当天采集在详情预算耗尽后中止）无法回填",
                       todo)
 
+    def test_local_startup_failure_detail_and_unknown_reason_reach_report(self):
+        for reason, detail, expected in (
+            ("STARTUP_FAILED", "测试配置缺失", "失败原因：测试配置缺失"),
+            ("STARTUP_FAILED", None, "失败原因：未记录"),
+            ("LEGACY_UNKNOWN", None, "终态不详（旧数据）；结束原因：未记录"),
+        ):
+            with self.subTest(reason=reason, detail=detail):
+                self.world.round_on("2026-09-17", reason)
+                self.world.conn.execute("UPDATE rounds SET note=? WHERE run_date=?",
+                                        (detail, "2026-09-17"))
+                self.world.conn.commit()
+                self.world.run()
+                self.assertIn(expected, self.world.report())
+
     def test_other_machines_gaps_come_from_their_packages_coverage(self):
         # m3 的包缺 A02 09-16 那天（当天采集中止）：计划该采到、包里没有 → 缺口
         world = ConsoleWorld(self)

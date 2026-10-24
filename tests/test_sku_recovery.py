@@ -90,6 +90,37 @@ class SkuRecoveryTests(unittest.TestCase):
         restored.retry_matching(first["id"])
         self.assertEqual(3, len(self.recommend_calls))
 
+    def test_legacy_stopped_draft_shows_unknown_reason_and_stays_retryable(self):
+        self.seed("#A#", image=product_picture("red"))
+        self.seed("无码", shop="B01", image=product_picture("green"))
+        def unavailable(content):
+            raise ModelFailure("模型不可用")
+        self.result = unavailable
+        first = self.analyze()
+        stopped = self.service.retry_matching(first["id"], stop=lambda: True)
+        self.assertEqual(1, stopped["matching"]["reasons"]["stopped"])
+        # Recreate the old saved representation, which carried no source.
+        for task in stopped["model_tasks"].values():
+            task.update(state="stopped", completed=False, retryable=True, reason="用户/运行已停止")
+        for state in stopped["matching"]["states"]:
+            if state["state"] == "stopped":
+                state["reason"] = "用户/运行已停止"
+        for member in stopped["members"]:
+            member["matching_note"] = "用户/运行已停止"
+            member["model_work"] = [dict(state="stopped", reason="用户/运行已停止")]
+        self.service.save_draft(first["id"])
+        stored = self.service.store.read(first["id"])
+        stopped["saved_at"] = stored.saved_at
+        self.service.store.write_sku(stopped)
+        restored = AnalysisService(self.service.config, running=lambda: False)
+        saved = restored.get(first["id"])
+        self.assertTrue(all(t["retryable"] for t in saved["model_tasks"].values()))
+        self.assertTrue(all("停止原因：未记录" in t["reason"] for t in saved["model_tasks"].values()))
+        self.assertTrue(all("停止原因：未记录" in m["matching_note"] for m in saved["members"]))
+        self.result = dict(same=True, confidence=.95, reason="恢复后有效")
+        self.assertEqual(0, restored.retry_matching(first["id"])["matching"]["retryable"])
+        self.assertEqual(2, len(self.calls))
+
     def test_stopped_recommendation_drops_late_result_and_resumes_only_remaining(self):
         import threading
         a, b, c, d, _ = self.split_code_anchors()
@@ -104,7 +135,7 @@ class SkuRecoveryTests(unittest.TestCase):
         self.recommend_result = delayed
         accepted = self.service.start_job("2026-09-07", "2026-09-14")
         self.assertTrue(entered.wait(5))
-        self.service.request_stop(accepted["id"])
+        self.service.request_stop(accepted["id"], reason="用户关闭窗口")
         release.set()
         terminal = self.service.wait_terminal(accepted["id"], 5)
         first = self.service.get(accepted["id"])
@@ -112,6 +143,8 @@ class SkuRecoveryTests(unittest.TestCase):
         self.assertTrue(terminal["stop_requested"])
         self.assertEqual(1, first["matching"]["completed"])
         self.assertEqual(1, first["matching"]["reasons"]["stopped"])
+        stopped = [t for t in first["model_tasks"].values() if t["state"] == "stopped"]
+        self.assertEqual(stopped[0]["reason"], "本次匹配已停止；停止原因：用户关闭窗口。")
         self.assertNotIn("recommendation", self.evidence(first, d))
         self.service.save_draft(first["id"])
         final = self.service.retry_matching(first["id"])
@@ -528,14 +561,14 @@ class SkuRecoveryBrowserTests(unittest.TestCase):
         self.assertTrue(entered.wait(5))
         self.page.locator("#maskStop").click()
         release.set()
-        expect(self.page.locator("#matchingStatus")).to_contain_text("用户/运行已停止")
+        expect(self.page.locator("#matchingStatus")).to_contain_text("停止原因：用户主动停止匹配")
         expect(self.page.locator("#matchingStatus")).to_contain_text("已完成但无法推荐唯一组")
         self.assertEqual(2, len(self.recommend_calls))
         self.retain("recommendation-stopped-partial")
         self.page.locator("#saveDraft").click()
         expect(self.page.locator("#saveStatus")).to_contain_text("已保存")
         self.page.reload()
-        expect(self.page.locator("#matchingStatus")).to_contain_text("用户/运行已停止")
+        expect(self.page.locator("#matchingStatus")).to_contain_text("停止原因：用户主动停止匹配")
         self.page.locator("#runMatching").click()
         expect(self.page.locator("#matchingStatus")).to_contain_text("未完成 0")
         self.assertEqual(3, len(self.recommend_calls))

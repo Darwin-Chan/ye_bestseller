@@ -138,6 +138,7 @@ class FakeAnalysis:
         self._race = race_after_first_look   # 关窗检查放行之后才登记进来的那趟（夹缝）
         self._looks = 0
         self.stopped, self.waited = [], []
+        self.stop_reasons = []
         self.calls = []                      # 收尾里的次序：先请求停下、再等它停完
 
     def in_flight_job(self):
@@ -150,7 +151,8 @@ class FakeAnalysis:
                 return dict(run.reading)
         return None
 
-    def request_stop(self, analysis_id):
+    def request_stop(self, analysis_id, *, reason=None):
+        self.stop_reasons.append(reason)
         self.stopped.append(analysis_id)
         self.calls.append(('stop', analysis_id))
 
@@ -356,6 +358,7 @@ class CloseWindowTests(unittest.TestCase):
         self.wait_for(lambda: service.waited, '收尾进入 wait_terminal')
         self.assertEqual(service.calls, [('stop', 'a1'), ('wait', 'a1')],
                          '「关闭并停止」走与「停止匹配」同一个停止入口，先请求停下再等它停完')
+        self.assertEqual(service.stop_reasons, ['用户关闭窗口'])
         text = confirm.call_args.args[0]
         self.assertIn('正在匹配同款：已完成 120/317 对，预计还需约 8 分钟。', text)
         self.assertIn('但这一趟的分析结果会没。', text)

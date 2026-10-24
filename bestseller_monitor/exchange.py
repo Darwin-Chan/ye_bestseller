@@ -115,7 +115,7 @@ _REASON_GLOSS = {
     "DENY_EXCEEDED": "当天采集因被拒次数超限中止",
     "ABANDONED": "当天采集被中止（放弃）",
     "STARTUP_FAILED": "当天采集启动或初始化时失败，未进入采集",
-    "LEGACY_UNKNOWN": "当天采集的终态不详（旧数据）",
+    "LEGACY_UNKNOWN": "当天采集的终态不详（旧数据）；结束原因：未记录",
 }
 
 
@@ -1115,7 +1115,10 @@ def gap_reason(db: Database, day: str) -> str:
         return "当天没有采集记录"
     reason = on_day[-1].reason
     if reason is None:
-        return "当天采集的终态不详"
+        return "当天采集的终态不详；结束原因：未记录"
+    if reason == rounds.TerminalReason.STARTUP_FAILED:
+        detail = rounds.ending_detail(db, on_day[-1].id) or "未记录"
+        return f"{_REASON_GLOSS[reason.value]}；失败原因：{detail}"
     return _REASON_GLOSS.get(reason.value, f"当天采集的终态是 {reason.value}")
 
 

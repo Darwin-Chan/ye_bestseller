@@ -271,7 +271,10 @@ class Api:
             return {"ok": True}
 
     def _collection_payload(self, payload: dict) -> dict:
-        return {**payload, "local_trial": self.cfg.local_trial,
+        return {**payload, "stop_reason": self._stop_watch.status.reason or "未记录",
+                "stop_failure": (views.stop_failure_text(self._stop_watch.status.code)
+                                 if self._stop_watch.status.code else None),
+                "local_trial": self.cfg.local_trial,
                 "collection_label": "本机试采，不共享" if self.cfg.local_trial else "正式采集",
                 "trial_available": is_merge_only(self.cfg),
                 "database": str(self.cfg.db_file),
@@ -851,7 +854,8 @@ class Api:
                 return {"ok": False, "error": "轮次已不存在，请重新确认中止。"}
             try:
                 settled = rounds.finish_if_open(db, target, TerminalReason.ABANDONED,
-                                                note="GUI 人工中止（放弃）")
+                                                note=("GUI 关窗人工中止（放弃）" if self._closing_requested
+                                                       else "GUI 人工中止（放弃）"))
             except (sqlite3.Error, ValueError) as exc:
                 return {"ok": False, "error": f"中止或收尾尚未完成：{exc}",
                         "retryable": True}
@@ -1015,10 +1019,12 @@ class Api:
                         return {"ok": False, "error": "停止目标已变化，请重新确认。"}
                     settled = rounds.finish_if_open(
                         db, rounds.load(db, status.round_id), TerminalReason.ABANDONED,
-                        note="GUI 人工中止（放弃）")
+                        note=("GUI 关窗人工中止（放弃）" if self._closing_requested
+                              else "GUI 人工中止（放弃）"))
                     self.user_paused = False
                     self._stop_watch.begin(conn, stop_request.StopCommand(
-                        stop_request.StopKind.ABORT, status.target, status.round_id))
+                        stop_request.StopKind.ABORT, status.target, status.round_id,
+                        reason="用户确认关闭采集窗口" if self._closing_requested else "用户确认中止"))
                     return {"ok": True, "round_id": settled.id,
                             "reason": settled.reason.value,
                             "stopping": self._stop_watch.state}
@@ -1052,7 +1058,8 @@ class Api:
                 try:
                     self._stop_watch.begin(
                         conn, stop_request.StopCommand(stop_request.StopKind.ABORT,
-                                                       target, rid))
+                                                       target, rid, reason=(
+                            "用户确认关闭采集窗口" if self._closing_requested else "用户确认中止")))
                 except RuntimeError as exc:
                     return {"ok": False, "error": "暂时无法确认停止目标，请稍后重试。",
                             "retryable": True, "code": str(exc)}
@@ -1158,7 +1165,8 @@ class Api:
                     if status.phase is not stop_request.StopPhase.IDLE:
                         try:
                             self._stop_watch.begin(conn, stop_request.StopCommand(
-                                stop_request.StopKind.ABORT, status.target, expected.round_id))
+                                stop_request.StopKind.ABORT, status.target, expected.round_id,
+                                reason="用户确认关闭采集窗口"))
                         except Exception as exc:
                             # Request accepted, not teardown completed. The independent
                             # close driver retries this exact promotion via snapshots.

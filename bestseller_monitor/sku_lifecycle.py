@@ -11,15 +11,32 @@ import sqlite3
 import json
 
 from .matching import ModelFailure, digest, signature_parts
+from .matching_stop import stop_reason
 from .sku_grouping import identity
 
 LABELS = {
     "inconclusive": "图文证据不确定，尚未得到有效判断", "missing_evidence": "缺少图片证据", "needs_config": "需要模型配置",
     "model_unavailable": "模型不可用", "failed": "调用失败",
-    "stopped": "用户/运行已停止", "completed_uncertain": "已完成但无法推荐唯一组",
+    "stopped": "本次匹配已停止；停止原因：未记录。", "completed_uncertain": "已完成但无法推荐唯一组",
     "completed_negative": "已完成并确定非同款", "completed_positive": "已完成并得到有效同款判断",
 }
 RETRYABLE = {"needs_config", "model_unavailable", "failed", "stopped", "inconclusive"}
+
+def restore_stop_reasons(snapshot):
+    """旧草稿只有停止状态，不能据此推断用户操作。保留已记录的新原因。"""
+    unknown = LABELS["stopped"]
+    for task in snapshot.get("model_tasks", {}).values():
+        if task.get("state") == "stopped" and "停止原因：" not in task.get("reason", ""):
+            task["reason"] = unknown
+    for state in snapshot.get("matching", {}).get("states", []):
+        if state.get("state") == "stopped" and "停止原因：" not in state.get("reason", ""):
+            state["reason"] = unknown
+    for member in snapshot.get("members", []):
+        for task in member.get("model_work", []):
+            if task.get("state") == "stopped" and "停止原因：" not in task.get("reason", ""):
+                task["reason"] = unknown
+        member["matching_note"] = member.get("matching_note", "").replace("用户/运行已停止", unknown)
+
 
 def cache_signature(config, rule):
     """Return the durable SKU cache signature used by production work."""
@@ -75,13 +92,14 @@ class ModelWork:
         key = self._key(branch, context)
         task = dict(branch=branch, context=context, members=sorted(members), state=state,
                     completed=state.startswith("completed_"), retryable=state in RETRYABLE,
-                    reason=LABELS[state], **fields)
+                    reason=(f"本次匹配已停止；停止原因：{stop_reason(self.stop)}。"
+                            if state == "stopped" else LABELS[state]), **fields)
         self.tasks[key] = task
         return key
 
     def failure_reason(self, branch, context):
         task = self.tasks[self._key(branch, context)]
-        return task.get("error", task["reason"])
+        return task["reason"] if task["state"] == "stopped" else task.get("error", task["reason"])
 
     def completed_result(self, branch, context, rule):
         signature = self._signature(rule)
@@ -156,7 +174,8 @@ class ModelWork:
             completed_members=len(self.snapshot["members"]) - len(unfinished_members),
             completed=sum(t["completed"] for t in tasks), unfinished=sum(not t["completed"] for t in tasks),
             retryable=sum(t["retryable"] for t in tasks), cached=sum(bool(t.get("cached")) for t in tasks),
-            states=[dict(state=state, reason=reason, count=sum(t["state"] == state for t in tasks)) for state, reason in LABELS.items()],
+            states=[dict(state=state, reason=(f"本次匹配已停止；停止原因：{stop_reason(self.stop)}。"
+                                           if state == "stopped" else reason), count=sum(t["state"] == state for t in tasks)) for state, reason in LABELS.items()],
             requested=self.requested, reasons={s: sum(t["state"] == s for t in tasks) for s in LABELS})
         protected = {identity(r) for g in self.snapshot["groups"] if g.get("manual_membership") or g.get("excluded_group") for r in g["members"]}
         for member in self.snapshot["members"]:

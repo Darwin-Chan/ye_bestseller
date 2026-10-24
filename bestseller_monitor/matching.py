@@ -1,6 +1,8 @@
 """Image-grounded suggestions and immutable evidence cache, independent of inventory."""
 from __future__ import annotations
 
+from .matching_stop import stop_reason
+
 import base64
 import hashlib
 import heapq
@@ -941,7 +943,7 @@ class MatchingService:
                 # 协作停止（票 02）：判断循环在每对之间认领一次。还没出发的对不再发请求，
                 # 记成可重试的失败；已经在途的那几个照常返回、照常入缓存（已判的会留下）。
                 if stop is not None and stop():
-                    return item, None, STATUS_STOPPED
+                    return item, None, f"匹配已停止，本对未完成判断；停止原因：{stop_reason(stop)}。"
                 try:
                     return item, self.judge.compare(a, b), None
                 except ModelFailure as exc:

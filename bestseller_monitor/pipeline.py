@@ -6,7 +6,7 @@ import os
 import random
 import sys
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Callable
@@ -70,8 +70,8 @@ class StopOutcome:
 _STOP_OUTCOMES: dict[type, StopOutcome] = {
     StopRequested: StopOutcome(
         shop_note=PAUSE_BY_USER_NOTE,
-        log_line="收到界面暂停请求：本轮停在检查点，已抓数据保留、可续跑。",
-        notice="本轮已暂停（可再次运行续跑）。",
+        log_line="收到界面暂停请求：本轮停在检查点，已抓取数据已保留。",
+        notice="本轮已按界面请求暂停，已抓取数据已保留；请在原界面等待收尾完成后，点击「继续」。",
     ),
     RoundDenyExceeded: StopOutcome(
         round_end=TerminalReason.DENY_EXCEEDED,
@@ -108,8 +108,8 @@ _STOP_OUTCOMES: dict[type, StopOutcome] = {
     ),
     RoundPauseRequired: StopOutcome(
         shop_note="人工介入未完成：{exc}",
-        log_line="本轮暂停：{exc}",
-        notice="本轮已暂停（可再次运行续跑）：{exc}",
+        log_line="本轮采集已停止；停止原因：{exc}。",
+        notice="本轮采集已停止；停止原因：{exc}；同日、同范围重新运行可续跑尚未结束的本轮；跨天请开始新轮。",
         log_level=logging.ERROR,
     ),
     ShopDenyExceeded: StopOutcome(
@@ -123,7 +123,7 @@ _STOP_OUTCOMES: dict[type, StopOutcome] = {
 STOP_WITH_OUTCOME = tuple(_STOP_OUTCOMES)
 
 
-def stop_outcome(exc: BaseException) -> StopOutcome:
+def stop_outcome(exc: BaseException, *, gui_entry: bool = False) -> StopOutcome:
     """查这个异常该怎么收尾：先看它自己，再沿继承链找最近的登记项。
 
     `InterventionTimeout` 就是靠这条落进「人工介入未完成」——它继承
@@ -132,6 +132,13 @@ def stop_outcome(exc: BaseException) -> StopOutcome:
     for cls in type(exc).__mro__:
         outcome = _STOP_OUTCOMES.get(cls)
         if outcome is not None:
+            if isinstance(exc, StopRequested) and exc.kind != stop_request.PAUSE:
+                return replace(outcome, shop_note="{exc}",
+                               log_line="本轮采集已停止；停止原因：{exc}。",
+                               notice="本轮采集已停止；停止原因：{exc}；已抓取数据已保留。")
+            if cls is RoundPauseRequired and gui_entry:
+                return replace(outcome, notice=("采集已停止，本轮未正常结束；停止原因：{exc}；"
+                                                "请确认中止并完成收尾后，再开始新轮。"))
             return outcome
     raise KeyError(f"没有登记这个停止异常：{type(exc).__name__}")
 
@@ -335,11 +342,12 @@ def _run_round_locked(cfg: Config, shops: list[Shop], deviations=(), *,
         _finalize_round(db, cfg, opened.round)
     except STOP_WITH_OUTCOME as exc:
         # 停止这一族在这里统一收尾：分类与文案都来自 _STOP_OUTCOMES。
-        outcome = stop_outcome(exc)
+        outcome = stop_outcome(exc, gui_entry=(new_intent is not None or resume_intent is not None))
         note = outcome.round_note.format(exc=exc)
         fields = {"exc": exc, "note": note, "round_id": round_id}
         if outcome.round_end is None:
             # 保持可续跑：数据保留，轮次不写终态。
+            db.event_logger(round_id)("collection_interrupted", kind="run", note=str(exc))
             log.log(outcome.log_level, outcome.log_line.format(**fields))
             print(f"\n>>> {outcome.notice.format(**fields)}\n")
         else:
@@ -418,11 +426,11 @@ def _finalize_round(db: Database, cfg: Config, run: Round) -> None:
     incomplete = [progress for progress in pending if not progress.listing_complete]
     if incomplete:
         keys = ", ".join(progress.shop_key for progress in incomplete)
-        raise RoundPauseRequired(f"榜单阶段未完成：{keys}；请检查存档页面后续跑")
+        raise RoundPauseRequired(f"榜单阶段未完成：{keys}")
     detail_pending = [progress for progress in pending if progress.listing_complete]
     if detail_pending:
         keys = ", ".join(progress.shop_key for progress in detail_pending)
-        raise RoundPauseRequired(f"详情阶段未完成：{keys}；请继续补采后续跑")
+        raise RoundPauseRequired(f"详情阶段未完成：{keys}")
     tally = db.round_tally(round_id)
     click_fail = tally.click_card_failures        # 点击后未得到商品编号的卡片
     attempted = tally.discovered + click_fail
@@ -473,6 +481,10 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
             browser_state=state, browser_port=port, browser_pid=browser_pid,
             browser_os_started=browser_os_started)
 
+    # 先读停机事实，再写本次开始事件，避免新事件把停机时长归零。
+    pacing_seed = db.pacing_visits_since_last_pause(
+        round_id, idle_reset_sec=cfg.pause_sec[0])
+    db.event_logger(round_id)("collection_started", kind="run")
     try:
         if started_at is None:
             row = db.crawler_process()
@@ -495,8 +507,6 @@ def _run_pwcdp_round(db: Database, cfg: Config, round_id: int,
     try:
         # 停顿账本的回读种子必须先于 resume_started 算：那条事件一写，「本轮最后一条
         # 事件」就成了它自己，停机时长会永远算成 0（issue 13）。
-        pacing_seed = db.pacing_visits_since_last_pause(
-            round_id, idle_reset_sec=cfg.pause_sec[0])
         if pacing_seed.idle_reset:
             log.info("距上段已停机 %.0f 分钟（≥ 停顿下限 %.0f 分钟）：停顿配额视为已停过，从 0 重数",
                      (pacing_seed.idle_sec or 0.0) / 60, cfg.pause_sec[0] / 60)

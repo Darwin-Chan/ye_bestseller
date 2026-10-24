@@ -428,7 +428,7 @@ def cst_date(iso_utc: str | None = None) -> str:
 
 
 DAY_CUTOFF = (23, 55)
-DAY_BOUNDARY_NOTE = "库存数据即将跨天，请0点后继续抓取"
+DAY_BOUNDARY_NOTE = "库存数据即将跨天，本轮已中止；请0点后开始新轮"
 DETAIL_BUDGET_NOTE = "本轮详情预算已用尽，剩余商品留待下一轮"
 
 # 只用于迁移：把旧库的中文状态串折算成轮次终态标识。状态列删掉之后，

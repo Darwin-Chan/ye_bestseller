@@ -928,7 +928,7 @@ function setStopRow(state) {
     const sku = (maskRetry ? currentSnapshot?.member_kind : settings?.member_kind) === 'sku';
     $('maskStopNote').innerHTML = (sku
         ? '停下后自动进入本页；未完成项保留原因，稍后可以继续判断'
-        : '停下后自动进入本页；没判断的对记为「失败」，点「模型匹配同款」可以接着判')
+        : '停下后自动进入本页；因停止而未判断的对保留为可重试的「失败」状态，点「模型匹配同款」可以接着判。')
         + '<br>点「停止匹配」与点关窗确认里的「关闭并停止」进的都是这一态；收尾完成前窗口不消失';
     $('maskLive').hidden = state === 'off';
     $('maskStopNote').hidden = state !== 'stopping';
@@ -963,8 +963,8 @@ function renderStopping(reading) {
     showMask();
     maskStopping = true;
     $('maskTitle').textContent = '正在停止匹配…';
-    $('maskPhase').innerHTML = `等一个在途判断结束（最多 ${reading.stop_timeout_sec || 30} 秒）；`
-        + '<b>已判的会留下</b>';
+    $('maskPhase').textContent = `停止原因：${reading.stop_reason || '未记录'}。`
+        + `等待当前判断结束（最多 ${reading.stop_timeout_sec || 30} 秒）；已完成的判断会保留。`;
     setStopRow('stopping');
 }
 function timeSuffix(reading) {
@@ -973,8 +973,8 @@ function timeSuffix(reading) {
 }
 // 停止后本页的说法：判了多少 / 共多少，未判完的照「模型匹配同款」的同一条建议说（票 02）。
 function stoppedLine(reading, summary) {
-    return `本次匹配已停止：已完成 ${reading.judged} / ${reading.todo} 对`
-        + ((summary.retryable || 0) > 0 ? `，未判完的对记为「失败」，${matchAdvice(summary, true)}` : '');
+    return `本次匹配已停止；停止原因：${reading.stop_reason || '未记录'}；已完成 ${reading.judged} / ${reading.todo} 对。`
+        + ((summary.retryable || 0) > 0 ? `未完成项保留为可重试的「失败」状态，${matchAdvice(summary, true)}。` : '');
 }
 function failMask(reading) {
     showMask();

@@ -24,6 +24,10 @@ _hook: Callable[[], None] | None = None
 class StopRequested(RuntimeError):
     """收到指向本进程的停止请求。"""
 
+    def __init__(self, message, *, kind=None):
+        super().__init__(message)
+        self.kind = kind
+
 
 def install(hook: Callable[[], None]) -> None:
     global _hook
@@ -72,8 +76,10 @@ def consume(db: Database, *, pid: int | None = None) -> None:
         return
     if db.ack_stop_request(target_pid=request["target_pid"],
                            target_started_at=request["target_started_at"]):
-        log.info("已认领界面暂停请求：回执已写，界面据此放宽收尾窗口。")
-    raise StopRequested("收到界面暂停请求")
+        log.info("已认领界面%s请求：回执已写，界面据此放宽收尾窗口。",
+                 "暂停" if request["kind"] == PAUSE else "中止")
+    label = "暂停" if request["kind"] == PAUSE else "中止"
+    raise StopRequested(f"收到界面{label}请求", kind=request["kind"])
 
 
 class StopKind(str, Enum):
@@ -119,11 +125,16 @@ class StopCommand:
     kind: StopKind | str
     target: StopTarget
     round_id: int | None = None
+    reason: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "kind", StopKind(self.kind))
         if self.target is None:
             raise ValueError("stop target is required")
+        if self.reason is None:
+            object.__setattr__(self, "reason",
+                               "用户请求暂停" if self.kind is StopKind.PAUSE
+                               else "用户确认中止")
 
 
 @dataclass(frozen=True)
@@ -134,6 +145,8 @@ class StopStatus:
     code: str | None = None
     retryable: bool = False
     round_id: int | None = None
+
+    reason: str | None = None
 
     @property
     def state(self) -> str | None:
@@ -389,7 +402,7 @@ class StopWatch:
         return StopStatus(stop.phase, stop.command.kind, stop.command.target,
                           stop.code, stop.phase in (StopPhase.VERIFYING,
                                                     StopPhase.CLEANUP_PENDING),
-                          stop.command.round_id)
+                          stop.command.round_id, stop.command.reason)
 
     @property
     def state(self) -> str | None:

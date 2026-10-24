@@ -156,7 +156,8 @@ def _confirm_close(text: str) -> bool:
 
 def _stop_and_wait(service, analysis_id: str) -> None:
     """请求停下这次运行、等它彻底停写——放锁排在这一对之后（ADR-0044 决策 5 的硬语义）。"""
-    service.request_stop(analysis_id)
+    from bestseller_monitor.matching_stop import WINDOW_CLOSE
+    service.request_stop(analysis_id, reason=WINDOW_CLOSE)
     service.wait_terminal(analysis_id)
 
 
