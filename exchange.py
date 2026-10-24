@@ -12,7 +12,7 @@
 
 退出码（spec §7）：`0` 干净 / `1` 有需要人看一眼的（含判断集这趟新记下的冲突）/ `2` 本机
 没做成事（含判断集没发出去、没收进来）。逐次流水在 `logs/exchange.log`；周报在
-`<交换区根>/报告/<年>-W<周>.md`。窗口标题与快捷方式名用中文全名「1688 畅销品监控 ·
+`<交换区根>/报告/<年>-W<周>.md`。窗口标题与快捷方式名用中文全名「畅销品监控 ·
 库存数据交换」；窗口不挂进现有采集界面（独立进程、独立锁）。
 
 **运行互斥**（票 14）：同一台机器同一时刻至多一次交换台运行——窗口与命令行同规，
@@ -60,7 +60,7 @@ from bestseller_monitor import single_instance  # noqa: E402
 from bestseller_monitor.config import ROLE_GLOSS, ROLE_MERGE_ONLY, Config  # noqa: E402
 from bestseller_monitor.weekly_plan import PlanError  # noqa: E402
 
-WINDOW_TITLE = "1688 畅销品监控 · 库存数据交换"
+WINDOW_TITLE = "畅销品监控 · 库存数据交换"
 
 _MB_ICONINFORMATION = 0x40
 _MB_SETFOREGROUND = 0x10000

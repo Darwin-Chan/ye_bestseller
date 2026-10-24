@@ -14,7 +14,7 @@
 
 |验收|结果及公开接缝|
 |---|---|
-|08-A09|真实ui_live.html点击open_login_browser，配置对应Edge命令和1688主页；不采集、不建轮，刷新无启动。|
+|08-A09|真实ui_live.html点击open_login_browser，配置对应Edge命令和目标网站主页；不采集、不建轮，刷新无启动。|
 |08-A10配置一致|Config规范化exe/profile/root，GUI快照传实际run CLI；配置变化在GUI、子进程加载、采集锁内及浏览器建立前重新核验；GUI新建必须OWNED。|
 |08-A10部署|含空格/中文临时迁移根与cwd变化；壳resolve_project_root→child_command→真实配置→实际页面点击回放。沿用源码部署壳，无新打包体系。|
 |08-A11重复并发|API锁内预约、锁外创建；opening可读取；重复或已有同目录实例只提示已有窗口，不另开标签；Popen退出不作为释放证明。|

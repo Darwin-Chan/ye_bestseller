@@ -59,7 +59,7 @@
 **落地实证（2026-09-22，改名）**：壳的形态不动，只改名字——采集壳的 spec 由
 `bestseller_gui.spec` 改名 `inventory_fetch.spec`（产物 `dist\inventory_fetch.exe`），交换台壳的
 `bestseller_exchange.spec` 改名 `inventory_exchange.spec`（产物 `dist\inventory_exchange.exe`）；
-分析壳不改（`bestseller_analysis.exe`）。三个程序的显示名统一为「1688 畅销品监控 · 库存数据抓取 /
+分析壳不改（`bestseller_analysis.exe`）。三个程序的显示名统一为「畅销品监控 · 库存数据抓取 /
 库存数据交换 / 销量分析」：窗口标题、页面 `<title>`/`<h1>`、壳的失败弹窗与「已经在运行」提示、
 两个周报/离线报告的标题与脚本里的提示语都跟着换；正文与提示语用短名（界面 / 交换台 / 分析，
 见 CONTEXT 的「程序名」）。不随改名走的是内部标识：目标键（`gui|exchange|analysis`）、互斥体名

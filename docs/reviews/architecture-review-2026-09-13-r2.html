@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>架构审查（第二轮）· bestseller（1688 库存快照）</title>
+    <title>架构审查（第二轮）· bestseller（店铺库存快照）</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script type="module">
       import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
@@ -31,7 +31,7 @@
 
       <header class="space-y-4">
         <p class="text-xs uppercase tracking-[0.2em] text-slate-400">架构审查 · 第二轮 · 加深机会</p>
-        <h1 class="text-4xl font-serif">bestseller / 1688 库存快照</h1>
+        <h1 class="text-4xl font-serif">bestseller / 店铺库存快照</h1>
         <p class="text-sm text-slate-500">2026-09-13 · HEAD 46b20d7 · 上一轮（<a class="underline" href="file:///F:/AI/projects/bestseller/docs/reviews/architecture-review-2026-09-13.html">候选 01–06</a>）已全部落地，本轮扫它之后又改的 14 个提交</p>
         <p class="text-sm text-slate-600 border-l-4 border-amber-300 bg-amber-50 px-4 py-3 rounded">归档说明：本报告是 2026-09-13 第二轮审查的快照（当时 HEAD <code>46b20d7</code>），文中的行号与数字指向当时的工作区，之后已位移；正文保持快照原样，不随实现更新。<b>六个候选已全部落地</b>（每个都是「主体 + 两轴审查收口」两个提交）：<br>
         <b>01 本轮计数收成 <code>Database.round_tally()</code></b>（<code>55a51ce</code> / <code>bf79b84</code>，ADR-0017）——口径统一到榜单行、孤儿单列，删掉 <code>success_rows</code>/<code>failed_rows</code>/<code>offer_counts</code>；30 万行合成库上一次刷新 0.53 秒（护栏 1 秒）。<br>

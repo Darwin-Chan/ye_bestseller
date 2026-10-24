@@ -153,7 +153,7 @@ class RunCliMergeOnlyTests(unittest.TestCase):
     def _env(self, tmp: str, *, shops: bool, db: bool = False) -> Path:
         """一台纯汇总机的世界：配置标 merge_only；（可选的）采集清单与（可选的）已有库。
 
-        纯汇总机的上机清单不建采集清单（不采 1688），所以「没有 shops.csv」才是常态。
+        纯汇总机的上机清单不建采集清单（不采目标网站），所以「没有 shops.csv」才是常态。
         """
         tmp_path = Path(tmp)
         cfg_path = tmp_path / "config.toml"

@@ -245,7 +245,7 @@ class EntryPathTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         title, url = webview.create_window.call_args.args
-        self.assertEqual(title, "1688 畅销品监控 · 销量分析")
+        self.assertEqual(title, "畅销品监控 · 销量分析")
         self.assertEqual(url, "http://127.0.0.1:43210")
         self.assertTrue(server.shut and server.closed, "关窗后服务要关干净")
 
@@ -470,7 +470,7 @@ class CloseConfirmTextTests(unittest.TestCase):
                               side_effect=OSError('弹不出来')):
                 self.assertFalse(analyze._confirm_close('文案'), '没问成就别关')
 
-        self.assertEqual(box.call_args.args[2], '1688 畅销品监控 · 销量分析（正在匹配）')
+        self.assertEqual(box.call_args.args[2], '畅销品监控 · 销量分析（正在匹配）')
         flags = box.call_args.args[3]
         self.assertTrue(flags & analyze._MB_OKCANCEL, '两个出口：确定／取消')
         self.assertTrue(flags & analyze._MB_DEFBUTTON2, '缺省焦点给「取消」')

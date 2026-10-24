@@ -98,7 +98,7 @@ class LauncherSpec:
     script: str                                  # 子进程入口：<项目根>\<script>
     script_args: tuple[str, ...] = ()            # 子进程的固定参数（用户的参数不转发）
     log_name: str = "launcher.log"               # <项目根>\logs\ 下的日志名
-    dialog_title: str = "1688 畅销品监控 · 无法启动"   # 品牌级兜底；三只壳都各自填「<程序全名>（无法启动）」
+    dialog_title: str = "畅销品监控 · 无法启动"   # 品牌级兜底；三只壳都各自填「<程序全名>（无法启动）」
     quiet_exit_codes: frozenset[int] = frozenset()
     project_modules: tuple[str, ...] = ()
 

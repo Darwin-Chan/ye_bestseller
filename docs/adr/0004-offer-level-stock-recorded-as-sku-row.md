@@ -26,4 +26,4 @@
 
 代价有两个。报表里单规格商品计为 1 个 SKU，因此 SKU 行数不再等于平台意义上的规格数量；跨粒度切换时会删除本轮快照与当天库存里的相反粒度记录，虽然只影响当天，但它是一次写入即生效的数据清理。
 
-相关词汇见 [CONTEXT.md](../../CONTEXT.md) 的「SKU」「单规格商品」「库存快照提交」「不完整库存观测」；实现见 `bestseller_monitor/parse.py` 的 `_extract_default_sku()` 与 `bestseller_monitor/db.py` 的 `submit_inventory_snapshot()`；工单为 IS-42，放在本地工单目录 `.scratch/1688-inventory-snapshot/issues/`（按 .gitignore 约定不纳入版本库）。
+相关词汇见 [CONTEXT.md](../../CONTEXT.md) 的「SKU」「单规格商品」「库存快照提交」「不完整库存观测」；实现见 `bestseller_monitor/parse.py` 的 `_extract_default_sku()` 与 `bestseller_monitor/db.py` 的 `submit_inventory_snapshot()`；工单为 IS-42，放在本地工单目录 [历史库存快照工单索引](../history/库存快照历史工单索引.md)（按 .gitignore 约定不纳入版本库）。

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>架构审查 · bestseller（1688 库存快照）</title>
+    <title>架构审查 · bestseller（店铺库存快照）</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script type="module">
       import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
@@ -34,7 +34,7 @@
           归档说明：本报告是 2026-09-13 的快照（当时 HEAD <code>b6d06ef</code>），文中的行号与测试数字指向当时的工作区，之后已位移。候选 04「界面取数收成一个 module」同日落地：新增 <code>bestseller_monitor/views.py</code>（<code>start_view</code> / <code>run_view</code> / <code>result_view</code> + <code>UiState</code>），<code>Api</code> 改为 <code>Api(cfg=None, *, now=utcnow, open_conn=None, shops=None)</code>，见 <code>docs/adr/0011-ui-views-module-and-injected-now.md</code> 与 <code>.scratch/ui-views/spec.md</code>；随后按两轴审查结论收口一轮（<code>c14577d</code>），全套 309 条用例通过、1 条跳过（本报告写下的那条日期炸弹已拆）。候选 01 / 02 / 03 / 05 / 06 仍未做。正文保持 2026-09-13 快照原样，不随实现更新。
         </p>
         <p class="text-xs uppercase tracking-[0.2em] text-slate-400">架构审查 · 加深机会</p>
-        <h1 class="text-4xl font-serif">bestseller / 1688 库存快照</h1>
+        <h1 class="text-4xl font-serif">bestseller / 店铺库存快照</h1>
         <p class="text-sm text-slate-500">2026-09-13 · HEAD b6d06ef · 扫描范围按近 60 次提交的热点取：gui.py、db.py、pipeline.py、browser_pw.py</p>
         <div class="flex flex-wrap gap-x-6 gap-y-2 text-xs text-slate-500 border-t border-slate-200 pt-4">
           <span><span class="inline-block w-4 h-3 border border-slate-400 align-middle mr-1"></span>module</span>

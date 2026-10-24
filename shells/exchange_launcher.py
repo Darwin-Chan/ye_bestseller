@@ -23,7 +23,7 @@ SPEC = LauncherSpec(
     script="exchange.py",
     script_args=("--window",),
     log_name="exchange_launcher.log",
-    dialog_title="1688 畅销品监控 · 库存数据交换（无法启动）",
+    dialog_title="畅销品监控 · 库存数据交换（无法启动）",
     quiet_exit_codes=frozenset({0, 1}),
     project_modules=("bestseller_monitor", "exchange"),
 )

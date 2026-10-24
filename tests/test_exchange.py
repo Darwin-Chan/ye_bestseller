@@ -1535,9 +1535,9 @@ class WindowTests(unittest.TestCase):
             code = exchange.open_window(crawler_cfg(machine_id="m1"))
 
         self.assertEqual(code, 0)
-        self.assertEqual(created["title"], "1688 畅销品监控 · 库存数据交换")
+        self.assertEqual(created["title"], "畅销品监控 · 库存数据交换")
         self.assertIsInstance(created["js_api"], exchange.Api)
-        self.assertIn("1688 畅销品监控 · 库存数据交换", created["html"])
+        self.assertIn("畅销品监控 · 库存数据交换", created["html"])
         # 关窗事件有接线（运行中关窗只记录，票 14 Q10）
         self.assertEqual(len(created["window"].events.closing.handlers), 1)
 

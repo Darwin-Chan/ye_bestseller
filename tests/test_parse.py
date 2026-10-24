@@ -43,7 +43,7 @@ class ParseTests(unittest.TestCase):
         html = """
         <html><head>
         <meta property="og:title" content="批发针线盒套装10件套" />
-        <title>批发针线盒套装 - 1688</title>
+        <title>批发针线盒套装 - 目标网站</title>
         </head><body>
           <div>老太婆针线盒#C19J5# ¥0.08 库存278976个</div>
           <div>小号#C0615# ¥0.18 库存6486515个</div>

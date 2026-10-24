@@ -9,11 +9,11 @@
 
 **只有点击式那条在真机上活着。** `config/config.toml` 写着 `driver = "pw_cdp"`；`run.log` 里 `开始抓取店铺`（两条旧路径的榜单入口日志）的末次出现是 2026-09-04 18:50，`等待店铺商品加载`（DrissionPage 独有）只出现过 1 次，而 `点击式抓取店铺` 有 110 次；2026-09-12 的第 28–32 轮全部走点击路径。
 
-**另外两条不是「慢一点的备用」，是结构上抓不到榜单。** `listing.crawl_shop_listing` 与 `browser_dp.crawl_shop_listing` 都用 `a[href*='/offer/']` 枚举商品，而 1688 店铺列表是图片卡片、没有 href——这是 2026-09-04 的实测结论，也是 `browser_pw.crawl_store_by_click` 被写出来的原因（见 `docs/实现进展.md`）。它们跑到榜单阶段只会得到 `ListingLoadFailed`。
+**另外两条不是「慢一点的备用」，是结构上抓不到榜单。** `listing.crawl_shop_listing` 与 `browser_dp.crawl_shop_listing` 都用 `a[href*='/offer/']` 枚举商品，而 店铺列表是图片卡片、没有 href——这是 2026-09-04 的实测结论，也是 `browser_pw.crawl_store_by_click` 被写出来的原因（见 `docs/实现进展.md`）。它们跑到榜单阶段只会得到 `ListingLoadFailed`。
 
 **它们和今天的运行契约也不兼容。** 过程页的「当前处理中的店 / 每店耗时 / deny 数」全部读 `event_log`（`gui.py` 的过程页取数），失败率里那块「点击未得商品」同样只来自事件表（`Database.click_card_failures()`），而 `event_log` 只有 `_run_pwcdp_round` 通过 `record_params` + `event_logger` 写。走旧驱动，界面会显示 deny=0、无耗时、无当前店，失败率被低估。
 
-**误配只差一步。** `Config.driver` 的缺省值是 `drission`（`config.py`），`config/config.toml` 的注释写着「drission（推荐，可过 1688 登录）/ playwright」，而任何拼错的值都被 `else` 静默送进 Playwright 直连。
+**误配只差一步。** `Config.driver` 的缺省值是 `drission`（`config.py`），`config/config.toml` 的注释写着「drission（推荐，可过目标网站登录）/ playwright」，而任何拼错的值都被 `else` 静默送进 Playwright 直连。
 
 **自动化覆盖也不在它们身上。** 两条旧路径的列表函数与阶段函数有 fixture 测试（`tests/test_pagination.py`、`tests/test_listing_resume.py`、`tests/test_p1.py`），真正零执行的是 `_run_pw_round` / `_run_dp_round` 的装配体，以及「驱动分发」本身——所有测试都写死 `driver="pw_cdp"`。此外 `browser_pw.crawl_store_listing`（href + XHR 拦截兜底版）没有任何调用方，是第四份死代码。
 

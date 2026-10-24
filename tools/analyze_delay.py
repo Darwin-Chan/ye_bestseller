@@ -178,7 +178,7 @@ def _fmt_rate(v: float | None) -> str:
 
 def render_report(res: dict) -> str:
     lines = []
-    lines.append("1688 处理延迟 × 反爬验证 关联分析")
+    lines.append("目标网站处理延迟 × 反爬验证 关联分析")
     lines.append("=" * 48)
     lines.append(f"事件总数：{res['total_events']}   验证出现(v_appear)：{res['total_verif']}")
     if res["total_events"]:

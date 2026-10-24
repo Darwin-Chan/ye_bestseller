@@ -79,7 +79,7 @@ class ProcessStopRuntime:
 - 把 ADR-0024 的 Internal Runtime Seam 与「deadline 时不再读取可变的 `self.proc`」执行到底；
   binding 判据、四态 relation、CAS 清理、窗口数值一概不动。
 - ADR-0024 的删除清单里还有三样没走完（`_LegacyRuntime` / `forget()` / `begin(target=None)`），
-  本条**没有**顺手做——那是同一 seam 的另一件事，已开成 [IS-55](../../.scratch/1688-inventory-snapshot/issues/55-is-55.md)。
+  本条**没有**顺手做——那是同一 seam 的另一件事，已开成 [IS-55](../history/库存快照历史工单索引.md)。
 - `browser_proc.close_browser` 的签名（`launched_by_us` 参数）保持不变：它仍是 ADR-0019 的
   会话收尾与这里的强制关闭共用的那一个入口。
 
@@ -88,7 +88,7 @@ class ProcessStopRuntime:
 - **IS-55**：ADR-0024 的删除清单还剩三样没走完（`_LegacyRuntime` / `forget()` /
   `begin(target=None)`）。它们是同一个 `StopRuntime` seam 的第二形状，与本条同源但性质是
   「旧决定没落地完」，混做会让改动面翻倍，故拆出单开：
-  [IS-55](../../.scratch/1688-inventory-snapshot/issues/55-is-55.md)。
+  [IS-55](../history/库存快照历史工单索引.md)。
 - **`hasattr(capability, "poll")` 的分派写了两处**（`observe()` 里两处、`terminate()` 一处）：
   Popen 与 Win32 capability 两种句柄的形状判断散在 adapter 内部。这是本条之前就有的形状，
   不是本条引入的；收成一个小 helper 是纯内部整理，等下次动这个 adapter 时顺手做。

@@ -1,9 +1,9 @@
-"""在「正常、非自动化」的 Edge 窗口中手动登录 1688，保存登录态。
+"""在「正常、非自动化」的 Edge 窗口中手动登录目标网站，保存登录态。
 
 用法：
     python login_chrome.py
 
-运行后会弹出独立的 Edge 窗口；用你的 1688/Taobao 账号扫码或账号登录一次，
+运行后会弹出独立的 Edge 窗口；用你的采集账号扫码或账号登录一次，
 登录成功并看到店铺/主页后，直接关闭该窗口即可。之后运行 MVP 会自动复用这份登录态。
 """
 from __future__ import annotations
@@ -27,7 +27,7 @@ def main() -> int:
     profile = cfg.user_data_path
     profile.mkdir(parents=True, exist_ok=True)
     url = "https://www.1688.com/"
-    print("正在打开独立 Edge 窗口，请登录 1688 后关闭该窗口……")
+    print("正在打开独立 Edge 窗口，请登录目标网站后关闭该窗口……")
     subprocess.Popen([
         chrome,
         f"--user-data-dir={profile}",

@@ -1,4 +1,4 @@
-"""1688 店铺畅销榜 × SKU 库存快照 MVP 入口。
+"""店铺畅销榜 × SKU 库存快照 MVP 入口。
 
 用法：
     python run.py                          # 开始或续跑一轮（范围与页数从本周计划取）
@@ -126,7 +126,7 @@ def main() -> int:
     if args.local_trial:
         return _run_local_trial(cfg, args)
     # 纯汇总机不做采集（spec §6 降级表末行、§11）：在碰采集清单与库之前就拒绝——这台
-    # 机器上没有采集清单是常态（不采 1688），库该由交换台开；这里一样都不动。
+    # 机器上没有采集清单是常态（不采目标网站），库该由交换台开；这里一样都不动。
     if is_merge_only(cfg):
         print(f"\n>>> {plan_step.MERGE_ONLY_REFUSAL}\n")
         return EXIT_NOT_DONE

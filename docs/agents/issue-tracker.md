@@ -18,7 +18,7 @@ Issues and specs for this repo live as markdown files in `.scratch/`.
 
 ## Existing notes
 
-The former `docs/ISSUES.md` has been migrated into `.scratch/1688-inventory-snapshot/`: the current spec is `spec.md`, each `IS-xx` entry is a separate file under `issues/`, and the original document is preserved under `archive/`.
+The former `docs/ISSUES.md` has been migrated into the local historical inventory-snapshot tickets (see [locator](../history/库存快照历史工单索引.md)): the current spec is `spec.md`, each `IS-xx` entry is a separate file under `issues/`, and the original document is preserved under `archive/`.
 
 ## Runtime problem reports are a different channel
 

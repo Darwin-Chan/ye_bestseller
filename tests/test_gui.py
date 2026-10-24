@@ -442,7 +442,7 @@ class GuiPlanWiringTests(unittest.TestCase):
         spawn.assert_not_called()
 
     def test_a_merge_only_machine_opens_without_a_shop_list_and_says_so(self):
-        """纯汇总机上没有采集清单是常态（不采 1688）：界面照常打开，并在开始页说明白。"""
+        """纯汇总机上没有采集清单是常态（不采目标网站）：界面照常打开，并在开始页说明白。"""
         api = self.api(role=ROLE_MERGE_ONLY, shop_csv=self.dir / "没有这份清单.csv")
 
         start = api.get_start()
@@ -1556,7 +1556,7 @@ class GuiSingleInstanceTests(unittest.TestCase):
 
     def test_the_window_and_its_page_carry_the_product_display_name(self):
         """显示名与另两个程序同族（ADR-0007 的 2026-09-22 改名）：窗口标题就是页面标题。"""
-        self.assertEqual(gui.WINDOW_TITLE, "1688 畅销品监控 · 库存数据抓取")
+        self.assertEqual(gui.WINDOW_TITLE, "畅销品监控 · 库存数据抓取")
         page = (Path(gui.__file__).resolve().parent / "bestseller_monitor" / "pages"
                 / "ui_live.html").read_text(encoding="utf-8")
         class HeadingParser(HTMLParser):

@@ -196,7 +196,7 @@ class InterventionResolutionTests(unittest.TestCase):
         block_page = ("淘宝网 - 淘！我喜欢 亲，请登录 免费注册 消息 手机逛淘宝 淘宝网首页 "
                       "我的淘宝 已买到的宝贝 我的足迹 购物车 0 收藏夹 亲，访问被拒绝 "
                       "可能因为：请检查是否使用了代理软件或 VPN 哦~ 了解更多原因 寻找答案 "
-                      "点我反馈 阿里巴巴集团|淘宝网|天猫|1688")
+                      "点我反馈 阿里巴巴集团|淘宝网|天猫|目标网站")
 
         self.assertIsNone(_intervention_of(_PageEvidence(product, "正常的商品详情页", False)))
         self.assertEqual(_intervention_of(_PageEvidence(product, "请登录后查看商品详情", False)),

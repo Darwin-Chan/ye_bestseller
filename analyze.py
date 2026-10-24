@@ -2,7 +2,7 @@
 
 **运行互斥**（票 14）：同一台机器同一时刻至多一次分析运行——窗口与 `--serve` 同规，
 锁在这里取（不放启动壳里，改脚本不用重新打包）。抢不到锁的第二个实例落日志、把已有的
-「1688 畅销品监控 · 销量分析」窗口叫到前面、弹中文提示，然后**退出 0**（照 ADR-0008
+「畅销品监控 · 销量分析」窗口叫到前面、弹中文提示，然后**退出 0**（照 ADR-0008
 的约定让分析壳保持安静）。分析没有恒真的 `--window`：缺省即开窗，`--serve` 只起本地服务。
 
 **关窗＝真的停下**（票 03，ADR-0044 决策 4/5）：匹配在跑时点窗口关闭按钮先弹原生
@@ -30,7 +30,7 @@ from bestseller_monitor.analysis import AnalysisConfig, AnalysisService
 from bestseller_monitor.analysis_http import create_server
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-WINDOW_TITLE = "1688 畅销品监控 · 销量分析"
+WINDOW_TITLE = "畅销品监控 · 销量分析"
 
 log = logging.getLogger(__name__)
 

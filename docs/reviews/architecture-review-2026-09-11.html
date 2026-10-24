@@ -111,7 +111,7 @@
   <p class="fact" style="margin:0 0 18px">归档说明：本报告是 2026-09-11 的快照（当时 HEAD <code>98624f8</code>，28 个提交），文中的文件行号与测试数字指向当时的工作区，之后已位移。三个候选均已落地：候选 01「商品库存快照提交」收敛到 <code>Database.submit_inventory_snapshot()</code>（<code>bd24140</code>，2026-09-11）；候选 02「同日去重与补采」的规则先随 <code>165a05a</code> 修正，再把详情机会与尝试额度收敛到 <code>bestseller_monitor/dedupe.py</code>（<code>de58037</code>，2026-09-11）；候选 03「轮次生命周期」见 <code>.scratch/round-identity/</code> 的规格与五张工单（2026-09-12）。正文保持 2026-09-11 快照原样，不随实现更新。</p>
   <header>
     <div class="heading">
-      <div><p class="eyebrow">ARCHITECTURE REVIEW / 1688 库存快照</p><h1>Bestseller</h1></div>
+      <div><p class="eyebrow">ARCHITECTURE REVIEW / 店铺库存快照</p><h1>Bestseller</h1></div>
       <div class="meta right">2026-09-11 · 当前工作区，含未提交改动<br>HEAD <code>98624f8</code> · 回看全部 28 个提交</div>
     </div>
     <div class="scope"><span>变更热点 <b>browser_pw.py 11 次</b></span><span><b>pipeline.py 9 次</b></span><span><b>db.py 7 次</b></span><span>现有 unittest <b>59 / 59 通过</b></span></div>
@@ -215,7 +215,7 @@ flowchart TB
       <div><h3>内存 SQLite 已复现</h3><p>商品 11 今日有库存；同店同名商品 22 失败待补采。实际执行补采函数后：<strong>详情访问 0 次、商品 22 仍无库存、却已退出待补采集合</strong>。</p></div>
       <div><h3>测试迁移</h3><p>保留“店 A 列表 → 店 A 补采 → 店 B”的行为断言；将目前 mock 掉详情的测试扩展为同名失败商品、部分 SKU 缺库存、点击与补采共用预算。</p></div>
     </div>
-    <p class="fact">1688 为外部依赖：真实浏览器 adapter 与测试 mock adapter 有实际用途；SQLite 用真引擎测试。保留现有驱动结构；此候选不要求统一不同驱动的导航方式。</p>
+    <p class="fact">目标网站为外部依赖：真实浏览器 adapter 与测试 mock adapter 有实际用途；SQLite 用真引擎测试。保留现有驱动结构；此候选不要求统一不同驱动的导航方式。</p>
   </article>
 
   <article id="round">
@@ -268,8 +268,8 @@ flowchart TB
     <p style="margin-top:12px"><a href="#snapshot">查看候选 01 ↑</a></p>
   </section>
   <footer>
-    依据：<code>CONTEXT.md</code>、<code>.scratch/1688-inventory-snapshot/spec.md</code>、当前代码与提交历史。验收范围：单账号、2 家店、每店最多 5 个榜单批次。<br>
-    验证：<code>python -B -m unittest discover -s tests</code>，59 项通过；两项内存 SQLite 复现。未访问真实 1688、运行数据库或登录 profile。<br>
+    依据：<code>CONTEXT.md</code>、<a href="../history/库存快照历史工单索引.md">历史库存快照规格</a>、当前代码与提交历史。验收范围：单账号、2 家店、每店最多 5 个榜单批次。<br>
+    验证：<code>python -B -m unittest discover -s tests</code>，59 项通过；两项内存 SQLite 复现。未访问真实目标网站、运行数据库或登录 profile。<br>
     本报告为候选评估，尚未设计具体 interface。报告与检查产物位于系统临时目录。
   </footer>
 </main>

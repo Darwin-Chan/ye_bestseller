@@ -13,7 +13,7 @@
 - 脚本及清单：[manifest.json](F:/AI/projects/bestseller/.scratch/tool-output/issues-diagnosis/00/20261008-124951/manifest.json)，目录 `F:/AI/projects/bestseller/.scratch/tool-output/issues-diagnosis/00/20261008-124951`。
 - 证据日志：`F:/AI/projects/bestseller/.scratch/logs/tickets/issues-diagnosis/00/20261008-124951`；[环境记录](F:/AI/projects/bestseller/.scratch/logs/tickets/issues-diagnosis/00/20261008-124951/environment.json)。
 - 环境：Python **3.14.7**，Playwright **1.62.0**，Edge **154.0.4258.62**，Git **2.55.0.windows.5**。浏览器实验均为 headless msedge。
-- 未使用真实账号、登录 profile、业务数据库或交换远端；未运行真实采集；**未进行发声测试**。判断集和导出使用临时数据库、本地裸 Git 库。现场 HTML 回放关闭脚本、拦截全部请求，未向 1688 发请求。仅记录分类结果，不复制认证内容或账号文字到新日志。
+- 未使用真实账号、登录 profile、业务数据库或交换远端；未运行真实采集；**未进行发声测试**。判断集和导出使用临时数据库、本地裸 Git 库。现场 HTML 回放关闭脚本、拦截全部请求，未向目标网站发请求。仅记录分类结果，不复制认证内容或账号文字到新日志。
 - 原始 ZIP 不修改。隔离副本最终 `git status --porcelain` 为空；诊断脚本保留在明确的调试产物目录，不注入产品代码。
 - 依照技能：先建立红能力并最小化，再展示排序假设，做单变量对照。**Git 历史静默退出、现场听觉失效、远端 deny 触发原因仍缺原始反馈闭环**，不编造根因。对这三项的辅助实验只证明特定机制/可观测性缺口。
 - 本次不是实现收尾，未运行全量测试；下列红色退出是刻意保存的未修复复现，不是交付通过。

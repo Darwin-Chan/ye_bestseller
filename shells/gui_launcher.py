@@ -17,7 +17,7 @@ SPEC = LauncherSpec(
     markers=("gui.py", "bestseller_monitor"),
     script="gui.py",
     log_name="gui_launcher.log",
-    dialog_title="1688 畅销品监控 · 库存数据抓取（无法启动）",
+    dialog_title="畅销品监控 · 库存数据抓取（无法启动）",
     project_modules=("bestseller_monitor", "gui"),
 )
 

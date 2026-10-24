@@ -1,4 +1,4 @@
-"""1688 畅销品监控 · GUI 启动器/进度/结果（pywebview）。
+"""畅销品监控 · GUI 启动器/进度/结果（pywebview）。
 
 行为约定：
   - GUI 只做启动器/监控，抓取仍由本机 `python run.py --limit-shops=...` 子进程执行。
@@ -76,7 +76,7 @@ def _crawler_python(exe: str | None = None) -> str:
     return exe
 
 
-WINDOW_TITLE = "1688 畅销品监控 · 库存数据抓取"
+WINDOW_TITLE = "畅销品监控 · 库存数据抓取"
 
 log = logging.getLogger(__name__)
 
@@ -93,7 +93,7 @@ _BUSY_ERROR = "已有抓取任务在运行，请先暂停或中止。"
 def _local_shops(cfg) -> list[Shop]:
     """本机采集清单里启用的店。
 
-    纯汇总机上没有这份清单是常态（不采 1688，上机清单也不建它）：界面照常打开、
+    纯汇总机上没有这份清单是常态（不采目标网站，上机清单也不建它）：界面照常打开、
     开始页说明白，而不是拿「找不到店铺清单」把人挡在门外。
     """
     try:

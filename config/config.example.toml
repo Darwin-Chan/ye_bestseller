@@ -85,7 +85,7 @@ retry_jitter_sec = 2.0
 # 这里只接受 pw_cdp；写了别的值（含已下线的 drission / playwright）启动即报错。
 driver = "pw_cdp"
 # 统一使用实际登录过的用户数据目录（用普通进程拉起浏览器时就是它）。
-# 「按机器改」：每台机器有自己的 1688 账号与专用 profile；首次运行 python login_chrome.py 扫码登录。
+# 「按机器改」：每台机器有自己的采集账号与专用 profile；首次运行 python login_chrome.py 扫码登录。
 user_data_path = "profiles/account1_edge"
 # 用普通进程拉起的浏览器（必须是有头浏览器，没有 headless 开关）。Win10/11 的 Edge 默认位置：
 chrome_path = "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
