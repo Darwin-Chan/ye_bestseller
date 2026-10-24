@@ -21,6 +21,11 @@ LABELS = {
 }
 RETRYABLE = {"needs_config", "model_unavailable", "failed", "stopped", "inconclusive"}
 
+def cache_signature(config, rule):
+    """Return the durable SKU cache signature used by production work."""
+    return digest({**signature_parts(config), "rule": rule}) if config and config.mode != "disabled" else None
+
+
 # 两张 SKU 缓存表的生产 DDL：打包（票 08）与收取导入都照这一份口径备表。
 # machine_id 只作来源与冲突说明、不参与键；一条结果记「第一次收到」的来源。
 SKU_JUDGMENTS_DDL = """CREATE TABLE IF NOT EXISTS sku_judgments (
@@ -64,8 +69,7 @@ class ModelWork:
         return digest(dict(branch=branch, context=context))
 
     def _signature(self, rule):
-        cfg = self.config
-        return digest({**signature_parts(cfg), "rule": rule}) if cfg and cfg.mode != "disabled" else None
+        return cache_signature(self.config, rule)
 
     def record(self, branch, context, members, state, **fields):
         key = self._key(branch, context)
