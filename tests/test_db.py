@@ -1506,7 +1506,7 @@ class EventIndexTests(unittest.TestCase):
                 self.assertIn(name, SCHEMA, "常量与 SCHEMA 里的 CREATE INDEX 要对得上")
 
     def test_an_existing_database_gets_them_on_open(self):
-        """老库没有这两条索引：下一次开连接要补上，别等人工迁。"""
+        """老库没有这些索引：下一次开连接要补上，别等人工迁。"""
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "legacy.db"
             conn = connect(path)

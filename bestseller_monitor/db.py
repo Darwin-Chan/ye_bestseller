@@ -183,6 +183,8 @@ CREATE TABLE IF NOT EXISTS event_log (
     note TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_event_log_round ON event_log(round_id);
+-- deny 发生账本边界与轮次计数：缺少此索引时，每店刷新都会扫描本轮全部事件。
+CREATE INDEX IF NOT EXISTS idx_event_log_round_event ON event_log(round_id, event);
 CREATE INDEX IF NOT EXISTS idx_event_log_shop_ts ON event_log(shop_key, ts);
 CREATE INDEX IF NOT EXISTS idx_event_log_event ON event_log(event);
 CREATE INDEX IF NOT EXISTS idx_event_log_verification ON event_log(verification_type);
@@ -365,9 +367,10 @@ SKU_IMAGE_DEDUPE_KEY = ("shop_key", "offer_id", "sku_id", "observed_at",
                         "COALESCE(content_hash,'')", "COALESCE(image_error,'')")
 SKU_IMAGE_DEDUPE_INDEX = "idx_sku_image_dedupe"
 
-# 过程页刷新的两条索引：逐店 deny 计数、逐店时间跨度（名字要与上面 SCHEMA 里的
-# 两条 CREATE INDEX 一致，tests/test_db.py 有用例守着）。
+# 过程页刷新的事件索引：轮次 deny 账本边界/计数、逐店计数与时间跨度。
+# 名字与上面 SCHEMA 里的 CREATE INDEX 一致，tests/test_db.py 有用例守着。
 EVENT_REFRESH_INDEXES = (
+    "idx_event_log_round_event",
     "idx_event_log_round_shop_event",
     "idx_event_log_round_shop_ts",
 )
@@ -2064,6 +2067,30 @@ class Database:
         if idle >= idle_reset_sec:
             return PacingSeed(visits=0, idle_sec=idle, idle_reset=True)
         return PacingSeed(visits=visits, idle_sec=idle, idle_reset=False)
+
+    def deny_count(self, round_id: int, shop_key: str | None = None) -> int:
+        """本轮 deny 发生次数；首次 deny_hit 前兼容旧版 click_deny。
+
+        deny_hit 在降温前落账，click_deny 是稍后才产生的点击路径结果，不能相加。
+        切换边界按整轮的事件 id 定义，店铺明细与轮次总数使用同一边界；不受滚动
+        限流窗口过期影响，不补写事件。见 ADR-0063。
+        """
+        from .guard import DENY_HIT_EVENT  # guard→stop_request→db，延迟导入以免成环
+        # 固定店铺条件保留 (round_id, shop_key, event) 的索引前缀；不要写成
+        # (? IS NULL OR shop_key=?)，否则逐店查询也会扫描全轮。
+        shop_filter = " AND shop_key=?" if shop_key is not None else ""
+        params = (round_id, DENY_HIT_EVENT, round_id)
+        if shop_key is not None:
+            params += (shop_key,)
+        params += (DENY_HIT_EVENT, click_events.ClickOutcome.DENIED.value, DENY_HIT_EVENT)
+        row = self.conn.execute(
+            "WITH boundary AS ("
+            "SELECT MIN(id) AS first_hit FROM event_log WHERE round_id=? AND event=?) "
+            "SELECT COUNT(*) AS c FROM event_log, boundary WHERE round_id=?" + shop_filter +
+            " AND event IN (?, ?) AND (event=? OR first_hit IS NULL OR id<first_hit)",
+            params,
+        ).fetchone()
+        return int(row["c"])
 
     def deny_seed(self, round_id: int, window_sec: float, *,
                   now: float | None = None) -> DenySeed:

@@ -1929,7 +1929,7 @@ class GuiRefreshCostTests(unittest.TestCase):
     断言分两层：
 
     - 结构层（承重）：这次刷新没有整表语句、开库没有任何一段迁移需要动手。
-    - 耗时段（护栏，不是性能目标）：同一台机器、同一份数据，**把两条事件索引摘掉再刷
+    - 耗时段（护栏，不是性能目标）：同一台机器、同一份数据，**把事件索引摘掉再刷
       一次作对照**——正常路径必须比对照快 `MIN_INDEX_ADVANTAGE` 倍以上（索引真在承重）。
       两侧各量两次取最快，负载尖峰只落在其中一次时不至于假红。另外留一条极宽松的绝对
       上界，只拦灾难级回归（如把聚合写成逐行 EXISTS：46 秒）。
@@ -1989,7 +1989,7 @@ class GuiRefreshCostTests(unittest.TestCase):
             self.assertEqual({report.applied for report in reports}, {()},
                              "每次开库都没有任何一段迁移需要动手")
 
-            # 同机对照：摘掉两条事件索引再刷一次。得让界面用裸连接——connect() 每次
+            # 同机对照：摘掉事件索引再刷一次。得让界面用裸连接——connect() 每次
             # 开库都会把索引建回来，摘掉的索引因此真的不在了。
             raw = sqlite3.connect(path)
             try:
