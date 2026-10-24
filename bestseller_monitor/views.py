@@ -20,6 +20,7 @@ from . import click_events, elapsed, pacing, plan_step, preparation, rounds, sho
 from .config import CARDS_PER_PAGE, effective_pages_limit, is_merge_only
 from .crawler_identity import CrawlerProcess, browser_cleanup_complete
 from .db import CST, Database, RoundTally, cst_date
+from .stop_request import StopReason
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,14 @@ class UiState:
     # 「正在确认」（锁住勾选与开始）与「接着轮询」都从它读，不再拼零散字段。
     prep: preparation.PreparationSnapshot = field(
         default_factory=preparation.PreparationSnapshot)
+
+
+def stop_reason_text(reason: StopReason | None) -> str:
+    return {
+        StopReason.USER_PAUSE: "用户请求暂停",
+        StopReason.USER_ABORT: "用户确认中止",
+        StopReason.WINDOW_CLOSE: "用户确认关闭采集窗口",
+    }.get(reason, "未记录")
 
 
 def stop_failure_text(code: str) -> str:

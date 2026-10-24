@@ -22,6 +22,11 @@ LABELS = {
 }
 RETRYABLE = {"needs_config", "model_unavailable", "failed", "stopped", "inconclusive"}
 
+def _state_reason(state, stop):
+    return (f"本次匹配已停止；停止原因：{stop_reason(stop)}。"
+            if state == "stopped" else LABELS[state])
+
+
 def restore_stop_reasons(snapshot):
     """旧草稿只有停止状态，不能据此推断用户操作。保留已记录的新原因。"""
     unknown = LABELS["stopped"]
@@ -92,8 +97,7 @@ class ModelWork:
         key = self._key(branch, context)
         task = dict(branch=branch, context=context, members=sorted(members), state=state,
                     completed=state.startswith("completed_"), retryable=state in RETRYABLE,
-                    reason=(f"本次匹配已停止；停止原因：{stop_reason(self.stop)}。"
-                            if state == "stopped" else LABELS[state]), **fields)
+                    reason=_state_reason(state, self.stop), **fields)
         self.tasks[key] = task
         return key
 
@@ -174,8 +178,7 @@ class ModelWork:
             completed_members=len(self.snapshot["members"]) - len(unfinished_members),
             completed=sum(t["completed"] for t in tasks), unfinished=sum(not t["completed"] for t in tasks),
             retryable=sum(t["retryable"] for t in tasks), cached=sum(bool(t.get("cached")) for t in tasks),
-            states=[dict(state=state, reason=(f"本次匹配已停止；停止原因：{stop_reason(self.stop)}。"
-                                           if state == "stopped" else reason), count=sum(t["state"] == state for t in tasks)) for state, reason in LABELS.items()],
+            states=[dict(state=state, reason=_state_reason(state, self.stop), count=sum(t["state"] == state for t in tasks)) for state in LABELS],
             requested=self.requested, reasons={s: sum(t["state"] == s for t in tasks) for s in LABELS})
         protected = {identity(r) for g in self.snapshot["groups"] if g.get("manual_membership") or g.get("excluded_group") for r in g["members"]}
         for member in self.snapshot["members"]:

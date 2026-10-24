@@ -413,14 +413,21 @@
     const showPending = pending.length > 0 && !crawler && !d.stopping;
     $("pendingCard").style.display = showPending ? "block" : "none";
     if (showPending) {
-      $("pendingRows").innerHTML = pending.map(r =>
-        `<div class="flex" style="gap:12px;align-items:center">` +
-        `<span style="flex:1;font-size:13px">${r.text}</span>` +
-        `<button class="btn danger sm" data-rid="${r.id}">中止此轮（放弃）</button></div>`
-      ).join("");
-      document.querySelectorAll("#pendingRows button").forEach(b => {
-        b.onclick = () => abortPendingRound(+b.dataset.rid);
-      });
+      $("pendingRows").replaceChildren(...pending.map(r => {
+        const row = document.createElement("div");
+        row.className = "flex";
+        row.style.cssText = "gap:12px;align-items:center";
+        const text = document.createElement("span");
+        text.style.cssText = "flex:1;font-size:13px";
+        text.textContent = r.text;
+        const button = document.createElement("button");
+        button.className = "btn danger sm";
+        button.dataset.rid = r.id;
+        button.textContent = "中止此轮（放弃）";
+        button.onclick = () => abortPendingRound(+button.dataset.rid);
+        row.append(text, button);
+        return row;
+      }));
     }
 
     // 已终态轮次留下的收尾欠账（票 06）：轮次卡消失后仍有产品内重试入口，

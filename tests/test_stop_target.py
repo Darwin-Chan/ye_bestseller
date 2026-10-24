@@ -32,14 +32,14 @@ class StopTargetTests(unittest.TestCase):
         runtime = stop_request.RecordingStopRuntime(alive=True)
         watch = self._watch(runtime)
         watch.begin(self.conn, stop_request.StopCommand(
-            stop_request.ABORT, self.a, 1, reason="用户确认关闭采集窗口"))
+            stop_request.ABORT, self.a, 1, reason=stop_request.StopReason.WINDOW_CLOSE))
         self.db.record_crawler_process(pid=9001, round_id=2)
         self.clock.value += 20
         status = watch.tick(self.conn)
-        self.assertEqual(status.reason, "用户确认关闭采集窗口")
+        self.assertEqual(status.reason, stop_request.StopReason.WINDOW_CLOSE)
         self.assertEqual(status.target, self.a)
         status = watch.tick(self.conn)
-        self.assertEqual(status.reason, "用户确认关闭采集窗口")
+        self.assertEqual(status.reason, stop_request.StopReason.WINDOW_CLOSE)
         self.assertNotIn("terminate", [name for name, _ in runtime.actions])
 
     def test_replacement_never_terminates_or_cleans_b(self):

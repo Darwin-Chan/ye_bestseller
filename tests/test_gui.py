@@ -1130,6 +1130,16 @@ class GuiStopRequestTests(unittest.TestCase):
         self.assertEqual(view["stop_reason"], "用户确认关闭采集窗口")
         self.assertEqual(self.api.get_result()["stop_reason"], "用户确认关闭采集窗口")
 
+    def test_close_retry_after_pause_promotion_keeps_close_origin(self):
+        self._running_crawler()
+        self.assertTrue(self.api.pause_run()["ok"])
+        snapshot = self.api.close_snapshot()
+        with patch.object(self.api._stop_watch, "begin", side_effect=RuntimeError("database busy")):
+            self.assertTrue(self.api.begin_close(snapshot)["ok"])
+        self.api.close_snapshot()
+        self.assertEqual(self.api.get_run()["stop_reason"], "用户确认关闭采集窗口")
+        self.assertEqual(self.api.get_result()["stop_reason"], "用户确认关闭采集窗口")
+
     def _dies(self):
         """「强杀」真的生效：内核释放会话锁，子进程变成已退出。"""
         return self._dies_when_terminated(self.api.proc)

@@ -543,6 +543,24 @@ class ExplicitNewRoundTests(unittest.TestCase):
         self.assertTrue(self.load_round(rid).in_progress)
 
 
+    def test_real_pending_round_renders_interruption_detail_as_text(self):
+        from playwright.sync_api import expect
+        rid = self.create_round()
+        detail = '详情阶段失败 <img src=x onerror="window.__reasonExecuted=true"> & 原始原因'
+        with closing(connect(self.db_path)) as conn:
+            Database(conn).append_event(rid, "collection_interrupted", kind="run", note=detail)
+        page = self.page()
+        expect(page.locator("#pendingRows")).to_contain_text(detail)
+        self.assertEqual(page.locator("#pendingRows img").count(), 0)
+        self.assertIsNone(page.evaluate("window.__reasonExecuted"))
+        button = page.locator("#pendingRows button")
+        self.assertEqual(button.get_attribute("data-rid"), str(rid))
+        button.click()
+        expect(page.locator("#confirmModal")).to_have_class("show")
+        page.locator("#confirmOk").click()
+        expect(page.locator("#confirmModal")).not_to_have_class("show")
+        self.assertEqual(self.load_round(rid).reason, rounds.TerminalReason.ABANDONED)
+
     def test_real_page_old_abort_confirmation_cannot_stop_a_replacement(self):
         from playwright.sync_api import expect
         rid, process, death = self.running()

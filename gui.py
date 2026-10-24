@@ -271,7 +271,7 @@ class Api:
             return {"ok": True}
 
     def _collection_payload(self, payload: dict) -> dict:
-        return {**payload, "stop_reason": self._stop_watch.status.reason or "未记录",
+        return {**payload, "stop_reason": views.stop_reason_text(self._stop_watch.status.reason),
                 "stop_failure": (views.stop_failure_text(self._stop_watch.status.code)
                                  if self._stop_watch.status.code else None),
                 "local_trial": self.cfg.local_trial,
@@ -1024,7 +1024,8 @@ class Api:
                     self.user_paused = False
                     self._stop_watch.begin(conn, stop_request.StopCommand(
                         stop_request.StopKind.ABORT, status.target, status.round_id,
-                        reason="用户确认关闭采集窗口" if self._closing_requested else "用户确认中止"))
+                        reason=(stop_request.StopReason.WINDOW_CLOSE if self._closing_requested
+                                else stop_request.StopReason.USER_ABORT)))
                     return {"ok": True, "round_id": settled.id,
                             "reason": settled.reason.value,
                             "stopping": self._stop_watch.state}
@@ -1059,7 +1060,8 @@ class Api:
                     self._stop_watch.begin(
                         conn, stop_request.StopCommand(stop_request.StopKind.ABORT,
                                                        target, rid, reason=(
-                            "用户确认关闭采集窗口" if self._closing_requested else "用户确认中止")))
+                            stop_request.StopReason.WINDOW_CLOSE if self._closing_requested
+                            else stop_request.StopReason.USER_ABORT)))
                 except RuntimeError as exc:
                     return {"ok": False, "error": "暂时无法确认停止目标，请稍后重试。",
                             "retryable": True, "code": str(exc)}
@@ -1085,7 +1087,9 @@ class Api:
                         is TerminalReason.ABANDONED):
                     try:
                         self._stop_watch.begin(conn, stop_request.StopCommand(
-                            stop_request.StopKind.ABORT, status.target, status.round_id))
+                            stop_request.StopKind.ABORT, status.target, status.round_id,
+                            reason=(stop_request.StopReason.WINDOW_CLOSE if self._closing_requested
+                                    else stop_request.StopReason.USER_ABORT)))
                     except Exception as exc:
                         # Terminal is committed. Retry promotion on the same watch,
                         # without consuming pause ACKs or resetting its deadlines.
@@ -1166,7 +1170,7 @@ class Api:
                         try:
                             self._stop_watch.begin(conn, stop_request.StopCommand(
                                 stop_request.StopKind.ABORT, status.target, expected.round_id,
-                                reason="用户确认关闭采集窗口"))
+                                reason=stop_request.StopReason.WINDOW_CLOSE))
                         except Exception as exc:
                             # Request accepted, not teardown completed. The independent
                             # close driver retries this exact promotion via snapshots.

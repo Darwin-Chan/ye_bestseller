@@ -87,6 +87,12 @@ class StopKind(str, Enum):
     ABORT = ABORT
 
 
+class StopReason(str, Enum):
+    USER_PAUSE = "user_pause"
+    USER_ABORT = "user_abort"
+    WINDOW_CLOSE = "window_close"
+
+
 class StopPhase(str, Enum):
     IDLE = "idle"
     STOPPING = "stopping"
@@ -125,7 +131,7 @@ class StopCommand:
     kind: StopKind | str
     target: StopTarget
     round_id: int | None = None
-    reason: str | None = None
+    reason: StopReason | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "kind", StopKind(self.kind))
@@ -133,8 +139,8 @@ class StopCommand:
             raise ValueError("stop target is required")
         if self.reason is None:
             object.__setattr__(self, "reason",
-                               "用户请求暂停" if self.kind is StopKind.PAUSE
-                               else "用户确认中止")
+                               StopReason.USER_PAUSE if self.kind is StopKind.PAUSE
+                               else StopReason.USER_ABORT)
 
 
 @dataclass(frozen=True)
@@ -146,7 +152,7 @@ class StopStatus:
     retryable: bool = False
     round_id: int | None = None
 
-    reason: str | None = None
+    reason: StopReason | None = None
 
     @property
     def state(self) -> str | None:
