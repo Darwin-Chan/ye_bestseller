@@ -638,6 +638,8 @@ class CallTimeoutTests(unittest.TestCase):
         if os.name == "nt":
             taskkill.assert_called_once()                # 杀的是整棵进程树
             self.assertEqual(taskkill.call_args.args[0][0], "taskkill")
+            self.assertEqual(taskkill.call_args.kwargs["creationflags"],
+                             git_channel.no_console_creationflags())
 
     def test_a_push_timeout_is_not_a_rejection_and_gets_no_retry(self):
         """超时不是 non-fast-forward 拒绝：push 那一步超时只试一次，原样报出。"""

@@ -655,8 +655,11 @@ class WeeklyReportTests(unittest.TestCase):
 
         self.assertEqual(outcome.exit_code, 0)
         report = world.report()
-        self.assertIn("- 部分日期缺口（提示，不计异常）：raw-m3 A02 09-16",
-                      report)
+        self.assertIn(
+            "- 部分日期缺口（提示，不计异常）：raw-m3 A02 09-16 —— "
+            "计划里该采到，收到的包里没有这一天",
+            report,
+        )
         todo = todo_of(report)
         self.assertNotIn("A02 09-16", todo)
 
@@ -1313,6 +1316,22 @@ class WeeklyCoverageThresholdTests(unittest.TestCase):
         self.assertIn("缺口 7", report)
         self.assertIn("本机缺7 天：A01 09-14", report)
         self.assertIn("本机缺7 天（A01 09-14", todo_of(report))
+
+    def test_an_arrived_remote_package_with_no_coverage_is_an_actionable_gap(self):
+        world = ConsoleWorld(self)
+        world.plan(("A01", "m1", 3), ("A02", "m2", 3))
+        world.crawls([("A01", day) for day in DAYS])
+        world.publish("m2", [])
+
+        outcome = world.run()
+
+        self.assertEqual(outcome.exit_code, 1)
+        self.assertEqual(outcome.partial_gaps, ())
+        self.assertEqual(len(outcome.gaps), 7)
+        self.assertTrue(all(gap.machine == "m2" for gap in outcome.gaps))
+        report = world.report()
+        self.assertIn("raw-m2 缺7 天：A02 09-14", report)
+        self.assertIn("raw-m2 的包缺7 天（A02 09-14", todo_of(report))
 
     def test_an_arrived_remote_package_with_a_partial_span_is_only_a_report_note(self):
         world = ConsoleWorld(self)

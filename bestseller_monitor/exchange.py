@@ -1712,7 +1712,7 @@ def _gaps_section(outcome: RunOutcome) -> list[str]:
                           if gap.machine != outcome.machine_id]
         for machine, group in _by_machine(tuple(partial_others)):
             out.append(f"- 部分日期缺口（提示，不计异常）：raw-{machine} "
-                       f"{_gap_detail(group, reasons=False)}")
+                       f"{_gap_detail(group, reasons=True)}")
             wrote = True
         if not wrote:
             out.append("- 没有缺口")
