@@ -1092,6 +1092,23 @@ class MergeOnlyMachineTests(unittest.TestCase):
         # 没有落库计划（纯汇总机不跑准备串）：缺口与「还没来的包」如实说没法对照
         self.assertIn("- 本机没有本周（2026-W38）的落库计划", report)
 
+    def test_merge_only_replays_its_own_historical_raw_package(self):
+        # 纯汇总机的交换区里也可能已经有本机历史 raw 包；冷启动必须把它记入导入账。
+        self.world.box.world("raw-m4.git", "exchange/raw-m4", "m4-publisher")
+        self.world.work["m4"] = self.world.box.tmp / "m4-publisher"
+        self.world.publish("m4", [("A04", "2026-09-09")], week="2026-W37")
+        self.world.sync("m4")
+
+        outcome = self.world.run()
+
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(len(outcome.imports), 3)
+        ledger = self.world.conn.execute(
+            "SELECT machine_id, week FROM import_packages ORDER BY machine_id, week"
+        ).fetchall()
+        self.assertIn(("m4", "2026-W37"), [tuple(row) for row in ledger])
+        self.assertIn("| raw-m4 | W37 |", self.world.report())
+
 
 class ReadOnlyCredentialRunTests(unittest.TestCase):
     """只读凭据下的一轮完整运行（票据 11，spec §11）：clone / pull / 汇总照常，一个 push 都不试。

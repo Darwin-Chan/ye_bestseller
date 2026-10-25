@@ -25,10 +25,11 @@
 - **发布判断集**：`judgment_set.publish` 把本机判断集推到 `judged-<机器>`（同内容空操作）。
 - **拉取**：对另外的每个交换库 pull（别的 `raw-*` 库 + `plan` 库——纯汇总机不跑采集
   准备串，plan 克隆靠这一趟保鲜）。拉不动记一笔（需要人看一眼），不拦汇总。
-- **汇总**：交换区里别人发的包逐个 `merge.import_package`（票据 09 的确定性合并、
-  同哈希幂等跳过）；本机自己的包不收。**不只本周**：账里还没有的历史包也一起收——
-  冷启动一次重放全部（spec §11），别的机器迟到补发的历史包下次运行自动补上
-  （各台最终收敛到同一份全量库）；账里已有的历史包安静跳过，不重进报告表。
+- **汇总**：交换区里的包逐个 `merge.import_package`（票据 09 的确定性合并、同哈希幂等跳过）。
+  采集机继续跳过本机自己的包；纯汇总机把交换区里可见的全部 raw 包都纳入导入账，
+  包括本机历史包。**不只本周**：账里还没有的历史包也一起收——冷启动一次重放全部
+  （spec §11），别的机器迟到补发的历史包下次运行自动补上（各台最终收敛到同一份全量库）；
+  账里已有的历史包安静跳过，不重进报告表。
 - **接入来源**（票 02、ADR-0052）：收取那半先读最近一次有效来源清单（plan 库里的
   `judged-sources.json`），按它补齐缺的 `judged-<机器>` 本地克隆、只快进更新已有的、
   核对远端地址；只在实际收取任务里做——开窗口、启动分析都不触发。plan 拉不动时用本机
@@ -485,8 +486,9 @@ def _pull_others(cfg, machine_id: str, say) -> tuple[PullNote, ...]:
 
 def _merge_packages(cfg, db: Database, *, week: str, machine_id: str, store,
                     say) -> dict[pathlib.Path, merge.ImportResult]:
-    """把交换区里别人发的包逐个收进本机库；本机自己的包不收。
+    """把交换区里的 raw 包逐个收进本机库。
 
+    采集机跳过本机自己的包；纯汇总机重放交换区里可见的全部包，包括本机历史包。
     不只收本周：账里还没有的历史包也一起收——冷启动一次重放全部（spec §11），
     别的机器迟到补发的历史包下次运行自动补上（各台最终收敛到同一份全量库）。
     账里已有且没有缺图的历史包安静跳过：不占这次运行的账、不重进报告表（状态累积以本周为焦点）。
@@ -499,7 +501,7 @@ def _merge_packages(cfg, db: Database, *, week: str, machine_id: str, store,
                  "SELECT package_sha256, images_missing FROM import_packages")}
     imported: dict[pathlib.Path, merge.ImportResult] = {}
     for ref in export.all_packages(root):
-        if ref.machine == machine_id:
+        if ref.machine == machine_id and cfg.role != ROLE_MERGE_ONLY:
             continue
         if ref.week != week:
             try:
@@ -786,9 +788,11 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
     plan_of_shop = ({row.shop_key: row.machine_id for row in plan.rows}
                     if plan is not None else {})
 
-    # 「收进来的包」= 这次真收的（含冷启动的历史包）+ 本周的全部别机包（含还没碰过的）。
-    # 账里已有的历史包不占行：状态累积以本周为焦点，历史是「已经收进来了」这一条。
-    others = {ref.path: ref for ref in export.all_packages(root) if ref.machine != machine_id}
+    # 「收进来的包」= 这次真收的（含冷启动的历史包）+ 本周的全部可见包（含还没碰过的）。
+    # 采集机仍只展示别机包；纯汇总机的本机历史包也属于冷启动收敛范围，应能在报告中对账。
+    include_own = role == ROLE_MERGE_ONLY
+    others = {ref.path: ref for ref in export.all_packages(root)
+              if include_own or ref.machine != machine_id}
     weekly_paths = {ref.path for ref in week_refs}
     shown = sorted((ref for path, ref in others.items()
                     if path in imported or path in weekly_paths),
