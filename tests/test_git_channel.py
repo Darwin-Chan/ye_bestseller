@@ -609,6 +609,8 @@ class CallTimeoutTests(unittest.TestCase):
         for proc in calls:
             self.assertEqual(proc.timeout, 4242,
                              f"{' '.join(proc.args)} 没带（或没带对）上限")
+            self.assertEqual(proc.kwargs["creationflags"],
+                             git_channel.no_console_creationflags())
 
     def test_the_limit_is_one_shared_300_second_constant(self):
         """300 秒一档、与 coscli 子进程同档：取值依据写在常量旁，值本身钉在这里。"""

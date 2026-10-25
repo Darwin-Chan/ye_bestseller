@@ -272,6 +272,7 @@ class RunOutcome:
     merge_ran: bool = False
     packages: tuple[PackageRow, ...] = ()
     gaps: tuple[GapLine, ...] = ()
+    partial_gaps: tuple[GapLine, ...] = ()
     conflicts: tuple[ConflictEntry, ...] = ()
     missing_machines: tuple[str, ...] = ()
     todo: tuple[str, ...] = ()
@@ -798,8 +799,8 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
     arrived = {ref.machine for ref in week_refs}
     missing = tuple(sorted(m for m in planned if m != machine_id and m not in arrived))
 
-    gaps = _gaps(db, plan, week=week, days=days, machine_id=machine_id, packages=week_refs,
-                 missing=missing)
+    gaps, partial_gaps = _gaps(db, plan, week=week, days=days, machine_id=machine_id,
+                                packages=week_refs, missing=missing)
     conflicts = _conflicts(db, week=week, machine_id=machine_id, plan=plan)
     image_missing_total = sum(result.images_missing for result in imported.values())
     judgment_conflicts = _judgment_conflicts(judgments, machine_id, week=week)
@@ -848,7 +849,8 @@ def _assemble(cfg, db: Database, *, week, now, machine_id, role, check, export_r
         week=week, machine_id=machine_id, role=role, ran_at=now, check=check, only=only,
         export=export_result, export_note=export_note, pulls=pulls,
         imports=tuple(imported.values()), merge_ran=merge_ran, packages=packages_rows,
-        gaps=gaps, conflicts=conflicts, missing_machines=missing, todo=todo,
+        gaps=gaps, partial_gaps=partial_gaps, conflicts=conflicts,
+        missing_machines=missing, todo=todo,
         summary=_summary(only=only, export_result=export_result, export_note=export_note,
                          imported=imported, merge_ran=merge_ran,
                          judgment_publish=judgment_publish, judgment_collect=judgment_collect,
@@ -1065,16 +1067,16 @@ def _package_row(db: Database, ref: export.PackageRef,
 
 def _gaps(db: Database, plan, *, week: str, days: tuple[dt.date, ...], machine_id: str,
           packages: tuple[export.PackageRef, ...], missing: tuple[str, ...]
-          ) -> tuple[GapLine, ...]:
-    """计划 × 收到的包：缺 = 计划里该采到的（店铺 × 日期）在哪都没有。
+          ) -> tuple[tuple[GapLine, ...], tuple[GapLine, ...]]:
+    """按计划店铺评估整段覆盖，并分出整段异常与部分日期提示。
 
-    覆盖的判据是「本机库 ∪ 交换区里全部包的覆盖」——口径是「在收到的包里找不到」
-    （包是「自己那份」，一组 (店铺, 日期) 只在一台机器的包里；本机采的组在本机库里）。
-    缺的展示归到计划里那台机器名下：本机份额的理由从轮次事实取，别机份额记「包缺这一天」；
-    还没发布/没拉到的机器的份额不记缺口（那是「还没来的包」那一行的事）。
+    覆盖的判据是「本机库 ∪ 交换区里全部已到包的覆盖」；一份远端周包还没到时，
+    由 ``missing`` 的“还没收到的包”语义负责，不把它提前算成缺口。只有一个计划店铺
+    在全部已评估日期都没有库存观测，才进入 ``gaps``；只缺部分日期的事实进入
+    ``partial_gaps``，供报告追查但不参与退出码和待办。
     """
     if plan is None or not days:
-        return ()
+        return (), ()
     span = (days[0].isoformat(), days[-1].isoformat())
     local = {(str(row[0]), str(row[1])) for row in db.conn.execute(
         "SELECT DISTINCT shop_key, date FROM inventory WHERE date BETWEEN ? AND ?", span)}
@@ -1084,23 +1086,27 @@ def _gaps(db: Database, plan, *, week: str, days: tuple[dt.date, ...], machine_i
             coverage |= merge.package_shop_days(ref.path, days[0], days[-1])
         except (OSError, EOFError, sqlite3.Error) as exc:
             log.warning("缺口检查读不动包 %s：%s（该包的导入失败会另行报出）", ref.rel, exc)
+
     gaps: list[GapLine] = []
+    partial_gaps: list[GapLine] = []
     for row in plan.rows:
+        if row.machine_id in missing:
+            continue                        # “还没来的包”那一行负责这台机器
+        row_gaps: list[GapLine] = []
         for day in days:
             pair = (row.shop_key, day.isoformat())
             if pair in local or pair in coverage:
                 continue
             if row.machine_id == machine_id:
-                gaps.append(GapLine(machine=machine_id, shop_key=row.shop_key,
-                                    date=pair[1], reason=gap_reason(db, pair[1])))
-            elif row.machine_id in missing:
-                continue                        # 「还没来的包」那一行说它，不记成缺口
+                reason = gap_reason(db, pair[1])
             else:
-                gaps.append(GapLine(machine=row.machine_id, shop_key=row.shop_key,
-                                    date=pair[1],
-                                    reason="计划里该采到，收到的包里没有这一天"))
-    return tuple(gaps)
-
+                reason = "计划里该采到，收到的包里没有这一天"
+            row_gaps.append(GapLine(machine=row.machine_id, shop_key=row.shop_key,
+                                     date=pair[1], reason=reason))
+        if not row_gaps:
+            continue
+        (gaps if len(row_gaps) == len(days) else partial_gaps).extend(row_gaps)
+    return tuple(gaps), tuple(partial_gaps)
 
 def gap_reason(db: Database, day: str) -> str:
     """本机缺这一天，为什么：当天的轮次终态（进行中 = 半截的一天）。
@@ -1359,7 +1365,8 @@ def _render(outcome: RunOutcome) -> str:
         f"**结果**：{VERDICT[outcome.exit_code]}（退出码 {outcome.exit_code}）· "
         f"缺口 {len(outcome.gaps)} · "
         f"冲突 {len(outcome.conflicts)} · 还没来的包 {len(outcome.missing_machines)} · "
-        f"判断集冲突 {len(outcome.judgment_conflicts)}",
+        f"判断集冲突 {len(outcome.judgment_conflicts)} · "
+        f"部分日期提示 {len(outcome.partial_gaps)}",
         f"**本次运行**：{outcome.summary}",
         "",
     ]
@@ -1694,12 +1701,26 @@ def _gaps_section(outcome: RunOutcome) -> list[str]:
             out.append(f"- 还没收到的包：{who} 的 {outcome.week.split('-')[1]} "
                        "还没发布或没拉到")
             wrote = True
+
+        partial_mine = [gap for gap in outcome.partial_gaps
+                        if gap.machine == outcome.machine_id]
+        if partial_mine:
+            out.append(f"- 部分日期缺口（提示，不计异常）：本机 "
+                       f"{_gap_detail(partial_mine, reasons=True)}")
+            wrote = True
+        partial_others = [gap for gap in outcome.partial_gaps
+                          if gap.machine != outcome.machine_id]
+        for machine, group in _by_machine(tuple(partial_others)):
+            out.append(f"- 部分日期缺口（提示，不计异常）：raw-{machine} "
+                       f"{_gap_detail(group, reasons=False)}")
+            wrote = True
         if not wrote:
             out.append("- 没有缺口")
     if outcome.gaps:
-        out.append("- 口径：缺口 = 计划里该采到的（店铺 × 日期），在收到的包里找不到")
+        out.append("- 口径：缺口 = 计划里该采到的店铺，在已评估日期范围内每天都找不到库存观测")
+    if outcome.partial_gaps:
+        out.append("- 口径：部分日期缺口 = 同一店铺至少有一天有库存观测，只缺其余日期；保留提示，不计异常")
     return out + [""]
-
 
 def _conflicts_section(outcome: RunOutcome) -> list[str]:
     if not outcome.conflicts:

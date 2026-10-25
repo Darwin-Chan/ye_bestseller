@@ -17,6 +17,8 @@ import pathlib
 import subprocess
 import tempfile
 
+from bestseller_monitor.process_launch import no_console_creationflags
+
 from bestseller_monitor.image_store import IMAGE_PREFIX, ImageStoreError
 
 COSCLI = "coscli"
@@ -90,7 +92,8 @@ class CosCliImageStore:
         try:
             done = subprocess.run(
                 [COSCLI, *args], capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=_TIMEOUT_SEC)
+                encoding="utf-8", errors="replace", timeout=_TIMEOUT_SEC,
+                creationflags=no_console_creationflags())
         except FileNotFoundError as exc:
             raise ImageStoreError(
                 f"找不到 {COSCLI}：按上机清单第 10 步装好 coscli 并配好本机 AK"

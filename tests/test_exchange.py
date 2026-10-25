@@ -607,14 +607,14 @@ class WeeklyReportTests(unittest.TestCase):
 
         self.assertEqual(outcome.exit_code, 1)
         report = self.world.report()
-        self.assertIn("**结果**：有需要人看一眼的地方（退出码 1）· 缺口 1 · 冲突 1 · "
-                      "还没来的包 1 · 判断集冲突 0", report)
+        self.assertIn("**结果**：有需要人看一眼的地方（退出码 1）· 缺口 0 · 冲突 1 · "
+                      "还没来的包 1 · 判断集冲突 0 · 部分日期提示 1", report)
         self.assertIn("**本次运行**：导出已发布 · 新收 1 个包", report)
-        # 四、缺口与还没来的：本机缺一天（带轮次终态的人话）+ 还没收到的包 + 口径
-        self.assertIn("- 本机缺一天：A03 09-17 —— 当天采集在详情预算耗尽后中止"
-                      "（历史日期补不了，如实记一笔）", report)
+        # 四、缺口与还没来的：A03 只缺一天，降为部分日期提示；A04 仍由未到包语义覆盖。
+        self.assertIn("- 部分日期缺口（提示，不计异常）：本机 A03 09-17 —— "
+                      "当天采集在详情预算耗尽后中止", report)
         self.assertIn("- 还没收到的包：raw-m2 的 W38 还没发布或没拉到", report)
-        self.assertIn("- 口径：缺口 = 计划里该采到的（店铺 × 日期），在收到的包里找不到",
+        self.assertIn("- 口径：部分日期缺口 = 同一店铺至少有一天有库存观测，只缺其余日期；保留提示，不计异常",
                       report)
         # A04 归 m2（包没来）：它的七天不记缺口，只记「还没来的包」——A04 整个报告不出现
         self.assertNotIn("A04", report)
@@ -624,12 +624,11 @@ class WeeklyReportTests(unittest.TestCase):
                       "取后到者（m3），覆盖 1 行、保留 1 行", report)
         self.assertIn("- 明细记在本机导入账（本机视角：导入 raw-m3 时发现）；冲突不入交换区",
                       report)
-        # 六、下次该做什么：三件（还没来的包 / 别再勾选 A02 / 本机缺的一天）
+        # 六、下次该做什么：还没来的包 / 别再勾选 A02；部分日期提示不生成待办。
         todo = todo_of(report)
         self.assertIn("raw-m2 的 W38 还没发布或没拉到", todo)
         self.assertIn("提醒本机操作者：不要手工勾选本期不归本机的店（A02）", todo)
-        self.assertIn("本机缺一天（A03 09-17 —— 当天采集在详情预算耗尽后中止）无法回填",
-                      todo)
+        self.assertNotIn("A03 09-17", todo)
 
     def test_local_startup_failure_detail_and_unknown_reason_reach_report(self):
         for reason, detail, expected in (
@@ -646,7 +645,7 @@ class WeeklyReportTests(unittest.TestCase):
                 self.assertIn(expected, self.world.report())
 
     def test_other_machines_gaps_come_from_their_packages_coverage(self):
-        # m3 的包缺 A02 09-16 那天（当天采集中止）：计划该采到、包里没有 → 缺口
+        # m3 的包缺 A02 09-16 那天（当天采集中止）：计划该采到、包里没有 → 部分日期提示
         world = ConsoleWorld(self)
         world.plan(("A01", "m1", 3), ("A02", "m3", 3))
         world.crawls([("A01", day) for day in DAYS], round_reason="COMPLETED")
@@ -654,12 +653,12 @@ class WeeklyReportTests(unittest.TestCase):
 
         outcome = world.run()
 
-        self.assertEqual(outcome.exit_code, 1)
+        self.assertEqual(outcome.exit_code, 0)
         report = world.report()
-        self.assertIn("- raw-m3 缺一天：A02 09-16 —— 计划里该采到，收到的包里没有这一天",
+        self.assertIn("- 部分日期缺口（提示，不计异常）：raw-m3 A02 09-16",
                       report)
         todo = todo_of(report)
-        self.assertIn("raw-m3 的包缺一天（A02 09-16）", todo)
+        self.assertNotIn("A02 09-16", todo)
 
 
 class MissingRemotePackageTests(unittest.TestCase):
@@ -1298,6 +1297,39 @@ class ExportOwnershipTests(unittest.TestCase):
         self.assertEqual(_package_query(
             package, "SELECT shop_key, date FROM inventory WHERE shop_key='A03'"),
             [("A03", "2026-09-16")])
+
+
+class WeeklyCoverageThresholdTests(unittest.TestCase):
+    def test_a_shop_with_no_data_on_any_evaluated_day_is_an_actionable_gap(self):
+        world = ConsoleWorld(self)
+        world.plan(("A01", "m1", 3))
+
+        outcome = world.run()
+
+        self.assertEqual(outcome.exit_code, 1)
+        self.assertEqual(len(outcome.gaps), 7)
+        self.assertEqual(outcome.partial_gaps, ())
+        report = world.report()
+        self.assertIn("缺口 7", report)
+        self.assertIn("本机缺7 天：A01 09-14", report)
+        self.assertIn("本机缺7 天（A01 09-14", todo_of(report))
+
+    def test_an_arrived_remote_package_with_a_partial_span_is_only_a_report_note(self):
+        world = ConsoleWorld(self)
+        world.plan(("A01", "m1", 3), ("A02", "m2", 3))
+        world.crawls([("A01", day) for day in DAYS])
+        world.publish("m2", [("A02", day) for day in DAYS if day != "2026-09-17"])
+
+        outcome = world.run()
+
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(outcome.gaps, ())
+        self.assertEqual(len(outcome.partial_gaps), 1)
+        self.assertEqual(outcome.partial_gaps[0].shop_key, "A02")
+        report = world.report()
+        self.assertIn("部分日期缺口（提示，不计异常）：raw-m2 A02 09-17", report)
+        self.assertIn("缺口 0", report)
+        self.assertIn("1. 没有待办：本周干净", todo_of(report))
 
 
 def _package_query(package: Path, sql: str):

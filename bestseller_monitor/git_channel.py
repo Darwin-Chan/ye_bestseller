@@ -27,6 +27,8 @@ import re
 import subprocess
 import time
 
+from bestseller_monitor.process_launch import no_console_creationflags
+
 DEFAULT_PUSH_ATTEMPTS = 5
 
 # 通道里每次 git 子进程调用的共享上限，300 秒一档（与 cos_store 的 coscli 子进程同档）：
@@ -98,7 +100,8 @@ def _run_git(what: str, args: tuple[str, ...], **kwargs) -> subprocess.Completed
     """
     started = time.monotonic()
     proc = subprocess.Popen(["git", *args], stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, **kwargs)
+                            stderr=subprocess.PIPE,
+                            creationflags=no_console_creationflags(), **kwargs)
     try:
         out, err = proc.communicate(timeout=_TIMEOUT_SEC)
     except subprocess.TimeoutExpired as exc:
@@ -179,7 +182,8 @@ def _abandon(proc: subprocess.Popen) -> None:
     if os.name == "nt":
         try:
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                           capture_output=True, timeout=_ABANDON_GRACE_SEC)
+                           capture_output=True, timeout=_ABANDON_GRACE_SEC,
+                           creationflags=no_console_creationflags())
         except (OSError, subprocess.TimeoutExpired):
             pass
     proc.kill()

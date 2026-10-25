@@ -10,6 +10,7 @@ import subprocess
 import unittest
 from unittest import mock
 
+from bestseller_monitor import cos_store
 from bestseller_monitor.cos_store import CosCliImageStore, parse_listing
 from bestseller_monitor.image_store import ImageStoreError, image_key
 
@@ -103,6 +104,8 @@ class CosCliTests(unittest.TestCase):
 
         self.assertEqual(run.call_args.args[0],
                          ["coscli", "ls", "-r", "cos://bucket/img/"])
+        self.assertEqual(run.call_args.kwargs["creationflags"],
+                         cos_store.no_console_creationflags())
         self.assertEqual(keys, {"img/", f"img/ab/{H1}.jpg", f"img/cd/{H2}.png"})
 
     def test_a_bucket_with_objects_yields_a_nonempty_key_set(self):
