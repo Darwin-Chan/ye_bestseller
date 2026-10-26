@@ -653,7 +653,9 @@ def degrade_to_v1(package: pathlib.Path) -> pathlib.Path:
     shutil.copyfile(package, path)
     sqlite_conn = sqlite3.connect(path)
     sqlite_conn.execute("DROP TABLE sku_image_versions")
-    sqlite_conn.execute("DELETE FROM exchange_meta WHERE key='rows_sku_image_versions'")
+    for table_name in ("rounds", "snapshots", "sku_observation_batches"):
+        sqlite_conn.execute(f"DROP TABLE {table_name}")
+    sqlite_conn.execute("DELETE FROM exchange_meta WHERE key IN ('rows_sku_image_versions', 'rows_rounds', 'rows_snapshots', 'rows_sku_observation_batches')")
     sqlite_conn.execute("UPDATE exchange_meta SET value='v1' WHERE key='format_version'")
     sqlite_conn.commit()
     sqlite_conn.close()
@@ -1078,6 +1080,84 @@ class EndToEndTests(MergeCase):
             self.rows(other, "SELECT offer_id, sku_id, stock FROM inventory ORDER BY sku_id"),
             self.rows(conn, "SELECT offer_id, sku_id, stock FROM inventory ORDER BY sku_id"),
             "其余各表与收新包那份逐行一致")
+
+
+class RawObservationEvidenceMergeTests(MergeCase):
+    def evidence_package(self, machine_id="m2"):
+        rows = machine_world(D16_1000, stock=8)
+        source = self.tmp / f"evidence-source-{machine_id}.db"
+        machine_source(source, shops=rows["shops"], products=rows["products"],
+                       skus=rows["skus"], inventory=rows["inventory"],
+                       versions=rows["versions"], assets=rows["assets"])
+        source_conn = dbmod.open(source)
+        source_conn.execute(
+            "INSERT INTO rounds(id, started_at, finished_at, note, detail_budget_limit, run_date, terminal_reason) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (700, "2026-09-16T09:00:00+00:00", "2026-09-16T10:00:00+00:00",
+             "evidence", 10, "2026-09-16", "完成"))
+        source_conn.execute(
+            "INSERT INTO snapshots(id, round_id, shop_key, shop_url, shop_name, offer_id, product_url, "
+            "product_name, sku_id, sku_name, sku_price, sku_stock, collected_at, page_status, attempt, detail_note) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (701, 700, "A01", "https://a01.example/", "店铺甲", "11",
+             "https://detail.1688.com/offer/11.html", "商品一", "s1", "规格一",
+             1.5, 8, "2026-09-16T10:00:00+00:00", "成功", 1, "raw"))
+        source_conn.execute(
+            "INSERT INTO sku_observation_batches(id, shop_key, offer_id, observed_at, observed_date, "
+            "product_name, product_url, skus_json, main_image_url, main_image_hash, main_image_error) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (702, "A01", "11", "2026-09-16T10:00:00+00:00", "2026-09-16", "商品一",
+             "https://detail.1688.com/offer/11.html",
+             '[{"sku_id":"s1","observation_complete":true,"sku_stock":8}]',
+             "https://img.example/main.png", H1, None))
+        source_conn.commit()
+        source_conn.close()
+        package = self.tmp / f"evidence-{machine_id}.db"
+        export.build_package(source, package, week="2026-W38", machine_id=machine_id,
+                             crawl_in_progress=False,
+                             generated_at=dt.datetime(2026, 9, 21, 10, 30, tzinfo=CST))
+        return package
+
+    def test_import_preserves_evidence_identity_and_is_idempotent(self):
+        package = self.evidence_package()
+        conn = self.local("m4")
+        first = self.import_(conn, package, machine_id="m4")
+        self.assertFalse(first.failed, first.failure)
+        self.assertEqual(self.rows(conn, "SELECT source_machine_id, source_id, note FROM rounds"),
+                         [("m2", 700, "evidence")])
+        self.assertEqual(self.rows(conn, "SELECT source_machine_id, source_id, round_id, collected_at, page_status, detail_note FROM snapshots"),
+                         [("m2", 701, 1, "2026-09-16T10:00:00+00:00", "成功", "raw")])
+        self.assertEqual(self.rows(conn, "SELECT source_machine_id, source_id, observed_at, observed_date, skus_json FROM sku_observation_batches"),
+                         [("m2", 702, "2026-09-16T10:00:00+00:00", "2026-09-16",
+                           '[{"sku_id":"s1","observation_complete":true,"sku_stock":8}]')])
+        second = self.import_(conn, package, machine_id="m4")
+        self.assertFalse(second.failed, second.failure)
+        self.assertTrue(second.skipped)
+        self.assertEqual(self.rows(conn, "SELECT COUNT(*) FROM rounds"), [(1,)])
+        self.assertEqual(self.rows(conn, "SELECT COUNT(*) FROM snapshots"), [(1,)])
+        self.assertEqual(self.rows(conn, "SELECT COUNT(*) FROM sku_observation_batches"), [(1,)])
+
+    def test_same_integer_source_ids_from_two_machines_do_not_collide(self):
+        first = self.local("m4")
+        self.assertFalse(self.import_(first, self.evidence_package("m2"), machine_id="m4").failed)
+        self.assertFalse(self.import_(first, self.evidence_package("m3"), machine_id="m4").failed)
+        self.assertEqual(self.rows(first,
+            "SELECT source_machine_id, source_id FROM sku_observation_batches ORDER BY source_machine_id"),
+            [("m2", 702), ("m3", 702)])
+
+    def test_broken_round_reference_rolls_back_without_a_ledger_row(self):
+        package = self.evidence_package()
+        broken = sqlite3.connect(package)
+        broken.execute("UPDATE snapshots SET round_id=999 WHERE id=701")
+        broken.commit()
+        broken.close()
+        conn = self.local("m4")
+        result = self.import_(conn, package, machine_id="m4")
+        self.assertTrue(result.failed)
+        self.assertEqual(self.rows(conn, "SELECT COUNT(*) FROM rounds"), [(0,)])
+        self.assertEqual(self.rows(conn, "SELECT COUNT(*) FROM snapshots"), [(0,)])
+        self.assertEqual(self.rows(conn, "SELECT COUNT(*) FROM sku_observation_batches"), [(0,)])
+        self.assertEqual(self.rows(conn, "SELECT COUNT(*) FROM import_packages"), [(0,)])
 
 
 class PackageFormTests(MergeCase):

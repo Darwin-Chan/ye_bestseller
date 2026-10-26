@@ -9,7 +9,7 @@
    取不到、没配桶、内容对不上哈希的都如实记缺，不挡导入（spec §9「仍缺的照插」）。包的
    资产表是「版本行 ∪ SKU 图流水行」引用到的那些（导出侧并集），所以这一步不必为新表
    加分支：先拉图自然覆盖新表的引用。
-3. **整包一个事务**：七表合并 + 三本账（幂等账 / 冲突账 / 取胜方账）一起生效，
+3. **整包一个事务**：交换集各表合并 + 三本账（幂等账 / 冲突账 / 取胜方账）一起生效，
    失败全回滚，重跑等价于首次导入。
 
 **观测表**（`inventory` / `product_information_versions`）——取胜单位是「一个 (日期, 店铺)
@@ -55,6 +55,7 @@ import dataclasses
 import datetime as dt
 import gzip
 import hashlib
+import json
 import logging
 import pathlib
 import sqlite3
@@ -247,7 +248,8 @@ def import_package(conn: sqlite3.Connection, package_path: pathlib.Path, *,
         if known["images_missing"] > 0 and store is not None:
             try:
                 with open_package(package_path) as pkg:
-                    rows = _read_package_rows(pkg)
+                    meta = export.read_package_meta(pkg)
+                    rows = _read_package_rows(pkg, format_version=meta["format_version"])
                 assets = _package_assets(rows)
                 if not assets:
                     raise ValueError("包内没有可用于补拉的图片引用")
@@ -272,7 +274,8 @@ def import_package(conn: sqlite3.Connection, package_path: pathlib.Path, *,
     try:
         with open_package(package_path) as pkg:
             meta = export.read_package_meta(pkg)
-            rows = _read_package_rows(pkg)
+            rows = _read_package_rows(pkg, format_version=meta["format_version"])
+            _validate_package_rows(conn, rows, meta)
     except (sqlite3.Error, OSError, KeyError, ValueError) as exc:
         return ImportResult(package_path.name, sha, failure=f"包读不出来：{exc}")
 
@@ -313,18 +316,18 @@ def _result_from_ledger(row: sqlite3.Row, *, images_bytes: int = 0,
 
 # ---------- 读包（显式投影） ----------
 
-def _read_package_rows(pkg: sqlite3.Connection) -> dict[str, list[dict]]:
+def _read_package_rows(pkg: sqlite3.Connection, *, format_version: str) -> dict[str, list[dict]]:
     """按显式投影列读包内交换集各表（spec §9：禁止 `SELECT *`）。
 
     包缺少的列不读、下游按 None 落库（旧包少一列也能导）；多出来的列（`inventory.diff`
     退役后的旧包）不读。包里没有交换集的某张表就当场报错——那不是交换集里的包；
-    v2 新增的表例外：缺席 = 旧包，给空列表照收（SKU 图这半为无，见 `export.OPTIONAL_TABLES`）。
+    v1/v2 新增的表例外：缺席 = 旧包，给空列表照收；v3 的证据表必须存在。
     """
     rows_by_table: dict[str, list[dict]] = {}
     for table in export.EXCHANGE_TABLES:
         present = {row[1] for row in pkg.execute(f'PRAGMA table_info("{table.name}")')}
         if not present:
-            if table.name in export.OPTIONAL_TABLES:
+            if format_version in export.LEGACY_FORMAT_VERSIONS and table.name in export.OPTIONAL_TABLES:
                 rows_by_table[table.name] = []
                 continue
             raise ValueError(f"包里没有 {table.name} 表")
@@ -334,6 +337,79 @@ def _read_package_rows(pkg: sqlite3.Connection) -> dict[str, list[dict]]:
             for row in pkg.execute(f'SELECT {", ".join(cols)} FROM "{table.name}"')
         ]
     return rows_by_table
+
+
+def _validate_package_rows(conn: sqlite3.Connection, rows: dict[str, list[dict]],
+                           meta: dict) -> None:
+    """在图片通道和正式事务之前验证包的结构、计数与证据关联。"""
+    for table in export.EXCHANGE_TABLES:
+        actual = len(rows[table.name])
+        expected = int(meta["rows"][table.name])
+        if actual != expected:
+            raise ValueError(
+                f"包内 {table.name} 行数与 exchange_meta 不一致：{actual} != {expected}")
+
+    source_ids: dict[str, set[int]] = {}
+    for table_name in export.NEW_EVIDENCE_TABLES:
+        seen: set[int] = set()
+        for row in rows[table_name]:
+            source_id = row.get("id")
+            if isinstance(source_id, bool) or not isinstance(source_id, int):
+                raise ValueError(f"{table_name} 的源 id 非法：{source_id!r}")
+            if source_id in seen:
+                raise ValueError(f"{table_name} 的源 id 重复：{source_id}")
+            seen.add(source_id)
+        source_ids[table_name] = seen
+
+    for row in rows["snapshots"]:
+        if row.get("round_id") not in source_ids["rounds"]:
+            raise ValueError(
+                f"snapshot {row.get('id')} 引用的 round {row.get('round_id')} 不在包内")
+
+    for row in rows["sku_observation_batches"]:
+        try:
+            payload = json.loads(str(row.get("skus_json")))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"sku_observation_batch {row.get('id')} 的 skus_json 不是 JSON") from exc
+        if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
+            raise ValueError(
+                f"sku_observation_batch {row.get('id')} 的 skus_json 结构非法")
+        if any("observation_complete" in item and
+               not isinstance(item["observation_complete"], bool) for item in payload):
+            raise ValueError(
+                f"sku_observation_batch {row.get('id')} 的 observation_complete 非布尔值")
+
+    identity_values = {
+        "shops": {row.get("shop_key") for row in rows["shops"]},
+        "products": {row.get("offer_id") for row in rows["products"]},
+        "skus": {(row.get("offer_id"), row.get("sku_id")) for row in rows["skus"]},
+    }
+    embedded_shops = {row.get("shop_key") for row in rows["snapshots"]
+                      if row.get("shop_url") or row.get("shop_name")}
+    embedded_products = {row.get("offer_id") for row in rows["snapshots"]
+                         if row.get("product_url") or row.get("product_name")}
+    for table_name in ("snapshots", "sku_observation_batches"):
+        for row in rows[table_name]:
+            shop_key = row.get("shop_key")
+            offer_id = row.get("offer_id")
+            shop_known = shop_key in identity_values["shops"] or conn.execute(
+                "SELECT 1 FROM shops WHERE shop_key=?", (shop_key,)).fetchone() is not None
+            if not shop_known and shop_key not in embedded_shops and not (row.get("shop_url") or row.get("shop_name")):
+                raise ValueError(f"{table_name} {row.get('id')} 引用缺失 shop {shop_key!r}")
+            product_known = offer_id in identity_values["products"] or conn.execute(
+                "SELECT 1 FROM products WHERE offer_id=?", (offer_id,)).fetchone() is not None
+            if not product_known and offer_id not in embedded_products and not (row.get("product_url") or row.get("product_name")):
+                raise ValueError(f"{table_name} {row.get('id')} 引用缺失 product {offer_id!r}")
+    for row in rows["snapshots"]:
+        sku_id = row.get("sku_id")
+        if sku_id is None:
+            continue
+        key = (row.get("offer_id"), sku_id)
+        sku_known = key in identity_values["skus"] or conn.execute(
+            "SELECT 1 FROM skus WHERE offer_id=? AND sku_id=?", key).fetchone() is not None
+        if not sku_known and not row.get("sku_name"):
+            raise ValueError(f"snapshot {row.get('id')} 引用缺失 sku {key!r}")
 
 
 def _package_assets(rows: dict[str, list[dict]]) -> list[tuple[str, str]]:
@@ -399,6 +475,84 @@ def _pull_images(conn: sqlite3.Connection, assets: list[tuple[str, str]],
 
 # ---------- 合并 ----------
 
+def _source_identity_row(conn: sqlite3.Connection, table: str, machine_id: str,
+                         source_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        f"SELECT * FROM {table} WHERE source_machine_id=? AND source_id=?",
+        (machine_id, source_id)).fetchone()
+
+
+def _merge_rounds(conn: sqlite3.Connection, rows: list[dict], pkg_machine: str,
+                  counts: _Counts) -> dict[int, int]:
+    """导入 rounds，并返回源 round id 到本地 round id 的映射。"""
+    table = _BY_NAME["rounds"]
+    mapping: dict[int, int] = {}
+    for row in rows:
+        source_id = int(row["id"])
+        existing = _source_identity_row(conn, "rounds", pkg_machine, source_id)
+        payload = {name: row.get(name) for name in table.names if name != "id"}
+        if existing is not None:
+            if any(existing[name] != value for name, value in payload.items()):
+                raise ValueError(f"rounds 源身份内容冲突：{pkg_machine}/{source_id}")
+            mapping[source_id] = int(existing["id"])
+            continue
+        columns = tuple(payload) + ("source_machine_id", "source_id")
+        values = tuple(payload.values()) + (pkg_machine, source_id)
+        conn.execute(
+            f"INSERT INTO rounds({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
+            values)
+        mapping[source_id] = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        counts.inserted += 1
+    return mapping
+
+
+def _merge_sku_observation_batches(conn: sqlite3.Connection, rows: list[dict],
+                                   pkg_machine: str, counts: _Counts) -> None:
+    table = _BY_NAME["sku_observation_batches"]
+    for row in rows:
+        source_id = int(row["id"])
+        existing = _source_identity_row(conn, "sku_observation_batches", pkg_machine, source_id)
+        payload = {name: row.get(name) for name in table.names if name != "id"}
+        if existing is not None:
+            if any(existing[name] != value for name, value in payload.items()):
+                raise ValueError(
+                    f"sku_observation_batches 源身份内容冲突：{pkg_machine}/{source_id}")
+            continue
+        columns = tuple(payload) + ("source_machine_id", "source_id")
+        values = tuple(payload.values()) + (pkg_machine, source_id)
+        conn.execute(
+            f"INSERT INTO sku_observation_batches({', '.join(columns)}) "
+            f"VALUES ({', '.join('?' * len(columns))})", values)
+        counts.inserted += 1
+
+
+def _merge_snapshots(conn: sqlite3.Connection, rows: list[dict],
+                     round_map: dict[int, int], pkg_machine: str,
+                     counts: _Counts) -> None:
+    table = _BY_NAME["snapshots"]
+    for row in rows:
+        source_id = int(row["id"])
+        source_round_id = int(row["round_id"])
+        try:
+            local_round_id = round_map[source_round_id]
+        except KeyError as exc:
+            raise ValueError(
+                f"snapshot {source_id} 引用未导入的 round {source_round_id}") from exc
+        existing = _source_identity_row(conn, "snapshots", pkg_machine, source_id)
+        payload = {name: row.get(name) for name in table.names if name != "id"}
+        payload["round_id"] = local_round_id
+        if existing is not None:
+            if any(existing[name] != value for name, value in payload.items()):
+                raise ValueError(f"snapshots 源身份内容冲突：{pkg_machine}/{source_id}")
+            continue
+        columns = tuple(payload) + ("source_machine_id", "source_id")
+        values = tuple(payload.values()) + (pkg_machine, source_id)
+        conn.execute(
+            f"INSERT INTO snapshots({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
+            values)
+        counts.inserted += 1
+
+
 def _merge_all(conn: sqlite3.Connection, rows: dict[str, list[dict]], *, meta: dict,
                package_name: str, sha: str, local_machine: str,
                images: _ImagePull) -> ImportResult:
@@ -412,6 +566,9 @@ def _merge_all(conn: sqlite3.Connection, rows: dict[str, list[dict]], *, meta: d
     _merge_sku_image_versions(conn, rows["sku_image_versions"], counts)
     for spec in _IDENTITY_TABLES:
         _merge_identity(conn, spec, rows[spec.table], pkg_machine, local_machine, counts)
+    round_map = _merge_rounds(conn, rows["rounds"], pkg_machine, counts)
+    _merge_sku_observation_batches(conn, rows["sku_observation_batches"], pkg_machine, counts)
+    _merge_snapshots(conn, rows["snapshots"], round_map, pkg_machine, counts)
     conflicts = _record_conflicts(conn, groups, sha, imported_at)
     for key, group in groups.items():
         _write_claim(conn, key, group)

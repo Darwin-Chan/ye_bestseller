@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS sku_observation_batches (
     id INTEGER PRIMARY KEY, shop_key TEXT NOT NULL, offer_id TEXT NOT NULL,
     observed_at TEXT NOT NULL, observed_date TEXT NOT NULL,
     product_name TEXT, product_url TEXT, skus_json TEXT NOT NULL,
-    main_image_url TEXT, main_image_hash TEXT, main_image_error TEXT
+    main_image_url TEXT, main_image_hash TEXT, main_image_error TEXT,
+    source_machine_id TEXT, source_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_sku_observation_batches_date
 ON sku_observation_batches(shop_key,offer_id,observed_date,observed_at);
@@ -58,7 +59,8 @@ CREATE TABLE IF NOT EXISTS rounds (
     note TEXT,
     detail_budget_limit INTEGER,
     run_date TEXT,
-    terminal_reason TEXT
+    terminal_reason TEXT,
+    source_machine_id TEXT, source_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS shops (
@@ -150,7 +152,8 @@ CREATE TABLE IF NOT EXISTS snapshots (
     collected_at TEXT NOT NULL,
     page_status TEXT NOT NULL,
     attempt INTEGER NOT NULL DEFAULT 1,
-    detail_note TEXT
+    detail_note TEXT,
+    source_machine_id TEXT, source_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_round ON snapshots(round_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_key
@@ -366,6 +369,14 @@ SKU_IMAGE_NONE = "无图"
 SKU_IMAGE_DEDUPE_KEY = ("shop_key", "offer_id", "sku_id", "observed_at",
                         "COALESCE(content_hash,'')", "COALESCE(image_error,'')")
 SKU_IMAGE_DEDUPE_INDEX = "idx_sku_image_dedupe"
+
+# 交换来的原始证据按源机器和源库自增 id 保留身份；三张表分别建索引，
+# 供迁移报告与测试复用同一份顺序定义。
+SOURCE_IDENTITY_INDEXES = (
+    "idx_rounds_source_identity",
+    "idx_snapshots_source_identity",
+    "idx_sku_observation_batches_source_identity",
+)
 
 # 过程页刷新的事件索引：轮次 deny 账本边界/计数、逐店计数与时间跨度。
 # 名字与上面 SCHEMA 里的 CREATE INDEX 一致，tests/test_db.py 有用例守着。
@@ -740,6 +751,35 @@ def _version_dedupe_index(conn: sqlite3.Connection, out: _ReportBuilder) -> bool
     return True
 
 
+def _source_identity_indexes(conn: sqlite3.Connection, out: _ReportBuilder) -> bool:
+    """给可交换的原始证据建立跨源身份索引。
+
+    旧库里的本机采集行没有 source_machine_id/source_id，保留为空；
+    周包导入行使用 (source_machine_id, source_id) 去重，避免不同源库的
+    自增整数 id 互相碰撞。
+    """
+    specs = (
+        ("rounds", SOURCE_IDENTITY_INDEXES[0]),
+        ("snapshots", SOURCE_IDENTITY_INDEXES[1]),
+        ("sku_observation_batches", SOURCE_IDENTITY_INDEXES[2]),
+    )
+    changed = False
+    for table, index in specs:
+        columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+        if not {"source_machine_id", "source_id"} <= columns:
+            continue
+        before = _has_index(conn, index)
+        conn.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {index} ON {table}"
+            "(source_machine_id, source_id) "
+            "WHERE source_machine_id IS NOT NULL AND source_id IS NOT NULL"
+        )
+        if not before:
+            out.created_indexes.append(index)
+            changed = True
+    return changed
+
+
 def _sku_image_dedupe_index(conn: sqlite3.Connection, out: _ReportBuilder) -> bool:
     """迁移：给 SKU 图流水建去重索引（老库第一次开连接时建一次）。
 
@@ -787,6 +827,13 @@ _MIGRATIONS: tuple[_Migration, ...] = (
     _Migration("round_tally_index", _round_tally_index),
     _Migration("version_dedupe_index", _version_dedupe_index),
     _Migration("sku_image_dedupe_index", _sku_image_dedupe_index),
+    _add_column("rounds", "source_machine_id", "TEXT"),
+    _add_column("rounds", "source_id", "INTEGER"),
+    _add_column("snapshots", "source_machine_id", "TEXT"),
+    _add_column("snapshots", "source_id", "INTEGER"),
+    _add_column("sku_observation_batches", "source_machine_id", "TEXT"),
+    _add_column("sku_observation_batches", "source_id", "INTEGER"),
+    _Migration("source_identity_indexes", _source_identity_indexes),
     _add_column("elapsed_rounds", "pending_execution", "TEXT"),
     _add_column("elapsed_segments", "process_pid", "INTEGER"),
     _add_column("crawler_process", "process_os_started", "TEXT"),

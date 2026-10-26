@@ -11,6 +11,7 @@ from bestseller_monitor.db import (
     ROUND_TALLY_INDEX,
     SCHEMA,
     SKU_IMAGE_DEDUPE_INDEX,
+    SOURCE_IDENTITY_INDEXES,
     SKU_IMAGE_FILLED,
     SKU_IMAGE_NONE,
     SKU_IMAGE_OWN,
@@ -1586,7 +1587,7 @@ class SnapshotDedupeMigrationTests(unittest.TestCase):
                 self.assertEqual(
                     report.created_indexes,
                     (SNAPSHOT_SUCCESS_INDEX, ROUND_TALLY_INDEX, VERSION_DEDUPE_INDEX,
-                     SKU_IMAGE_DEDUPE_INDEX),
+                     SKU_IMAGE_DEDUPE_INDEX, *SOURCE_IDENTITY_INDEXES),
                     "去重建起唯一索引之后，本轮计数的覆盖索引、版本表与 SKU 图去重索引也一并补上")
                 self.assertIn("snapshot_success_index", report.applied)
                 self.assertEqual(conn.execute(
@@ -1622,7 +1623,7 @@ class SnapshotDedupeMigrationTests(unittest.TestCase):
                 self.assertEqual(
                     report.created_indexes,
                     (SNAPSHOT_SUCCESS_INDEX, ROUND_TALLY_INDEX, VERSION_DEDUPE_INDEX,
-                     SKU_IMAGE_DEDUPE_INDEX),
+                     SKU_IMAGE_DEDUPE_INDEX, *SOURCE_IDENTITY_INDEXES),
                     "新库也在这次开库里建起本轮计数的覆盖索引、版本表与 SKU 图去重索引")
             finally:
                 conn.close()

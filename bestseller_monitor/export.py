@@ -4,7 +4,7 @@
 
 - 一个 SQLite 文件（提交前压成 `.db.gz`），落在 `raw-<机器>` 的
   `data/<年>/<周>-<机器>.db.gz`（如 `data/2026/W38-m1.db.gz`）。
-- 包内 = 交换集七表 + 一张元数据表 `exchange_meta`。列集**显式**列出、不 `SELECT *`
+- 包内 = 交换集各表 + 一张元数据表 `exchange_meta`。列集**显式**列出、不 `SELECT *`
   （包与本地库的列可以不同；汇总侧同样按显式投影读）。
 - **周窗口**：包是「这一周的切片」——`inventory` 按 `date`、`product_information_versions`
   与 `sku_image_versions` 按 `observed_date` 取窗口内（北京日期，ISO 周周一至周日）；
@@ -26,7 +26,7 @@
 **一致性快照**：源库只读打开、单个 `BEGIN` 事务里把所有行读完（WAL 下不锁正在跑的
 采集，也看不见任何未提交的半截事务），再往包库里写。源库自始至终只读，export 不改本机库。
 
-**同周重跑不产生多余提交**：拿新包的**内容摘要**（`package_digest`，七表逐行的规范摘要，
+**同周重跑不产生多余提交**：拿新包的**内容摘要**（`package_digest`，交换集各表逐行的规范摘要，
 不含生成时刻这类每次都会变的东西）与 raw 库里已发布那份比——比的是 **HEAD 里那份**
 （远端的事实），工作区里躺着的残迹不算数；一样就不写文件、不提交，只把推送再试一次
 （上次推失败留下的那笔在这里补上，真的是空的推送是个空动作）。
@@ -61,8 +61,11 @@ from bestseller_monitor.weekly_plan import iso_week_label, week_monday
 from bestseller_monitor.weekly_plan import week_window as plan_week_window
 
 # 导出程序口径版本：包格式（表、列、筛选口径）变化时进一位——发布侧据此重发，
-# 汇总侧据此认出旧包。v2 = 加 SKU 图流水（`sku_image_versions`）与资产并集。
-EXPORT_FORMAT_VERSION = "v2"
+# 汇总侧据此认出旧包。v3 = 加原始观测证据（rounds、snapshots、
+# sku_observation_batches）。
+EXPORT_FORMAT_VERSION = "v3"
+SUPPORTED_FORMAT_VERSIONS = frozenset({"v1", "v2", "v3"})
+LEGACY_FORMAT_VERSIONS = frozenset({"v1", "v2"})
 
 META_TABLE = "exchange_meta"
 PACKAGE_SUFFIX = ".db.gz"
@@ -72,11 +75,19 @@ MANIFEST_SUFFIX = ".manifest.json.gz"
 _WEEK_OFFERS = (
     "SELECT offer_id FROM inventory WHERE date BETWEEN :start AND :end "
     "UNION SELECT offer_id FROM product_information_versions "
+    "WHERE observed_date BETWEEN :start AND :end "
+    "UNION SELECT offer_id FROM snapshots "
+    "WHERE date(datetime(collected_at), '+8 hours') BETWEEN :start AND :end "
+    "UNION SELECT offer_id FROM sku_observation_batches "
     "WHERE observed_date BETWEEN :start AND :end"
 )
 _WEEK_SHOPS = (
     "SELECT shop_key FROM inventory WHERE date BETWEEN :start AND :end "
     "UNION SELECT shop_key FROM product_information_versions "
+    "WHERE observed_date BETWEEN :start AND :end "
+    "UNION SELECT shop_key FROM snapshots "
+    "WHERE date(datetime(collected_at), '+8 hours') BETWEEN :start AND :end "
+    "UNION SELECT shop_key FROM sku_observation_batches "
     "WHERE observed_date BETWEEN :start AND :end"
 )
 
@@ -219,15 +230,56 @@ EXCHANGE_TABLES: tuple[_PackageTable, ...] = (
                   f"AND {_owned_observed('sku_image_versions', 'observed_date')}"
                   ") ORDER BY {cols}",
     ),
+    _PackageTable(
+        "rounds",
+        (("id", "INTEGER NOT NULL"), ("started_at", "TEXT NOT NULL"),
+         ("finished_at", "TEXT"), ("note", "TEXT"),
+         ("detail_budget_limit", "INTEGER"), ("run_date", "TEXT"),
+         ("terminal_reason", "TEXT")),
+        primary_key=("id",),
+        slice_sql="SELECT {cols} FROM rounds WHERE id IN ("
+                  "SELECT DISTINCT round_id FROM snapshots "
+                  "WHERE date(datetime(collected_at), '+8 hours') "
+                  "BETWEEN :start AND :end"
+                  ") ORDER BY {cols}",
+    ),
+    _PackageTable(
+        "snapshots",
+        (("id", "INTEGER NOT NULL"), ("round_id", "INTEGER NOT NULL"),
+         ("shop_key", "TEXT NOT NULL"), ("shop_url", "TEXT"),
+         ("shop_name", "TEXT"), ("offer_id", "TEXT NOT NULL"),
+         ("product_url", "TEXT"), ("product_name", "TEXT"),
+         ("sku_id", "TEXT"), ("sku_name", "TEXT"),
+         ("sku_price", "REAL"), ("sku_stock", "INTEGER"),
+         ("collected_at", "TEXT NOT NULL"), ("page_status", "TEXT NOT NULL"),
+         ("attempt", "INTEGER NOT NULL"), ("detail_note", "TEXT")),
+        primary_key=("id",),
+        slice_sql="SELECT {cols} FROM snapshots WHERE "
+                  "date(datetime(collected_at), '+8 hours') BETWEEN :start AND :end "
+                  "ORDER BY {cols}",
+    ),
+    _PackageTable(
+        "sku_observation_batches",
+        (("id", "INTEGER NOT NULL"), ("shop_key", "TEXT NOT NULL"),
+         ("offer_id", "TEXT NOT NULL"), ("observed_at", "TEXT NOT NULL"),
+         ("observed_date", "TEXT NOT NULL"), ("product_name", "TEXT"),
+         ("product_url", "TEXT"), ("skus_json", "TEXT NOT NULL"),
+         ("main_image_url", "TEXT"), ("main_image_hash", "TEXT"),
+         ("main_image_error", "TEXT")),
+        primary_key=("id",),
+        slice_sql="SELECT {cols} FROM sku_observation_batches "
+                  "WHERE observed_date BETWEEN :start AND :end ORDER BY {cols}",
+    ),
 )
 
 _PACKAGE_SCHEMA = ("\n".join(table.ddl for table in EXCHANGE_TABLES)
                    + f"\nCREATE TABLE {META_TABLE} (key TEXT PRIMARY KEY, value TEXT NOT NULL);\n")
 
-# 读包时**可以缺席**的表：v2 起新增的 SKU 图流水。缺席 = 上一版程序发的旧包，汇总侧照收
-# （那半为无）；元数据里的 `rows_<表名>` 键同理按 0 算。其余六表缺席仍是「不是交换集里的
-# 包」——当场报错。包格式的家在这里，`read_package_meta` 与 `merge` 读表共用这一份名单。
-OPTIONAL_TABLES = frozenset({"sku_image_versions"})
+# 旧包可以缺席的表。v1/v2 没有 v3 的原始观测证据表；v1 还没有 SKU 图流水。
+# v3 新包必须包含所有交换表，即便该表本周为空。
+OPTIONAL_TABLES = frozenset({"sku_image_versions", "rounds", "snapshots",
+                             "sku_observation_batches"})
+NEW_EVIDENCE_TABLES = frozenset({"rounds", "snapshots", "sku_observation_batches"})
 
 
 def week_window(week: str) -> tuple[str, str]:
@@ -345,17 +397,20 @@ def all_packages(exchange_root: str | pathlib.Path) -> tuple[PackageRef, ...]:
 def read_package_meta(conn: sqlite3.Connection) -> dict:
     """把 exchange_meta 折成调用方要的形状：机器、周、时刻、口径版本、是否在采、各表行数。
 
-    `rows_<表名>` 里 v2 新增的表可以缺席（旧包没有那个键）：按 0 算——汇总侧据此照收；
-    其余六表缺键仍当场 KeyError，那不是这个包格式认识的一版（见 `OPTIONAL_TABLES`）。
+    v1/v2 的新表可以缺席（旧包没有那个键）：按 0 算；v3 必须显式列出全部新表。
+    未知格式在这里拒绝，避免把未来格式误当成当前格式导入。
     """
     raw = {key: value for key, value in
            conn.execute(f"SELECT key, value FROM {META_TABLE}").fetchall()}
+    version = str(raw["format_version"])
+    if version not in SUPPORTED_FORMAT_VERSIONS:
+        raise ValueError(f"不支持的交换包格式版本：{version}")
     rows: dict[str, int] = {}
     for table in EXCHANGE_TABLES:
         key = f"rows_{table.name}"
         if key in raw:
             rows[table.name] = int(raw[key])
-        elif table.name in OPTIONAL_TABLES:
+        elif version in LEGACY_FORMAT_VERSIONS and table.name in OPTIONAL_TABLES:
             rows[table.name] = 0
         else:
             raise KeyError(key)
@@ -363,7 +418,7 @@ def read_package_meta(conn: sqlite3.Connection) -> dict:
         "machine_id": raw["machine_id"],
         "week": raw["week"],
         "generated_at": raw["generated_at"],
-        "format_version": raw["format_version"],
+        "format_version": version,
         "crawl_in_progress": raw["crawl_in_progress"] == "1",
         "rows": rows,
     }
@@ -439,7 +494,7 @@ def _meta_rows(*, week: str, machine_id: str, crawl_in_progress: bool,
 
 
 def package_digest(conn: sqlite3.Connection) -> str:
-    """包的内容摘要：七表逐行的规范摘要，+ 口径版本与机器/周。
+    """包的内容摘要：交换集各表逐行的规范摘要，+ 口径版本与机器/周。
 
     不含生成时刻、是否在采这类每次都可能变的东西——「同周无新数据重跑」靠它判。
     行序按列排序（重跑与跨机器都可复现），与 SQLite 文件的物理布局无关。
@@ -556,8 +611,15 @@ def pack_gzip(data: bytes) -> bytes:
     return gzip.compress(data, mtime=0)
 
 
-def _manifest_bytes(package_name: str, images: tuple[ImageRef, ...]) -> bytes:
-    manifest = {"package": package_name, "keys": [ref.key for ref in images]}
+def _manifest_bytes(package_name: str, images: tuple[ImageRef, ...], *,
+                    format_version: str, rows: Mapping[str, int], digest: str) -> bytes:
+    manifest = {
+        "package": package_name,
+        "format_version": format_version,
+        "rows": dict(rows),
+        "digest": digest,
+        "keys": [ref.key for ref in images],
+    }
     return pack_gzip(json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
 
 
@@ -679,7 +741,9 @@ def _build(source: pathlib.Path, outbox: pathlib.Path, package_rel: str, *,
     package_gz = pack_gzip(package_path.read_bytes())
     (outbox / f"{base}.db.gz").write_bytes(package_gz)
     return _BuiltPackage(base=base, package_gz=package_gz,
-                         manifest_gz=_manifest_bytes(package_name, images),
+                         manifest_gz=_manifest_bytes(
+                             package_name, images, format_version=EXPORT_FORMAT_VERSION,
+                             rows=rows, digest=digest),
                          rows=rows, digest=digest, images=images,
                          sku_image_failures=sku_image_failures)
 

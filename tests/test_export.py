@@ -21,6 +21,7 @@ import gzip
 import json
 import pathlib
 import sqlite3
+import tempfile
 import unittest
 
 from bestseller_monitor import db as dbmod
@@ -131,7 +132,8 @@ class PackageBuildTests(unittest.TestCase):
         self.assertEqual(
             tables,
             {"shops", "products", "skus", "inventory", "product_information_versions",
-             "sku_image_versions", "product_image_assets", "exchange_meta"})
+             "sku_image_versions", "product_image_assets", "rounds", "snapshots",
+         "sku_observation_batches", "exchange_meta"})
         self.assertEqual(
             [tuple(r) for r in conn.execute(
                 "SELECT shop_key, offer_id, sku_id, date FROM inventory")],
@@ -239,7 +241,7 @@ class PackageBuildTests(unittest.TestCase):
         """口径版本进了一位（v2）：SKU 图流水与资产并集是这个格式的一部分。"""
         conn = self.build("2026-W37")
 
-        self.assertEqual(export.read_package_meta(conn)["format_version"], "v2")
+        self.assertEqual(export.read_package_meta(conn)["format_version"], "v3")
 
     def test_crawl_in_progress_is_recorded_as_given(self):
         export.build_package(
@@ -277,6 +279,62 @@ def blank_world_template() -> WorldTemplate:
         return paths
 
     return WorldTemplate.obtain("export-blank", build)
+
+
+class RawObservationEvidenceExportTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="bestseller-export-evidence-")
+        self.addCleanup(self.tmp.cleanup)
+        self.path = pathlib.Path(self.tmp.name) / "source.db"
+        self.conn = build_source_db(self.path)
+        self.addCleanup(self.conn.close)
+
+    def add_evidence(self):
+        self.conn.executemany(
+            "INSERT INTO rounds(id, started_at, finished_at, note, detail_budget_limit, run_date, terminal_reason) "
+            "VALUES (?,?,?,?,?,?,?)",
+            [(41, "2026-09-13T15:00:00+00:00", None, "old", 10, "2026-09-13", "完成"),
+             (42, "2026-09-13T16:00:00+00:00", None, "current", 10, "2026-09-14", "完成")],
+        )
+        self.conn.executemany(
+            "INSERT INTO snapshots(id, round_id, shop_key, shop_url, shop_name, offer_id, product_url, "
+            "product_name, sku_id, sku_name, sku_price, sku_stock, collected_at, page_status, attempt, detail_note) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [(501, 41, "A01", "https://a01.example/", "店铺甲", "11", "https://detail/11", "商品一",
+              "s1", "规格一", 1.0, 2, "2026-09-13T15:59:59+00:00", "成功", 1, "old"),
+             (502, 42, "A02", "https://a02.example/", "店铺乙", "22", "https://detail/22", "商品二",
+              "s2", "规格二", 2.0, None, "2026-09-13T16:30:00+00:00", "失败", 2, "timeout")],
+        )
+        self.conn.executemany(
+            "INSERT INTO sku_observation_batches(id, shop_key, offer_id, observed_at, observed_date, "
+            "product_name, product_url, skus_json, main_image_url, main_image_hash, main_image_error) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            [(601, "A01", "11", "2026-09-13T15:59:59+00:00", "2026-09-13", "商品一",
+              "https://detail/11", '[{"sku_id":"s1","observation_complete":false}]', None, None, "old"),
+             (602, "A02", "22", "2026-09-13T16:30:00+00:00", "2026-09-14", "商品二",
+              "https://detail/22", '[{"sku_id":"s2","observation_complete":true}]', "https://img/22", H2, None)],
+        )
+        self.conn.commit()
+
+    def test_v3_package_contains_week_evidence_and_minimal_round_dependency(self):
+        self.add_evidence()
+        package = pathlib.Path(self.tmp.name) / "package.db"
+        export.build_package(self.path, package, week="2026-W38", machine_id="m1",
+                             crawl_in_progress=False,
+                             generated_at=dt.datetime(2026, 9, 21, 10, 30, tzinfo=CST))
+        conn = sqlite3.connect(package)
+        self.addCleanup(conn.close)
+        self.assertEqual(export.read_package_meta(conn)["format_version"], "v3")
+        self.assertEqual(export.read_package_meta(conn)["rows"]["snapshots"], 1)
+        self.assertEqual(export.read_package_meta(conn)["rows"]["sku_observation_batches"], 1)
+        self.assertEqual([tuple(row) for row in conn.execute(
+            "SELECT id, round_id, collected_at, page_status, detail_note FROM snapshots")],
+            [(502, 42, "2026-09-13T16:30:00+00:00", "失败", "timeout")])
+        self.assertEqual([tuple(row) for row in conn.execute(
+            "SELECT id, observed_date, skus_json, main_image_hash FROM sku_observation_batches")],
+            [(602, "2026-09-14", '[{"sku_id":"s2","observation_complete":true}]', H2)])
+        self.assertEqual([tuple(row) for row in conn.execute(
+            "SELECT id, note FROM rounds")], [(42, "current")])
 
 
 class ExportRunTests(unittest.TestCase):
@@ -398,7 +456,7 @@ class ExportRunTests(unittest.TestCase):
         self.assertFalse(result.unchanged, "上一版格式的包认不出：同数据也要重发")
         self.assertEqual(self.commits(), before + 1, "重发正是多的那一笔")
         self.assertEqual(export.read_package_meta(self.read_published())["format_version"],
-                         "v2")
+                         "v3")
 
     def test_a_backfilled_week_lands_in_its_own_directory_file(self):
         result = self.export("2026-W37")
@@ -503,6 +561,10 @@ class ExportRunTests(unittest.TestCase):
         manifest = json.loads(raw.decode("utf-8"))
 
         self.assertEqual(manifest["package"], "W38-m1.db.gz")
+        self.assertEqual(manifest["format_version"], "v3")
+        self.assertEqual(manifest["rows"]["snapshots"], 0)
+        self.assertEqual(manifest["rows"]["sku_observation_batches"], 0)
+        self.assertEqual(manifest["digest"], export.package_digest(self.read_published()))
         self.assertEqual(manifest["keys"], [key2, key3])
 
         self.export("2026-W37")
